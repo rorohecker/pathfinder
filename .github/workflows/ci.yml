@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  check:
+    name: Cargo check
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Check
+        working-directory: src-tauri
+        run: cargo check --locked
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked -- -D warnings
