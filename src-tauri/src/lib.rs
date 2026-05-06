@@ -152,6 +152,9 @@ pub struct SessionTab {
     pub sort_dir: String,
 }
 
+type GitStatusMap = HashMap<String, String>;
+type GitCacheMap = HashMap<String, (GitStatusMap, Instant)>;
+
 #[derive(Clone)]
 struct AppState {
     directory_cache: Arc<Mutex<HashMap<String, CachedDirectory>>>,
@@ -160,7 +163,7 @@ struct AppState {
     search_generation: Arc<AtomicU64>,
     ai_capabilities: Arc<Mutex<Option<AiCapabilities>>>,
     operation_log: Arc<Mutex<Vec<FileOp>>>,
-    git_cache: Arc<Mutex<HashMap<String, (HashMap<String, String>, Instant)>>>,
+    git_cache: Arc<Mutex<GitCacheMap>>,
 }
 
 impl Default for AppState {
@@ -1743,7 +1746,7 @@ fn build_storage_tree(dir: &Path, depth: u32, max_depth: u32) -> StorageNode {
         .par_iter()
         .filter_map(|e| {
             let m = fs::metadata(e.path()).ok()?;
-            m.is_file().then(|| m.len())
+            m.is_file().then_some(m.len())
         })
         .sum();
 
@@ -3551,7 +3554,7 @@ impl NativeController {
             tree if tree.size > 0 => {
                 ui.set_preview_title(ss("Storage Treemap"));
                 let mut children = tree.children;
-                children.sort_by(|a, b| b.size.cmp(&a.size));
+                children.sort_by_key(|child| std::cmp::Reverse(child.size));
                 let lines = children
                     .into_iter()
                     .take(18)
