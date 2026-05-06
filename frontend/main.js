@@ -2398,17 +2398,41 @@ async function loadGitStatus(path) {
   }
 }
 
-function gitBadgeHtml(filePath) {
-  const status = state.gitStatus[filePath];
+function gitBadgeHtml(file) {
+  if (file.kind === "Directory") {
+    // Normalize separators for prefix matching on both Windows and Unix
+    const sep = file.path.includes("\\") ? "\\" : "/";
+    const prefix = file.path.endsWith(sep) ? file.path : file.path + sep;
+    const counts = { modified: 0, added: 0, untracked: 0, deleted: 0, renamed: 0 };
+    let total = 0;
+    for (const [p, st] of Object.entries(state.gitStatus)) {
+      if (p.startsWith(prefix)) {
+        if (counts[st] !== undefined) counts[st]++;
+        total++;
+      }
+    }
+    if (!total) return "";
+    const parts = [];
+    if (counts.modified)  parts.push(`${counts.modified}M`);
+    if (counts.added)     parts.push(`${counts.added}A`);
+    if (counts.untracked) parts.push(`${counts.untracked}?`);
+    if (counts.deleted)   parts.push(`${counts.deleted}D`);
+    if (counts.renamed)   parts.push(`${counts.renamed}R`);
+    const dominant = ["modified","added","deleted","renamed","untracked"].find(k => counts[k] > 0) || "modified";
+    return `<span class="git-badge ${dominant}" title="${total} changed file${total !== 1 ? "s" : ""} inside">${parts.join(" ")}</span>`;
+  }
+  // File — direct lookup
+  const status = state.gitStatus[file.path];
   if (!status) return "";
-  return `<span class="git-badge ${status}">${status[0].toUpperCase()}</span>`;
+  const labels = { modified: "M", added: "A", untracked: "?", deleted: "D", renamed: "R" };
+  return `<span class="git-badge ${status}" title="${status}">${labels[status] || status[0].toUpperCase()}</span>`;
 }
 
 // Patch fileCard and fileRow to include git badges
 const _origFileCard = fileCard;
 function fileCard(file) {
   const base = _origFileCard(file);
-  const badge = gitBadgeHtml(file.path);
+  const badge = gitBadgeHtml(file);
   if (!badge) return base;
   return base.replace('<div class="name">', `${badge}<div class="name">`);
 }
@@ -2416,7 +2440,7 @@ function fileCard(file) {
 const _origFileRow = fileRow;
 function fileRow(file) {
   const base = _origFileRow(file);
-  const badge = gitBadgeHtml(file.path);
+  const badge = gitBadgeHtml(file);
   if (!badge) return base;
   return base.replace('<div class="name-cell">', `<div class="name-cell">${badge}`);
 }
