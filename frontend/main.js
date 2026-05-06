@@ -114,6 +114,26 @@ const state = {
   previewLoading: new Set(),
   previewToken: 0,
   thumbnailCache: new Map(),
+  fileNotes: {},
+  savedSearches: [],
+  gitStatus: {},
+  filterQuery: "",
+  dualPane: false,
+  rightPane: {
+    currentPath: "",
+    files: [],
+    selected: new Set(),
+    view: "grid",
+    sortBy: "name",
+    sortDir: "asc",
+    loading: false,
+    loadError: null,
+    query: "",
+    searchResults: null,
+    loadToken: 0,
+    virtual: { scrollTop: 0, paneHeight: 0, paneWidth: 0 },
+  },
+  activePaneSide: "left",
   menuActions: [],
   settingsTab: "themes",
   paletteItems: [],
@@ -2257,19 +2277,44 @@ async function init() {
   setupEvents();
 
   try {
-    const [knownFolders, drives, bookmarks, home] = await Promise.all([
+    const [knownFolders, drives, bookmarks, home, sessionTabs, allNotes, savedSearches] = await Promise.all([
       invoke("get_known_folders"),
       invoke("get_drives"),
       invoke("get_bookmarks"),
       invoke("get_home_directory"),
+      invoke("load_session"),
+      invoke("get_all_notes"),
+      invoke("get_saved_searches"),
     ]);
+    state.fileNotes = allNotes;
+    state.savedSearches = savedSearches;
     state.knownFolders = knownFolders;
     state.drives = drives;
     state.bookmarks = bookmarks;
-    state.currentPath = home;
-    state.tabs = [{ id: "tab-home", path: home, name: basename(home) || "Home", history: [home], hIndex: 0 }];
-    state.activeTabId = "tab-home";
-    await navigateTo(home, { pushHistory: false });
+
+    if (sessionTabs && sessionTabs.length) {
+      state.tabs = sessionTabs.map((t, i) => ({
+        id: `tab-${i}`,
+        path: t.path,
+        name: basename(t.path) || t.path,
+        history: [t.path],
+        hIndex: 0,
+        view: t.view || "grid",
+        sortBy: t.sort_by || "name",
+        sortDir: t.sort_dir || "asc",
+      }));
+      state.activeTabId = state.tabs[0].id;
+      state.view = state.tabs[0].view || "grid";
+      state.sortBy = state.tabs[0].sortBy || "name";
+      state.sortDir = state.tabs[0].sortDir || "asc";
+      state.currentPath = state.tabs[0].path;
+    } else {
+      state.currentPath = home;
+      state.tabs = [{ id: "tab-home", path: home, name: basename(home) || "Home", history: [home], hIndex: 0 }];
+      state.activeTabId = "tab-home";
+    }
+
+    await navigateTo(state.currentPath, { pushHistory: false });
     const commonPaths = [...new Set([
       home,
       ...knownFolders.map((folder) => folder.path),
@@ -2298,3 +2343,604 @@ async function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+// ─────────────────────────────────────────────
+// LRU cache — replaces plain Map for thumbnails
+// ─────────────────────────────────────────────
+class LRUMap {
+  constructor(max) { this.max = max; this.map = new Map(); }
+  has(k) { return this.map.has(k); }
+  get(k) {
+    if (!this.map.has(k)) return undefined;
+    const v = this.map.get(k); this.map.delete(k); this.map.set(k, v); return v;
+  }
+  set(k, v) {
+    if (this.map.has(k)) this.map.delete(k);
+    this.map.set(k, v);
+    if (this.map.size > this.max) this.map.delete(this.map.keys().next().value);
+  }
+  delete(k) { return this.map.delete(k); }
+  clear() { this.map.clear(); }
+}
+// Upgrade caches to LRU
+state.thumbnailCache = new LRUMap(300);
+state.previewCache = new LRUMap(200);
+
+// ─────────────────────────────────────────────
+// Session save (called after every navigation)
+// ─────────────────────────────────────────────
+function persistSession() {
+  const tabs = state.tabs.map(t => ({
+    path: t.path,
+    view: state.activeTabId === t.id ? state.view : (t.view || "grid"),
+    sort_by: state.activeTabId === t.id ? state.sortBy : (t.sortBy || "name"),
+    sort_dir: state.activeTabId === t.id ? state.sortDir : (t.sortDir || "asc"),
+  }));
+  invoke("save_session", { tabs }).catch(() => {});
+}
+
+// Hook into navigateTo to persist session
+const _origNavigateTo = navigateTo;
+async function navigateTo(path, options = {}) {
+  await _origNavigateTo(path, options);
+  persistSession();
+}
+
+// ─────────────────────────────────────────────
+// Git status — load for current directory
+// ─────────────────────────────────────────────
+async function loadGitStatus(path) {
+  try {
+    state.gitStatus = await invoke("get_git_status", { path });
+    renderFiles();
+  } catch {
+    state.gitStatus = {};
+  }
+}
+
+function gitBadgeHtml(filePath) {
+  const status = state.gitStatus[filePath];
+  if (!status) return "";
+  return `<span class="git-badge ${status}">${status[0].toUpperCase()}</span>`;
+}
+
+// Patch fileCard and fileRow to include git badges
+const _origFileCard = fileCard;
+function fileCard(file) {
+  const base = _origFileCard(file);
+  const badge = gitBadgeHtml(file.path);
+  if (!badge) return base;
+  return base.replace('<div class="name">', `${badge}<div class="name">`);
+}
+
+const _origFileRow = fileRow;
+function fileRow(file) {
+  const base = _origFileRow(file);
+  const badge = gitBadgeHtml(file.path);
+  if (!badge) return base;
+  return base.replace('<div class="name-cell">', `<div class="name-cell">${badge}`);
+}
+
+// Note indicator patch on fileCard
+const _fileCardWithNote = fileCard;
+function fileCard(file) {
+  const base = _fileCardWithNote(file);
+  if (!state.fileNotes[file.path]) return base;
+  return base.replace('<div class="name">', '<span class="note-indicator" title="Has note"></span><div class="name">');
+}
+
+// ─────────────────────────────────────────────
+// Search within results (filter bar)
+// ─────────────────────────────────────────────
+function getDisplayFiles() {
+  const files = state.searchResults !== null ? state.searchResults : state.files;
+  let sorted = sortNodes(files, state.sortBy, state.sortDir);
+  if (state.activeTag) sorted = sorted.filter(f => (state.tags[f.path] || null) === state.activeTag);
+  if (state.filterQuery) {
+    const q = state.filterQuery.toLowerCase();
+    sorted = sorted.filter(f => f.name.toLowerCase().includes(q));
+  }
+  return sorted;
+}
+
+// ─────────────────────────────────────────────
+// Dual pane
+// ─────────────────────────────────────────────
+function toggleDualPane() {
+  state.dualPane = !state.dualPane;
+  const right = document.getElementById("file-pane-right");
+  const divider = document.getElementById("pane-divider");
+  els.main.classList.toggle("dual-pane", state.dualPane);
+  right.hidden = !state.dualPane;
+  divider.hidden = !state.dualPane;
+  els.dualPaneToggle.classList.toggle("active", state.dualPane);
+  if (state.dualPane && !state.rightPane.currentPath) {
+    navigateRightPane(state.currentPath);
+  }
+}
+
+async function navigateRightPane(path) {
+  const rp = state.rightPane;
+  const token = ++rp.loadToken;
+  rp.loading = true; rp.loadError = null; rp.query = ""; rp.searchResults = null;
+  rp.selected.clear();
+  renderRightPane();
+  try {
+    const files = (await invoke("list_directory", { path })).map(normalizeEntry);
+    if (token !== rp.loadToken) return;
+    rp.files = files; rp.currentPath = path; rp.loading = false;
+    renderRightPane();
+    const likely = files.filter(isDirectory).slice(0, 6).map(f => f.path);
+    if (likely.length) invoke("prefetch_paths", { paths: likely }).catch(() => {});
+  } catch (err) {
+    if (token !== rp.loadToken) return;
+    rp.loading = false; rp.loadError = String(err);
+    renderRightPane();
+  }
+}
+
+function renderRightPane() {
+  const pane = document.getElementById("file-pane-right");
+  if (!pane || !state.dualPane) return;
+  const rp = state.rightPane;
+
+  pane.classList.toggle("active-pane", state.activePaneSide === "right");
+  document.getElementById("file-pane").classList.toggle("active-pane", state.activePaneSide === "left");
+
+  if (rp.loading) { pane.innerHTML = `<div class="loading-state"><div><div class="spinner"></div><div>Loading…</div></div></div>`; return; }
+  if (rp.loadError) { pane.innerHTML = `<div class="error-state"><div>${escapeHtml(rp.loadError)}</div></div>`; return; }
+
+  const files = sortNodes(rp.searchResults !== null ? rp.searchResults : rp.files, rp.sortBy, rp.sortDir);
+  if (!files.length) { pane.innerHTML = `<div class="empty-state"><div>Empty folder</div></div>`; return; }
+
+  pane.innerHTML = `<div class="view-grid">${files.map(f => {
+    const sel = rp.selected.has(f.path) ? "selected" : "";
+    const thumbUrl = state.thumbnailCache.get(f.path);
+    const visual = thumbUrl ? `<div class="node-visual thumb"><img src="${thumbUrl}" alt="" loading="lazy" decoding="async"/></div>` : nodeVisual(f);
+    return `<div class="file-card ${sel}" data-path="${escapeHtml(f.path)}" data-pane="right">${visual}<div class="name">${escapeHtml(f.name)}</div></div>`;
+  }).join("")}</div>`;
+
+  warmVisibleThumbnails(files.slice(0, 60));
+
+  pane.onclick = e => {
+    const card = e.target.closest("[data-path]");
+    if (!card) { rp.selected.clear(); renderRightPane(); return; }
+    state.activePaneSide = "right";
+    rp.selected = new Set([card.dataset.path]);
+    renderRightPane();
+  };
+  pane.ondblclick = e => {
+    const card = e.target.closest("[data-path]");
+    if (!card) return;
+    const entry = rp.files.find(f => f.path === card.dataset.path);
+    if (!entry) return;
+    if (entry.kind === "Directory") navigateRightPane(entry.path);
+    else invoke("open_file", { path: entry.path }).catch(err => toast(String(err)));
+  };
+}
+
+// ─────────────────────────────────────────────
+// Batch rename
+// ─────────────────────────────────────────────
+function applyRenamePattern(files, { find, replace, prefix, suffix, startNum, padLen, ext }) {
+  return files.map((f, i) => {
+    let name = f.name;
+    const dotIdx = name.lastIndexOf(".");
+    const base = f.kind !== "Directory" && dotIdx > 0 ? name.slice(0, dotIdx) : name;
+    const fileExt = f.kind !== "Directory" && dotIdx > 0 ? name.slice(dotIdx) : "";
+
+    let newBase = base;
+    if (find) {
+      try { newBase = newBase.replace(new RegExp(find, "gi"), replace || ""); }
+      catch { newBase = newBase.split(find).join(replace || ""); }
+    }
+    if (prefix) newBase = prefix + newBase;
+    if (suffix) newBase = newBase + suffix;
+    if (startNum !== "") {
+      const n = String(Number(startNum) + i).padStart(Number(padLen) || 1, "0");
+      newBase = newBase + n;
+    }
+    const newExt = ext || fileExt;
+    const newName = newBase + newExt;
+    const dir = f.path.slice(0, f.path.length - f.name.length);
+    return { file: f, newName, newPath: dir + newName, changed: newName !== f.name };
+  });
+}
+
+async function openBatchRename() {
+  const files = selectedEntries();
+  if (!files.length) { toast("Select files to rename"); return; }
+
+  const html = `
+    <div class="dialog" style="width:640px;max-width:96vw">
+      <div class="dialog-head"><span>Batch Rename</span><button data-modal-close class="tool-btn">${icon("x", 14)}</button></div>
+      <div class="dialog-body" style="max-height:70vh;overflow-y:auto">
+        <div class="rename-pattern-row">
+          <input id="br-find" placeholder="Find (regex ok)" style="flex:2" />
+          <input id="br-replace" placeholder="Replace with" style="flex:2" />
+          <input id="br-prefix" placeholder="Prefix" style="flex:1" />
+          <input id="br-suffix" placeholder="Suffix" style="flex:1" />
+          <input id="br-num" placeholder="Start #" style="flex:1;width:70px" />
+          <input id="br-pad" placeholder="Pad" style="flex:0.5;width:50px" value="1" />
+          <input id="br-ext" placeholder="Ext (.jpg)" style="flex:1" />
+        </div>
+        <div id="br-preview"></div>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn" data-modal-close>Cancel</button>
+        <button class="btn primary" id="br-apply">Rename ${files.length} file${files.length > 1 ? "s" : ""}</button>
+      </div>
+    </div>`;
+
+  openModal(html);
+
+  const update = () => {
+    const opts = {
+      find: document.getElementById("br-find")?.value || "",
+      replace: document.getElementById("br-replace")?.value || "",
+      prefix: document.getElementById("br-prefix")?.value || "",
+      suffix: document.getElementById("br-suffix")?.value || "",
+      startNum: document.getElementById("br-num")?.value ?? "",
+      padLen: document.getElementById("br-pad")?.value || "1",
+      ext: document.getElementById("br-ext")?.value || "",
+    };
+    const preview = applyRenamePattern(files, opts);
+    const rows = preview.filter(p => p.changed).map(p =>
+      `<tr><td>${escapeHtml(p.file.name)}</td><td class="batch-rename-arrow">→</td><td>${escapeHtml(p.newName)}</td></tr>`
+    ).join("");
+    document.getElementById("br-preview").innerHTML = rows.length
+      ? `<table class="batch-rename-table"><thead><tr><th>Before</th><th></th><th>After</th></tr></thead><tbody>${rows}</tbody></table>`
+      : `<div style="padding:8px;color:var(--text-muted);font-size:12px">No changes with current pattern.</div>`;
+
+    const applyBtn = document.getElementById("br-apply");
+    if (applyBtn) {
+      applyBtn.onclick = async () => {
+        const ops = preview.filter(p => p.changed).map(p => ({ from: p.file.path, to: p.newPath }));
+        if (!ops.length) { toast("Nothing to rename"); return; }
+        try {
+          await invoke("batch_rename", { ops });
+          closeModal();
+          await refreshCurrent();
+          toast(`Renamed ${ops.length} file${ops.length > 1 ? "s" : ""}`);
+        } catch (err) { toast(String(err)); }
+      };
+    }
+  };
+
+  ["br-find","br-replace","br-prefix","br-suffix","br-num","br-pad","br-ext"].forEach(id => {
+    document.getElementById(id)?.addEventListener("input", update);
+  });
+  update();
+}
+
+// ─────────────────────────────────────────────
+// Checksum viewer
+// ─────────────────────────────────────────────
+async function showChecksum(file) {
+  openModal(`<div class="dialog" style="width:520px"><div class="dialog-head"><span>Checksum — ${escapeHtml(file.name)}</span><button data-modal-close class="tool-btn">${icon("x",14)}</button></div><div class="dialog-body"><div style="color:var(--text-muted);font-size:12px">Computing…</div></div></div>`);
+  try {
+    const result = await invoke("get_checksum", { path: file.path });
+    const rows = Object.entries(result).map(([alg, hash]) =>
+      `<div class="checksum-row"><span class="checksum-label">${alg.toUpperCase()}</span><span class="checksum-value">${escapeHtml(hash)}</span><button class="btn checksum-copy" onclick="navigator.clipboard.writeText('${hash}');this.textContent='Copied'">Copy</button></div>`
+    ).join("");
+    const body = document.querySelector(".dialog-body");
+    if (body) body.innerHTML = rows;
+  } catch (err) { toast(String(err)); closeModal(); }
+}
+
+// ─────────────────────────────────────────────
+// Storage treemap
+// ─────────────────────────────────────────────
+function layoutTreemap(nodes, rect) {
+  if (!nodes.length) return [];
+  const total = nodes.reduce((s, n) => s + n.size, 0);
+  if (!total) return [];
+  const sorted = [...nodes].sort((a, b) => b.size - a.size);
+  const result = [];
+  let rem = { ...rect };
+  for (let i = 0; i < sorted.length; i++) {
+    const node = sorted[i];
+    const remTotal = sorted.slice(i).reduce((s, n) => s + n.size, 0);
+    const frac = node.size / remTotal;
+    let r;
+    if (rem.w >= rem.h) {
+      r = { x: rem.x, y: rem.y, w: rem.w * frac, h: rem.h };
+      rem = { x: rem.x + r.w, y: rem.y, w: rem.w * (1 - frac), h: rem.h };
+    } else {
+      r = { x: rem.x, y: rem.y, w: rem.w, h: rem.h * frac };
+      rem = { x: rem.x, y: rem.y + r.h, w: rem.w, h: rem.h * (1 - frac) };
+    }
+    result.push({ ...node, ...r });
+  }
+  return result;
+}
+
+const TREEMAP_COLORS = [
+  "oklch(0.55 0.18 250)","oklch(0.55 0.18 180)","oklch(0.55 0.18 140)",
+  "oklch(0.55 0.18 55)","oklch(0.55 0.18 20)","oklch(0.55 0.18 290)",
+  "oklch(0.55 0.18 320)","oklch(0.55 0.14 250)",
+];
+
+async function openStorageTreemap(path) {
+  openModal(`<div class="dialog" style="width:700px"><div class="dialog-head"><span>Storage — ${escapeHtml(basename(path) || path)}</span><button data-modal-close class="tool-btn">${icon("x",14)}</button></div><div class="dialog-body"><div style="color:var(--text-muted);font-size:12px;padding:24px;text-align:center">Scanning…</div></div></div>`);
+  try {
+    const tree = await invoke("get_storage_tree", { path, maxDepth: 3 });
+    const W = 660, H = 400;
+    const nodes = layoutTreemap(tree.children, { x: 0, y: 0, w: W, h: H });
+    const svgItems = nodes.map((n, i) => {
+      const color = TREEMAP_COLORS[i % TREEMAP_COLORS.length];
+      const label = n.w > 70 && n.h > 28
+        ? `<text x="${n.x+5}" y="${n.y+14}" font-size="11" fill="white" style="pointer-events:none">${escapeHtml(n.name.slice(0,20))}</text>${n.h > 30 ? `<text x="${n.x+5}" y="${n.y+27}" font-size="10" fill="rgba(255,255,255,0.65)" style="pointer-events:none">${formatSize(n.size)}</text>` : ""}`
+        : "";
+      return `<g class="treemap-node" title="${escapeHtml(n.name)} — ${formatSize(n.size)}" data-path="${escapeHtml(n.path)}" style="cursor:pointer" onclick="navigateTo('${escapeHtml(n.path)}');closeModal()"><rect x="${n.x}" y="${n.y}" width="${Math.max(0,n.w-1)}" height="${Math.max(0,n.h-1)}" fill="${color}" opacity="0.75" rx="3"/>${label}</g>`;
+    }).join("");
+    const svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="border-radius:6px">${svgItems}</svg>`;
+    const body = document.querySelector(".dialog-body");
+    if (body) body.innerHTML = `<div class="treemap-container">${svg}</div><div class="treemap-path">Total: ${formatSize(tree.size)} — click a folder to navigate</div>`;
+  } catch (err) { toast(String(err)); closeModal(); }
+}
+
+// ─────────────────────────────────────────────
+// Duplicate finder
+// ─────────────────────────────────────────────
+async function openDuplicateFinder() {
+  const path = state.currentPath;
+  openModal(`<div class="dialog" style="width:640px"><div class="dialog-head"><span>Duplicate Files — ${escapeHtml(basename(path) || path)}</span><button data-modal-close class="tool-btn">${icon("x",14)}</button></div><div class="dialog-body"><div style="color:var(--text-muted);font-size:12px;padding:24px;text-align:center">Hashing files… this may take a moment.</div></div></div>`);
+  try {
+    const groups = await invoke("find_duplicates", { path, minSize: 4096 });
+    if (!groups.length) {
+      const body = document.querySelector(".dialog-body");
+      if (body) body.innerHTML = `<div style="padding:24px;text-align:center;color:var(--text-muted)">No duplicate files found.</div>`;
+      return;
+    }
+    const totalWasted = groups.reduce((s, g) => s + g.slice(1).reduce((ss, f) => ss + f.size, 0), 0);
+    const html = groups.map((group, gi) => {
+      const rows = group.map((f, fi) => `
+        <div class="dup-file-row">
+          ${nodeVisual(f, "small")}
+          <span class="dup-file-name" title="${escapeHtml(f.path)}">${escapeHtml(f.name)}</span>
+          <span class="dup-file-path">${escapeHtml(dirname(f.path))}</span>
+          ${fi > 0 ? `<button class="btn" onclick="invoke('delete_file',{path:'${escapeHtml(f.path)}'}).then(()=>{this.closest('.dup-file-row').remove();refreshCurrent()}).catch(e=>toast(String(e)))">Delete</button>` : `<span style="font-size:11px;color:var(--text-muted)">keep</span>`}
+        </div>`).join("");
+      return `<div class="dup-group"><div class="dup-group-head"><strong>${escapeHtml(group[0].name)}</strong><span>${group.length} copies — ${formatSize(group[0].size)} each</span></div>${rows}</div>`;
+    }).join("");
+    const body = document.querySelector(".dialog-body");
+    if (body) body.innerHTML = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${groups.length} duplicate groups — ${formatSize(totalWasted)} recoverable</div><div style="max-height:420px;overflow-y:auto">${html}</div>`;
+  } catch (err) { toast(String(err)); closeModal(); }
+}
+
+// ─────────────────────────────────────────────
+// File notes
+// ─────────────────────────────────────────────
+async function openFileNote(file) {
+  const current = state.fileNotes[file.path] || "";
+  const html = `
+    <div class="dialog" style="width:480px">
+      <div class="dialog-head"><span>Note — ${escapeHtml(file.name)}</span><button data-modal-close class="tool-btn">${icon("x",14)}</button></div>
+      <div class="dialog-body">
+        <textarea id="note-input" class="note-textarea" placeholder="Add a note about this file…">${escapeHtml(current)}</textarea>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn" data-modal-close>Cancel</button>
+        <button class="btn primary" id="note-save">Save</button>
+      </div>
+    </div>`;
+  openModal(html);
+  const input = document.getElementById("note-input");
+  if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+  document.getElementById("note-save")?.addEventListener("click", async () => {
+    const note = input?.value || "";
+    await invoke("save_file_note", { path: file.path, note });
+    if (note.trim()) state.fileNotes[file.path] = note.trim();
+    else delete state.fileNotes[file.path];
+    closeModal();
+    renderFiles();
+    toast(note.trim() ? "Note saved" : "Note removed");
+  });
+}
+
+// ─────────────────────────────────────────────
+// Saved searches
+// ─────────────────────────────────────────────
+async function openSavedSearches() {
+  const list = state.savedSearches;
+  const rows = list.length
+    ? list.map(s => `
+        <div class="saved-search-item" data-query="${escapeHtml(s.query)}" data-scope="${escapeHtml(s.scope)}">
+          <span class="saved-search-name">${escapeHtml(s.name)}</span>
+          <span class="saved-search-query">${escapeHtml(s.query)}</span>
+          <span class="saved-search-scope">${escapeHtml(basename(s.scope) || s.scope)}</span>
+          <button class="btn" style="font-size:11px;padding:2px 7px" onclick="invoke('delete_saved_search',{name:'${escapeHtml(s.name)}'}).then(()=>{state.savedSearches=state.savedSearches.filter(x=>x.name!=='${escapeHtml(s.name)}');this.closest('.saved-search-item').remove()}).catch(e=>toast(String(e)))">Remove</button>
+        </div>`).join("")
+    : `<div style="padding:16px;color:var(--text-muted);font-size:12px">No saved searches yet. Run a search and use "Save Search" from the context menu.</div>`;
+
+  openModal(`<div class="dialog" style="width:560px"><div class="dialog-head"><span>Saved Searches</span><button data-modal-close class="tool-btn">${icon("x",14)}</button></div><div class="dialog-body" style="max-height:60vh;overflow-y:auto">${rows}</div></div>`);
+
+  document.querySelectorAll(".saved-search-item[data-query]").forEach(el => {
+    el.addEventListener("click", e => {
+      if (e.target.tagName === "BUTTON") return;
+      const query = el.dataset.query;
+      const scope = el.dataset.scope;
+      closeModal();
+      navigateTo(scope, { pushHistory: true }).then(() => {
+        state.query = query;
+        els.searchInput.value = query;
+        performSearch(query);
+      });
+    });
+  });
+}
+
+async function saveCurrentSearch() {
+  if (!state.query) { toast("No active search to save"); return; }
+  const name = await promptModal("Save Search", "Name this search:", state.query);
+  if (!name) return;
+  await invoke("save_search", { name, query: state.query, scope: state.currentPath });
+  state.savedSearches = await invoke("get_saved_searches");
+  toast("Search saved");
+}
+
+// ─────────────────────────────────────────────
+// Undo / operation log
+// ─────────────────────────────────────────────
+async function undoLast() {
+  try {
+    const msg = await invoke("undo_last_operation");
+    toast(msg);
+    await refreshCurrent();
+  } catch (err) { toast(String(err)); }
+}
+
+async function openOperationLog() {
+  const log = await invoke("get_operation_log");
+  const rows = [...log].reverse().map(op => `
+    <div class="op-log-item">
+      <span class="op-log-kind">${escapeHtml(op.kind)}</span>
+      <div class="op-log-paths">
+        <div class="op-log-from">${escapeHtml(op.from)}</div>
+        ${op.to ? `<div class="op-log-to">→ ${escapeHtml(op.to)}</div>` : ""}
+      </div>
+    </div>`).join("");
+  openModal(`<div class="dialog" style="width:560px"><div class="dialog-head"><span>Operation Log</span><button data-modal-close class="tool-btn">${icon("x",14)}</button></div><div class="dialog-body" style="max-height:60vh;overflow-y:auto">${rows || '<div style="padding:16px;color:var(--text-muted);font-size:12px">No operations recorded yet.</div>'}</div><div class="dialog-foot"><button class="btn" data-modal-close>Close</button><button class="btn primary" id="undo-btn">Undo Last</button></div></div>`);
+  document.getElementById("undo-btn")?.addEventListener("click", async () => { closeModal(); await undoLast(); });
+}
+
+// ─────────────────────────────────────────────
+// Archive helpers
+// ─────────────────────────────────────────────
+async function extractSelectedArchive(file) {
+  const dest = await invoke("get_parent_path", { path: file.path });
+  if (!dest) return;
+  try {
+    await invoke("extract_archive", { path: file.path, dest });
+    toast("Extracted successfully");
+    await refreshCurrent();
+  } catch (err) { toast(String(err)); }
+}
+
+async function createArchiveFromSelected() {
+  const files = selectedEntries();
+  if (!files.length) { toast("Select files to archive"); return; }
+  const name = await promptModal("Create Archive", "Archive name (.zip):", "archive.zip");
+  if (!name) return;
+  const dest = await invoke("join_path", { parent: state.currentPath, child: name.endsWith(".zip") ? name : name + ".zip" });
+  try {
+    await invoke("create_archive", { paths: files.map(f => f.path), dest });
+    toast("Archive created");
+    await refreshCurrent();
+  } catch (err) { toast(String(err)); }
+}
+
+// ─────────────────────────────────────────────
+// promptModal helper (simple text input)
+// ─────────────────────────────────────────────
+function promptModal(title, label, defaultVal = "") {
+  return new Promise(resolve => {
+    const html = `
+      <div class="dialog" style="width:400px">
+        <div class="dialog-head"><span>${escapeHtml(title)}</span><button data-modal-close class="tool-btn">${icon("x",14)}</button></div>
+        <div class="dialog-body"><label style="font-size:13px;display:block;margin-bottom:8px">${escapeHtml(label)}</label><input id="prompt-input" class="addr" style="width:100%" value="${escapeHtml(defaultVal)}" /></div>
+        <div class="dialog-foot"><button class="btn" id="prompt-cancel">Cancel</button><button class="btn primary" id="prompt-ok">OK</button></div>
+      </div>`;
+    openModal(html);
+    const input = document.getElementById("prompt-input");
+    if (input) { input.focus(); input.select(); }
+    document.getElementById("prompt-ok")?.addEventListener("click", () => { closeModal(); resolve(input?.value.trim() || null); });
+    document.getElementById("prompt-cancel")?.addEventListener("click", () => { closeModal(); resolve(null); });
+    state.modalResolve = resolve;
+  });
+}
+
+// ─────────────────────────────────────────────
+// Extend context menu with new actions
+// ─────────────────────────────────────────────
+const _origContextItemsFor = contextItemsFor;
+function contextItemsFor(entry) {
+  const base = _origContextItemsFor(entry);
+  const extra = [];
+
+  if (entry) {
+    extra.push({ label: "Add Note", action: () => openFileNote(entry) });
+    extra.push({ label: "Checksum", action: () => showChecksum(entry) });
+    if ((entry.extension || "").toLowerCase() === "zip") {
+      extra.push({ label: "Extract Here", action: () => extractSelectedArchive(entry) });
+    }
+    if (state.dualPane) {
+      const dest = state.activePaneSide === "left" ? state.rightPane.currentPath : state.currentPath;
+      if (dest) {
+        extra.push({ label: "Copy to Other Pane", action: async () => {
+          const destPath = await invoke("join_path", { parent: dest, child: entry.name });
+          await invoke("copy_file", { from: entry.path, to: destPath });
+          state.activePaneSide === "left" ? renderRightPane() : await refreshCurrent();
+          toast("Copied");
+        }});
+        extra.push({ label: "Move to Other Pane", action: async () => {
+          const destPath = await invoke("join_path", { parent: dest, child: entry.name });
+          await invoke("move_file", { from: entry.path, to: destPath });
+          state.activePaneSide === "left" ? await refreshCurrent() : renderRightPane();
+          await refreshCurrent();
+          toast("Moved");
+        }});
+      }
+    }
+    if (state.gitStatus[entry.path]) {
+      extra.push({ label: `Git: ${state.gitStatus[entry.path]}`, action: () => {} });
+    }
+  } else {
+    extra.push({ label: "Open Terminal Here", action: () => invoke("open_terminal", { path: state.currentPath }).catch(e => toast(String(e))) });
+    extra.push({ label: "Storage Treemap", action: () => openStorageTreemap(state.currentPath) });
+    extra.push({ label: "Find Duplicates", action: () => openDuplicateFinder() });
+    extra.push({ label: "Compress Selected", action: () => createArchiveFromSelected() });
+    if (state.query) extra.push({ label: "Save This Search", action: () => saveCurrentSearch() });
+    extra.push({ label: "Saved Searches", action: () => openSavedSearches() });
+    extra.push({ label: "Operation Log / Undo", action: () => openOperationLog() });
+  }
+
+  return [...base, ...(extra.length ? [{ type: "separator" }, ...extra] : [])];
+}
+
+// ─────────────────────────────────────────────
+// Extend palette with new actions
+// ─────────────────────────────────────────────
+const _origPaletteActions = paletteActions;
+function paletteActions() {
+  return [
+    ..._origPaletteActions(),
+    { label: "Toggle Dual Pane", hint: "Ctrl+\\", action: toggleDualPane },
+    { label: "Batch Rename", hint: "", action: openBatchRename },
+    { label: "Open Terminal Here", hint: "", action: () => invoke("open_terminal", { path: state.currentPath }).catch(e => toast(String(e))) },
+    { label: "Storage Treemap", hint: "", action: () => openStorageTreemap(state.currentPath) },
+    { label: "Find Duplicates", hint: "", action: openDuplicateFinder },
+    { label: "Saved Searches", hint: "", action: openSavedSearches },
+    { label: "Save Current Search", hint: "", action: saveCurrentSearch },
+    { label: "Undo Last Operation", hint: "Ctrl+Z", action: undoLast },
+    { label: "Operation Log", hint: "", action: openOperationLog },
+    { label: "Add Note to Selected", hint: "", action: () => { const e = selectedEntries()[0]; if (e) openFileNote(e); } },
+    { label: "Checksum of Selected", hint: "", action: () => { const e = selectedEntries()[0]; if (e) showChecksum(e); } },
+    { label: "Compress Selected", hint: "", action: createArchiveFromSelected },
+  ];
+}
+
+// ─────────────────────────────────────────────
+// Wire up new toolbar button + keyboard shortcut
+// ─────────────────────────────────────────────
+document.addEventListener("DOMContentLoaded", () => {
+  els.dualPaneToggle = document.getElementById("dual-pane-toggle");
+  if (els.dualPaneToggle) {
+    els.dualPaneToggle.innerHTML = icon("list", 15);
+    els.dualPaneToggle.addEventListener("click", toggleDualPane);
+  }
+
+  document.addEventListener("keydown", async e => {
+    if (e.ctrlKey && e.key === "\\") { e.preventDefault(); toggleDualPane(); }
+    if (e.ctrlKey && e.key === "z" && !e.target.closest("input,textarea")) { e.preventDefault(); await undoLast(); }
+    if (e.key === "F3") { e.preventDefault(); toggleDualPane(); }
+  });
+
+  // Load git status after each navigation
+  const _patchedNav = navigateTo;
+  navigateTo = async (path, opts) => {
+    await _patchedNav(path, opts);
+    loadGitStatus(path);
+  };
+});

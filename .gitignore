@@ -25,3 +25,5 @@ npm-debug.log*
 
 # Node (if ever added)
 node_modules/
+
+pathfinder/

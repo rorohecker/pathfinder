@@ -1898,3 +1898,86 @@ svg.icon {
     flex-basis: 210px;
   }
 }
+
+/* ── Dual pane ── */
+.main.dual-pane {
+  grid-template-columns: minmax(0,1fr) 4px minmax(0,1fr) !important;
+}
+.main.dual-pane.with-preview {
+  grid-template-columns: minmax(0,1fr) 4px minmax(0,1fr) 280px !important;
+}
+.pane-divider {
+  background: var(--border-strong);
+  cursor: col-resize;
+  transition: background 0.15s;
+}
+.pane-divider:hover { background: var(--accent); }
+.file-pane-right { border-left: none; }
+.file-pane.active-pane { box-shadow: inset 0 0 0 2px var(--accent); }
+
+/* ── Batch rename dialog ── */
+.batch-rename-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12px; }
+.batch-rename-table th { text-align: left; padding: 4px 8px; color: var(--text-muted); font-weight: 500; border-bottom: 1px solid var(--border); }
+.batch-rename-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.batch-rename-table td:last-child { color: var(--accent); }
+.batch-rename-arrow { color: var(--text-muted); padding: 0 4px; }
+.rename-pattern-row { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.rename-pattern-row input, .rename-pattern-row select { flex: 1; min-width: 120px; }
+
+/* ── Checksum dialog ── */
+.checksum-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.checksum-label { font-size: 11px; color: var(--text-muted); min-width: 48px; }
+.checksum-value { font-family: var(--font-mono, monospace); font-size: 11px; flex: 1; background: var(--panel-alt); padding: 4px 8px; border-radius: var(--radius-small); word-break: break-all; }
+.checksum-copy { flex-shrink: 0; }
+
+/* ── Storage treemap ── */
+.treemap-container { position: relative; width: 100%; height: 420px; overflow: hidden; border-radius: var(--radius); border: 1px solid var(--border); background: var(--panel-alt); }
+.treemap-container svg { display: block; width: 100%; height: 100%; }
+.treemap-node rect { transition: opacity 0.1s; }
+.treemap-node:hover rect { opacity: 1 !important; }
+.treemap-path { font-size: 11px; color: var(--text-muted); margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.treemap-legend { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.treemap-legend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+.treemap-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+
+/* ── Duplicate finder ── */
+.dup-group { border: 1px solid var(--border); border-radius: var(--radius-small); margin-bottom: 8px; overflow: hidden; }
+.dup-group-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--panel-alt); font-size: 12px; }
+.dup-group-head strong { color: var(--text); }
+.dup-group-head span { color: var(--text-muted); font-size: 11px; }
+.dup-file-row { display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 12px; border-top: 1px solid var(--border); }
+.dup-file-row:hover { background: var(--hover); }
+.dup-file-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
+.dup-file-name { font-weight: 500; flex-shrink: 0; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── File notes ── */
+.note-textarea { width: 100%; min-height: 120px; resize: vertical; padding: 8px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-small); background: var(--panel-alt); color: var(--text); font-family: inherit; }
+.note-textarea:focus { outline: none; border-color: var(--accent); }
+.note-indicator { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0; opacity: 0.8; }
+
+/* ── Git status indicators ── */
+.git-badge { font-size: 9px; font-weight: 700; padding: 1px 4px; border-radius: 3px; line-height: 1.4; flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.03em; }
+.git-badge.modified  { background: oklch(0.65 0.18 55 / 0.25); color: oklch(0.75 0.18 55); }
+.git-badge.added     { background: oklch(0.65 0.18 145 / 0.25); color: oklch(0.7 0.18 145); }
+.git-badge.untracked { background: oklch(0.65 0.05 250 / 0.2); color: oklch(0.6 0.05 250); }
+.git-badge.deleted   { background: oklch(0.65 0.2 20 / 0.25); color: oklch(0.7 0.2 20); }
+.git-badge.renamed   { background: oklch(0.65 0.15 290 / 0.25); color: oklch(0.7 0.15 290); }
+
+/* ── Saved searches ── */
+.saved-search-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: var(--radius-small); cursor: pointer; }
+.saved-search-item:hover { background: var(--hover); }
+.saved-search-name { font-weight: 500; font-size: 13px; flex: 1; }
+.saved-search-query { font-size: 11px; color: var(--text-muted); flex: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.saved-search-scope { font-size: 11px; color: var(--text-muted); flex-shrink: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Operation log / undo ── */
+.op-log-item { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.op-log-kind { font-size: 10px; font-weight: 700; padding: 2px 5px; border-radius: 3px; background: var(--panel-alt); color: var(--text-muted); text-transform: uppercase; flex-shrink: 0; margin-top: 1px; }
+.op-log-paths { flex: 1; min-width: 0; }
+.op-log-from { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.op-log-to { color: var(--text-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Search within results toolbar ── */
+.filter-bar { display: flex; align-items: center; gap: 8px; padding: 4px 12px; background: color-mix(in srgb, var(--accent) 8%, transparent); border-bottom: 1px solid var(--border); font-size: 12px; }
+.filter-bar input { flex: 1; background: transparent; border: none; outline: none; color: var(--text); }
+.filter-bar-label { color: var(--text-muted); flex-shrink: 0; }

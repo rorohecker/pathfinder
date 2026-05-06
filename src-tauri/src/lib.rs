@@ -2,13 +2,14 @@ use base64::{engine::general_purpose, Engine as _};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Cursor, Read};
+use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::time::{Duration, Instant, SystemTime};
@@ -101,6 +102,49 @@ struct CachedPreview {
     loaded_at: Instant,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FileOp {
+    pub kind: String,
+    pub from: String,
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RenameOp {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StorageNode {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub children: Vec<StorageNode>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ImageInfo {
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SavedSearch {
+    pub name: String,
+    pub query: String,
+    pub scope: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SessionTab {
+    pub path: String,
+    pub view: String,
+    pub sort_by: String,
+    pub sort_dir: String,
+}
+
 #[derive(Clone)]
 struct AppState {
     directory_cache: Arc<Mutex<HashMap<String, CachedDirectory>>>,
@@ -108,6 +152,8 @@ struct AppState {
     watchers: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
     search_generation: Arc<AtomicU64>,
     ai_capabilities: Arc<Mutex<Option<AiCapabilities>>>,
+    operation_log: Arc<Mutex<Vec<FileOp>>>,
+    git_cache: Arc<Mutex<HashMap<String, (HashMap<String, String>, Instant)>>>,
 }
 
 impl Default for AppState {
@@ -118,6 +164,8 @@ impl Default for AppState {
             watchers: Arc::new(Mutex::new(HashMap::new())),
             search_generation: Arc::new(AtomicU64::new(0)),
             ai_capabilities: Arc::new(Mutex::new(None)),
+            operation_log: Arc::new(Mutex::new(Vec::new())),
+            git_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -255,12 +303,27 @@ fn sort_entries(entries: &mut [FileEntry]) {
     });
 }
 
-fn trim_cache<K, V>(cache: &mut HashMap<K, V>, max_entries: usize)
-where
-    K: Eq + std::hash::Hash + Clone,
-{
+fn trim_dir_cache(cache: &mut HashMap<String, CachedDirectory>, max_entries: usize) {
     while cache.len() > max_entries {
-        if let Some(key) = cache.keys().next().cloned() {
+        if let Some(key) = cache
+            .iter()
+            .min_by_key(|(_, v)| v.loaded_at)
+            .map(|(k, _)| k.clone())
+        {
+            cache.remove(&key);
+        } else {
+            break;
+        }
+    }
+}
+
+fn trim_preview_cache(cache: &mut HashMap<String, CachedPreview>, max_entries: usize) {
+    while cache.len() > max_entries {
+        if let Some(key) = cache
+            .iter()
+            .min_by_key(|(_, v)| v.loaded_at)
+            .map(|(k, _)| k.clone())
+        {
             cache.remove(&key);
         } else {
             break;
@@ -289,7 +352,20 @@ impl AppState {
                     loaded_at: Instant::now(),
                 },
             );
-            trim_cache(&mut cache, MAX_DIRECTORY_CACHE_ENTRIES);
+            trim_dir_cache(&mut cache, MAX_DIRECTORY_CACHE_ENTRIES);
+        }
+    }
+
+    fn log_op(&self, kind: &str, from: &str, to: Option<&str>) {
+        if let Ok(mut log) = self.operation_log.lock() {
+            log.push(FileOp {
+                kind: kind.to_string(),
+                from: from.to_string(),
+                to: to.map(|s| s.to_string()),
+            });
+            if log.len() > 50 {
+                log.remove(0);
+            }
         }
     }
 
@@ -329,7 +405,7 @@ impl AppState {
                     loaded_at: Instant::now(),
                 },
             );
-            trim_cache(&mut cache, MAX_PREVIEW_CACHE_ENTRIES);
+            trim_preview_cache(&mut cache, MAX_PREVIEW_CACHE_ENTRIES);
         }
     }
 }
@@ -834,6 +910,7 @@ fn rename_file(
     fs::rename(&src, &dst).map_err(|e| e.to_string())?;
     state.invalidate_path(&src);
     state.invalidate_path(&dst);
+    state.log_op("rename", &path, Some(&dst.to_string_lossy()));
     Ok(dst.to_string_lossy().to_string())
 }
 
@@ -877,6 +954,7 @@ fn copy_file(state: State<'_, AppState>, from: String, to: String) -> Result<(),
     };
     if result.is_ok() {
         state.invalidate_path(&dst);
+        state.log_op("copy", &from, Some(&to));
     }
     result
 }
@@ -908,6 +986,7 @@ fn move_file(state: State<'_, AppState>, from: String, to: String) -> Result<(),
     if result.is_ok() {
         state.invalidate_path(&src);
         state.invalidate_path(&dst);
+        state.log_op("move", &from, Some(&to));
     }
     result
 }
@@ -936,49 +1015,36 @@ fn search_files(
     }
 
     let token = state.search_generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let parsed = parse_query(&query);
-    let parsed = Arc::new(parsed);
-    let results = Arc::new(Mutex::new(Vec::<FileEntry>::new()));
-    let full = Arc::new(AtomicBool::new(false));
+    let parsed = Arc::new(parse_query(&query));
     let generation = state.search_generation.clone();
 
-    WalkDir::new(&dir)
+    let mut output: Vec<FileEntry> = WalkDir::new(&dir)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .par_bridge()
-        .for_each(|entry| {
-            if full.load(Ordering::Relaxed) || generation.load(Ordering::SeqCst) != token {
-                return;
+        .filter_map(|entry| {
+            if generation.load(Ordering::Relaxed) != token {
+                return None;
             }
-
             let entry_path = entry.path().to_path_buf();
             if entry_path == dir {
-                return;
+                return None;
             }
-
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(_) => return,
-            };
-
+            let metadata = entry.metadata().ok()?;
             if matches_query(&entry_path, &metadata, &parsed) {
-                if let Ok(mut guard) = results.lock() {
-                    if guard.len() < max {
-                        guard.push(path_to_entry(&entry_path, &metadata));
-                    }
-                    if guard.len() >= max {
-                        full.store(true, Ordering::Relaxed);
-                    }
-                }
+                Some(path_to_entry(&entry_path, &metadata))
+            } else {
+                None
             }
-        });
+        })
+        .take_any(max)
+        .collect();
 
     if state.search_generation.load(Ordering::SeqCst) != token {
         return Ok(Vec::new());
     }
 
-    let mut output = results.lock().map_err(|_| "Search lock failed")?.clone();
     sort_entries(&mut output);
     Ok(output)
 }
@@ -1406,6 +1472,441 @@ fn close_window(window: Window) -> Result<(), String> {
     window.close().map_err(|e| e.to_string())
 }
 
+// ───── helpers ─────
+
+fn app_data_file(app: &AppHandle, name: &str) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(name)
+}
+
+fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path, fallback: T) -> T {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(fallback)
+}
+
+fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let data = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    fs::write(path, data).map_err(|e| e.to_string())
+}
+
+// ───── checksum ─────
+
+#[tauri::command]
+fn get_checksum(path: String) -> Result<HashMap<String, String>, String> {
+    let mut file = File::open(&path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let mut result = HashMap::new();
+    result.insert("sha256".to_string(), hex::encode(hasher.finalize()));
+    Ok(result)
+}
+
+// ───── terminal ─────
+
+#[tauri::command]
+fn open_terminal(path: String) -> Result<(), String> {
+    let dir = if Path::new(&path).is_dir() {
+        path.clone()
+    } else {
+        Path::new(&path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or(path)
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        ProcessCommand::new("wt")
+            .args(["-d", &dir])
+            .spawn()
+            .or_else(|_| {
+                ProcessCommand::new("powershell")
+                    .args(["-NoExit", "-Command", &format!("Set-Location '{}'", dir.replace('\'', "''"))])
+                    .spawn()
+            })
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        open::that(dir).map_err(|e| e.to_string())
+    }
+}
+
+// ───── file notes ─────
+
+#[tauri::command]
+fn get_all_notes(app: AppHandle) -> HashMap<String, String> {
+    read_json_file(&app_data_file(&app, "notes.json"), HashMap::new())
+}
+
+#[tauri::command]
+fn save_file_note(app: AppHandle, path: String, note: String) -> Result<(), String> {
+    let file = app_data_file(&app, "notes.json");
+    let mut notes: HashMap<String, String> = read_json_file(&file, HashMap::new());
+    if note.trim().is_empty() {
+        notes.remove(&path);
+    } else {
+        notes.insert(path, note.trim().to_string());
+    }
+    write_json_file(&file, &notes)
+}
+
+// ───── batch rename ─────
+
+#[tauri::command]
+fn batch_rename(state: State<'_, AppState>, ops: Vec<RenameOp>) -> Result<Vec<String>, String> {
+    let mut completed = Vec::new();
+    for op in &ops {
+        let src = Path::new(&op.from);
+        let dst = Path::new(&op.to);
+        if dst.exists() {
+            return Err(format!("'{}' already exists", dst.display()));
+        }
+        fs::rename(src, dst).map_err(|e| format!("{}: {}", op.from, e))?;
+        state.invalidate_path(src);
+        state.invalidate_path(dst);
+        state.log_op("rename", &op.from, Some(&op.to));
+        completed.push(op.to.clone());
+    }
+    Ok(completed)
+}
+
+// ───── git status ─────
+
+#[tauri::command]
+fn get_git_status(state: State<'_, AppState>, path: String) -> Result<HashMap<String, String>, String> {
+    let key = cache_key_str(&path);
+    if let Ok(cache) = state.git_cache.lock() {
+        if let Some((map, at)) = cache.get(&key) {
+            if at.elapsed() < Duration::from_secs(10) {
+                return Ok(map.clone());
+            }
+        }
+    }
+
+    let output = ProcessCommand::new("git")
+        .args(["-C", &path, "status", "--porcelain", "-u"])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err("Not a git repository".to_string());
+    }
+
+    let mut statuses: HashMap<String, String> = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let xy = &line[..2];
+        let name = line[3..].trim();
+        let name = if name.contains(" -> ") {
+            name.split(" -> ").last().unwrap_or(name)
+        } else {
+            name
+        };
+        let status = match xy.trim() {
+            "M" | "MM" => "modified",
+            "A" | "AM" => "added",
+            "D" => "deleted",
+            "R" | "RM" => "renamed",
+            "??" => "untracked",
+            _ if xy.contains('M') => "modified",
+            _ => continue,
+        };
+        let full = PathBuf::from(&path).join(name);
+        statuses.insert(full.to_string_lossy().to_string(), status.to_string());
+    }
+
+    if let Ok(mut cache) = state.git_cache.lock() {
+        cache.insert(key, (statuses.clone(), Instant::now()));
+        if cache.len() > 32 {
+            if let Some(k) = cache.keys().next().cloned() {
+                cache.remove(&k);
+            }
+        }
+    }
+    Ok(statuses)
+}
+
+// ───── image info ─────
+
+#[tauri::command]
+fn get_image_info(path: String) -> Result<ImageInfo, String> {
+    let img = image::open(&path).map_err(|e| e.to_string())?;
+    let ext = extension(Path::new(&path));
+    Ok(ImageInfo {
+        width: img.width(),
+        height: img.height(),
+        format: ext.to_uppercase(),
+    })
+}
+
+// ───── duplicate finder ─────
+
+#[tauri::command]
+fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEntry>>, String> {
+    let dir = PathBuf::from(&path);
+    let min = min_size.unwrap_or(4096);
+
+    let items: Vec<(String, FileEntry)> = WalkDir::new(&dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .par_bridge()
+        .filter_map(|entry| {
+            let p = entry.path().to_path_buf();
+            let meta = fs::metadata(&p).ok()?;
+            if meta.len() < min {
+                return None;
+            }
+            let mut file = File::open(&p).ok()?;
+            let mut hasher = Sha256::new();
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = file.read(&mut buf).ok()?;
+                if n == 0 { break; }
+                hasher.update(&buf[..n]);
+            }
+            let hash = hex::encode(hasher.finalize());
+            Some((hash, path_to_entry(&p, &meta)))
+        })
+        .collect();
+
+    let mut map: HashMap<String, Vec<FileEntry>> = HashMap::new();
+    for (hash, entry) in items {
+        map.entry(hash).or_default().push(entry);
+    }
+
+    let mut groups: Vec<Vec<FileEntry>> = map.into_values().filter(|g| g.len() > 1).collect();
+    groups.sort_by(|a, b| {
+        let sa: u64 = a.iter().map(|e| e.size).sum();
+        let sb: u64 = b.iter().map(|e| e.size).sum();
+        sb.cmp(&sa)
+    });
+    Ok(groups)
+}
+
+// ───── storage tree ─────
+
+fn build_storage_tree(dir: &Path, depth: u32, max_depth: u32) -> StorageNode {
+    let name = dir.file_name().unwrap_or(dir.as_os_str()).to_string_lossy().to_string();
+    let mut node = StorageNode { name, path: dir.to_string_lossy().to_string(), size: 0, children: vec![] };
+
+    let Ok(entries) = fs::read_dir(dir) else { return node };
+    let items: Vec<_> = entries.filter_map(Result::ok).collect();
+
+    let file_size: u64 = items.par_iter().filter_map(|e| {
+        let m = fs::metadata(e.path()).ok()?;
+        m.is_file().then(|| m.len())
+    }).sum();
+
+    node.children = if depth < max_depth {
+        items.par_iter().filter_map(|e| {
+            let p = e.path();
+            let m = fs::metadata(&p).ok()?;
+            m.is_dir().then(|| build_storage_tree(&p, depth + 1, max_depth))
+        }).collect()
+    } else {
+        vec![]
+    };
+
+    let child_size: u64 = node.children.iter().map(|c| c.size).sum();
+    node.size = file_size + child_size;
+    node
+}
+
+#[tauri::command]
+fn get_storage_tree(path: String, max_depth: Option<u32>) -> Result<StorageNode, String> {
+    let dir = PathBuf::from(&path);
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {path}"));
+    }
+    Ok(build_storage_tree(&dir, 0, max_depth.unwrap_or(3)))
+}
+
+// ───── archives ─────
+
+#[tauri::command]
+fn extract_archive(state: State<'_, AppState>, path: String, dest: String) -> Result<(), String> {
+    let src = PathBuf::from(&path);
+    let dst = PathBuf::from(&dest);
+    fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+
+    let file = File::open(&src).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let out = dst.join(entry.name());
+        if entry.is_dir() {
+            fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+        } else {
+            if let Some(p) = out.parent() {
+                fs::create_dir_all(p).map_err(|e| e.to_string())?;
+            }
+            let mut outfile = File::create(&out).map_err(|e| e.to_string())?;
+            io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+        }
+    }
+    state.invalidate_path(&dst);
+    Ok(())
+}
+
+#[tauri::command]
+fn create_archive(state: State<'_, AppState>, paths: Vec<String>, dest: String) -> Result<(), String> {
+    let dst = PathBuf::from(&dest);
+    if dst.exists() {
+        return Err(format!("'{}' already exists", dst.display()));
+    }
+    let file = File::create(&dst).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    for p in &paths {
+        let src = PathBuf::from(p);
+        let name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+        if src.is_dir() {
+            for entry in WalkDir::new(&src).into_iter().filter_map(Result::ok) {
+                let rel = entry.path().strip_prefix(&src).unwrap_or(entry.path());
+                let entry_name = format!("{}/{}", name, rel.to_string_lossy().replace('\\', "/"));
+                if entry.file_type().is_dir() {
+                    zip.add_directory(&entry_name, opts).map_err(|e| e.to_string())?;
+                } else {
+                    zip.start_file(&entry_name, opts).map_err(|e| e.to_string())?;
+                    let mut f = File::open(entry.path()).map_err(|e| e.to_string())?;
+                    io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
+                }
+            }
+        } else {
+            zip.start_file(&name, opts).map_err(|e| e.to_string())?;
+            let mut f = File::open(&src).map_err(|e| e.to_string())?;
+            io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
+        }
+    }
+    zip.finish().map_err(|e| e.to_string())?;
+    state.invalidate_path(&dst);
+    Ok(())
+}
+
+// ───── saved searches ─────
+
+#[tauri::command]
+fn get_saved_searches(app: AppHandle) -> Vec<SavedSearch> {
+    read_json_file(&app_data_file(&app, "searches.json"), vec![])
+}
+
+#[tauri::command]
+fn save_search(app: AppHandle, name: String, query: String, scope: String) -> Result<(), String> {
+    let file = app_data_file(&app, "searches.json");
+    let mut searches: Vec<SavedSearch> = read_json_file(&file, vec![]);
+    searches.retain(|s| s.name != name);
+    searches.insert(0, SavedSearch { name, query, scope });
+    if searches.len() > 50 {
+        searches.truncate(50);
+    }
+    write_json_file(&file, &searches)
+}
+
+#[tauri::command]
+fn delete_saved_search(app: AppHandle, name: String) -> Result<(), String> {
+    let file = app_data_file(&app, "searches.json");
+    let mut searches: Vec<SavedSearch> = read_json_file(&file, vec![]);
+    searches.retain(|s| s.name != name);
+    write_json_file(&file, &searches)
+}
+
+// ───── session ─────
+
+#[tauri::command]
+fn save_session(app: AppHandle, tabs: Vec<SessionTab>) -> Result<(), String> {
+    write_json_file(&app_data_file(&app, "session.json"), &tabs)
+}
+
+#[tauri::command]
+fn load_session(app: AppHandle) -> Result<Vec<SessionTab>, String> {
+    let path = app_data_file(&app, "session.json");
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    Ok(read_json_file(&path, vec![]))
+}
+
+// ───── operation log / undo ─────
+
+#[tauri::command]
+fn get_operation_log(state: State<'_, AppState>) -> Vec<FileOp> {
+    state.operation_log.lock().map(|l| l.clone()).unwrap_or_default()
+}
+
+#[tauri::command]
+fn undo_last_operation(state: State<'_, AppState>) -> Result<String, String> {
+    let op = state
+        .operation_log
+        .lock()
+        .map_err(|_| "Lock failed")?
+        .pop()
+        .ok_or("Nothing to undo")?;
+
+    match op.kind.as_str() {
+        "rename" => {
+            let from = op.to.as_deref().ok_or("Missing destination")?;
+            let to = &op.from;
+            let src = Path::new(from);
+            let dst = Path::new(to);
+            if dst.exists() {
+                return Err(format!("'{}' already exists", dst.display()));
+            }
+            fs::rename(src, dst).map_err(|e| e.to_string())?;
+            state.invalidate_path(src);
+            state.invalidate_path(dst);
+            Ok(format!("Renamed back to '{}'", dst.display()))
+        }
+        "copy" => {
+            let copied = op.to.as_deref().ok_or("Missing destination")?;
+            let p = Path::new(copied);
+            if p.is_dir() {
+                fs::remove_dir_all(p).map_err(|e| e.to_string())?;
+            } else {
+                fs::remove_file(p).map_err(|e| e.to_string())?;
+            }
+            state.invalidate_path(p);
+            Ok(format!("Deleted copy '{}'", p.display()))
+        }
+        "move" => {
+            let from = op.to.as_deref().ok_or("Missing destination")?;
+            let to = &op.from;
+            let src = Path::new(from);
+            let dst = Path::new(to);
+            if dst.exists() {
+                return Err(format!("'{}' already exists", dst.display()));
+            }
+            fs::rename(src, dst).map_err(|e| e.to_string())?;
+            state.invalidate_path(src);
+            state.invalidate_path(dst);
+            Ok(format!("Moved back to '{}'", dst.display()))
+        }
+        _ => Err(format!("Cannot undo '{}'", op.kind)),
+    }
+}
+
 fn is_image_ext(ext: &str) -> bool {
     matches!(ext, "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp")
 }
@@ -1498,6 +1999,24 @@ pub fn run() {
             minimize_window,
             toggle_maximize_window,
             close_window,
+            get_checksum,
+            open_terminal,
+            get_all_notes,
+            save_file_note,
+            batch_rename,
+            get_git_status,
+            get_image_info,
+            find_duplicates,
+            get_storage_tree,
+            extract_archive,
+            create_archive,
+            get_saved_searches,
+            save_search,
+            delete_saved_search,
+            save_session,
+            load_session,
+            get_operation_log,
+            undo_last_operation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

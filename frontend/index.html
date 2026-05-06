@@ -54,12 +54,15 @@
       </div>
 
       <button id="preview-toggle" class="tool-btn" title="Preview pane (Ctrl+I)" aria-label="Preview pane"></button>
+      <button id="dual-pane-toggle" class="tool-btn" title="Dual pane (Ctrl+\)" aria-label="Dual pane"></button>
       <button id="palette-btn" class="tool-btn" title="Command palette (Ctrl+P)" aria-label="Command palette"></button>
       <button id="settings-btn" class="tool-btn" title="Personalization (Ctrl+,)" aria-label="Personalization"></button>
     </section>
 
     <main id="main" class="main with-preview">
       <section id="file-pane" class="file-pane" tabindex="0" aria-label="Files"></section>
+      <div id="pane-divider" class="pane-divider" hidden></div>
+      <section id="file-pane-right" class="file-pane file-pane-right" tabindex="0" aria-label="Files (right pane)" hidden></section>
       <aside id="preview-pane" class="preview-pane" aria-label="Preview"></aside>
     </main>
 
