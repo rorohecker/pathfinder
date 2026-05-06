@@ -3,21 +3,11 @@
   "version": "0.1.0",
   "identifier": "com.fusntuff.pathfinder",
   "build": {
-    "frontendDist": "../frontend"
+    "frontendDist": null
   },
   "app": {
-    "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "Pathfinder",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 900,
-        "minHeight": 550,
-        "resizable": true,
-        "decorations": false
-      }
-    ],
+    "withGlobalTauri": false,
+    "windows": [],
     "security": {
       "csp": null
     }

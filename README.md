@@ -1,21 +1,20 @@
 # Pathfinder
 
-A Windows file explorer that doesn't get in your way. Built on Tauri 2 with a Rust backend and plain HTML/CSS/JS frontend.
+Pathfinder is a Windows 11 file manager built with Rust, Tauri 2, and a native Slint interface. It aims to feel familiar if you use File Explorer every day, while adding power tools like dual-pane workflows, tags, notes, themes, batch rename, checksums, duplicate finding, storage views, and AI-aware local features.
 
 ## Features
 
-- **Virtual scroll** - only renders what's visible, so huge folders stay snappy
-- **Parallel search** - searches recursively across threads and cancels automatically when you type something new
-- **Windows Search integration** - uses the built-in Windows index for instant results and falls back to a manual scan if needed
-- **Directory cache and prefetch** - folders you've visited are cached and likely next folders are preloaded in the background; file watchers keep everything up to date
-- **Thumbnail cache** - image previews are generated off the UI thread, cached, and reused so you're never waiting twice
-- **Preview pane** - shows text files, images, and file info inline; hit Space for a full Quick Look overlay
-- **Tabs** - open multiple folders at once, each with its own back/forward history
-- **Tags** - color-coded labels (Urgent, Important, Review, Done, Personal, Code) saved locally per file
-- **9 themes** - Mica Dark, Mica Light, Warm, Flat, Terminal, Paper, Retro, Fantasy, Cyberpunk
-- **Command palette** - hit Ctrl+P and type anything
-- **Rubber-band selection** - click and drag to select multiple files
-- **AI features** (requires NPU) - semantic search, file summaries, image classification, and local embeddings; automatically disabled if no supported NPU is detected
+- **Native Slint UI** - no HTML frontend, with a custom Windows 11 style shell
+- **Explorer-style navigation** - tabs, back and forward history, breadcrumbs, address bar, quick access, drives, bookmarks, and status bar
+- **Multiple views** - icon grid, details list, gallery view, preview pane, and dual-pane mode
+- **Fast folders** - directory caching, prefetching, file watching, and virtualized rendering for large folders
+- **Search** - Windows Search support where available, recursive fallback search, and prefix filters like `ext:`, `kind:`, `size:`, `name:`, `content:`, `modified:`, and `tag:`
+- **File tools** - copy, cut, paste, rename, delete to Recycle Bin, new folder, archive actions, checksums, batch rename, duplicate finder, and storage treemap
+- **Tags and notes** - local color tags and per-file notes with visible indicators
+- **Git badges** - lightweight file and folder status badges for repositories
+- **Themes** - Mica Dark, Mica Light, Warm, Flat, Terminal, Paper, Retro, Fantasy, and Cyberpunk, plus accent and density controls
+- **Command palette** - hit Ctrl+P and type the action you want
+- **AI status** - detects NPU/GPU/CPU capability on startup and shows the result in Settings
 
 ## Download
 
@@ -49,7 +48,7 @@ Head to the [**Releases**](../../releases) page and grab the installer:
 
 ## Build from Source
 
-**Prerequisites:** [Rust](https://rustup.rs) (stable) and [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) (WebView2)
+**Prerequisites:** [Rust](https://rustup.rs) stable, Windows build tools, and the normal [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```powershell
 git clone https://github.com/rorohecker/pathfinder.git
@@ -69,20 +68,32 @@ cargo tauri dev
 
 | Layer | Technology |
 |-------|-----------|
-| Shell | [Tauri 2](https://v2.tauri.app) |
-| Backend | Rust (Rayon, walkdir, notify, image) |
-| Frontend | Vanilla JS and CSS, no framework or bundler |
+| Shell | Native Slint window hosted from the Rust app |
+| Backend | Rust with Tauri 2 helpers, Rayon, walkdir, notify, image, zip, trash |
+| UI | Slint 1 with the winit backend |
 | Installer | NSIS / WiX MSI via Tauri bundler |
 
 ## AI Features
 
-Pathfinder checks for NPU hardware on startup using `Get-PnpDevice`. If something is found, you can enable AI features by setting this environment variable:
+Pathfinder checks for local acceleration hardware on startup. If an NPU or GPU path is available, the UI can show accelerated feature status. If no supported hardware or runtime is found, Pathfinder falls back to CPU behavior and stays usable.
 
 ```powershell
 $env:PATHFINDER_LOCAL_AI_RUNTIME = "path\to\runtime"
 ```
 
 Without it, the AI tab in Settings will tell you what was detected and why the features are off.
+
+## Windows Compatibility Side Note
+
+Pathfinder is designed to cover the everyday File Explorer experience, but a few Windows features depend on shell extensions, cloud providers, enterprise policy, or system services that an app cannot fully control.
+
+- Third-party context menu items may be delegated to the native Windows `Show more options` menu.
+- Some virtual shell locations, phones, cameras, and Control Panel style views may open in Windows Explorer if they do not behave like normal folders.
+- Previous Versions only appears when File History, server shadow copies, restore points, or VSS snapshots exist.
+- Some Properties tabs, such as Compatibility or vendor-specific tabs, may open in the native Windows Properties dialog.
+- Protected OS files may still be blocked by Windows permissions, UAC, TrustedInstaller, Windows Resource Protection, or policy.
+- Defender scans can be started, but detailed scan results may be limited by Windows Security settings.
+- Taskbar and Start pinning are restricted by Windows, so Pathfinder only uses the verbs Windows exposes.
 
 ## License
 

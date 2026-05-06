@@ -1,13 +1,18 @@
+#![allow(dead_code)]
+
 use base64::{engine::general_purpose, Engine as _};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
@@ -15,6 +20,8 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Manager, State, Window};
 use walkdir::WalkDir;
+
+slint::include_modules!();
 
 const DIRECTORY_CACHE_TTL: Duration = Duration::from_secs(20);
 const PREVIEW_CACHE_TTL: Duration = Duration::from_secs(180);
@@ -1535,7 +1542,11 @@ fn open_terminal(path: String) -> Result<(), String> {
             .spawn()
             .or_else(|_| {
                 ProcessCommand::new("powershell")
-                    .args(["-NoExit", "-Command", &format!("Set-Location '{}'", dir.replace('\'', "''"))])
+                    .args([
+                        "-NoExit",
+                        "-Command",
+                        &format!("Set-Location '{}'", dir.replace('\'', "''")),
+                    ])
                     .spawn()
             })
             .map(|_| ())
@@ -1589,7 +1600,10 @@ fn batch_rename(state: State<'_, AppState>, ops: Vec<RenameOp>) -> Result<Vec<St
 // ───── git status ─────
 
 #[tauri::command]
-fn get_git_status(state: State<'_, AppState>, path: String) -> Result<HashMap<String, String>, String> {
+fn get_git_status(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<HashMap<String, String>, String> {
     let key = cache_key_str(&path);
     if let Ok(cache) = state.git_cache.lock() {
         if let Some((map, at)) = cache.get(&key) {
@@ -1681,7 +1695,9 @@ fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEn
             let mut buf = vec![0u8; 64 * 1024];
             loop {
                 let n = file.read(&mut buf).ok()?;
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 hasher.update(&buf[..n]);
             }
             let hash = hex::encode(hasher.finalize());
@@ -1706,23 +1722,41 @@ fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEn
 // ───── storage tree ─────
 
 fn build_storage_tree(dir: &Path, depth: u32, max_depth: u32) -> StorageNode {
-    let name = dir.file_name().unwrap_or(dir.as_os_str()).to_string_lossy().to_string();
-    let mut node = StorageNode { name, path: dir.to_string_lossy().to_string(), size: 0, children: vec![] };
+    let name = dir
+        .file_name()
+        .unwrap_or(dir.as_os_str())
+        .to_string_lossy()
+        .to_string();
+    let mut node = StorageNode {
+        name,
+        path: dir.to_string_lossy().to_string(),
+        size: 0,
+        children: vec![],
+    };
 
-    let Ok(entries) = fs::read_dir(dir) else { return node };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return node;
+    };
     let items: Vec<_> = entries.filter_map(Result::ok).collect();
 
-    let file_size: u64 = items.par_iter().filter_map(|e| {
-        let m = fs::metadata(e.path()).ok()?;
-        m.is_file().then(|| m.len())
-    }).sum();
+    let file_size: u64 = items
+        .par_iter()
+        .filter_map(|e| {
+            let m = fs::metadata(e.path()).ok()?;
+            m.is_file().then(|| m.len())
+        })
+        .sum();
 
     node.children = if depth < max_depth {
-        items.par_iter().filter_map(|e| {
-            let p = e.path();
-            let m = fs::metadata(&p).ok()?;
-            m.is_dir().then(|| build_storage_tree(&p, depth + 1, max_depth))
-        }).collect()
+        items
+            .par_iter()
+            .filter_map(|e| {
+                let p = e.path();
+                let m = fs::metadata(&p).ok()?;
+                m.is_dir()
+                    .then(|| build_storage_tree(&p, depth + 1, max_depth))
+            })
+            .collect()
     } else {
         vec![]
     };
@@ -1770,7 +1804,11 @@ fn extract_archive(state: State<'_, AppState>, path: String, dest: String) -> Re
 }
 
 #[tauri::command]
-fn create_archive(state: State<'_, AppState>, paths: Vec<String>, dest: String) -> Result<(), String> {
+fn create_archive(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    dest: String,
+) -> Result<(), String> {
     let dst = PathBuf::from(&dest);
     if dst.exists() {
         return Err(format!("'{}' already exists", dst.display()));
@@ -1782,15 +1820,21 @@ fn create_archive(state: State<'_, AppState>, paths: Vec<String>, dest: String) 
 
     for p in &paths {
         let src = PathBuf::from(p);
-        let name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = src
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if src.is_dir() {
             for entry in WalkDir::new(&src).into_iter().filter_map(Result::ok) {
                 let rel = entry.path().strip_prefix(&src).unwrap_or(entry.path());
                 let entry_name = format!("{}/{}", name, rel.to_string_lossy().replace('\\', "/"));
                 if entry.file_type().is_dir() {
-                    zip.add_directory(&entry_name, opts).map_err(|e| e.to_string())?;
+                    zip.add_directory(&entry_name, opts)
+                        .map_err(|e| e.to_string())?;
                 } else {
-                    zip.start_file(&entry_name, opts).map_err(|e| e.to_string())?;
+                    zip.start_file(&entry_name, opts)
+                        .map_err(|e| e.to_string())?;
                     let mut f = File::open(entry.path()).map_err(|e| e.to_string())?;
                     io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
                 }
@@ -1853,7 +1897,11 @@ fn load_session(app: AppHandle) -> Result<Vec<SessionTab>, String> {
 
 #[tauri::command]
 fn get_operation_log(state: State<'_, AppState>) -> Vec<FileOp> {
-    state.operation_log.lock().map(|l| l.clone()).unwrap_or_default()
+    state
+        .operation_log
+        .lock()
+        .map(|l| l.clone())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -1965,59 +2013,1928 @@ fn fetch_thumbnails(
         .collect()
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct NativeSettings {
+    theme: String,
+    accent: String,
+    density: String,
+    wallpaper: String,
+}
+
+impl Default for NativeSettings {
+    fn default() -> Self {
+        Self {
+            theme: "mica-dark".to_string(),
+            accent: "blue".to_string(),
+            density: "cozy".to_string(),
+            wallpaper: "none".to_string(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct NativeClipboard {
+    paths: Vec<String>,
+    cut: bool,
+}
+
+enum PendingPrompt {
+    Rename(String),
+    NewFolder,
+    Note(String),
+    Archive,
+}
+
+struct NativeController {
+    app_state: AppState,
+    current_path: String,
+    files: Vec<FileEntry>,
+    visible_files: Vec<FileEntry>,
+    selected_index: i32,
+    search_query: String,
+    history: Vec<String>,
+    history_index: usize,
+    tabs: Vec<SessionTab>,
+    active_tab: usize,
+    known_folders: Vec<KnownFolder>,
+    drives: Vec<DriveInfo>,
+    bookmarks: Vec<Bookmark>,
+    tags: HashMap<String, String>,
+    notes: HashMap<String, String>,
+    git_status: HashMap<String, String>,
+    settings: NativeSettings,
+    ai: AiCapabilities,
+    clipboard: Option<NativeClipboard>,
+    pending_prompt: Option<PendingPrompt>,
+}
+
+struct PaletteSpec {
+    bg: Color,
+    bg_soft: Color,
+    panel: Color,
+    panel_solid: Color,
+    panel_alt: Color,
+    titlebar: Color,
+    sidebar: Color,
+    border: Color,
+    border_strong: Color,
+    text: Color,
+    text_muted: Color,
+    text_faint: Color,
+    accent: Color,
+    accent_soft: Color,
+    accent_strong: Color,
+    radius: f32,
+    radius_small: f32,
+    ui_font: &'static str,
+    mono_font: &'static str,
+    light_controls: bool,
+    outer_border: f32,
+}
+
+fn native_data_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Pathfinder")
+}
+
+fn native_data_file(name: &str) -> PathBuf {
+    native_data_dir().join(name)
+}
+
+fn read_native_json<T: serde::de::DeserializeOwned>(name: &str, fallback: T) -> T {
+    fs::read_to_string(native_data_file(name))
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or(fallback)
+}
+
+fn write_native_json<T: Serialize>(name: &str, value: &T) -> Result<(), String> {
+    let path = native_data_file(name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let data = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    fs::write(path, data).map_err(|e| e.to_string())
+}
+
+fn color(hex: &str) -> Color {
+    let value = hex.trim_start_matches('#');
+    let parsed = u32::from_str_radix(value, 16).unwrap_or(0);
+    let r = ((parsed >> 16) & 0xff) as u8;
+    let g = ((parsed >> 8) & 0xff) as u8;
+    let b = (parsed & 0xff) as u8;
+    Color::from_rgb_u8(r, g, b)
+}
+
+fn rgba_u8(r: u8, g: u8, b: u8, alpha: f32) -> Color {
+    Color::from_argb_u8((alpha.clamp(0.0, 1.0) * 255.0).round() as u8, r, g, b)
+}
+
+fn model_from_vec<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
+    ModelRc::new(VecModel::from(items))
+}
+
+fn ss(value: impl Into<String>) -> SharedString {
+    SharedString::from(value.into())
+}
+
+fn same_path_string(left: &str, right: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        left.replace('/', "\\")
+            .eq_ignore_ascii_case(&right.replace('/', "\\"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        left == right
+    }
+}
+
+fn native_bookmarks() -> Vec<Bookmark> {
+    let saved: Vec<Bookmark> = read_native_json("bookmarks.json", Vec::new());
+    if !saved.is_empty() {
+        return saved
+            .into_iter()
+            .filter(|bookmark| Path::new(&bookmark.path).exists())
+            .collect();
+    }
+
+    get_known_folders()
+        .into_iter()
+        .filter(|folder| matches!(folder.id.as_str(), "documents" | "downloads" | "desktop"))
+        .map(|folder| Bookmark {
+            name: folder.name,
+            path: folder.path,
+        })
+        .collect()
+}
+
+fn native_list_directory(state: &AppState, path: &str) -> Result<Vec<FileEntry>, String> {
+    if let Some(entries) = state.cached_directory(path) {
+        return Ok(entries);
+    }
+    let entries = list_directory_uncached(&PathBuf::from(path))?;
+    state.store_directory(path, entries.clone());
+    Ok(entries)
+}
+
+fn native_read_preview(
+    state: &AppState,
+    path: &str,
+    max_bytes: Option<usize>,
+) -> Result<PreviewContent, String> {
+    let path_buf = PathBuf::from(path);
+    let metadata = fs::metadata(&path_buf).map_err(|e| e.to_string())?;
+    let key = format!(
+        "{}|{}|{}",
+        cache_key(&path_buf),
+        unix_secs(metadata.modified()),
+        max_bytes.unwrap_or(4 * 1024)
+    );
+    if let Some(content) = state.preview(&key) {
+        return Ok(content);
+    }
+    let content = read_preview_uncached(&path_buf, &metadata, max_bytes)?;
+    state.store_preview(key, content.clone());
+    Ok(content)
+}
+
+fn native_git_status(path: &str) -> HashMap<String, String> {
+    let output = ProcessCommand::new("git")
+        .args(["-C", path, "status", "--porcelain", "-u"])
+        .output();
+
+    let Ok(output) = output else {
+        return HashMap::new();
+    };
+    if !output.status.success() {
+        return HashMap::new();
+    }
+
+    let mut statuses = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let xy = &line[..2];
+        let name = line[3..].trim();
+        let name = if name.contains(" -> ") {
+            name.split(" -> ").last().unwrap_or(name)
+        } else {
+            name
+        };
+        let status = match xy.trim() {
+            "M" | "MM" => "modified",
+            "A" | "AM" => "added",
+            "D" => "deleted",
+            "R" | "RM" => "renamed",
+            "??" => "untracked",
+            _ if xy.contains('M') => "modified",
+            _ => continue,
+        };
+        statuses.insert(
+            PathBuf::from(path).join(name).to_string_lossy().to_string(),
+            status.to_string(),
+        );
+    }
+    statuses
+}
+
+fn native_rename(state: &AppState, path: &str, new_name: &str) -> Result<String, String> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Err("Name cannot be empty".to_string());
+    }
+    if new_name.contains('/') || new_name.contains('\\') {
+        return Err("Name cannot contain path separators".to_string());
+    }
+
+    let src = PathBuf::from(path);
+    let parent = src.parent().ok_or("No parent directory")?;
+    let dst = parent.join(new_name);
+    if dst.exists() && !same_destination(&src, &dst) {
+        return Err(format!("'{new_name}' already exists"));
+    }
+
+    fs::rename(&src, &dst).map_err(|e| e.to_string())?;
+    state.invalidate_path(&src);
+    state.invalidate_path(&dst);
+    state.log_op("rename", path, Some(&dst.to_string_lossy()));
+    Ok(dst.to_string_lossy().to_string())
+}
+
+fn native_delete(state: &AppState, path: &str) -> Result<(), String> {
+    let path_buf = PathBuf::from(path);
+    if !path_buf.exists() {
+        return Err(format!("Path does not exist: {path}"));
+    }
+    trash::delete(&path_buf).map_err(|e| e.to_string())?;
+    state.invalidate_path(&path_buf);
+    Ok(())
+}
+
+fn native_create_directory(state: &AppState, path: &str) -> Result<(), String> {
+    let path_buf = PathBuf::from(path);
+    if path_buf.exists() {
+        return Err(format!("Folder already exists: {}", path_buf.display()));
+    }
+    fs::create_dir_all(&path_buf).map_err(|e| e.to_string())?;
+    state.invalidate_path(&path_buf);
+    Ok(())
+}
+
+fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
+    let src = PathBuf::from(from);
+    let dst = PathBuf::from(to);
+    if dst.exists() {
+        return Err(format!("Destination already exists: {}", dst.display()));
+    }
+    let result = if src.is_dir() {
+        copy_dir_recursive(&src, &dst)
+    } else {
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::copy(&src, &dst).map(|_| ()).map_err(|e| e.to_string())
+    };
+    if result.is_ok() {
+        state.invalidate_path(&dst);
+        state.log_op("copy", from, Some(to));
+    }
+    result
+}
+
+fn native_move(state: &AppState, from: &str, to: &str) -> Result<(), String> {
+    let src = PathBuf::from(from);
+    let dst = PathBuf::from(to);
+    if dst.exists() {
+        return Err(format!("Destination already exists: {}", dst.display()));
+    }
+    if fs::rename(&src, &dst).is_err() {
+        if src.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+            fs::remove_dir_all(&src).map_err(|e| e.to_string())?;
+        } else {
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+            fs::remove_file(&src).map_err(|e| e.to_string())?;
+        }
+    }
+    state.invalidate_path(&src);
+    state.invalidate_path(&dst);
+    state.log_op("move", from, Some(to));
+    Ok(())
+}
+
+fn format_size_short(bytes: u64) -> String {
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut index = 0;
+    while size >= 1024.0 && index < units.len() - 1 {
+        size /= 1024.0;
+        index += 1;
+    }
+    if index > 0 && size < 10.0 {
+        format!("{size:.1} {}", units[index])
+    } else {
+        format!("{} {}", size.round() as u64, units[index])
+    }
+}
+
+fn format_modified(secs: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let diff = now.saturating_sub(secs);
+    if secs == 0 {
+        String::new()
+    } else if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        format!("{} min ago", diff / 60)
+    } else if diff < 86_400 {
+        format!("{} hr ago", diff / 3600)
+    } else if diff < 604_800 {
+        format!("{} day ago", diff / 86_400)
+    } else {
+        format!("{} days ago", diff / 86_400)
+    }
+}
+
+fn entry_type(entry: &FileEntry) -> String {
+    if entry.kind == FileKind::Directory {
+        return "Folder".to_string();
+    }
+    match entry
+        .extension
+        .as_deref()
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "" => "File".to_string(),
+        "jpg" | "jpeg" => "JPEG image".to_string(),
+        "png" => "PNG image".to_string(),
+        "gif" => "GIF image".to_string(),
+        "webp" => "WebP image".to_string(),
+        "pdf" => "PDF document".to_string(),
+        "md" => "Markdown".to_string(),
+        "txt" => "Text document".to_string(),
+        "zip" => "ZIP archive".to_string(),
+        "rs" => "Rust source".to_string(),
+        "js" => "JavaScript".to_string(),
+        "ts" => "TypeScript".to_string(),
+        "html" => "HTML document".to_string(),
+        "css" => "CSS stylesheet".to_string(),
+        ext => format!("{} file", ext.to_uppercase()),
+    }
+}
+
+fn tag_color(id: &str) -> Color {
+    match id {
+        "red" => color("#e5484d"),
+        "orange" => color("#e3862a"),
+        "yellow" => color("#d7b125"),
+        "green" => color("#2aa96b"),
+        "blue" => color("#4f9cff"),
+        "violet" => color("#8b6cff"),
+        _ => rgba_u8(0, 0, 0, 0.0),
+    }
+}
+
+fn git_color(status: &str) -> Color {
+    match status {
+        "modified" => color("#d98a24"),
+        "added" => color("#2aa96b"),
+        "deleted" => color("#e5484d"),
+        "renamed" => color("#8b6cff"),
+        "untracked" => color("#7f8b9d"),
+        _ => rgba_u8(0, 0, 0, 0.0),
+    }
+}
+
+fn git_label(status: &str) -> &'static str {
+    match status {
+        "modified" => "M",
+        "added" => "A",
+        "deleted" => "D",
+        "renamed" => "R",
+        "untracked" => "U",
+        _ => "",
+    }
+}
+
+fn accent_override(id: &str) -> (Color, Color, Color) {
+    match id {
+        "amber" => (
+            color("#d98a24"),
+            rgba_u8(217, 138, 36, 0.17),
+            color("#f0ae4d"),
+        ),
+        "green" => (
+            color("#2aa96b"),
+            rgba_u8(42, 169, 107, 0.17),
+            color("#45c985"),
+        ),
+        "violet" => (
+            color("#8b6cff"),
+            rgba_u8(139, 108, 255, 0.18),
+            color("#aa93ff"),
+        ),
+        "rose" => (
+            color("#e45578"),
+            rgba_u8(228, 85, 120, 0.17),
+            color("#ff7a99"),
+        ),
+        "teal" => (
+            color("#1aa6a6"),
+            rgba_u8(26, 166, 166, 0.17),
+            color("#31caca"),
+        ),
+        _ => (
+            color("#4f9cff"),
+            rgba_u8(79, 156, 255, 0.16),
+            color("#78b6ff"),
+        ),
+    }
+}
+
+fn theme_palette(id: &str) -> PaletteSpec {
+    let mut p = match id {
+        "mica-light" => PaletteSpec {
+            bg: color("#eef2f7"),
+            bg_soft: color("#f6f8fb"),
+            panel: rgba_u8(255, 255, 255, 0.78),
+            panel_solid: color("#ffffff"),
+            panel_alt: color("#edf1f6"),
+            titlebar: rgba_u8(242, 246, 251, 0.92),
+            sidebar: rgba_u8(236, 241, 247, 0.86),
+            border: rgba_u8(33, 52, 78, 0.13),
+            border_strong: rgba_u8(33, 52, 78, 0.23),
+            text: color("#19202a"),
+            text_muted: color("#526173"),
+            text_faint: color("#7f8c9d"),
+            accent: color("#4f9cff"),
+            accent_soft: rgba_u8(79, 156, 255, 0.16),
+            accent_strong: color("#72b3ff"),
+            radius: 8.0,
+            radius_small: 5.0,
+            ui_font: "Segoe UI",
+            mono_font: "Cascadia Mono",
+            light_controls: true,
+            outer_border: 0.0,
+        },
+        "warm" => PaletteSpec {
+            bg: color("#f2eee6"),
+            bg_soft: color("#faf6ee"),
+            panel: rgba_u8(255, 250, 241, 0.84),
+            panel_solid: color("#fffaf1"),
+            panel_alt: color("#eee4d3"),
+            titlebar: rgba_u8(240, 231, 216, 0.92),
+            sidebar: rgba_u8(235, 225, 210, 0.88),
+            border: rgba_u8(95, 75, 46, 0.15),
+            border_strong: rgba_u8(95, 75, 46, 0.28),
+            text: color("#2a241d"),
+            text_muted: color("#65594d"),
+            text_faint: color("#928576"),
+            accent: color("#d07920"),
+            accent_soft: rgba_u8(208, 121, 32, 0.16),
+            accent_strong: color("#b96218"),
+            radius: 8.0,
+            radius_small: 5.0,
+            ui_font: "Segoe UI",
+            mono_font: "Cascadia Mono",
+            light_controls: true,
+            outer_border: 0.0,
+        },
+        "flat" => PaletteSpec {
+            bg: color("#f7f8fa"),
+            bg_soft: color("#ffffff"),
+            panel: color("#ffffff"),
+            panel_solid: color("#ffffff"),
+            panel_alt: color("#f0f2f5"),
+            titlebar: color("#ffffff"),
+            sidebar: color("#f3f5f8"),
+            border: color("#e3e7ee"),
+            border_strong: color("#cdd5e0"),
+            text: color("#161a20"),
+            text_muted: color("#526071"),
+            text_faint: color("#7d8795"),
+            accent: color("#4f6fdc"),
+            accent_soft: rgba_u8(79, 111, 220, 0.15),
+            accent_strong: color("#3d5ac8"),
+            radius: 4.0,
+            radius_small: 3.0,
+            ui_font: "Segoe UI",
+            mono_font: "Cascadia Mono",
+            light_controls: true,
+            outer_border: 0.0,
+        },
+        "terminal" => PaletteSpec {
+            bg: color("#07110d"),
+            bg_soft: color("#0d1b14"),
+            panel: color("#0b1812"),
+            panel_solid: color("#0b1812"),
+            panel_alt: color("#10261b"),
+            titlebar: color("#06100b"),
+            sidebar: color("#08130d"),
+            border: rgba_u8(68, 255, 153, 0.22),
+            border_strong: rgba_u8(68, 255, 153, 0.42),
+            text: color("#c8ffd8"),
+            text_muted: color("#7de59f"),
+            text_faint: color("#4f996b"),
+            accent: color("#7cff9d"),
+            accent_soft: rgba_u8(124, 255, 157, 0.12),
+            accent_strong: color("#c8ffd8"),
+            radius: 0.0,
+            radius_small: 0.0,
+            ui_font: "Cascadia Mono",
+            mono_font: "Cascadia Mono",
+            light_controls: false,
+            outer_border: 0.0,
+        },
+        "paper" => PaletteSpec {
+            bg: color("#eadfc9"),
+            bg_soft: color("#f8efd9"),
+            panel: color("#f5ead1"),
+            panel_solid: color("#f5ead1"),
+            panel_alt: color("#dfcfad"),
+            titlebar: color("#e4d4b3"),
+            sidebar: color("#deceb0"),
+            border: rgba_u8(88, 63, 34, 0.20),
+            border_strong: rgba_u8(88, 63, 34, 0.34),
+            text: color("#332617"),
+            text_muted: color("#6b573d"),
+            text_faint: color("#957f5e"),
+            accent: color("#9f3f2c"),
+            accent_soft: rgba_u8(159, 63, 44, 0.14),
+            accent_strong: color("#7f2f21"),
+            radius: 5.0,
+            radius_small: 3.0,
+            ui_font: "Georgia",
+            mono_font: "Cascadia Mono",
+            light_controls: true,
+            outer_border: 0.0,
+        },
+        "retro" => PaletteSpec {
+            bg: color("#24205e"),
+            bg_soft: color("#342c86"),
+            panel: color("#302878"),
+            panel_solid: color("#302878"),
+            panel_alt: color("#4539a5"),
+            titlebar: color("#171446"),
+            sidebar: color("#211b62"),
+            border: color("#f8e76d"),
+            border_strong: color("#fff4a8"),
+            text: color("#fff7b0"),
+            text_muted: color("#aeeaff"),
+            text_faint: color("#f59bd1"),
+            accent: color("#ffcf3f"),
+            accent_soft: rgba_u8(255, 207, 63, 0.18),
+            accent_strong: color("#ffef7a"),
+            radius: 0.0,
+            radius_small: 0.0,
+            ui_font: "Consolas",
+            mono_font: "Consolas",
+            light_controls: false,
+            outer_border: 4.0,
+        },
+        "fantasy" => PaletteSpec {
+            bg: color("#d9c38f"),
+            bg_soft: color("#f0dfaf"),
+            panel: rgba_u8(244, 226, 179, 0.90),
+            panel_solid: color("#f4e2b3"),
+            panel_alt: color("#ceb16f"),
+            titlebar: color("#c6a562"),
+            sidebar: color("#d3b976"),
+            border: rgba_u8(80, 50, 22, 0.28),
+            border_strong: rgba_u8(80, 50, 22, 0.48),
+            text: color("#2f2113"),
+            text_muted: color("#604323"),
+            text_faint: color("#876b3c"),
+            accent: color("#9b6716"),
+            accent_soft: rgba_u8(155, 103, 22, 0.16),
+            accent_strong: color("#74450e"),
+            radius: 6.0,
+            radius_small: 5.0,
+            ui_font: "Georgia",
+            mono_font: "Cascadia Mono",
+            light_controls: true,
+            outer_border: 0.0,
+        },
+        "cyberpunk" => PaletteSpec {
+            bg: color("#100727"),
+            bg_soft: color("#190b3d"),
+            panel: rgba_u8(30, 13, 68, 0.88),
+            panel_solid: color("#1e0d44"),
+            panel_alt: color("#28105f"),
+            titlebar: color("#0b051f"),
+            sidebar: color("#13082f"),
+            border: rgba_u8(0, 236, 255, 0.24),
+            border_strong: rgba_u8(255, 57, 188, 0.54),
+            text: color("#f6f2ff"),
+            text_muted: color("#9cecff"),
+            text_faint: color("#ce6cff"),
+            accent: color("#ff39bc"),
+            accent_soft: rgba_u8(255, 57, 188, 0.18),
+            accent_strong: color("#00ecff"),
+            radius: 3.0,
+            radius_small: 2.0,
+            ui_font: "Segoe UI",
+            mono_font: "Cascadia Mono",
+            light_controls: false,
+            outer_border: 0.0,
+        },
+        _ => PaletteSpec {
+            bg: color("#101318"),
+            bg_soft: color("#171b22"),
+            panel: rgba_u8(28, 33, 42, 0.82),
+            panel_solid: color("#1c212a"),
+            panel_alt: color("#232936"),
+            titlebar: rgba_u8(18, 22, 29, 0.92),
+            sidebar: rgba_u8(22, 26, 34, 0.84),
+            border: rgba_u8(157, 172, 196, 0.16),
+            border_strong: rgba_u8(185, 198, 220, 0.26),
+            text: color("#f2f6fb"),
+            text_muted: color("#b5c0cf"),
+            text_faint: color("#7f8b9d"),
+            accent: color("#4f9cff"),
+            accent_soft: rgba_u8(79, 156, 255, 0.16),
+            accent_strong: color("#72b3ff"),
+            radius: 8.0,
+            radius_small: 5.0,
+            ui_font: "Segoe UI",
+            mono_font: "Cascadia Mono",
+            light_controls: false,
+            outer_border: 0.0,
+        },
+    };
+
+    let (accent, accent_soft, accent_strong) = accent_override(id);
+    if !matches!(
+        id,
+        "warm" | "terminal" | "paper" | "retro" | "fantasy" | "cyberpunk"
+    ) {
+        p.accent = accent;
+        p.accent_soft = accent_soft;
+        p.accent_strong = accent_strong;
+    }
+    p
+}
+
+fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
+    let mut palette = theme_palette(&settings.theme);
+    let (accent, accent_soft, accent_strong) = accent_override(&settings.accent);
+    palette.accent = accent;
+    palette.accent_soft = accent_soft;
+    palette.accent_strong = accent_strong;
+
+    let global = ui.global::<ThemePalette>();
+    global.set_bg(palette.bg);
+    global.set_bg_soft(palette.bg_soft);
+    global.set_panel(palette.panel);
+    global.set_panel_solid(palette.panel_solid);
+    global.set_panel_alt(palette.panel_alt);
+    global.set_titlebar(palette.titlebar);
+    global.set_sidebar(palette.sidebar);
+    global.set_border(palette.border);
+    global.set_border_strong(palette.border_strong);
+    global.set_text(palette.text);
+    global.set_text_muted(palette.text_muted);
+    global.set_text_faint(palette.text_faint);
+    global.set_accent(palette.accent);
+    global.set_accent_soft(palette.accent_soft);
+    global.set_accent_strong(palette.accent_strong);
+    global.set_danger(color("#e5484d"));
+    global.set_success(color("#37b26c"));
+    global.set_warning(color("#e3a524"));
+
+    let metrics = ui.global::<AppMetrics>();
+    metrics.set_radius(palette.radius);
+    metrics.set_radius_small(palette.radius_small);
+    metrics.set_outer_border(palette.outer_border);
+    metrics.set_ui_font(ss(palette.ui_font));
+    metrics.set_mono_font(ss(palette.mono_font));
+    metrics.set_light_controls(palette.light_controls);
+
+    match settings.density.as_str() {
+        "compact" => {
+            metrics.set_row_h(26.0);
+            metrics.set_grid_w(104.0);
+            metrics.set_grid_h(94.0);
+            metrics.set_pad(8.0);
+        }
+        "comfortable" => {
+            metrics.set_row_h(32.0);
+            metrics.set_grid_w(120.0);
+            metrics.set_grid_h(108.0);
+            metrics.set_pad(12.0);
+        }
+        _ => {
+            metrics.set_row_h(38.0);
+            metrics.set_grid_w(136.0);
+            metrics.set_grid_h(122.0);
+            metrics.set_pad(16.0);
+        }
+    }
+
+    ui.set_active_theme(ss(&settings.theme));
+    ui.set_active_accent(ss(&settings.accent));
+    ui.set_active_density(ss(&settings.density));
+}
+
+fn choice_items(items: &[(&str, &str, &str, &str)]) -> ModelRc<ChoiceItem> {
+    model_from_vec(
+        items
+            .iter()
+            .map(|(id, label, description, color_value)| ChoiceItem {
+                id: ss(*id),
+                label: ss(*label),
+                description: ss(*description),
+                color: color(color_value),
+            })
+            .collect(),
+    )
+}
+
+fn command_items() -> ModelRc<CommandItem> {
+    let items = [
+        ("Navigation", "New Tab", "Ctrl+T", "new-tab"),
+        ("Navigation", "Close Tab", "Ctrl+W", "close-tab"),
+        ("Navigation", "Refresh", "F5", "refresh"),
+        ("Files", "New Folder", "Ctrl+Shift+N", "new-folder"),
+        ("Files", "Rename", "F2", "rename"),
+        ("Files", "Delete", "Del", "delete"),
+        ("Files", "Copy", "Ctrl+C", "copy"),
+        ("Files", "Cut", "Ctrl+X", "cut"),
+        ("Files", "Paste", "Ctrl+V", "paste"),
+        ("Tools", "Checksum", "", "checksum"),
+        ("Tools", "Storage Treemap", "", "storage"),
+        ("Tools", "Find Duplicates", "", "duplicates"),
+        ("Tools", "Operation Log", "", "operation-log"),
+        ("Tools", "Undo Last Operation", "Ctrl+Z", "undo"),
+        ("View", "Icon View", "Ctrl+1", "view-grid"),
+        ("View", "Details View", "Ctrl+2", "view-list"),
+        ("View", "Gallery View", "Ctrl+3", "view-gallery"),
+        ("View", "Toggle Preview", "Ctrl+I", "toggle-preview"),
+        ("View", "Toggle Dual Pane", "F3", "toggle-dual"),
+        ("Settings", "Open Settings", "Ctrl+,", "settings"),
+    ];
+
+    model_from_vec(
+        items
+            .iter()
+            .map(|(group, label, hint, command)| CommandItem {
+                group: ss(*group),
+                label: ss(*label),
+                hint: ss(*hint),
+                command: ss(*command),
+            })
+            .collect(),
+    )
+}
+
+impl NativeController {
+    fn new() -> Self {
+        let app_state = AppState::default();
+        let settings = read_native_json("settings.json", NativeSettings::default());
+        let tabs: Vec<SessionTab> = read_native_json("session.json", Vec::new());
+        let known_folders = get_known_folders();
+        let home = get_home_directory()
+            .ok()
+            .or_else(|| known_folders.first().map(|folder| folder.path.clone()))
+            .unwrap_or_else(|| ".".to_string());
+        let current_path = tabs
+            .first()
+            .map(|tab| tab.path.clone())
+            .filter(|path| Path::new(path).is_dir())
+            .unwrap_or(home);
+
+        Self {
+            app_state,
+            current_path: current_path.clone(),
+            files: Vec::new(),
+            visible_files: Vec::new(),
+            selected_index: -1,
+            search_query: String::new(),
+            history: vec![current_path],
+            history_index: 0,
+            tabs: if tabs.is_empty() {
+                vec![SessionTab {
+                    path: String::new(),
+                    view: "grid".to_string(),
+                    sort_by: "name".to_string(),
+                    sort_dir: "asc".to_string(),
+                }]
+            } else {
+                tabs
+            },
+            active_tab: 0,
+            known_folders,
+            drives: get_drives(),
+            bookmarks: native_bookmarks(),
+            tags: read_native_json("tags.json", HashMap::new()),
+            notes: read_native_json("notes.json", HashMap::new()),
+            git_status: HashMap::new(),
+            settings,
+            ai: compute_ai_capabilities(),
+            clipboard: None,
+            pending_prompt: None,
+        }
+    }
+
+    fn initialize_ui(&mut self, ui: &MainWindow) {
+        ui.set_theme_choices(choice_items(&[
+            (
+                "mica-dark",
+                "Mica Dark",
+                "Windows-style dark Fluent",
+                "#101318",
+            ),
+            (
+                "mica-light",
+                "Mica Light",
+                "Windows-style light Mica",
+                "#eef2f7",
+            ),
+            ("warm", "Warm Neutral", "Soft desktop workspace", "#d07920"),
+            ("flat", "Flat White", "Quiet and minimal", "#ffffff"),
+            (
+                "terminal",
+                "Terminal",
+                "Phosphor green command room",
+                "#7cff9d",
+            ),
+            ("paper", "Paper", "Letterpress and ink", "#eadfc9"),
+            ("retro", "Retro Arcade", "16-bit desktop energy", "#ffcf3f"),
+            (
+                "fantasy",
+                "High Fantasy",
+                "Parchment and gilded UI",
+                "#d9c38f",
+            ),
+            ("cyberpunk", "Cyberpunk", "Neon city file grid", "#ff39bc"),
+        ]));
+        ui.set_accent_choices(choice_items(&[
+            ("blue", "Blue", "Default Pathfinder blue", "#4f9cff"),
+            ("amber", "Amber", "Warm amber controls", "#d98a24"),
+            ("green", "Green", "Quiet success green", "#2aa96b"),
+            ("violet", "Violet", "Soft violet accents", "#8b6cff"),
+            ("rose", "Rose", "Pink-red highlight", "#e45578"),
+            ("teal", "Teal", "Cool teal accent", "#1aa6a6"),
+        ]));
+        ui.set_density_choices(choice_items(&[
+            ("cozy", "Cozy", "38px rows and larger icons", "#4f9cff"),
+            (
+                "comfortable",
+                "Comfortable",
+                "Balanced row and grid sizing",
+                "#8b6cff",
+            ),
+            (
+                "compact",
+                "Compact",
+                "Dense rows and tight spacing",
+                "#2aa96b",
+            ),
+        ]));
+        ui.set_command_items(command_items());
+        ui.set_ai_device(ss(&self.ai.reason));
+        ui.set_ai_label(ss(if self.ai.npu_available {
+            "NPU Accelerated"
+        } else {
+            "CPU Fallback"
+        }));
+        apply_theme(ui, &self.settings);
+        let path = self.current_path.clone();
+        self.navigate(ui, path, false);
+    }
+
+    fn show_toast(&self, ui: &MainWindow, message: impl Into<String>) {
+        ui.set_toast_text(ss(message));
+    }
+
+    fn save_settings(&self) {
+        let _ = write_native_json("settings.json", &self.settings);
+    }
+
+    fn save_session(&self) {
+        let _ = write_native_json("session.json", &self.tabs);
+    }
+
+    fn selected_entry(&self) -> Option<FileEntry> {
+        self.visible_files
+            .get(self.selected_index as usize)
+            .cloned()
+    }
+
+    fn apply_filter(&mut self) {
+        let query = self.search_query.trim().to_lowercase();
+        if query.is_empty() {
+            self.visible_files = self.files.clone();
+            return;
+        }
+
+        self.visible_files = self
+            .files
+            .iter()
+            .filter(|entry| {
+                let name = entry.name.to_lowercase();
+                let ext = entry.extension.clone().unwrap_or_default().to_lowercase();
+                if let Some(expected) = query.strip_prefix("ext:") {
+                    return ext == expected.trim_start_matches('.');
+                }
+                if let Some(expected) = query.strip_prefix("name:") {
+                    return name.contains(expected);
+                }
+                if let Some(expected) = query.strip_prefix("tag:") {
+                    return self
+                        .tags
+                        .get(&entry.path)
+                        .map(|tag| tag == expected)
+                        .unwrap_or(false);
+                }
+                if let Some(expected) = query.strip_prefix("kind:") {
+                    let kind = if entry.kind == FileKind::Directory {
+                        "folder"
+                    } else {
+                        match ext.as_str() {
+                            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "ico" => {
+                                "image"
+                            }
+                            "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" => "video",
+                            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
+                            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt"
+                            | "md" => "doc",
+                            _ => "file",
+                        }
+                    };
+                    return kind == expected;
+                }
+                name.contains(&query) || ext.contains(&query)
+            })
+            .cloned()
+            .collect();
+    }
+
+    fn update_models(&self, ui: &MainWindow) {
+        ui.set_files(model_from_vec(
+            self.visible_files
+                .iter()
+                .map(|entry| self.file_item(entry))
+                .collect(),
+        ));
+        ui.set_side_items(model_from_vec(self.side_items()));
+        ui.set_tabs(model_from_vec(self.tab_items()));
+        ui.set_selected_index(self.selected_index);
+        ui.set_current_path(ss(&self.current_path));
+        ui.set_address_text(ss(&self.current_path));
+        ui.set_search_text(ss(&self.search_query));
+        ui.set_status_left(ss(format!(
+            "{} items | {} selected",
+            self.visible_files.len(),
+            if self.selected_index >= 0 { 1 } else { 0 }
+        )));
+        ui.set_status_right(ss(self.current_path.clone()));
+    }
+
+    fn file_item(&self, entry: &FileEntry) -> FileItem {
+        let tag_id = self.tags.get(&entry.path).cloned().unwrap_or_default();
+        let git_status = self.git_for_entry(entry);
+        FileItem {
+            name: ss(&entry.name),
+            file_path: ss(&entry.path),
+            is_dir: entry.kind == FileKind::Directory,
+            size_text: ss(if entry.kind == FileKind::Directory {
+                String::new()
+            } else {
+                format_size_short(entry.size)
+            }),
+            modified_text: ss(format_modified(entry.modified)),
+            type_text: ss(entry_type(entry)),
+            extension: ss(entry
+                .extension
+                .clone()
+                .unwrap_or_else(|| "file".to_string())
+                .to_uppercase()),
+            has_tag: !tag_id.is_empty(),
+            tag_color: tag_color(&tag_id),
+            git_badge: ss(git_label(&git_status)),
+            git_color: git_color(&git_status),
+            has_note: self.notes.contains_key(&entry.path),
+        }
+    }
+
+    fn git_for_entry(&self, entry: &FileEntry) -> String {
+        if let Some(status) = self.git_status.get(&entry.path) {
+            return status.clone();
+        }
+        if entry.kind == FileKind::Directory {
+            let prefix = format!("{}{}", entry.path, std::path::MAIN_SEPARATOR);
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            for (path, status) in &self.git_status {
+                if path.starts_with(&prefix) {
+                    *counts.entry(status.as_str()).or_default() += 1;
+                }
+            }
+            return counts
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(status, _)| status.to_string())
+                .unwrap_or_default();
+        }
+        String::new()
+    }
+
+    fn side_items(&self) -> Vec<SideItem> {
+        let mut items = Vec::new();
+        items.push(SideItem {
+            label: ss("QUICK ACCESS"),
+            path: ss(""),
+            icon: ss(""),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: true,
+            active: false,
+        });
+        for folder in &self.known_folders {
+            items.push(SideItem {
+                label: ss(&folder.name),
+                path: ss(&folder.path),
+                icon: ss(match folder.id.as_str() {
+                    "home" => "home",
+                    "downloads" => "download",
+                    "pictures" => "image",
+                    _ => "folder",
+                }),
+                count: ss(""),
+                color: rgba_u8(0, 0, 0, 0.0),
+                is_header: false,
+                active: same_path_string(&self.current_path, &folder.path),
+            });
+        }
+
+        items.push(SideItem {
+            label: ss("DRIVES"),
+            path: ss(""),
+            icon: ss(""),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: true,
+            active: false,
+        });
+        for drive in &self.drives {
+            items.push(SideItem {
+                label: ss(if drive.name.is_empty() {
+                    &drive.path
+                } else {
+                    &drive.name
+                }),
+                path: ss(&drive.path),
+                icon: ss("drive"),
+                count: ss(&drive.kind),
+                color: rgba_u8(0, 0, 0, 0.0),
+                is_header: false,
+                active: self.current_path.starts_with(&drive.path),
+            });
+        }
+
+        items.push(SideItem {
+            label: ss("BOOKMARKS"),
+            path: ss(""),
+            icon: ss(""),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: true,
+            active: false,
+        });
+        for bookmark in &self.bookmarks {
+            items.push(SideItem {
+                label: ss(&bookmark.name),
+                path: ss(&bookmark.path),
+                icon: ss("folder"),
+                count: ss(""),
+                color: rgba_u8(0, 0, 0, 0.0),
+                is_header: false,
+                active: same_path_string(&self.current_path, &bookmark.path),
+            });
+        }
+
+        items.push(SideItem {
+            label: ss("TAGS"),
+            path: ss(""),
+            icon: ss(""),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: true,
+            active: false,
+        });
+        for (id, label) in [
+            ("red", "Urgent"),
+            ("orange", "Important"),
+            ("yellow", "Review"),
+            ("green", "Done"),
+            ("blue", "Personal"),
+            ("violet", "Code"),
+        ] {
+            let count = self.tags.values().filter(|tag| tag.as_str() == id).count();
+            items.push(SideItem {
+                label: ss(label),
+                path: ss(format!("tag:{id}")),
+                icon: ss("tag"),
+                count: ss(count.to_string()),
+                color: tag_color(id),
+                is_header: false,
+                active: self.search_query == format!("tag:{id}"),
+            });
+        }
+        items
+    }
+
+    fn tab_items(&self) -> Vec<TabItem> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| TabItem {
+                title: ss(Path::new(&tab.path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| tab.path.clone())),
+                path: ss(&tab.path),
+                active: index == self.active_tab,
+            })
+            .collect()
+    }
+
+    fn navigate(&mut self, ui: &MainWindow, path: String, push_history: bool) {
+        let path = if path.trim().is_empty() {
+            self.current_path.clone()
+        } else {
+            path
+        };
+        match native_list_directory(&self.app_state, &path) {
+            Ok(files) => {
+                self.current_path = path.clone();
+                self.files = files;
+                self.search_query.clear();
+                self.selected_index = -1;
+                self.git_status = native_git_status(&path);
+                if push_history {
+                    self.history.truncate(self.history_index + 1);
+                    self.history.push(path.clone());
+                    self.history_index = self.history.len().saturating_sub(1);
+                }
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    tab.path = path.clone();
+                    tab.view = ui.get_view_mode().to_string();
+                }
+                self.apply_filter();
+                self.update_models(ui);
+                self.update_preview(ui);
+                self.save_session();
+            }
+            Err(error) => self.show_toast(ui, error),
+        }
+    }
+
+    fn refresh(&mut self, ui: &MainWindow) {
+        self.app_state
+            .invalidate_directory_path(Path::new(&self.current_path));
+        let path = self.current_path.clone();
+        self.navigate(ui, path, false);
+    }
+
+    fn select(&mut self, ui: &MainWindow, index: i32) {
+        self.selected_index = index;
+        if let Some(entry) = self.selected_entry() {
+            ui.set_selected_name(ss(&entry.name));
+        } else {
+            ui.set_selected_name(ss(""));
+        }
+        self.update_models(ui);
+        self.update_preview(ui);
+    }
+
+    fn open_index(&mut self, ui: &MainWindow, index: i32) {
+        if index < 0 {
+            return;
+        }
+        let Some(entry) = self.visible_files.get(index as usize).cloned() else {
+            return;
+        };
+        if entry.kind == FileKind::Directory {
+            self.navigate(ui, entry.path, true);
+        } else if let Err(error) = open_file(entry.path) {
+            self.show_toast(ui, error);
+        }
+    }
+
+    fn update_preview(&self, ui: &MainWindow) {
+        let Some(entry) = self.selected_entry() else {
+            ui.set_preview_title(ss(""));
+            ui.set_preview_body(ss(""));
+            ui.set_preview_meta(ss(""));
+            return;
+        };
+
+        ui.set_preview_title(ss(&entry.name));
+        match native_read_preview(&self.app_state, &entry.path, Some(4 * 1024)) {
+            Ok(preview) => {
+                let body = match preview.kind.as_str() {
+                    "image" => "Image preview is available. Native bitmap display is prepared through the preview pipeline.".to_string(),
+                    "text" => preview.text.unwrap_or_default(),
+                    "folder" => "Folder".to_string(),
+                    other => format!("{other} file"),
+                };
+                let meta = format!(
+                    "Path: {}\nType: {}\nSize: {}\nModified: {}{}",
+                    entry.path,
+                    entry_type(&entry),
+                    format_size_short(entry.size),
+                    format_modified(entry.modified),
+                    if preview.truncated {
+                        "\nPreview truncated"
+                    } else {
+                        ""
+                    }
+                );
+                ui.set_preview_body(ss(body));
+                ui.set_preview_meta(ss(meta));
+            }
+            Err(error) => {
+                ui.set_preview_body(ss("Preview unavailable"));
+                ui.set_preview_meta(ss(error));
+            }
+        }
+    }
+
+    fn side_activated(&mut self, ui: &MainWindow, index: i32) {
+        let items = self.side_items();
+        if let Some(item) = items.get(index as usize) {
+            let path = item.path.to_string();
+            if let Some(tag) = path.strip_prefix("tag:") {
+                self.search_query = format!("tag:{tag}");
+                self.apply_filter();
+                self.selected_index = -1;
+                self.update_models(ui);
+            } else if !path.is_empty() {
+                self.navigate(ui, path, true);
+            }
+        }
+    }
+
+    fn go_up(&mut self, ui: &MainWindow) {
+        if let Some(parent) = Path::new(&self.current_path).parent() {
+            self.navigate(ui, parent.to_string_lossy().to_string(), true);
+        }
+    }
+
+    fn go_back(&mut self, ui: &MainWindow) {
+        if self.history_index > 0 {
+            self.history_index -= 1;
+            if let Some(path) = self.history.get(self.history_index).cloned() {
+                self.navigate(ui, path, false);
+            }
+        }
+    }
+
+    fn go_forward(&mut self, ui: &MainWindow) {
+        if self.history_index + 1 < self.history.len() {
+            self.history_index += 1;
+            if let Some(path) = self.history.get(self.history_index).cloned() {
+                self.navigate(ui, path, false);
+            }
+        }
+    }
+
+    fn set_view(&mut self, ui: &MainWindow, mode: &str) {
+        ui.set_view_mode(ss(mode));
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.view = mode.to_string();
+        }
+        self.save_session();
+    }
+
+    fn search(&mut self, ui: &MainWindow, query: String) {
+        self.search_query = query;
+        self.selected_index = -1;
+        self.apply_filter();
+        self.update_models(ui);
+    }
+
+    fn new_tab(&mut self, ui: &MainWindow) {
+        self.tabs.push(SessionTab {
+            path: self.current_path.clone(),
+            view: ui.get_view_mode().to_string(),
+            sort_by: "name".to_string(),
+            sort_dir: "asc".to_string(),
+        });
+        self.active_tab = self.tabs.len() - 1;
+        self.update_models(ui);
+        self.save_session();
+    }
+
+    fn close_tab(&mut self, ui: &MainWindow, index: i32) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let idx = if index < 0 {
+            self.active_tab
+        } else {
+            index as usize
+        };
+        if idx < self.tabs.len() {
+            self.tabs.remove(idx);
+            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+            if let Some(tab) = self.tabs.get(self.active_tab).cloned() {
+                self.navigate(ui, tab.path, false);
+            }
+        }
+    }
+
+    fn activate_tab(&mut self, ui: &MainWindow, index: i32) {
+        let idx = index as usize;
+        if let Some(tab) = self.tabs.get(idx).cloned() {
+            self.active_tab = idx;
+            ui.set_view_mode(ss(&tab.view));
+            self.navigate(ui, tab.path, false);
+        }
+    }
+
+    fn command(&mut self, ui: &MainWindow, command: &str) {
+        match command {
+            "new-tab" => self.new_tab(ui),
+            "close-tab" => self.close_tab(ui, -1),
+            "refresh" => self.refresh(ui),
+            "settings" => ui.set_settings_visible(true),
+            "command-palette" => ui.set_command_visible(true),
+            "view-grid" => self.set_view(ui, "grid"),
+            "view-list" => self.set_view(ui, "list"),
+            "view-gallery" => self.set_view(ui, "gallery"),
+            "toggle-preview" => ui.set_preview_visible(!ui.get_preview_visible()),
+            "toggle-dual" => ui.set_dual_pane(!ui.get_dual_pane()),
+            "open" => self.open_index(ui, self.selected_index),
+            "rename" => self.prompt_rename(ui),
+            "delete" => self.prompt_delete(ui),
+            "new-folder" => self.prompt_new_folder(ui),
+            "copy" => self.copy_selected(false, ui),
+            "cut" => self.copy_selected(true, ui),
+            "paste" => self.paste(ui),
+            "checksum" => self.show_checksum(ui),
+            "note" => self.prompt_note(ui),
+            "storage" => self.show_storage(ui),
+            "duplicates" => self.show_duplicates(ui),
+            "operation-log" => self.show_operation_log(ui),
+            "undo" => self.undo(ui),
+            "focus-search" => self.show_toast(ui, "Search is ready in the toolbar."),
+            _ => self.show_toast(ui, format!("Command not implemented: {command}")),
+        }
+    }
+
+    fn prompt_rename(&mut self, ui: &MainWindow) {
+        let Some(entry) = self.selected_entry() else {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        };
+        self.pending_prompt = Some(PendingPrompt::Rename(entry.path));
+        ui.set_prompt_title(ss("Rename"));
+        ui.set_prompt_value(ss(entry.name));
+        ui.set_prompt_visible(true);
+    }
+
+    fn prompt_new_folder(&mut self, ui: &MainWindow) {
+        self.pending_prompt = Some(PendingPrompt::NewFolder);
+        ui.set_prompt_title(ss("New folder"));
+        ui.set_prompt_value(ss("New Folder"));
+        ui.set_prompt_visible(true);
+    }
+
+    fn prompt_note(&mut self, ui: &MainWindow) {
+        let Some(entry) = self.selected_entry() else {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        };
+        self.pending_prompt = Some(PendingPrompt::Note(entry.path.clone()));
+        ui.set_prompt_title(ss("File note"));
+        ui.set_prompt_value(ss(self.notes.get(&entry.path).cloned().unwrap_or_default()));
+        ui.set_prompt_visible(true);
+    }
+
+    fn prompt_delete(&mut self, ui: &MainWindow) {
+        let Some(entry) = self.selected_entry() else {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        };
+        ui.set_confirm_text(ss(format!("Send '{}' to the Recycle Bin?", entry.name)));
+        ui.set_confirm_visible(true);
+    }
+
+    fn accept_prompt(&mut self, ui: &MainWindow, value: String) {
+        match self.pending_prompt.take() {
+            Some(PendingPrompt::Rename(path)) => {
+                match native_rename(&self.app_state, &path, &value) {
+                    Ok(_) => {
+                        self.refresh(ui);
+                        self.show_toast(ui, "Renamed");
+                    }
+                    Err(error) => self.show_toast(ui, error),
+                }
+            }
+            Some(PendingPrompt::NewFolder) => {
+                let path = PathBuf::from(&self.current_path).join(value.trim());
+                match native_create_directory(&self.app_state, &path.to_string_lossy()) {
+                    Ok(()) => {
+                        self.refresh(ui);
+                        self.show_toast(ui, "Folder created");
+                    }
+                    Err(error) => self.show_toast(ui, error),
+                }
+            }
+            Some(PendingPrompt::Note(path)) => {
+                if value.trim().is_empty() {
+                    self.notes.remove(&path);
+                } else {
+                    self.notes.insert(path, value.trim().to_string());
+                }
+                let _ = write_native_json("notes.json", &self.notes);
+                self.update_models(ui);
+                self.show_toast(ui, "Note saved");
+            }
+            Some(PendingPrompt::Archive) | None => {}
+        }
+    }
+
+    fn confirm_delete(&mut self, ui: &MainWindow) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        match native_delete(&self.app_state, &entry.path) {
+            Ok(()) => {
+                self.refresh(ui);
+                self.show_toast(ui, "Deleted");
+            }
+            Err(error) => self.show_toast(ui, error),
+        }
+    }
+
+    fn copy_selected(&mut self, cut: bool, ui: &MainWindow) {
+        let Some(entry) = self.selected_entry() else {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        };
+        self.clipboard = Some(NativeClipboard {
+            paths: vec![entry.path],
+            cut,
+        });
+        self.show_toast(
+            ui,
+            if cut {
+                "Cut to clipboard"
+            } else {
+                "Copied to clipboard"
+            },
+        );
+    }
+
+    fn paste(&mut self, ui: &MainWindow) {
+        let Some(clipboard) = self.clipboard.clone() else {
+            self.show_toast(ui, "Clipboard is empty.");
+            return;
+        };
+        for src in &clipboard.paths {
+            let Some(name) = Path::new(src).file_name() else {
+                continue;
+            };
+            let dest = PathBuf::from(&self.current_path).join(name);
+            let result = if clipboard.cut {
+                native_move(&self.app_state, src, &dest.to_string_lossy())
+            } else {
+                native_copy(&self.app_state, src, &dest.to_string_lossy())
+            };
+            if let Err(error) = result {
+                self.show_toast(ui, error);
+                return;
+            }
+        }
+        if clipboard.cut {
+            self.clipboard = None;
+        }
+        self.refresh(ui);
+        self.show_toast(ui, "Pasted");
+    }
+
+    fn show_checksum(&mut self, ui: &MainWindow) {
+        let Some(entry) = self.selected_entry() else {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        };
+        match get_checksum(entry.path.clone()) {
+            Ok(map) => {
+                ui.set_preview_title(ss(format!("Checksum - {}", entry.name)));
+                ui.set_preview_body(ss(map.get("sha256").cloned().unwrap_or_default()));
+                ui.set_preview_meta(ss("SHA-256"));
+            }
+            Err(error) => self.show_toast(ui, error),
+        }
+    }
+
+    fn show_storage(&mut self, ui: &MainWindow) {
+        match build_storage_tree(Path::new(&self.current_path), 0, 4) {
+            tree if tree.size > 0 => {
+                ui.set_preview_title(ss("Storage Treemap"));
+                let mut children = tree.children;
+                children.sort_by(|a, b| b.size.cmp(&a.size));
+                let lines = children
+                    .into_iter()
+                    .take(18)
+                    .map(|child| format!("{}  {}", format_size_short(child.size), child.path))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ui.set_preview_body(ss(lines));
+                ui.set_preview_meta(ss(format!("Total: {}", format_size_short(tree.size))));
+            }
+            _ => self.show_toast(ui, "Storage information is unavailable."),
+        }
+    }
+
+    fn show_duplicates(&mut self, ui: &MainWindow) {
+        match find_duplicates(self.current_path.clone(), Some(1024)) {
+            Ok(groups) => {
+                ui.set_preview_title(ss("Duplicate Finder"));
+                let body = if groups.is_empty() {
+                    "No duplicate files found.".to_string()
+                } else {
+                    groups
+                        .iter()
+                        .take(12)
+                        .map(|group| {
+                            format!(
+                                "{} duplicates | {} each | {}",
+                                group.len(),
+                                format_size_short(group.first().map(|f| f.size).unwrap_or(0)),
+                                group.first().map(|f| f.name.clone()).unwrap_or_default()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                ui.set_preview_body(ss(body));
+                ui.set_preview_meta(ss(format!("{} duplicate groups", groups.len())));
+            }
+            Err(error) => self.show_toast(ui, error),
+        }
+    }
+
+    fn show_operation_log(&mut self, ui: &MainWindow) {
+        let log = self
+            .app_state
+            .operation_log
+            .lock()
+            .map(|l| l.clone())
+            .unwrap_or_default();
+        let body = log
+            .iter()
+            .rev()
+            .map(|op| {
+                format!(
+                    "{} | {}{}",
+                    op.kind,
+                    op.from,
+                    op.to
+                        .as_ref()
+                        .map(|to| format!(" -> {to}"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        ui.set_preview_title(ss("Operation Log"));
+        ui.set_preview_body(ss(if body.is_empty() {
+            "No operations recorded yet.".to_string()
+        } else {
+            body
+        }));
+        ui.set_preview_meta(ss(""));
+    }
+
+    fn undo(&mut self, ui: &MainWindow) {
+        let op = self
+            .app_state
+            .operation_log
+            .lock()
+            .ok()
+            .and_then(|mut log| log.pop());
+        let Some(op) = op else {
+            self.show_toast(ui, "Nothing to undo.");
+            return;
+        };
+        let result = match op.kind.as_str() {
+            "rename" | "move" => {
+                let from = op.to.as_deref().unwrap_or("");
+                native_move(&self.app_state, from, &op.from)
+            }
+            "copy" => op
+                .to
+                .as_deref()
+                .map(native_delete_path)
+                .unwrap_or_else(|| Err("Missing copied path".to_string())),
+            _ => Err(format!("Cannot undo '{}'", op.kind)),
+        };
+        match result {
+            Ok(()) => {
+                self.refresh(ui);
+                self.show_toast(ui, "Undone");
+            }
+            Err(error) => self.show_toast(ui, error),
+        }
+    }
+}
+
+fn native_delete_path(path: &str) -> Result<(), String> {
+    let p = Path::new(path);
+    if p.is_dir() {
+        fs::remove_dir_all(p).map_err(|e| e.to_string())
+    } else {
+        fs::remove_file(p).map_err(|e| e.to_string())
+    }
+}
+
+fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeController>>) {
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_navigate(move |path| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().navigate(&ui, path.to_string(), true);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_side_activated(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().side_activated(&ui, index);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_file_selected(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().select(&ui, index);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_file_opened(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().open_index(&ui, index);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_file_context(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().select(&ui, index);
+            ui.set_context_visible(true);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_tab_activated(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().activate_tab(&ui, index);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_tab_closed(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().close_tab(&ui, index);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_new_tab(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().new_tab(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_go_back(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().go_back(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_go_forward(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().go_forward(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_go_up(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().go_up(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_refresh(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().refresh(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_search_requested(move |query| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().search(&ui, query.to_string());
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_set_view(move |mode| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().set_view(&ui, &mode);
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_toggle_preview(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_preview_visible(!ui.get_preview_visible());
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_toggle_dual_pane(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_dual_pane(!ui.get_dual_pane());
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_command(move |command| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().command(&ui, &command);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_theme_selected(move |theme| {
+        if let Some(ui) = weak.upgrade() {
+            let mut controller = c.borrow_mut();
+            controller.settings.theme = theme.to_string();
+            apply_theme(&ui, &controller.settings);
+            controller.save_settings();
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_accent_selected(move |accent| {
+        if let Some(ui) = weak.upgrade() {
+            let mut controller = c.borrow_mut();
+            controller.settings.accent = accent.to_string();
+            apply_theme(&ui, &controller.settings);
+            controller.save_settings();
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_density_selected(move |density| {
+        if let Some(ui) = weak.upgrade() {
+            let mut controller = c.borrow_mut();
+            controller.settings.density = density.to_string();
+            apply_theme(&ui, &controller.settings);
+            controller.save_settings();
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_minimize(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.window().set_minimized(true);
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_maximize(move || {
+        if let Some(ui) = weak.upgrade() {
+            let window = ui.window();
+            window.set_maximized(!window.is_maximized());
+        }
+    });
+
+    ui.on_close(move || {
+        let _ = slint::quit_event_loop();
+    });
+
+    let weak = ui.as_weak();
+    ui.on_drag_window(move || {
+        if let Some(ui) = weak.upgrade() {
+            start_native_drag(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_confirm_delete(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().confirm_delete(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller;
+    ui.on_prompt_accept(move |value| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().accept_prompt(&ui, value.to_string());
+        }
+    });
+}
+
+fn start_native_drag(ui: &MainWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        use i_slint_backend_winit::WinitWindowAccessor;
+        ui.window().with_winit_window(|window| {
+            let _ = window.drag_window();
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = ui;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_mica(ui: &MainWindow) {
+    use i_slint_backend_winit::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use i_slint_backend_winit::WinitWindowAccessor;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
+
+    const DWMWA_SYSTEMBACKDROP_TYPE_ID: i32 = 38;
+    const DWMSBT_MAINWINDOW: i32 = 2;
+
+    ui.window().with_winit_window(|window| {
+        let Ok(handle) = window.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return;
+        };
+        let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWINDOWATTRIBUTE(DWMWA_SYSTEMBACKDROP_TYPE_ID),
+                &DWMSBT_MAINWINDOW as *const _ as *const _,
+                std::mem::size_of_val(&DWMSBT_MAINWINDOW) as u32,
+            );
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_mica(_ui: &MainWindow) {}
+
 pub fn run() {
-    tauri::Builder::default()
-        .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![
-            list_directory,
-            get_file_info,
-            get_home_directory,
-            get_known_folders,
-            get_parent_path,
-            join_path,
-            path_exists,
-            get_drives,
-            open_file,
-            reveal_in_folder,
-            rename_file,
-            delete_file,
-            create_directory,
-            copy_file,
-            move_file,
-            search_files,
-            windows_index_search,
-            read_preview,
-            warm_preview_cache,
-            prefetch_paths,
-            watch_paths,
-            fetch_thumbnails,
-            get_ai_capabilities,
-            ai_semantic_search,
-            ai_summarize_file,
-            get_bookmarks,
-            save_bookmarks,
-            minimize_window,
-            toggle_maximize_window,
-            close_window,
-            get_checksum,
-            open_terminal,
-            get_all_notes,
-            save_file_note,
-            batch_rename,
-            get_git_status,
-            get_image_info,
-            find_duplicates,
-            get_storage_tree,
-            extract_archive,
-            create_archive,
-            get_saved_searches,
-            save_search,
-            delete_saved_search,
-            save_session,
-            load_session,
-            get_operation_log,
-            undo_last_operation,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    let _ = slint::platform::set_platform(Box::new(
+        i_slint_backend_winit::Backend::new().expect("failed to create Slint winit backend"),
+    ));
+
+    let ui = MainWindow::new().expect("failed to create Pathfinder window");
+    let controller = Rc::new(RefCell::new(NativeController::new()));
+    controller.borrow_mut().initialize_ui(&ui);
+    wire_native_callbacks(&ui, controller);
+    ui.show().expect("failed to show Pathfinder window");
+    apply_mica(&ui);
+    slint::run_event_loop().expect("error while running Slint event loop");
 }

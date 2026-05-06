@@ -1,0 +1,1282 @@
+import { LineEdit, ListView, ScrollView } from "std-widgets.slint";
+
+export struct FileItem {
+    name: string,
+    file_path: string,
+    is_dir: bool,
+    size_text: string,
+    modified_text: string,
+    type_text: string,
+    extension: string,
+    has_tag: bool,
+    tag_color: color,
+    git_badge: string,
+    git_color: color,
+    has_note: bool,
+}
+
+export struct SideItem {
+    label: string,
+    path: string,
+    icon: string,
+    count: string,
+    color: color,
+    is_header: bool,
+    active: bool,
+}
+
+export struct TabItem {
+    title: string,
+    path: string,
+    active: bool,
+}
+
+export struct ChoiceItem {
+    id: string,
+    label: string,
+    description: string,
+    color: color,
+}
+
+export struct CommandItem {
+    group: string,
+    label: string,
+    hint: string,
+    command: string,
+}
+
+export global ThemePalette {
+    in-out property <color> bg: #101318;
+    in-out property <color> bg_soft: #171b22;
+    in-out property <color> panel: rgba(28, 33, 42, 0.82);
+    in-out property <color> panel_solid: #1c212a;
+    in-out property <color> panel_alt: #232936;
+    in-out property <color> titlebar: rgba(18, 22, 29, 0.92);
+    in-out property <color> sidebar: rgba(22, 26, 34, 0.84);
+    in-out property <color> border: rgba(157, 172, 196, 0.16);
+    in-out property <color> border_strong: rgba(185, 198, 220, 0.26);
+    in-out property <color> text: #f2f6fb;
+    in-out property <color> text_muted: #b5c0cf;
+    in-out property <color> text_faint: #7f8b9d;
+    in-out property <color> accent: #4f9cff;
+    in-out property <color> accent_soft: rgba(79, 156, 255, 0.16);
+    in-out property <color> accent_strong: #72b3ff;
+    in-out property <color> danger: #e5484d;
+    in-out property <color> success: #37b26c;
+    in-out property <color> warning: #e3a524;
+}
+
+component SvgIcon {
+    in property <string> data;
+    in property <color> tint: ThemePalette.text_muted;
+    in property <length> icon_size: 16px;
+    width: root.icon_size;
+    height: root.icon_size;
+
+    Path {
+        width: root.icon_size;
+        height: root.icon_size;
+        commands: root.data;
+        fill: rgba(0, 0, 0, 0);
+        stroke: root.tint;
+        stroke-width: 1.6px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+}
+
+component ToolButton inherits Rectangle {
+    in property <string> icon_data;
+    in property <string> text_label;
+    in property <bool> active;
+    in property <bool> danger;
+    in property <length> button_width: 31px;
+    in property <length> button_height: 31px;
+    callback clicked();
+
+    width: root.button_width;
+    height: root.button_height;
+    border-radius: AppMetrics.radius_small;
+    border-width: root.active ? 1px : 0px;
+    border-color: root.active ? ThemePalette.accent : rgba(0, 0, 0, 0);
+    background: root.danger && touch.has-hover ? ThemePalette.danger : (root.active ? ThemePalette.accent_soft : (touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0)));
+
+    SvgIcon {
+        x: (parent.width - 16px) / 2;
+        y: (parent.height - 16px) / 2;
+        icon_size: 16px;
+        data: root.icon_data;
+        tint: root.danger && touch.has-hover ? white : (root.active || touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted);
+    }
+
+    Text {
+        visible: root.icon_data == "";
+        text: root.text_label;
+        color: root.danger && touch.has-hover ? white : (root.active || touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted);
+        font-size: 16px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component TabButton inherits Rectangle {
+    in property <TabItem> tab;
+    in property <int> index;
+    callback activated(int);
+    callback closed(int);
+
+    width: 132px;
+    height: 30px;
+    border-radius: 7px;
+    border-width: root.tab.active ? 1px : 0px;
+    border-color: ThemePalette.border;
+    background: root.tab.active ? ThemePalette.panel : (touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0));
+
+    Text {
+        x: 10px;
+        y: 0;
+        width: parent.width - 38px;
+        height: parent.height;
+        text: root.tab.title;
+        color: root.tab.active ? ThemePalette.text : ThemePalette.text_muted;
+        font-size: 12px;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    ToolButton {
+        x: parent.width - 28px;
+        y: 3px;
+        button_width: 24px;
+        button_height: 24px;
+        icon_data: "M18 6L6 18 M6 6l12 12";
+        visible: touch.has-hover || root.tab.active;
+        clicked => { root.closed(root.index); }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.activated(root.index); }
+    }
+}
+
+component SideRow inherits Rectangle {
+    in property <SideItem> item;
+    in property <int> index;
+    callback activated(int);
+
+    height: root.item.is_header ? 24px : 32px;
+    border-radius: AppMetrics.radius_small;
+    background: !root.item.is_header && root.item.active ? ThemePalette.accent_soft : (!root.item.is_header && touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0));
+
+    Text {
+        visible: root.item.is_header;
+        x: 8px;
+        width: parent.width - 16px;
+        height: parent.height;
+        text: root.item.label;
+        color: ThemePalette.text_faint;
+        font-size: 11px;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+
+    Rectangle {
+        visible: !root.item.is_header && root.item.icon == "tag";
+        x: 12px;
+        y: (parent.height - 9px) / 2;
+        width: 9px;
+        height: 9px;
+        border-radius: 5px;
+        background: root.item.color;
+        border-width: 1px;
+        border-color: rgba(0, 0, 0, 0.14);
+    }
+
+    SvgIcon {
+        visible: !root.item.is_header && root.item.icon != "tag";
+        x: 9px;
+        y: (parent.height - 16px) / 2;
+        icon_size: 16px;
+        data: root.item.icon == "drive" ? "M22 12H2 M5.5 5.2 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.8A2 2 0 0 0 16.7 4H7.3a2 2 0 0 0-1.8 1.2z" :
+              root.item.icon == "home" ? "M3 10l9-7 9 7v10a2 2 0 0 1-2 2h-4v-7H9v7H5a2 2 0 0 1-2-2z" :
+              root.item.icon == "download" ? "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3" :
+              root.item.icon == "image" ? "M21 15V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2z M8 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z M21 19l-6-6-9 9" :
+              "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z";
+        tint: root.item.active ? ThemePalette.accent_strong : ThemePalette.text_muted;
+    }
+
+    Text {
+        visible: !root.item.is_header;
+        x: 38px;
+        width: parent.width - 78px;
+        height: parent.height;
+        text: root.item.label;
+        color: root.item.active ? ThemePalette.accent_strong : (touch.has-hover ? ThemePalette.text : ThemePalette.text_muted);
+        font-size: 13px;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    Text {
+        visible: !root.item.is_header;
+        x: parent.width - 46px;
+        width: 38px;
+        height: parent.height;
+        text: root.item.count;
+        color: ThemePalette.text_faint;
+        font-family: AppMetrics.mono_font;
+        font-size: 10px;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    touch := TouchArea {
+        enabled: !root.item.is_header;
+        mouse-cursor: pointer;
+        clicked => { root.activated(root.index); }
+    }
+}
+
+component NodeVisual {
+    in property <bool> is_dir;
+    in property <string> extension;
+    in property <length> visual_width: root.is_dir ? 54px : 46px;
+    in property <length> visual_height: root.is_dir ? 44px : 54px;
+
+    width: root.visual_width;
+    height: root.visual_height;
+
+    if root.is_dir: Rectangle {
+        x: 4px;
+        y: 8px;
+        width: parent.width - 8px;
+        height: parent.height - 11px;
+        border-radius: 5px;
+        background: @linear-gradient(180deg, #ffd86a 0%, #e2a934 100%);
+    }
+
+    if root.is_dir: Rectangle {
+        x: 8px;
+        y: 1px;
+        width: 22px;
+        height: 10px;
+        border-radius: 5px;
+        background: #ffe28d;
+    }
+
+    if !root.is_dir: Rectangle {
+        x: 7px;
+        y: 3px;
+        width: parent.width - 14px;
+        height: parent.height - 6px;
+        border-width: 1px;
+        border-color: ThemePalette.border_strong;
+        border-radius: 4px;
+        background: ThemePalette.panel_solid;
+    }
+
+    if !root.is_dir: Rectangle {
+        x: parent.width - 20px;
+        y: 4px;
+        width: 13px;
+        height: 13px;
+        background: ThemePalette.panel_alt;
+        border-width: 1px;
+        border-color: ThemePalette.border_strong;
+    }
+
+    if !root.is_dir: Rectangle {
+        x: 7px;
+        y: parent.height - 18px;
+        width: parent.width - 14px;
+        height: 15px;
+        background: ThemePalette.accent;
+        Text {
+            text: root.extension == "" ? "FILE" : root.extension;
+            color: white;
+            font-family: AppMetrics.mono_font;
+            font-size: 8px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component FileRow inherits Rectangle {
+    in property <FileItem> item;
+    in property <int> index;
+    in property <int> selected_index;
+    in property <string> view_mode;
+    callback selected(int);
+    callback opened(int);
+    callback context(int);
+
+    height: root.view_mode == "list" ? AppMetrics.row_h : (root.view_mode == "gallery" ? 154px : AppMetrics.grid_h);
+    border-radius: AppMetrics.radius;
+    border-width: root.selected_index == root.index ? 1px : 0px;
+    border-color: root.selected_index == root.index ? ThemePalette.accent : rgba(0, 0, 0, 0);
+    background: root.selected_index == root.index ? ThemePalette.accent_soft : (touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0));
+
+    if root.view_mode == "list": NodeVisual {
+        x: 10px;
+        y: (parent.height - 22px) / 2;
+        visual_width: 24px;
+        visual_height: root.item.is_dir ? 20px : 26px;
+        is_dir: root.item.is_dir;
+        extension: root.item.extension;
+    }
+
+    if root.view_mode == "list": Text {
+        x: 44px;
+        y: 0;
+        width: parent.width - 486px;
+        height: parent.height;
+        text: root.item.name;
+        color: root.selected_index == root.index ? ThemePalette.text : ThemePalette.text_muted;
+        font-size: 12.5px;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    if root.view_mode == "list": Text {
+        x: parent.width - 428px;
+        width: 112px;
+        height: parent.height;
+        text: root.item.size_text;
+        color: ThemePalette.text_faint;
+        font-family: AppMetrics.mono_font;
+        font-size: 11.5px;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    if root.view_mode == "list": Text {
+        x: parent.width - 306px;
+        width: 146px;
+        height: parent.height;
+        text: root.item.modified_text;
+        color: ThemePalette.text_faint;
+        font-family: AppMetrics.mono_font;
+        font-size: 11.5px;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    if root.view_mode == "list": Text {
+        x: parent.width - 150px;
+        width: 90px;
+        height: parent.height;
+        text: root.item.type_text;
+        color: ThemePalette.text_faint;
+        font-size: 11.5px;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    if root.view_mode == "list": Rectangle {
+        visible: root.item.has_tag;
+        x: parent.width - 44px;
+        y: (parent.height - 9px) / 2;
+        width: 9px;
+        height: 9px;
+        border-radius: 5px;
+        background: root.item.tag_color;
+    }
+
+    if root.view_mode != "list": NodeVisual {
+        x: (parent.width - 64px) / 2;
+        y: root.view_mode == "gallery" ? 18px : 12px;
+        visual_width: root.view_mode == "gallery" ? 64px : 54px;
+        visual_height: root.view_mode == "gallery" ? 70px : 54px;
+        is_dir: root.item.is_dir;
+        extension: root.item.extension;
+    }
+
+    if root.view_mode != "list": Text {
+        x: 18px;
+        y: parent.height - 38px;
+        width: parent.width - 36px;
+        height: 30px;
+        text: root.item.name;
+        color: root.selected_index == root.index ? ThemePalette.text : ThemePalette.text_muted;
+        font-size: 12px;
+        wrap: word-wrap;
+        horizontal-alignment: center;
+    }
+
+    Rectangle {
+        visible: root.item.has_tag && root.view_mode != "list";
+        x: parent.width - 22px;
+        y: 8px;
+        width: 9px;
+        height: 9px;
+        border-radius: 5px;
+        background: root.item.tag_color;
+    }
+
+    Rectangle {
+        visible: root.item.git_badge != "";
+        x: 8px;
+        y: 8px;
+        height: 15px;
+        width: 10px + git-text.preferred-width;
+        border-radius: 3px;
+        background: root.item.git_color;
+        git-text := Text {
+            x: 5px;
+            y: 0;
+            height: parent.height;
+            text: root.item.git_badge;
+            color: white;
+            font-family: AppMetrics.mono_font;
+            font-size: 9px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+    }
+
+    Rectangle {
+        visible: root.item.has_note;
+        x: parent.width - 15px;
+        y: parent.height - 15px;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: ThemePalette.accent_strong;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.selected(root.index); }
+        double-clicked => { root.opened(root.index); }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                root.context(root.index);
+            }
+        }
+    }
+}
+
+component ListHeader inherits Rectangle {
+    height: 32px;
+    background: ThemePalette.panel_solid;
+    border-width: 0px;
+
+    Text { x: 44px; width: parent.width - 486px; height: parent.height; text: "NAME"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+    Text { x: parent.width - 428px; width: 112px; height: parent.height; text: "SIZE"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+    Text { x: parent.width - 306px; width: 146px; height: parent.height; text: "MODIFIED"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+    Text { x: parent.width - 150px; width: 90px; height: parent.height; text: "TYPE"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+
+    Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: ThemePalette.border; }
+}
+
+component ChoiceChip inherits Rectangle {
+    in property <ChoiceItem> item;
+    in property <bool> active;
+    callback picked(string);
+
+    height: 46px;
+    border-radius: AppMetrics.radius_small;
+    border-width: 1px;
+    border-color: root.active ? ThemePalette.accent : ThemePalette.border;
+    background: root.active ? ThemePalette.accent_soft : (touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel);
+
+    Rectangle {
+        x: 10px;
+        y: 11px;
+        width: 24px;
+        height: 24px;
+        border-radius: 12px;
+        background: root.item.color;
+        border-width: 1px;
+        border-color: ThemePalette.border_strong;
+    }
+
+    Text {
+        x: 44px;
+        y: 6px;
+        width: parent.width - 54px;
+        height: 18px;
+        text: root.item.label;
+        color: ThemePalette.text;
+        font-size: 13px;
+        font-weight: 700;
+        overflow: elide;
+    }
+
+    Text {
+        x: 44px;
+        y: 24px;
+        width: parent.width - 54px;
+        height: 16px;
+        text: root.item.description;
+        color: ThemePalette.text_faint;
+        font-size: 11px;
+        overflow: elide;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.picked(root.item.id); }
+    }
+}
+
+component ChoiceMenuRow inherits Rectangle {
+    in property <string> label;
+    in property <string> command_name;
+    in property <bool> danger;
+    callback picked(string);
+
+    height: 30px;
+    border-radius: AppMetrics.radius_small;
+    background: touch.has-hover ? (root.danger ? ThemePalette.danger : ThemePalette.accent_soft) : rgba(0, 0, 0, 0);
+    Text {
+        x: 9px;
+        width: parent.width - 18px;
+        height: parent.height;
+        text: root.label;
+        color: touch.has-hover ? (root.danger ? white : ThemePalette.accent_strong) : ThemePalette.text_muted;
+        font-size: 12.5px;
+        vertical-alignment: center;
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.picked(root.command_name); } }
+}
+
+component CommandRow inherits Rectangle {
+    in property <CommandItem> item;
+    callback picked(string);
+
+    height: 34px;
+    border-radius: AppMetrics.radius_small;
+    background: touch.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+    Text { x: 10px; width: 90px; height: parent.height; text: root.item.group; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; overflow: elide; }
+    Text { x: 110px; width: parent.width - 220px; height: parent.height; text: root.item.label; color: touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 13px; vertical-alignment: center; overflow: elide; }
+    Text { x: parent.width - 100px; width: 90px; height: parent.height; text: root.item.hint; color: ThemePalette.text_faint; font-family: AppMetrics.mono_font; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.picked(root.item.command); } }
+}
+
+component DialogButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary;
+    in property <bool> danger;
+    callback clicked();
+
+    width: 76px;
+    height: 32px;
+    border-radius: AppMetrics.radius_small;
+    background: root.primary ? (root.danger ? ThemePalette.danger : ThemePalette.accent) : ThemePalette.panel_alt;
+    Text {
+        text: root.label;
+        color: root.primary ? white : ThemePalette.text_muted;
+        font-size: 12.5px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+export component MainWindow inherits Window {
+    no-frame: true;
+    resize-border-width: 6px;
+    title: "Pathfinder";
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 900px;
+    min-height: 550px;
+    background: ThemePalette.bg;
+    default-font-family: AppMetrics.ui_font;
+    forward-focus: keys;
+
+    in-out property <[FileItem]> files;
+    in-out property <[SideItem]> side_items;
+    in-out property <[TabItem]> tabs;
+    in-out property <[ChoiceItem]> theme_choices;
+    in-out property <[ChoiceItem]> accent_choices;
+    in-out property <[ChoiceItem]> density_choices;
+    in-out property <[CommandItem]> command_items;
+
+    in-out property <string> current_path: "";
+    in-out property <string> address_text: "";
+    in-out property <string> search_text: "";
+    in-out property <string> active_theme: "mica-dark";
+    in-out property <string> active_accent: "blue";
+    in-out property <string> active_density: "cozy";
+    in-out property <string> view_mode: "grid";
+    in-out property <bool> preview_visible: true;
+    in-out property <bool> dual_pane: false;
+    in-out property <bool> settings_visible: false;
+    in-out property <bool> command_visible: false;
+    in-out property <bool> context_visible: false;
+    in-out property <bool> confirm_visible: false;
+    in-out property <bool> prompt_visible: false;
+    in-out property <bool> address_editing: false;
+    in-out property <int> selected_index: -1;
+    in-out property <string> selected_name: "";
+    in-out property <string> preview_title: "";
+    in-out property <string> preview_body: "";
+    in-out property <string> preview_meta: "";
+    in-out property <string> status_left: "Ready";
+    in-out property <string> status_right: "";
+    in-out property <string> toast_text: "";
+    in-out property <string> ai_label: "CPU Fallback";
+    in-out property <string> ai_device: "Detecting";
+    in-out property <string> prompt_title: "";
+    in-out property <string> prompt_value: "";
+    in-out property <string> confirm_text: "";
+
+    callback navigate(string);
+    callback side_activated(int);
+    callback file_selected(int);
+    callback file_opened(int);
+    callback file_context(int);
+    callback tab_activated(int);
+    callback tab_closed(int);
+    callback new_tab();
+    callback go_back();
+    callback go_forward();
+    callback go_up();
+    callback refresh();
+    callback search_requested(string);
+    callback set_view(string);
+    callback toggle_preview();
+    callback toggle_dual_pane();
+    callback command(string);
+    callback theme_selected(string);
+    callback accent_selected(string);
+    callback density_selected(string);
+    callback minimize();
+    callback maximize();
+    callback close();
+    callback drag_window();
+    callback confirm_delete();
+    callback prompt_accept(string);
+
+    property <length> sidebar_w: 238px;
+    property <length> title_h: 36px;
+    property <length> toolbar_h: 44px;
+    property <length> status_h: 26px;
+    property <length> preview_w: root.preview_visible ? 326px : 0px;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: @radial-gradient(circle, rgba(79, 156, 255, 0.18) 0%, rgba(79, 156, 255, 0.00) 38%);
+    }
+
+    Rectangle {
+        x: parent.width * 0.55;
+        y: parent.height * 0.45;
+        width: parent.width * 0.45;
+        height: parent.height * 0.55;
+        background: @radial-gradient(circle, rgba(137, 93, 255, 0.16) 0%, rgba(137, 93, 255, 0.00) 44%);
+    }
+
+    app := Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: ThemePalette.panel;
+        border-width: AppMetrics.outer_border;
+        border-color: ThemePalette.border_strong;
+
+        // Titlebar
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: root.title_h;
+            background: ThemePalette.titlebar;
+            border-width: 0px;
+
+            TouchArea {
+                x: 0;
+                y: 0;
+                width: parent.width - 170px;
+                height: parent.height;
+                mouse-cursor: move;
+                clicked => { }
+                moved => { if (self.pressed) { root.drag_window(); } }
+            }
+
+            Rectangle {
+                x: 14px;
+                y: 12px;
+                width: 18px;
+                height: 15px;
+                border-radius: 3px;
+                background: @linear-gradient(180deg, ThemePalette.accent_strong 0%, ThemePalette.accent 100%);
+            }
+
+            Rectangle {
+                x: 16px;
+                y: 9px;
+                width: 8px;
+                height: 5px;
+                border-radius: 3px;
+                background: ThemePalette.accent_strong;
+            }
+
+            Text {
+                x: 40px;
+                y: 0;
+                width: 160px;
+                height: parent.height;
+                text: "Pathfinder";
+                color: ThemePalette.text_muted;
+                font-size: 12px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            HorizontalLayout {
+                x: root.sidebar_w;
+                y: 6px;
+                width: parent.width - root.sidebar_w - 170px;
+                height: 30px;
+                spacing: 2px;
+                for tab[index] in root.tabs: TabButton {
+                    tab: tab;
+                    index: index;
+                    activated(i) => { root.tab_activated(i); }
+                    closed(i) => { root.tab_closed(i); }
+                }
+            }
+
+            ToolButton {
+                x: parent.width - 164px;
+                y: 6px;
+                button_width: 24px;
+                button_height: 24px;
+                icon_data: "M12 5v14 M5 12h14";
+                clicked => { root.new_tab(); }
+            }
+
+            ToolButton {
+                x: parent.width - 138px;
+                y: 0;
+                button_width: 46px;
+                button_height: 36px;
+                icon_data: "M5 12h14";
+                clicked => { root.minimize(); }
+            }
+
+            ToolButton {
+                x: parent.width - 92px;
+                y: 0;
+                button_width: 46px;
+                button_height: 36px;
+                icon_data: "M7 7h10v10H7z";
+                clicked => { root.maximize(); }
+            }
+
+            ToolButton {
+                x: parent.width - 46px;
+                y: 0;
+                button_width: 46px;
+                button_height: 36px;
+                icon_data: "M18 6L6 18 M6 6l12 12";
+                danger: true;
+                clicked => { root.close(); }
+            }
+
+            Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
+        }
+
+        // Sidebar
+        Rectangle {
+            x: 0;
+            y: root.title_h;
+            width: root.sidebar_w;
+            height: parent.height - root.title_h - root.status_h;
+            background: ThemePalette.sidebar;
+            border-width: 0px;
+
+            ListView {
+                x: 10px;
+                y: 14px;
+                width: parent.width - 20px;
+                height: parent.height - 28px;
+                for item[index] in root.side_items: SideRow {
+                    item: item;
+                    index: index;
+                    activated(i) => { root.side_activated(i); }
+                }
+            }
+
+            Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: ThemePalette.border; }
+        }
+
+        // Toolbar
+        Rectangle {
+            x: root.sidebar_w;
+            y: root.title_h;
+            width: parent.width - root.sidebar_w;
+            height: root.toolbar_h;
+            background: ThemePalette.panel;
+
+            ToolButton { x: 10px; y: 6px; icon_data: "M15 18l-6-6 6-6"; clicked => { root.go_back(); } }
+            ToolButton { x: 45px; y: 6px; icon_data: "M9 18l6-6-6-6"; clicked => { root.go_forward(); } }
+            ToolButton { x: 80px; y: 6px; icon_data: "M12 19V5 M5 12l7-7 7 7"; clicked => { root.go_up(); } }
+            ToolButton { x: 115px; y: 6px; icon_data: "M3 12a9 9 0 0 1 15-6.7L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15 6.7L3 16 M3 21v-5h5"; clicked => { root.refresh(); } }
+
+            Rectangle { x: 156px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
+
+            Rectangle {
+                x: 167px;
+                y: 6px;
+                width: parent.width - 650px;
+                height: 31px;
+                border-width: 1px;
+                border-color: ThemePalette.border;
+                border-radius: AppMetrics.radius_small;
+                background: AppMetrics.light_controls ? rgba(255, 255, 255, 0.50) : rgba(0, 0, 0, 0.12);
+
+                Text {
+                    visible: !root.address_editing;
+                    x: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height;
+                    text: root.current_path;
+                    color: ThemePalette.text_muted;
+                    font-size: 12px;
+                    font-family: AppMetrics.mono_font;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+
+                addr := LineEdit {
+                    visible: root.address_editing;
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.address_text;
+                    font-size: 12px;
+                    font-family: AppMetrics.mono_font;
+                    accepted(path) => {
+                        root.address_editing = false;
+                        root.navigate(path);
+                    }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.address_editing = false;
+                            accept
+                        } else {
+                            reject
+                        }
+                    }
+                }
+
+                TouchArea {
+                    enabled: !root.address_editing;
+                    mouse-cursor: text;
+                    clicked => {
+                        root.address_text = root.current_path;
+                        root.address_editing = true;
+                        addr.focus();
+                        addr.select-all();
+                    }
+                }
+            }
+
+            Rectangle {
+                x: parent.width - 473px;
+                y: 6px;
+                width: 280px;
+                height: 31px;
+                border-width: 1px;
+                border-color: search.has-focus ? ThemePalette.accent : ThemePalette.border;
+                border-radius: AppMetrics.radius_small;
+                background: AppMetrics.light_controls ? rgba(255, 255, 255, 0.50) : rgba(0, 0, 0, 0.12);
+
+                SvgIcon { x: 8px; y: 8px; icon_size: 15px; data: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3"; tint: ThemePalette.text_faint; }
+                search := LineEdit {
+                    x: 30px;
+                    y: 0;
+                    width: parent.width - 82px;
+                    height: parent.height;
+                    text: root.search_text;
+                    placeholder-text: "Search ext:pdf size:>1mb";
+                    font-size: 12.5px;
+                    edited(value) => {
+                        root.search_text = value;
+                        root.search_requested(value);
+                    }
+                    accepted(value) => { root.search_requested(value); }
+                }
+                Text { x: parent.width - 48px; width: 40px; height: parent.height; text: "Ctrl+F"; color: ThemePalette.text_faint; font-family: AppMetrics.mono_font; font-size: 10px; vertical-alignment: center; horizontal-alignment: right; }
+            }
+
+            Rectangle { x: parent.width - 181px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
+            ToolButton { x: parent.width - 170px; y: 6px; icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z"; active: root.view_mode == "grid"; clicked => { root.set_view("grid"); } }
+            ToolButton { x: parent.width - 136px; y: 6px; icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01"; active: root.view_mode == "list"; clicked => { root.set_view("list"); } }
+            ToolButton { x: parent.width - 102px; y: 6px; icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01"; active: root.view_mode == "gallery"; clicked => { root.set_view("gallery"); } }
+            ToolButton { x: parent.width - 68px; y: 6px; icon_data: "M3 4h18v16H3z M14 4v16"; active: root.preview_visible; clicked => { root.toggle_preview(); } }
+            ToolButton { x: parent.width - 34px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
+
+            Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
+        }
+
+        // Main area
+        Rectangle {
+            x: root.sidebar_w;
+            y: root.title_h + root.toolbar_h;
+            width: parent.width - root.sidebar_w;
+            height: parent.height - root.title_h - root.toolbar_h - root.status_h;
+            background: ThemePalette.bg;
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width - root.preview_w;
+                height: parent.height;
+                background: rgba(0, 0, 0, 0);
+
+                if root.view_mode == "list": ListHeader {
+                    x: AppMetrics.pad;
+                    y: AppMetrics.pad;
+                    width: parent.width - AppMetrics.pad * 2;
+                }
+
+                ListView {
+                    x: AppMetrics.pad;
+                    y: AppMetrics.pad + (root.view_mode == "list" ? 32px : 0px);
+                    width: parent.width - AppMetrics.pad * 2;
+                    height: parent.height - AppMetrics.pad * 2 - (root.view_mode == "list" ? 32px : 0px);
+                    for file[index] in root.files: FileRow {
+                        item: file;
+                        index: index;
+                        selected_index: root.selected_index;
+                        view_mode: root.view_mode;
+                        selected(i) => { root.file_selected(i); }
+                        opened(i) => { root.file_opened(i); }
+                        context(i) => { root.file_context(i); }
+                    }
+                }
+
+                Text {
+                    visible: root.files.length == 0;
+                    width: parent.width;
+                    height: parent.height;
+                    text: "No files";
+                    color: ThemePalette.text_faint;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            if root.preview_visible: Rectangle {
+                x: parent.width - root.preview_w;
+                y: 0;
+                width: root.preview_w;
+                height: parent.height;
+                background: ThemePalette.panel_solid;
+                border-width: 0px;
+
+                Rectangle { width: 1px; height: parent.height; background: ThemePalette.border; }
+
+                Rectangle {
+                    x: 1px;
+                    y: 0;
+                    width: parent.width - 1px;
+                    height: 46px;
+                    background: ThemePalette.panel_solid;
+                    NodeVisual {
+                        x: 14px;
+                        y: 11px;
+                        visual_width: 24px;
+                        visual_height: 24px;
+                        is_dir: false;
+                        extension: "";
+                    }
+                    Text {
+                        x: 48px;
+                        width: parent.width - 92px;
+                        height: parent.height;
+                        text: root.preview_title == "" ? "Preview" : root.preview_title;
+                        color: ThemePalette.text;
+                        font-size: 13px;
+                        font-weight: 700;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    ToolButton {
+                        x: parent.width - 37px;
+                        y: 7px;
+                        icon_data: "M18 6L6 18 M6 6l12 12";
+                        clicked => { root.toggle_preview(); }
+                    }
+                    Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: ThemePalette.border; }
+                }
+
+                ScrollView {
+                    x: 16px;
+                    y: 62px;
+                    width: parent.width - 32px;
+                    height: parent.height - 78px;
+                    Text {
+                        width: parent.width;
+                        text: root.preview_body == "" ? "Select a file to preview details." : root.preview_body + "\n\n" + root.preview_meta;
+                        color: root.preview_body == "" ? ThemePalette.text_faint : ThemePalette.text_muted;
+                        font-size: root.preview_body == "" ? 12.5px : 11.5px;
+                        font-family: root.preview_body == "" ? AppMetrics.ui_font : AppMetrics.mono_font;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        // Status
+        Rectangle {
+            x: 0;
+            y: parent.height - root.status_h;
+            width: parent.width;
+            height: root.status_h;
+            background: ThemePalette.titlebar;
+            Rectangle { width: parent.width; height: 1px; background: ThemePalette.border; }
+            Text { x: 12px; width: parent.width / 2; height: parent.height; text: root.status_left; color: ThemePalette.text_faint; font-size: 11px; vertical-alignment: center; overflow: elide; }
+            Text { x: parent.width / 2; width: parent.width / 2 - 12px; height: parent.height; text: root.status_right; color: ThemePalette.text_faint; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
+        }
+    }
+
+    // Context menu
+    if root.context_visible: Rectangle {
+        x: root.sidebar_w + 24px;
+        y: root.title_h + root.toolbar_h + 24px;
+        width: 226px;
+        height: 248px;
+        border-width: 1px;
+        border-color: ThemePalette.border_strong;
+        border-radius: AppMetrics.radius;
+        background: ThemePalette.panel_solid;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: rgba(0, 0, 0, 0.38);
+
+        VerticalLayout {
+            padding: 5px;
+            spacing: 2px;
+            ChoiceMenuRow { width: parent.width; label: "Open"; command_name: "open"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Rename"; command_name: "rename"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Copy"; command_name: "copy"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Cut"; command_name: "cut"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Paste"; command_name: "paste"; picked(c) => { root.context_visible = false; root.command(c); } }
+            Rectangle { height: 1px; background: ThemePalette.border; }
+            ChoiceMenuRow { width: parent.width; label: "Batch Rename"; command_name: "batch-rename"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Checksum"; command_name: "checksum"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Add Note"; command_name: "note"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Delete"; command_name: "delete"; danger: true; picked(c) => { root.context_visible = false; root.command(c); } }
+        }
+    }
+
+    if root.command_visible: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.42);
+
+        Rectangle {
+            x: (parent.width - 620px) / 2;
+            y: 82px;
+            width: 620px;
+            height: 512px;
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            drop-shadow-blur: 32px;
+            drop-shadow-color: rgba(0, 0, 0, 0.38);
+
+            Rectangle {
+                x: 16px;
+                y: 14px;
+                width: parent.width - 32px;
+                height: 38px;
+                border-width: 1px;
+                border-color: ThemePalette.border;
+                border-radius: AppMetrics.radius_small;
+                background: ThemePalette.bg_soft;
+                Text { x: 12px; width: parent.width - 24px; height: parent.height; text: "Command palette"; color: ThemePalette.text; font-size: 15px; vertical-alignment: center; }
+            }
+
+            ListView {
+                x: 6px;
+                y: 64px;
+                width: parent.width - 12px;
+                height: parent.height - 70px;
+                for cmd[index] in root.command_items: CommandRow {
+                    width: parent.width;
+                    item: cmd;
+                    picked(name) => {
+                        root.command_visible = false;
+                        root.command(name);
+                    }
+                }
+            }
+        }
+    }
+
+    if root.settings_visible: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.42);
+
+        Rectangle {
+            x: (parent.width - 760px) / 2;
+            y: (parent.height - 660px) / 2;
+            width: 760px;
+            height: 660px;
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            drop-shadow-blur: 32px;
+            drop-shadow-color: rgba(0, 0, 0, 0.38);
+
+            Text { x: 18px; y: 16px; width: parent.width - 80px; height: 28px; text: "Settings"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            ToolButton { x: parent.width - 46px; y: 14px; icon_data: "M18 6L6 18 M6 6l12 12"; clicked => { root.settings_visible = false; } }
+            Rectangle { y: 60px; height: 1px; width: parent.width; background: ThemePalette.border; }
+
+            ScrollView {
+                x: 18px;
+                y: 78px;
+                width: parent.width - 36px;
+                height: parent.height - 96px;
+
+                VerticalLayout {
+                    width: parent.width;
+                    spacing: 14px;
+
+                    Text { text: "Appearance"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+                    for theme in root.theme_choices: ChoiceChip {
+                        width: parent.width;
+                        item: theme;
+                        active: root.active_theme == theme.id;
+                        picked(id) => { root.theme_selected(id); }
+                    }
+
+                    Text { text: "Accent"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+                    for accent in root.accent_choices: ChoiceChip {
+                        width: parent.width;
+                        item: accent;
+                        active: root.active_accent == accent.id;
+                        picked(id) => { root.accent_selected(id); }
+                    }
+
+                    Text { text: "Density"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+                    for density in root.density_choices: ChoiceChip {
+                        width: parent.width;
+                        item: density;
+                        active: root.active_density == density.id;
+                        picked(id) => { root.density_selected(id); }
+                    }
+
+                    Text { text: "AI"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+                    Rectangle {
+                        height: 94px;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        border-radius: AppMetrics.radius;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; y: 12px; width: parent.width - 28px; height: 22px; text: root.ai_label; color: ThemePalette.text; font-size: 14px; font-weight: 700; }
+                        Text { x: 14px; y: 38px; width: parent.width - 28px; height: 20px; text: root.ai_device; color: ThemePalette.accent_strong; font-size: 12px; font-family: AppMetrics.mono_font; overflow: elide; }
+                        Text { x: 14px; y: 64px; width: parent.width - 28px; height: 20px; text: "Thumbnails, content search, and image analysis use the best detected device."; color: ThemePalette.text_muted; font-size: 12px; overflow: elide; }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.confirm_visible: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.42);
+        Rectangle {
+            x: (parent.width - 420px) / 2;
+            y: (parent.height - 180px) / 2;
+            width: 420px;
+            height: 180px;
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            Text { x: 18px; y: 16px; width: parent.width - 36px; height: 26px; text: "Confirm delete"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            Text { x: 18px; y: 58px; width: parent.width - 36px; height: 48px; text: root.confirm_text; color: ThemePalette.text_muted; font-size: 13px; wrap: word-wrap; }
+            DialogButton { x: parent.width - 180px; y: parent.height - 48px; label: "Cancel"; clicked => { root.confirm_visible = false; } }
+            DialogButton { x: parent.width - 90px; y: parent.height - 48px; label: "Delete"; primary: true; danger: true; clicked => { root.confirm_visible = false; root.confirm_delete(); } }
+        }
+    }
+
+    if root.prompt_visible: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.42);
+        Rectangle {
+            x: (parent.width - 420px) / 2;
+            y: (parent.height - 190px) / 2;
+            width: 420px;
+            height: 190px;
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            Text { x: 18px; y: 16px; width: parent.width - 36px; height: 26px; text: root.prompt_title; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            prompt := LineEdit { x: 18px; y: 66px; width: parent.width - 36px; height: 34px; text: root.prompt_value; accepted(value) => { root.prompt_visible = false; root.prompt_accept(value); } }
+            DialogButton { x: parent.width - 180px; y: parent.height - 48px; label: "Cancel"; clicked => { root.prompt_visible = false; } }
+            DialogButton { x: parent.width - 90px; y: parent.height - 48px; label: "OK"; primary: true; clicked => { root.prompt_visible = false; root.prompt_accept(prompt.text); } }
+        }
+    }
+
+    if root.toast_text != "": Rectangle {
+        x: (parent.width - 360px) / 2;
+        y: parent.height - 78px;
+        width: 360px;
+        height: 38px;
+        border-width: 1px;
+        border-color: ThemePalette.border_strong;
+        border-radius: AppMetrics.radius;
+        background: ThemePalette.panel_solid;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: rgba(0, 0, 0, 0.38);
+        Text { x: 13px; width: parent.width - 26px; height: parent.height; text: root.toast_text; color: ThemePalette.text; font-size: 12.5px; vertical-alignment: center; overflow: elide; }
+    }
+
+    keys := FocusScope {
+        KeyBinding { keys: @keys(Control+T); activated => { root.new_tab(); } }
+        KeyBinding { keys: @keys(Control+W); activated => { root.tab_closed(-1); } }
+        KeyBinding { keys: @keys(Control+L); activated => { root.address_text = root.current_path; root.address_editing = true; } }
+        KeyBinding { keys: @keys(Control+F); activated => { root.command("focus-search"); } }
+        KeyBinding { keys: @keys(Control+P); activated => { root.command_visible = true; } }
+        KeyBinding { keys: @keys(Control+Comma); activated => { root.settings_visible = true; } }
+        KeyBinding { keys: @keys(Control+"1"); activated => { root.set_view("grid"); } }
+        KeyBinding { keys: @keys(Control+"2"); activated => { root.set_view("list"); } }
+        KeyBinding { keys: @keys(Control+"3"); activated => { root.set_view("gallery"); } }
+        KeyBinding { keys: @keys(Control+I); activated => { root.toggle_preview(); } }
+        KeyBinding { keys: @keys(F5); activated => { root.refresh(); } }
+        KeyBinding { keys: @keys(Delete); activated => { root.command("delete"); } }
+        KeyBinding { keys: @keys(F2); activated => { root.command("rename"); } }
+        KeyBinding { keys: @keys(Return); activated => { root.file_opened(root.selected_index); } }
+        KeyBinding { keys: @keys(Escape); activated => { root.context_visible = false; root.command_visible = false; root.settings_visible = false; root.confirm_visible = false; root.prompt_visible = false; root.address_editing = false; } }
+    }
+}
+
+export global AppMetrics {
+    in-out property <length> radius: 8px;
+    in-out property <length> radius_small: 5px;
+    in-out property <length> row_h: 38px;
+    in-out property <length> grid_w: 136px;
+    in-out property <length> grid_h: 122px;
+    in-out property <length> pad: 16px;
+    in-out property <length> outer_border: 0px;
+    in-out property <string> ui_font: "Segoe UI";
+    in-out property <string> mono_font: "Cascadia Mono";
+    in-out property <bool> light_controls: false;
+}
