@@ -1,10 +1,9 @@
 /// Windows-specific integrations for shell extensions, VSS, UAC, and taskbar pinning
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::process::Command;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-
+use std::path::PathBuf;
+use std::process::Command;
 
 // ============================================================================
 // Data Structures
@@ -44,6 +43,40 @@ pub struct PinningResult {
 // Helper Functions
 // ============================================================================
 
+fn win32_clipboard_copy(text: &str) -> Result<(), String> {
+    use windows::Win32::Foundation::{HANDLE, HWND};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let byte_count = wide.len() * 2;
+
+    unsafe {
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_count).map_err(|e| e.to_string())?;
+        let ptr = GlobalLock(hmem) as *mut u16;
+        if ptr.is_null() {
+            return Err("GlobalLock failed".to_string());
+        }
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+        let _ = GlobalUnlock(hmem);
+
+        OpenClipboard(HWND(std::ptr::null_mut())).map_err(|e| e.to_string())?;
+        if let Err(e) = EmptyClipboard() {
+            let _ = CloseClipboard();
+            return Err(e.to_string());
+        }
+        const CF_UNICODETEXT: u32 = 13;
+        if let Err(e) = SetClipboardData(CF_UNICODETEXT, HANDLE(hmem.0)) {
+            let _ = CloseClipboard();
+            return Err(e.to_string());
+        }
+        CloseClipboard().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
 fn to_wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     OsStr::new(s.as_ref())
         .encode_wide()
@@ -56,23 +89,52 @@ fn from_wide(v: &[u16]) -> String {
     String::from_utf16_lossy(&v[..len]).to_string()
 }
 
+fn shell_execute_verb(path: &str, verb: &str) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::core::PCWSTR;
+
+    let path_wide = to_wide(path);
+    let verb_wide = to_wide(verb);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        hwnd: HWND(std::ptr::null_mut()),
+        lpVerb: PCWSTR(verb_wide.as_ptr()),
+        lpFile: PCWSTR(path_wide.as_ptr()),
+        lpParameters: PCWSTR::null(),
+        lpDirectory: PCWSTR::null(),
+        nShow: 1,
+        ..Default::default()
+    };
+
+    unsafe { ShellExecuteExW(&mut info).map_err(|e| e.to_string()) }
+}
+
 fn is_elevated() -> bool {
-    Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "([Security.Principal.WindowsPrincipal]\
-              [Security.Principal.WindowsIdentity]::GetCurrent())\
-              .IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
-        ])
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .eq_ignore_ascii_case("True")
-        })
-        .unwrap_or(false)
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let process = GetCurrentProcess();
+        let mut token = HANDLE::default();
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut ret_size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            ret_size,
+            &mut ret_size,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok && elevation.TokenIsElevated != 0
+    }
 }
 
 // ============================================================================
@@ -81,8 +143,13 @@ fn is_elevated() -> bool {
 
 /// Get context menu actions available for a file/folder from registered shell extensions
 pub fn get_context_menu_actions(path: &str) -> Result<Vec<ContextMenuAction>, String> {
-    // Return standard built-in actions plus any registered extensions
     let mut actions = vec![
+        ContextMenuAction {
+            id: 0,
+            name: "Open".to_string(),
+            help_text: Some("Open using the default Windows association".to_string()),
+            icon_url: None,
+        },
         ContextMenuAction {
             id: 1,
             name: "Copy Path".to_string(),
@@ -101,11 +168,31 @@ pub fn get_context_menu_actions(path: &str) -> Result<Vec<ContextMenuAction>, St
             help_text: Some("Send file to another location".to_string()),
             icon_url: None,
         },
+        ContextMenuAction {
+            id: 4,
+            name: "Open With".to_string(),
+            help_text: Some("Open Windows app picker".to_string()),
+            icon_url: None,
+        },
+        ContextMenuAction {
+            id: 5,
+            name: "Properties".to_string(),
+            help_text: Some("Open native Windows Properties".to_string()),
+            icon_url: None,
+        },
     ];
 
-    // Attempt to enumerate registered context menu extensions
-    if let Ok(extensions) = enumerate_shell_extensions(path) {
-        actions.extend(extensions);
+    let ext = PathBuf::from(path)
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(ext.as_str(), "exe" | "bat" | "cmd" | "ps1" | "msi") {
+        actions.push(ContextMenuAction {
+            id: 6,
+            name: "Run as administrator".to_string(),
+            help_text: Some("Invoke the Windows runas verb".to_string()),
+            icon_url: None,
+        });
     }
 
     Ok(actions)
@@ -163,26 +250,22 @@ try {
 /// Invoke a context menu action (via the COM interface or registered handler)
 pub fn invoke_context_menu_action(path: &str, action_id: u32) -> Result<(), String> {
     match action_id {
+        0 => shell_execute_verb(path, "open"),
         1 => {
-            // Copy Path
-            let escaped = path.replace('\'', "''");
-            Command::new("powershell")
-                .args(&[
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    &format!("Set-Clipboard -Value '{}'", escaped),
-                ])
-                .spawn()
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+            // Copy Path — Win32 clipboard, no PowerShell spawn
+            win32_clipboard_copy(path)
         }
         2 => {
             // Open in Terminal
             Command::new("wt")
                 .args(&["-d", path])
                 .spawn()
-                .or_else(|_| Command::new("cmd").arg("/k").arg(&format!("cd /d {}", path)).spawn())
+                .or_else(|_| {
+                    Command::new("cmd")
+                        .arg("/k")
+                        .arg(&format!("cd /d {}", path))
+                        .spawn()
+                })
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         }
@@ -196,6 +279,13 @@ pub fn invoke_context_menu_action(path: &str, action_id: u32) -> Result<(), Stri
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         }
+        4 => Command::new("rundll32.exe")
+            .args(["shell32.dll,OpenAs_RunDLL", path])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        5 => shell_execute_verb(path, "properties"),
+        6 => shell_execute_verb(path, "runas"),
         _ => Err("Unknown action ID".to_string()),
     }
 }
@@ -269,8 +359,8 @@ ConvertTo-Json -InputObject $versions -Compress
         .map_err(|e| e.to_string())?;
 
     if output.status.success() {
-        let versions: Vec<PreviousVersion> = serde_json::from_slice(&output.stdout)
-            .unwrap_or_default();
+        let versions: Vec<PreviousVersion> =
+            serde_json::from_slice(&output.stdout).unwrap_or_default();
         Ok(versions)
     } else {
         Ok(Vec::new())
@@ -358,7 +448,10 @@ Start-Process -FilePath pwsh -ArgumentList "-Command", "Write-Host 'Administrato
     match output {
         Ok(output) if output.status.success() => Ok(AdminRetryResult {
             success: true,
-            message: format!("Operation '{}' executed with administrator privileges", operation),
+            message: format!(
+                "Operation '{}' executed with administrator privileges",
+                operation
+            ),
             requires_ownership_change: needs_ownership,
         }),
         Ok(output) => Ok(AdminRetryResult {
@@ -460,45 +553,51 @@ if ($acl.Owner -match $env:USERNAME -or $acl.Owner -match 'Administrators') {{
 // 4. Taskbar and Start Menu Pinning via .lnk + ShellExecuteEx
 // ============================================================================
 
-/// Create a .lnk (shortcut) file
+/// Create a .lnk (shortcut) file via IShellLink COM (no PowerShell spawn).
 pub fn create_shortcut(
     target_path: &str,
     shortcut_path: &str,
     args: Option<&str>,
     working_dir: Option<&str>,
 ) -> Result<(), String> {
-    let script = format!(
-        r#"
-$targetPath = '{}'
-$shortcutPath = '{}'
-$arguments = '{}'
-$workingDir = '{}'
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    use windows::core::{Interface, PCWSTR};
 
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $targetPath
-if ($arguments) {{ $shortcut.Arguments = $arguments }}
-if ($workingDir) {{ $shortcut.WorkingDirectory = $workingDir }}
-$shortcut.Save()
-Write-Host "Shortcut created at: $shortcutPath"
-"#,
-        target_path.replace('\'', "''"),
-        shortcut_path.replace('\'', "''"),
-        args.unwrap_or("").replace('\'', "''"),
-        working_dir.unwrap_or("").replace('\'', "''")
-    );
+    let target_wide = to_wide(target_path);
+    let shortcut_wide: Vec<u16> = shortcut_path
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
-    let output = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(&script)
-        .output()
-        .map_err(|e| e.to_string())?;
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| format!("CoCreateInstance failed: {e}"))?;
 
-    if output.status.success() {
+        link.SetPath(PCWSTR(target_wide.as_ptr()))
+            .map_err(|e| format!("SetPath failed: {e}"))?;
+
+        if let Some(a) = args {
+            if !a.is_empty() {
+                let wide = to_wide(a);
+                let _ = link.SetArguments(PCWSTR(wide.as_ptr()));
+            }
+        }
+        if let Some(wd) = working_dir {
+            if !wd.is_empty() {
+                let wide = to_wide(wd);
+                let _ = link.SetWorkingDirectory(PCWSTR(wide.as_ptr()));
+            }
+        }
+
+        let persist: IPersistFile = link
+            .cast()
+            .map_err(|e| format!("IPersistFile cast failed: {e}"))?;
+        persist
+            .Save(PCWSTR(shortcut_wide.as_ptr()), true)
+            .map_err(|e| format!("Save failed: {e}"))?;
+
         Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
 }
 
@@ -558,7 +657,9 @@ if ($verb) {{
     } else {
         Ok(PinningResult {
             success: false,
-            message: "Could not find pin to taskbar verb. Modern Windows may require alternative method.".to_string(),
+            message:
+                "Could not find pin to taskbar verb. Modern Windows may require alternative method."
+                    .to_string(),
             location: "taskbar".to_string(),
         })
     }
@@ -630,7 +731,9 @@ if ($pinned) {{ 'success' }} else {{ 'failed' }}
     } else {
         Ok(PinningResult {
             success: false,
-            message: "Could not pin to Start menu. This feature may be limited in your Windows version.".to_string(),
+            message:
+                "Could not pin to Start menu. This feature may be limited in your Windows version."
+                    .to_string(),
             location: "start-menu".to_string(),
         })
     }

@@ -1,9 +1,14 @@
 #![allow(dead_code)]
+#![allow(
+    clippy::collapsible_if,
+    clippy::needless_borrows_for_generic_args,
+    clippy::type_complexity
+)]
 
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use rayon::prelude::*;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
@@ -15,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::rc::Rc;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, LazyLock, Mutex,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Manager, State, Window};
@@ -35,6 +40,47 @@ const INDEX_DB_FILE: &str = ".pathfinder-index.sqlite3";
 const THUMBNAIL_CACHE_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
 const INDEX_ESTIMATE_BYTES_PER_FILE: u64 = 420;
 const MAX_OPERATION_QUEUE_ITEMS: usize = 200;
+const MAX_HEAVY_OPS: usize = 2;
+
+static ACTIVE_HEAVY_OPS: AtomicUsize = AtomicUsize::new(0);
+
+// Dedicated 2-thread pool for thumbnail generation. Threads run at below-normal
+// priority on Windows so they don't compete with foreground I/O.
+static THUMBNAIL_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .thread_name(|i| format!("pathfinder-thumb-{i}"))
+        .spawn_handler(|thread| {
+            std::thread::Builder::new()
+                .name(thread.name().unwrap_or("thumb").to_owned())
+                .spawn(move || {
+                    #[cfg(target_os = "windows")]
+                    unsafe {
+                        use windows::Win32::System::Threading::{
+                            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+                        };
+                        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                    }
+                    thread.run();
+                })
+                .map(|_| ())
+        })
+        .build()
+        .expect("thumbnail thread pool")
+});
+
+// RAII guard that decrements ACTIVE_HEAVY_OPS on drop.
+struct HeavyOpGuard;
+impl Drop for HeavyOpGuard {
+    fn drop(&mut self) {
+        ACTIVE_HEAVY_OPS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+const FIRST_DIRECTORY_CHUNK: usize = 2_500;
+const LARGE_DIRECTORY_GIT_CAP: usize = 20_000;
+const SEARCH_INDEX_LIMIT: usize = 800;
+const SEARCH_LIVE_SCAN_LIMIT: usize = 1_200;
+const ARCHIVE_SCHEME: &str = "archive://";
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum FileKind {
@@ -118,6 +164,25 @@ struct CachedPreview {
     loaded_at: Instant,
 }
 
+struct DirectoryPage {
+    entries: Vec<FileEntry>,
+    partial: bool,
+}
+
+#[derive(Clone)]
+struct NativeDirectoryResult {
+    path: String,
+    entries: Vec<FileEntry>,
+}
+
+#[derive(Clone)]
+struct NativeSearchResult {
+    path: String,
+    query: String,
+    entries: Vec<FileEntry>,
+    source: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FileOp {
     pub kind: String,
@@ -137,6 +202,21 @@ pub struct StorageNode {
     pub path: String,
     pub size: u64,
     pub children: Vec<StorageNode>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ArchiveEntry {
+    pub name: String,
+    pub size: u64,
+    pub is_dir: bool,
+    pub encrypted: bool,
+}
+
+#[derive(Clone)]
+struct ArchiveView {
+    archive_path: String,
+    prefix: String,
+    return_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1018,19 +1098,50 @@ fn list_directory_uncached(dir: &Path) -> Result<Vec<FileEntry>, String> {
         return Err(format!("Not a directory: {}", dir.display()));
     }
 
-    let paths: Vec<PathBuf> = fs::read_dir(dir)
+    // Collect DirEntry instead of PathBuf so we can call entry.metadata() which on Windows
+    // reads from the cached WIN32_FIND_DATA returned by FindFirstFileEx — zero extra syscalls.
+    let dir_entries: Vec<fs::DirEntry> = fs::read_dir(dir)
         .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
-        .map(|entry| entry.path())
         .collect();
 
-    let mut entries: Vec<FileEntry> = paths
+    let mut entries: Vec<FileEntry> = dir_entries
         .par_iter()
-        .filter_map(|path| fs::metadata(path).ok().map(|m| path_to_entry(path, &m)))
+        .filter_map(|entry| {
+            let path = entry.path();
+            entry.metadata().ok().map(|m| path_to_entry(&path, &m))
+        })
         .collect();
 
     sort_entries(&mut entries);
     Ok(entries)
+}
+
+fn list_directory_chunk(dir: &Path, max_entries: usize) -> Result<DirectoryPage, String> {
+    if !dir.exists() {
+        return Err(format!("Path does not exist: {}", dir.display()));
+    }
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {}", dir.display()));
+    }
+
+    let mut entries = Vec::with_capacity(max_entries.min(512));
+    let mut partial = false;
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if entries.len() >= max_entries {
+            partial = true;
+            break;
+        }
+        let path = entry.path();
+        if let Ok(metadata) = entry.metadata() {
+            entries.push(path_to_entry(&path, &metadata));
+        }
+    }
+    sort_entries(&mut entries);
+    Ok(DirectoryPage { entries, partial })
 }
 
 #[tauri::command]
@@ -1202,11 +1313,11 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
 fn locked_file_processes(path: &str) -> Result<Vec<LockedProcessInfo>, String> {
     use std::mem::MaybeUninit;
     use std::os::windows::ffi::OsStrExt;
-    use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::System::RestartManager::{
-        RmEndSession, RmGetList, RmRegisterResources, RmStartSession, CCH_RM_SESSION_KEY,
-        RM_PROCESS_INFO,
+        CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources,
+        RmStartSession,
     };
+    use windows::core::{PCWSTR, PWSTR};
 
     let mut session = 0_u32;
     let mut key = vec![0_u16; CCH_RM_SESSION_KEY as usize + 1];
@@ -1286,24 +1397,32 @@ fn locked_file_processes(_path: &str) -> Result<Vec<LockedProcessInfo>, String> 
 fn open_windows_properties(path: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let escaped = path.replace('\'', "''");
-        ProcessCommand::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!(
-                    "$p='{}'; $shell=New-Object -ComObject Shell.Application; \
-                     $item=Get-Item -LiteralPath $p -ErrorAction Stop; \
-                     $folder=$shell.Namespace($item.DirectoryName); \
-                     if ($item.PSIsContainer) {{ $folder=$shell.Namespace($item.Parent.FullName) }}; \
-                     $folder.ParseName($item.Name).InvokeVerb('properties')",
-                    escaped
-                ),
-            ])
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::Shell::SEE_MASK_INVOKEIDLIST;
+        use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
+        use windows::core::PCWSTR;
+
+        let path_wide: Vec<u16> = OsStr::new(path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let verb_wide: Vec<u16> = "properties\0".encode_utf16().collect();
+
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_INVOKEIDLIST,
+            hwnd: HWND(std::ptr::null_mut()),
+            lpVerb: PCWSTR(verb_wide.as_ptr()),
+            lpFile: PCWSTR(path_wide.as_ptr()),
+            lpParameters: PCWSTR::null(),
+            lpDirectory: PCWSTR::null(),
+            nShow: 1,
+            ..Default::default()
+        };
+
+        unsafe { ShellExecuteExW(&mut info).map_err(|e| e.to_string()) }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1315,21 +1434,37 @@ fn open_windows_properties(path: &str) -> Result<(), String> {
 
 // ── Windows-specific shell helpers ──────────────────────────────────────────
 
-/// Run a file elevated via PowerShell Start-Process -Verb RunAs.
+/// Run a file elevated via ShellExecuteExW "runas" — triggers UAC immediately, no PowerShell spawn.
 fn run_as_admin(path: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let escaped = path.replace('\'', "''");
-        ProcessCommand::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!("Start-Process -FilePath '{}' -Verb RunAs", escaped),
-            ])
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("Run as Administrator failed: {e}"))
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
+        use windows::core::PCWSTR;
+
+        let path_wide: Vec<u16> = OsStr::new(path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let verb_wide: Vec<u16> = "runas\0".encode_utf16().collect();
+
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: Default::default(),
+            hwnd: HWND(std::ptr::null_mut()),
+            lpVerb: PCWSTR(verb_wide.as_ptr()),
+            lpFile: PCWSTR(path_wide.as_ptr()),
+            lpParameters: PCWSTR::null(),
+            lpDirectory: PCWSTR::null(),
+            nShow: 1,
+            ..Default::default()
+        };
+
+        unsafe {
+            ShellExecuteExW(&mut info).map_err(|e| format!("Run as Administrator failed: {e}"))
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1378,6 +1513,77 @@ fn open_more_options(path: &str, _ui: &MainWindow) -> Result<(), String> {
     reveal_in_folder(path.to_string())
 }
 
+fn open_with_dialog(path: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        ProcessCommand::new("rundll32.exe")
+            .args(["shell32.dll,OpenAs_RunDLL", path])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err("Open With is only available on Windows.".to_string())
+    }
+}
+
+fn defender_scan_path(path: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        ProcessCommand::new("powershell")
+            .arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-Command")
+            .arg("Start-MpScan -ScanType CustomScan -ScanPath $args[0]")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err("Microsoft Defender scan is only available on Windows.".to_string())
+    }
+}
+
+fn shell_verb_summary(path: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        match windows_integration::get_context_menu_actions(path) {
+            Ok(actions) if !actions.is_empty() => actions
+                .iter()
+                .map(|action| {
+                    format!(
+                        "{}. {}{}",
+                        action.id,
+                        action.name,
+                        action
+                            .help_text
+                            .as_ref()
+                            .map(|text| format!(" - {text}"))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Ok(_) => "No shell verbs were reported for this item.".to_string(),
+            Err(error) => error,
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        "Shell verbs are Windows-specific.".to_string()
+    }
+}
+
 fn cloud_state_label(path: &str) -> String {
     #[cfg(target_os = "windows")]
     {
@@ -1413,18 +1619,39 @@ fn cloud_state_label(path: &str) -> String {
 fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        ProcessCommand::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", "Set-Clipboard"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                if let Some(stdin) = child.stdin.as_mut() {
-                    stdin.write_all(text.as_bytes())?;
-                }
-                let _ = child.wait();
-                Ok(())
-            })
-            .map_err(|e| e.to_string())
+        use windows::Win32::Foundation::{HANDLE, HWND};
+        use windows::Win32::System::DataExchange::{
+            CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+        };
+        use windows::Win32::System::Memory::{
+            GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
+        };
+
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let byte_count = wide.len() * 2;
+
+        unsafe {
+            let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_count).map_err(|e| e.to_string())?;
+            let ptr = GlobalLock(hmem) as *mut u16;
+            if ptr.is_null() {
+                return Err("GlobalLock failed".to_string());
+            }
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+            let _ = GlobalUnlock(hmem);
+
+            OpenClipboard(HWND(std::ptr::null_mut())).map_err(|e| e.to_string())?;
+            if let Err(e) = EmptyClipboard() {
+                let _ = CloseClipboard();
+                return Err(e.to_string());
+            }
+            const CF_UNICODETEXT: u32 = 13;
+            if let Err(e) = SetClipboardData(CF_UNICODETEXT, HANDLE(hmem.0)) {
+                let _ = CloseClipboard();
+                return Err(e.to_string());
+            }
+            CloseClipboard().map_err(|e| e.to_string())?;
+            Ok(())
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1554,48 +1781,16 @@ fn search_files(
 
     let max = max_results.unwrap_or(400).min(2000);
     if use_indexed.unwrap_or(false) {
-        if let Ok(mut indexed) = windows_index_search_impl(&query, &path, max) {
-            if !indexed.is_empty() {
-                sort_entries(&mut indexed);
-                return Ok(indexed);
-            }
+        let token = state.search_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let (entries, _) = hybrid_search_background(&state, &path, &query, max, token);
+        if state.search_generation.load(Ordering::SeqCst) == token {
+            return Ok(entries);
         }
+        return Ok(Vec::new());
     }
 
     let token = state.search_generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let parsed = Arc::new(parse_query(&query));
-    let generation = state.search_generation.clone();
-
-    // Split into top-level work units so each Rayon thread gets its own
-    // WalkDir, issuing independent I/O requests to the NVMe queue in parallel.
-    let work_units: Vec<PathBuf> = fs::read_dir(&dir)
-        .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).collect())
-        .unwrap_or_default();
-
-    let mut output: Vec<FileEntry> = work_units
-        .into_par_iter()
-        .flat_map_iter(|subtree| {
-            let parsed = Arc::clone(&parsed);
-            let generation = Arc::clone(&generation);
-            WalkDir::new(subtree)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter_map(move |entry| {
-                    if generation.load(Ordering::Relaxed) != token {
-                        return None;
-                    }
-                    let entry_path = entry.path().to_path_buf();
-                    let metadata = entry.metadata().ok()?;
-                    if matches_query(&entry_path, &metadata, &parsed) {
-                        Some(path_to_entry(&entry_path, &metadata))
-                    } else {
-                        None
-                    }
-                })
-        })
-        .take_any(max)
-        .collect();
+    let mut output = live_search_scan(&state, &path, &query, max, token);
 
     if state.search_generation.load(Ordering::SeqCst) != token {
         return Ok(Vec::new());
@@ -1691,8 +1886,113 @@ fn windows_index_search(
 ) -> Result<Vec<FileEntry>, String> {
     let mut entries =
         windows_index_search_impl(&query, &path, max_results.unwrap_or(400).min(2000))?;
+    let _ = upsert_index_entries(&entries);
     sort_entries(&mut entries);
     Ok(entries)
+}
+
+fn merge_search_entries(target: &mut Vec<FileEntry>, incoming: Vec<FileEntry>, max: usize) {
+    let mut seen: HashSet<String> = target
+        .iter()
+        .map(|entry| cache_key_str(&entry.path))
+        .collect();
+    for entry in incoming {
+        if target.len() >= max {
+            break;
+        }
+        if seen.insert(cache_key_str(&entry.path)) {
+            target.push(entry);
+        }
+    }
+}
+
+fn live_search_scan(
+    state: &AppState,
+    root: &str,
+    query: &str,
+    max: usize,
+    token: u64,
+) -> Vec<FileEntry> {
+    let dir = PathBuf::from(root);
+    let parsed = Arc::new(parse_query(query));
+    let generation = state.search_generation.clone();
+    let work_units: Vec<PathBuf> = fs::read_dir(&dir)
+        .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).collect())
+        .unwrap_or_default();
+
+    let mut output: Vec<FileEntry> = work_units
+        .into_par_iter()
+        .flat_map_iter(|subtree| {
+            let parsed = Arc::clone(&parsed);
+            let generation = Arc::clone(&generation);
+            WalkDir::new(subtree)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter_map(move |entry| {
+                    if generation.load(Ordering::Relaxed) != token {
+                        return None;
+                    }
+                    let entry_path = entry.path().to_path_buf();
+                    let metadata = entry.metadata().ok()?;
+                    if matches_query(&entry_path, &metadata, &parsed) {
+                        Some(path_to_entry(&entry_path, &metadata))
+                    } else {
+                        None
+                    }
+                })
+        })
+        .take_any(max)
+        .collect();
+    sort_entries(&mut output);
+    output
+}
+
+fn hybrid_search_background(
+    state: &AppState,
+    root: &str,
+    query: &str,
+    max: usize,
+    token: u64,
+) -> (Vec<FileEntry>, String) {
+    let mut results = index_search(root, query, max).unwrap_or_default();
+    let mut source = if results.is_empty() {
+        "live scan".to_string()
+    } else {
+        "Pathfinder index".to_string()
+    };
+
+    if state.search_generation.load(Ordering::Relaxed) != token {
+        return (Vec::new(), "cancelled".to_string());
+    }
+
+    if let Ok(windows_results) = windows_index_search_impl(query, root, max) {
+        if !windows_results.is_empty() {
+            let _ = upsert_index_entries(&windows_results);
+            merge_search_entries(&mut results, windows_results, max);
+            source = "Pathfinder index + Windows Search".to_string();
+        }
+    }
+
+    if state.search_generation.load(Ordering::Relaxed) != token {
+        return (Vec::new(), "cancelled".to_string());
+    }
+
+    if results.len() < max.min(80) {
+        let live = live_search_scan(state, root, query, max.saturating_sub(results.len()), token);
+        if !live.is_empty() {
+            let _ = upsert_index_entries(&live);
+            merge_search_entries(&mut results, live, max);
+            source = if source.contains("Windows") {
+                "Pathfinder index + Windows Search + live scan".to_string()
+            } else {
+                "Pathfinder index + live scan".to_string()
+            };
+        }
+    }
+
+    sort_entries(&mut results);
+    (results, source)
 }
 
 #[tauri::command]
@@ -1718,28 +2018,276 @@ fn read_preview(
     Ok(content)
 }
 
-fn archive_listing_preview(path: &Path, max_items: usize) -> Result<String, String> {
-    let ext = extension(path);
-    if ext != "zip" {
-        return Ok(format!(
-            "{} archive preview is available through Extract Here or Open in Explorer. Inline listing currently supports ZIP files.",
-            ext.to_uppercase()
-        ));
+fn find_7z() -> Option<PathBuf> {
+    if ProcessCommand::new("7z").arg("i").output().is_ok() {
+        return Some(PathBuf::from("7z"));
     }
+    #[cfg(target_os = "windows")]
+    {
+        for candidate in [
+            r"C:\Program Files\7-Zip\7z.exe",
+            r"C:\Program Files (x86)\7-Zip\7z.exe",
+        ] {
+            let path = PathBuf::from(candidate);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
 
+fn list_zip_archive(path: &Path, max_items: usize) -> Result<Vec<ArchiveEntry>, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    let mut lines = Vec::new();
+    let mut entries = Vec::new();
     for i in 0..archive.len().min(max_items) {
         let entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        lines.push(format!(
-            "{}  {}",
-            format_size_short(entry.size()),
-            entry.name()
-        ));
+        entries.push(ArchiveEntry {
+            name: entry.name().to_string(),
+            size: entry.size(),
+            is_dir: entry.is_dir(),
+            encrypted: entry.encrypted(),
+        });
     }
-    if archive.len() > max_items {
-        lines.push(format!("... {} more entries", archive.len() - max_items));
+    Ok(entries)
+}
+
+fn list_7z_archive(path: &Path, max_items: usize) -> Result<Vec<ArchiveEntry>, String> {
+    let seven_zip = find_7z().ok_or_else(|| "7-Zip was not found on this system.".to_string())?;
+    let output = ProcessCommand::new(seven_zip)
+        .arg("l")
+        .arg("-slt")
+        .arg(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let mut entries = Vec::new();
+    let mut name = String::new();
+    let mut size = 0_u64;
+    let mut is_dir = false;
+    let mut encrypted = false;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(value) = line.strip_prefix("Path = ") {
+            if !name.is_empty() && entries.len() < max_items {
+                entries.push(ArchiveEntry {
+                    name: std::mem::take(&mut name),
+                    size,
+                    is_dir,
+                    encrypted,
+                });
+            }
+            name = value.to_string();
+            size = 0;
+            is_dir = false;
+            encrypted = false;
+        } else if let Some(value) = line.strip_prefix("Size = ") {
+            size = value.trim().parse().unwrap_or(0);
+        } else if let Some(value) = line.strip_prefix("Folder = ") {
+            is_dir = value.trim() == "+";
+        } else if let Some(value) = line.strip_prefix("Encrypted = ") {
+            encrypted = value.trim() == "+";
+        }
+    }
+    if !name.is_empty() && entries.len() < max_items {
+        entries.push(ArchiveEntry {
+            name,
+            size,
+            is_dir,
+            encrypted,
+        });
+    }
+    entries.retain(|entry| entry.name != path.to_string_lossy());
+    Ok(entries)
+}
+
+fn list_archive_entries(path: &Path, max_items: usize) -> Result<Vec<ArchiveEntry>, String> {
+    let ext = extension(path);
+    if ext == "zip" {
+        list_zip_archive(path, max_items)
+    } else {
+        list_7z_archive(path, max_items)
+    }
+}
+
+fn normalize_archive_prefix(value: &str) -> String {
+    value
+        .replace('\\', "/")
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn archive_virtual_path(archive_path: &str, prefix: &str) -> String {
+    let encoded = general_purpose::URL_SAFE_NO_PAD.encode(archive_path.as_bytes());
+    let prefix = normalize_archive_prefix(prefix);
+    if prefix.is_empty() {
+        format!("{ARCHIVE_SCHEME}{encoded}!/")
+    } else {
+        format!("{ARCHIVE_SCHEME}{encoded}!/{prefix}")
+    }
+}
+
+fn parse_archive_virtual_path(path: &str) -> Option<(String, String)> {
+    let rest = path.strip_prefix(ARCHIVE_SCHEME)?;
+    let (encoded, prefix) = rest.split_once("!/")?;
+    let bytes = general_purpose::URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    let archive_path = String::from_utf8(bytes).ok()?;
+    Some((archive_path, normalize_archive_prefix(prefix)))
+}
+
+fn archive_display_path(archive_path: &str, prefix: &str) -> String {
+    let prefix = normalize_archive_prefix(prefix);
+    if prefix.is_empty() {
+        format!("{archive_path}!/")
+    } else {
+        format!("{archive_path}!/{prefix}")
+    }
+}
+
+fn archive_parent_prefix(prefix: &str) -> String {
+    let prefix = normalize_archive_prefix(prefix);
+    prefix
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.to_string())
+        .unwrap_or_default()
+}
+
+fn archive_breadcrumbs(archive_path: &str, prefix: &str) -> Vec<ChoiceItem> {
+    let mut crumbs = vec![ChoiceItem {
+        id: ss(archive_virtual_path(archive_path, "")),
+        label: ss(Path::new(archive_path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| archive_path.to_string())),
+        description: ss("Archive root"),
+        color: rgba_u8(0, 0, 0, 0.0),
+    }];
+
+    let mut accumulated = String::new();
+    for part in normalize_archive_prefix(prefix).split('/') {
+        if part.is_empty() {
+            continue;
+        }
+        if !accumulated.is_empty() {
+            accumulated.push('/');
+        }
+        accumulated.push_str(part);
+        crumbs.push(ChoiceItem {
+            id: ss(archive_virtual_path(archive_path, &accumulated)),
+            label: ss(part),
+            description: ss("Archive folder"),
+            color: rgba_u8(0, 0, 0, 0.0),
+        });
+    }
+    crumbs
+}
+
+fn list_archive_virtual_dir(archive_path: &str, prefix: &str) -> Result<Vec<FileEntry>, String> {
+    let archive = Path::new(archive_path);
+    let modified = fs::metadata(archive)
+        .map(|m| unix_secs(m.modified()))
+        .unwrap_or(0);
+    let prefix = normalize_archive_prefix(prefix);
+    let prefix_with_slash = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}/")
+    };
+    let mut children: HashMap<String, FileEntry> = HashMap::new();
+
+    for entry in list_archive_entries(archive, 100_000)? {
+        let full = normalize_archive_prefix(&entry.name);
+        if full.is_empty() {
+            continue;
+        }
+        if !prefix.is_empty() && full != prefix && !full.starts_with(&prefix_with_slash) {
+            continue;
+        }
+        let rest = if prefix.is_empty() {
+            full.as_str()
+        } else {
+            full.strip_prefix(&prefix_with_slash).unwrap_or_default()
+        };
+        if rest.is_empty() {
+            continue;
+        }
+
+        let (name, is_nested) = rest
+            .split_once('/')
+            .map(|(name, _)| (name.to_string(), true))
+            .unwrap_or_else(|| (rest.to_string(), false));
+        if name.is_empty() {
+            continue;
+        }
+        let child_prefix = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let kind = if is_nested || entry.is_dir {
+            FileKind::Directory
+        } else {
+            FileKind::File
+        };
+        let existing_is_dir = children
+            .get(&name)
+            .map(|item| item.kind == FileKind::Directory)
+            .unwrap_or(false);
+        if existing_is_dir && kind != FileKind::Directory {
+            continue;
+        }
+
+        let extension = if kind == FileKind::File {
+            Path::new(&name)
+                .extension()
+                .map(|ext| ext.to_string_lossy().to_lowercase())
+        } else {
+            None
+        };
+        children.insert(
+            name.clone(),
+            FileEntry {
+                path: archive_virtual_path(archive_path, &child_prefix),
+                name_lower: name.to_lowercase(),
+                name,
+                kind,
+                size: if is_nested { 0 } else { entry.size },
+                modified,
+                extension,
+            },
+        );
+    }
+
+    let mut entries: Vec<FileEntry> = children.into_values().collect();
+    sort_entries(&mut entries);
+    Ok(entries)
+}
+
+fn archive_listing_preview(path: &Path, max_items: usize) -> Result<String, String> {
+    let entries = list_archive_entries(path, max_items)?;
+    let mut lines = entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}{}  {}",
+                if entry.is_dir {
+                    "<dir>".to_string()
+                } else {
+                    format_size_short(entry.size)
+                },
+                if entry.encrypted { " locked" } else { "" },
+                entry.name
+            )
+        })
+        .collect::<Vec<_>>();
+    if entries.len() >= max_items {
+        lines.push(format!("... showing first {max_items} entries"));
     }
     Ok(lines.join("\n"))
 }
@@ -1777,7 +2325,7 @@ fn read_preview_uncached(
 
     let ext = extension(path_buf);
     if ext == "svg" {
-        let limit = max_bytes.unwrap_or(512 * 1024).min(2 * 1024 * 1024);
+        let limit = max_bytes.unwrap_or(64 * 1024).min(64 * 1024);
         let mut file = File::open(path_buf).map_err(|e| e.to_string())?;
         let mut bytes = Vec::with_capacity(limit + 1);
         std::io::Read::by_ref(&mut file)
@@ -1836,11 +2384,30 @@ fn read_preview_uncached(
     }
 
     if let Some(mime) = mime_for_ext(&ext) {
-        if metadata.len() > 20 * 1024 * 1024 {
+        // Inline embedding limit: 8 MB. Larger images get a metadata preview with dimensions
+        // read from the image header only — no full decode needed.
+        const INLINE_MAX: u64 = 8 * 1024 * 1024;
+        if metadata.len() > INLINE_MAX {
+            let dims = image::ImageReader::open(path_buf)
+                .ok()
+                .and_then(|r| r.with_guessed_format().ok())
+                .and_then(|r| r.into_dimensions().ok());
+            let text = match dims {
+                Some((w, h)) => format!(
+                    "Kind: Image\nExtension: {}\nDimensions: {} x {}\nSize: {}\nModified: {}\nPath: {}",
+                    ext.to_uppercase(),
+                    w,
+                    h,
+                    format_size_short(metadata.len()),
+                    format_modified(unix_secs(metadata.modified())),
+                    path_buf.display()
+                ),
+                None => generic_metadata_preview(path_buf, metadata, "Image"),
+            };
             return Ok(PreviewContent {
                 kind: "image-too-large".to_string(),
                 mime: Some(mime.to_string()),
-                text: None,
+                text: Some(text),
                 data_url: None,
                 truncated: true,
             });
@@ -1861,7 +2428,7 @@ fn read_preview_uncached(
     }
 
     if is_text_ext(&ext) {
-        let limit = max_bytes.unwrap_or(512 * 1024).min(2 * 1024 * 1024);
+        let limit = max_bytes.unwrap_or(64 * 1024).min(64 * 1024);
         let mut file = File::open(path_buf).map_err(|e| e.to_string())?;
         let mut bytes = Vec::with_capacity(limit + 1);
         std::io::Read::by_ref(&mut file)
@@ -1870,6 +2437,17 @@ fn read_preview_uncached(
             .map_err(|e| e.to_string())?;
         let truncated = bytes.len() > limit;
         bytes.truncate(limit);
+
+        // A null byte in the first 512 bytes means binary despite the extension.
+        if memchr::memchr(0, &bytes[..bytes.len().min(512)]).is_some() {
+            return Ok(PreviewContent {
+                kind: "binary".to_string(),
+                mime: None,
+                text: Some(generic_metadata_preview(path_buf, metadata, "Binary file")),
+                data_url: None,
+                truncated: false,
+            });
+        }
 
         return Ok(PreviewContent {
             kind: "text".to_string(),
@@ -1891,8 +2469,13 @@ fn read_preview_uncached(
 
 #[tauri::command]
 fn warm_preview_cache(state: State<'_, AppState>, paths: Vec<String>, max_bytes: Option<usize>) {
+    if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= MAX_HEAVY_OPS {
+        ACTIVE_HEAVY_OPS.fetch_sub(1, Ordering::SeqCst);
+        return;
+    }
     let app_state = state.inner().clone();
     std::thread::spawn(move || {
+        let _guard = HeavyOpGuard;
         paths.into_par_iter().for_each(|path| {
             let path_buf = PathBuf::from(&path);
             let Ok(metadata) = fs::metadata(&path_buf) else {
@@ -2349,11 +2932,16 @@ fn get_git_status(state: State<'_, AppState>, path: String) -> Result<GitStatusM
 
 #[tauri::command]
 fn get_image_info(path: String) -> Result<ImageInfo, String> {
-    let img = image::open(&path).map_err(|e| e.to_string())?;
     let ext = extension(Path::new(&path));
+    // Read only the image header for dimensions — avoids decoding the full file.
+    let (width, height) = image::ImageReader::open(&path)
+        .ok()
+        .and_then(|r| r.with_guessed_format().ok())
+        .and_then(|r| r.into_dimensions().ok())
+        .ok_or_else(|| "Could not read image dimensions".to_string())?;
     Ok(ImageInfo {
-        width: img.width(),
-        height: img.height(),
+        width,
+        height,
         format: ext.to_uppercase(),
     })
 }
@@ -2362,35 +2950,87 @@ fn get_image_info(path: String) -> Result<ImageInfo, String> {
 
 #[tauri::command]
 fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEntry>>, String> {
+    if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= MAX_HEAVY_OPS {
+        ACTIVE_HEAVY_OPS.fetch_sub(1, Ordering::SeqCst);
+        return Err("Too many operations in progress. Please wait.".to_string());
+    }
+    let _guard = HeavyOpGuard;
     let dir = PathBuf::from(&path);
     let min = min_size.unwrap_or(4096);
 
-    let items: Vec<(String, FileEntry)> = WalkDir::new(&dir)
+    // Phase 1: group by exact size — unique sizes cannot be duplicates.
+    // WalkDir entry.metadata() is cache-backed on Windows (FindFirstFileExW), zero extra syscalls.
+    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    for entry in WalkDir::new(&dir)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
-        .par_bridge()
-        .filter_map(|entry| {
-            let p = entry.path().to_path_buf();
-            let meta = fs::metadata(&p).ok()?;
-            if meta.len() < min {
-                return None;
+    {
+        if let Ok(m) = entry.metadata() {
+            let size = m.len();
+            if size >= min {
+                by_size
+                    .entry(size)
+                    .or_default()
+                    .push(entry.path().to_path_buf());
             }
-            let mut file = File::open(&p).ok()?;
-            let mut hasher = Sha256::new();
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = file.read(&mut buf).ok()?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buf[..n]);
-            }
-            let hash = hex::encode(hasher.finalize());
-            Some((hash, path_to_entry(&p, &meta)))
-        })
+        }
+    }
+
+    let size_candidates: Vec<PathBuf> = by_size
+        .into_values()
+        .filter(|v| v.len() > 1)
+        .flatten()
         .collect();
+
+    if size_candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Phase 2: partial hash (first 64 KB) — eliminates near-size false matches cheaply.
+    let partial_results: Vec<(String, PathBuf)> = THUMBNAIL_POOL.install(|| {
+        size_candidates
+            .par_iter()
+            .filter_map(|p| quick_sha256(p, 64 * 1024).map(|h| (h, p.clone())))
+            .collect()
+    });
+
+    let mut by_partial: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for (hash, p) in partial_results {
+        by_partial.entry(hash).or_default().push(p);
+    }
+
+    let full_candidates: Vec<PathBuf> = by_partial
+        .into_values()
+        .filter(|v| v.len() > 1)
+        .flatten()
+        .collect();
+
+    if full_candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Phase 3: full hash — only files that survived both prior filters.
+    let items: Vec<(String, FileEntry)> = THUMBNAIL_POOL.install(|| {
+        full_candidates
+            .par_iter()
+            .filter_map(|p| {
+                let meta = fs::metadata(p).ok()?;
+                let mut file = File::open(p).ok()?;
+                let mut hasher = Sha256::new();
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    let n = file.read(&mut buf).ok()?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+                Some((hex::encode(hasher.finalize()), path_to_entry(p, &meta)))
+            })
+            .collect()
+    });
 
     let mut map: HashMap<String, Vec<FileEntry>> = HashMap::new();
     for (hash, entry) in items {
@@ -2498,48 +3138,170 @@ fn get_storage_tree(path: String, max_depth: Option<u32>) -> Result<StorageNode,
 
 // ───── archives ─────
 
-#[tauri::command]
-fn extract_archive(state: State<'_, AppState>, path: String, dest: String) -> Result<(), String> {
-    let src = PathBuf::from(&path);
-    let dst = PathBuf::from(&dest);
-    fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+fn safe_archive_out_path(dest: &Path, entry_name: &str) -> Option<PathBuf> {
+    let relative = Path::new(entry_name);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(dest.join(relative))
+}
 
-    let file = File::open(&src).map_err(|e| e.to_string())?;
+fn extract_zip_archive(
+    state: &AppState,
+    src: &Path,
+    dest: &Path,
+    selected: Option<&HashSet<String>>,
+    conflict: &str,
+) -> Result<(), String> {
+    let file = File::open(src).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let total = src.metadata().map(|m| m.len()).unwrap_or(0);
+    let op_id = state.queue_start(
+        "extract",
+        &src.to_string_lossy(),
+        Some(&dest.to_string_lossy()),
+        total,
+    );
+    let started = Instant::now();
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        let out = dst.join(entry.name());
+        let name = entry.name().to_string();
+        if let Some(items) = selected {
+            let normalized_name = normalize_archive_prefix(&name);
+            let matched = items.iter().any(|item| {
+                normalized_name == *item || normalized_name.starts_with(&format!("{item}/"))
+            });
+            if !matched {
+                continue;
+            }
+        }
+        let Some(mut out) = safe_archive_out_path(dest, &name) else {
+            continue;
+        };
+        if out.exists() {
+            match conflict {
+                "replace" => {
+                    if out.is_dir() {
+                        fs::remove_dir_all(&out).map_err(|e| e.to_string())?;
+                    } else {
+                        fs::remove_file(&out).map_err(|e| e.to_string())?;
+                    }
+                }
+                "skip" => continue,
+                _ => out = keep_both_destination(&out),
+            }
+        }
         if entry.is_dir() {
             fs::create_dir_all(&out).map_err(|e| e.to_string())?;
         } else {
-            if let Some(p) = out.parent() {
-                fs::create_dir_all(p).map_err(|e| e.to_string())?;
+            if let Some(parent) = out.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
             let mut outfile = File::create(&out).map_err(|e| e.to_string())?;
             io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
         }
     }
-    state.invalidate_path(&dst);
+
+    state.invalidate_path(dest);
+    state.queue_finish(op_id, "done", "Extracted", total, started.elapsed());
     Ok(())
 }
 
-#[tauri::command]
-fn create_archive(
-    state: State<'_, AppState>,
-    paths: Vec<String>,
-    dest: String,
+fn extract_with_7z(
+    state: &AppState,
+    src: &Path,
+    dest: &Path,
+    selected: &[String],
+    password: Option<&str>,
+    conflict: &str,
 ) -> Result<(), String> {
-    let dst = PathBuf::from(&dest);
-    if dst.exists() {
-        return Err(format!("'{}' already exists", dst.display()));
+    let seven_zip = find_7z().ok_or_else(|| "7-Zip was not found on this system.".to_string())?;
+    fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let total = src.metadata().map(|m| m.len()).unwrap_or(0);
+    let op_id = state.queue_start(
+        "extract",
+        &src.to_string_lossy(),
+        Some(&dest.to_string_lossy()),
+        total,
+    );
+    let started = Instant::now();
+    let overwrite = match conflict {
+        "replace" => "-aoa",
+        "skip" => "-aos",
+        _ => "-aou",
+    };
+    let mut command = ProcessCommand::new(seven_zip);
+    command
+        .arg("x")
+        .arg(src)
+        .arg(format!("-o{}", dest.display()))
+        .arg(overwrite);
+    if let Some(password) = password {
+        command.arg(format!("-p{password}"));
     }
-    let file = File::create(&dst).map_err(|e| e.to_string())?;
+    for item in selected {
+        command.arg(item);
+    }
+    let output = command.output().map_err(|e| e.to_string())?;
+    if output.status.success() {
+        state.invalidate_path(dest);
+        state.queue_finish(op_id, "done", "Extracted", total, started.elapsed());
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr).to_string();
+        state.queue_finish(op_id, "failed", error.clone(), 0, started.elapsed());
+        Err(error)
+    }
+}
+
+fn extract_archive_impl(
+    state: &AppState,
+    path: &str,
+    dest: &str,
+    selected: &[String],
+    password: Option<&str>,
+    conflict: &str,
+) -> Result<(), String> {
+    let src = PathBuf::from(path);
+    let dst = PathBuf::from(dest);
+    fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+    let ext = extension(&src);
+    if ext == "zip" && password.unwrap_or_default().is_empty() {
+        let selected_set = if selected.is_empty() {
+            None
+        } else {
+            Some(selected.iter().cloned().collect::<HashSet<_>>())
+        };
+        extract_zip_archive(state, &src, &dst, selected_set.as_ref(), conflict)
+    } else {
+        extract_with_7z(state, &src, &dst, selected, password, conflict)
+    }
+}
+
+fn archive_has_encrypted_entries(path: &str) -> bool {
+    list_archive_entries(Path::new(path), 2_000)
+        .map(|entries| entries.iter().any(|entry| entry.encrypted))
+        .unwrap_or(false)
+}
+
+fn create_zip_archive_impl(state: &AppState, paths: &[String], dest: &Path) -> Result<(), String> {
+    let total = paths
+        .iter()
+        .map(|path| folder_size_quick(Path::new(path), 25_000))
+        .sum();
+    let op_id = state.queue_start("archive", "", Some(&dest.to_string_lossy()), total);
+    let started = Instant::now();
+    let file = File::create(dest).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    for p in &paths {
+    for p in paths {
         let src = PathBuf::from(p);
         let name = src
             .file_name()
@@ -2549,7 +3311,12 @@ fn create_archive(
         if src.is_dir() {
             for entry in WalkDir::new(&src).into_iter().filter_map(Result::ok) {
                 let rel = entry.path().strip_prefix(&src).unwrap_or(entry.path());
-                let entry_name = format!("{}/{}", name, rel.to_string_lossy().replace('\\', "/"));
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                let entry_name = if rel.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name}/{rel}")
+                };
                 if entry.file_type().is_dir() {
                     zip.add_directory(&entry_name, opts)
                         .map_err(|e| e.to_string())?;
@@ -2567,8 +3334,105 @@ fn create_archive(
         }
     }
     zip.finish().map_err(|e| e.to_string())?;
-    state.invalidate_path(&dst);
+    state.invalidate_path(dest);
+    state.queue_finish(op_id, "done", "Archive created", total, started.elapsed());
     Ok(())
+}
+
+fn create_archive_impl(state: &AppState, paths: &[String], dest: &str) -> Result<(), String> {
+    let dst = PathBuf::from(dest);
+    if dst.exists() {
+        return Err(format!("'{}' already exists", dst.display()));
+    }
+    let ext = archive_format_from_path(&dst);
+    if ext == "zip" {
+        return create_zip_archive_impl(state, paths, &dst);
+    }
+
+    let seven_zip = find_7z().ok_or_else(|| {
+        format!(
+            "{} creation needs 7-Zip installed or available on PATH.",
+            ext.to_uppercase()
+        )
+    })?;
+    let total = paths
+        .iter()
+        .map(|path| folder_size_quick(Path::new(path), 25_000))
+        .sum();
+    let op_id = state.queue_start("archive", "", Some(&dst.to_string_lossy()), total);
+    let started = Instant::now();
+    let archive_type = match ext.as_str() {
+        "7z" => "7z",
+        "tar" | "tar.gz" | "tgz" => "tgzip",
+        _ => "7z",
+    };
+    let mut command = ProcessCommand::new(seven_zip);
+    command.arg("a").arg(format!("-t{archive_type}")).arg(&dst);
+    for path in paths {
+        command.arg(path);
+    }
+    let output = command.output().map_err(|e| e.to_string())?;
+    if output.status.success() {
+        state.invalidate_path(&dst);
+        state.queue_finish(op_id, "done", "Archive created", total, started.elapsed());
+        Ok(())
+    } else {
+        let error = String::from_utf8_lossy(&output.stderr).to_string();
+        state.queue_finish(op_id, "failed", error.clone(), 0, started.elapsed());
+        Err(error)
+    }
+}
+
+fn archive_format_from_path(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if name.ends_with(".tar.gz") {
+        "tar.gz".to_string()
+    } else if name.ends_with(".tgz") {
+        "tgz".to_string()
+    } else {
+        extension(path)
+    }
+}
+
+#[tauri::command]
+fn extract_archive(state: State<'_, AppState>, path: String, dest: String) -> Result<(), String> {
+    extract_archive_impl(&state, &path, &dest, &[], None, "keep")
+}
+
+#[tauri::command]
+fn list_archive(path: String, max_items: Option<usize>) -> Result<Vec<ArchiveEntry>, String> {
+    list_archive_entries(Path::new(&path), max_items.unwrap_or(500).min(5_000))
+}
+
+#[tauri::command]
+fn extract_archive_selected(
+    state: State<'_, AppState>,
+    path: String,
+    dest: String,
+    selected: Vec<String>,
+    password: Option<String>,
+    conflict: Option<String>,
+) -> Result<(), String> {
+    extract_archive_impl(
+        &state,
+        &path,
+        &dest,
+        &selected,
+        password.as_deref(),
+        conflict.as_deref().unwrap_or("keep"),
+    )
+}
+
+#[tauri::command]
+fn create_archive(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    dest: String,
+) -> Result<(), String> {
+    create_archive_impl(&state, &paths, &dest)
 }
 
 // ───── saved searches ─────
@@ -2837,26 +3701,54 @@ fn fetch_thumbnails(
     let app_state = state.inner().clone();
     let px = size.unwrap_or(160).clamp(64, 512);
 
-    paths
-        .par_iter()
-        .filter_map(|path| {
-            let path_buf = PathBuf::from(path);
-            if !is_image_ext(&extension(&path_buf)) {
-                return None;
-            }
-            let metadata = fs::metadata(&path_buf).ok()?;
-            if metadata.len() > 30 * 1024 * 1024 {
-                return None;
-            }
-            let mtime = unix_secs(metadata.modified());
-            let key = format!("thumb|{}|{}|{}", cache_key(&path_buf), mtime, px);
-            let disk_key = thumbnail_cache_key(&path_buf, mtime, px);
+    THUMBNAIL_POOL.install(|| {
+        paths
+            .par_iter()
+            .filter_map(|path| {
+                let path_buf = PathBuf::from(path);
+                if !is_image_ext(&extension(&path_buf)) {
+                    return None;
+                }
+                let metadata = fs::metadata(&path_buf).ok()?;
+                if metadata.len() > 30 * 1024 * 1024 {
+                    return None;
+                }
+                let mtime = unix_secs(metadata.modified());
+                let key = format!("thumb|{}|{}|{}", cache_key(&path_buf), mtime, px);
+                let disk_key = thumbnail_cache_key(&path_buf, mtime, px);
 
-            if let Some(cached) = app_state.preview(&key) {
-                return cached.data_url.map(|url| (path.clone(), url));
-            }
+                if let Some(cached) = app_state.preview(&key) {
+                    return cached.data_url.map(|url| (path.clone(), url));
+                }
 
-            if let Some(data_url) = read_thumbnail_from_disk(&disk_key, mtime, px) {
+                if let Some(data_url) = read_thumbnail_from_disk(&disk_key, mtime, px) {
+                    app_state.store_preview(
+                        key,
+                        PreviewContent {
+                            kind: "image".to_string(),
+                            mime: Some("image/jpeg".to_string()),
+                            text: None,
+                            data_url: Some(data_url.clone()),
+                            truncated: false,
+                        },
+                    );
+                    return Some((path.clone(), data_url));
+                }
+
+                let img = image::open(&path_buf).ok()?;
+                let thumb = img.thumbnail(px, px);
+                let mut buf = Vec::new();
+                thumb
+                    .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+                    .ok()?;
+                let data_url = store_thumbnail_on_disk(
+                    &path_buf,
+                    mtime,
+                    px,
+                    &buf,
+                    THUMBNAIL_CACHE_LIMIT_BYTES,
+                )
+                .unwrap_or_else(|| thumbnail_data_url(&buf));
                 app_state.store_preview(
                     key,
                     PreviewContent {
@@ -2867,31 +3759,10 @@ fn fetch_thumbnails(
                         truncated: false,
                     },
                 );
-                return Some((path.clone(), data_url));
-            }
-
-            let img = image::open(&path_buf).ok()?;
-            let thumb = img.thumbnail(px, px);
-            let mut buf = Vec::new();
-            thumb
-                .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
-                .ok()?;
-            let data_url =
-                store_thumbnail_on_disk(&path_buf, mtime, px, &buf, THUMBNAIL_CACHE_LIMIT_BYTES)
-                    .unwrap_or_else(|| thumbnail_data_url(&buf));
-            app_state.store_preview(
-                key,
-                PreviewContent {
-                    kind: "image".to_string(),
-                    mime: Some("image/jpeg".to_string()),
-                    text: None,
-                    data_url: Some(data_url.clone()),
-                    truncated: false,
-                },
-            );
-            Some((path.clone(), data_url))
-        })
-        .collect()
+                Some((path.clone(), data_url))
+            })
+            .collect()
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2984,6 +3855,12 @@ enum PendingPrompt {
     NewFolder,
     Note(String),
     Archive,
+    ArchivePassword {
+        archive_path: String,
+        dest: String,
+        selected: Vec<String>,
+        conflict: String,
+    },
     NewTemplate(FileTemplate),
     CompareFolder(String),
     BatchRename(Vec<String>),
@@ -2999,6 +3876,7 @@ struct NativeController {
     current_path: String,
     files: Vec<FileEntry>,
     visible_files: Vec<FileEntry>,
+    active_archive: Option<ArchiveView>,
     selected_index: i32,
     selected_set: std::collections::HashSet<usize>,
     select_anchor: i32,
@@ -3034,6 +3912,10 @@ struct NativeController {
     pending_git_status: Arc<Mutex<Option<Arc<GitStatusMap>>>>,
     operation_ready: Arc<std::sync::atomic::AtomicBool>,
     pending_operation_result: Arc<Mutex<Option<NativeOperationResult>>>,
+    directory_ready: Arc<std::sync::atomic::AtomicBool>,
+    pending_directory_result: Arc<Mutex<Option<NativeDirectoryResult>>>,
+    search_ready: Arc<std::sync::atomic::AtomicBool>,
+    pending_search_result: Arc<Mutex<Option<NativeSearchResult>>>,
 }
 
 #[derive(Clone)]
@@ -3284,6 +4166,14 @@ fn open_index_connection() -> Result<Connection, String> {
         CREATE INDEX IF NOT EXISTS idx_files_name ON files(name COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_files_extension ON files(extension);
 
+        CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
+            path UNINDEXED,
+            parent UNINDEXED,
+            name,
+            extension,
+            tokenize = 'unicode61'
+        );
+
         CREATE TABLE IF NOT EXISTS thumbnail_cache (
             cache_key TEXT PRIMARY KEY,
             source_path TEXT NOT NULL,
@@ -3333,19 +4223,37 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
                 ",
             )
             .map_err(|e| e.to_string())?;
+        let mut delete_fts = tx
+            .prepare("DELETE FROM files_fts WHERE path = ?1")
+            .map_err(|e| e.to_string())?;
+        let mut insert_fts = tx
+            .prepare(
+                "
+                INSERT INTO files_fts(path, parent, name, extension)
+                VALUES(?1, ?2, ?3, ?4)
+                ",
+            )
+            .map_err(|e| e.to_string())?;
 
         for entry in entries {
+            let extension = entry.extension.as_deref().unwrap_or("").to_lowercase();
             upsert
                 .execute(params![
                     entry.path,
                     parent,
                     entry.name,
-                    entry.extension.as_deref().unwrap_or("").to_lowercase(),
+                    extension,
                     i64::from(entry.kind == FileKind::Directory),
                     entry.size as i64,
                     entry.modified as i64,
                     now
                 ])
+                .map_err(|e| e.to_string())?;
+            delete_fts
+                .execute(params![entry.path])
+                .map_err(|e| e.to_string())?;
+            insert_fts
+                .execute(params![entry.path, parent, entry.name, extension])
                 .map_err(|e| e.to_string())?;
         }
     }
@@ -3369,6 +4277,8 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
     for path in stale_paths {
         tx.execute("DELETE FROM files WHERE path = ?1", params![path])
             .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM files_fts WHERE path = ?1", params![path])
+            .map_err(|e| e.to_string())?;
     }
 
     tx.commit().map_err(|e| e.to_string())?;
@@ -3383,10 +4293,142 @@ fn like_escape(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+fn upsert_index_entries(entries: &[FileEntry]) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let mut conn = open_index_connection()?;
+    let now = now_unix_secs() as i64;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    {
+        let mut upsert = tx
+            .prepare(
+                "
+                INSERT INTO files(path, parent, name, extension, is_dir, size, modified, indexed_at)
+                VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(path) DO UPDATE SET
+                    parent = excluded.parent,
+                    name = excluded.name,
+                    extension = excluded.extension,
+                    is_dir = excluded.is_dir,
+                    size = excluded.size,
+                    modified = excluded.modified,
+                    indexed_at = excluded.indexed_at
+                ",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut delete_fts = tx
+            .prepare("DELETE FROM files_fts WHERE path = ?1")
+            .map_err(|e| e.to_string())?;
+        let mut insert_fts = tx
+            .prepare("INSERT INTO files_fts(path, parent, name, extension) VALUES(?1, ?2, ?3, ?4)")
+            .map_err(|e| e.to_string())?;
+
+        for entry in entries {
+            let parent = Path::new(&entry.path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let extension = entry.extension.as_deref().unwrap_or("").to_lowercase();
+            upsert
+                .execute(params![
+                    entry.path,
+                    parent,
+                    entry.name,
+                    extension,
+                    i64::from(entry.kind == FileKind::Directory),
+                    entry.size as i64,
+                    entry.modified as i64,
+                    now
+                ])
+                .map_err(|e| e.to_string())?;
+            delete_fts
+                .execute(params![entry.path])
+                .map_err(|e| e.to_string())?;
+            insert_fts
+                .execute(params![entry.path, parent, entry.name, extension])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn fts_query_for(query: &str) -> Option<String> {
+    let parsed = parse_query(query);
+    let mut terms = parsed.terms;
+    terms.extend(parsed.name);
+    terms.extend(parsed.ext);
+    terms.extend(parsed.kind);
+    let cleaned: Vec<String> = terms
+        .into_iter()
+        .flat_map(|term| {
+            term.split(|c: char| !c.is_alphanumeric())
+                .filter(|part| part.len() >= 2)
+                .map(|part| format!("{}*", part.to_lowercase()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.join(" AND "))
+    }
+}
+
+fn index_search_fts(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, String> {
+    let Some(fts_query) = fts_query_for(query) else {
+        return Ok(Vec::new());
+    };
+    let conn = open_index_connection()?;
+    let root_prefix = format!("{}%", like_escape(root.trim_end_matches(['\\', '/'])));
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT f.path, f.name, f.is_dir, f.size, f.modified, f.extension
+            FROM files f
+            JOIN files_fts ON files_fts.path = f.path
+            WHERE f.path LIKE ?1 ESCAPE '\\'
+              AND files_fts MATCH ?2
+            ORDER BY rank, f.is_dir DESC, f.name COLLATE NOCASE ASC
+            LIMIT ?3
+            ",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![root_prefix, fts_query, max as i64], |row| {
+            let is_dir = row.get::<_, i64>(2)? == 1;
+            let ext = row.get::<_, String>(5)?;
+            let name: String = row.get(1)?;
+            Ok(FileEntry {
+                path: row.get(0)?,
+                name_lower: name.to_lowercase(),
+                name,
+                kind: if is_dir {
+                    FileKind::Directory
+                } else {
+                    FileKind::File
+                },
+                size: row.get::<_, i64>(3)?.max(0) as u64,
+                modified: row.get::<_, i64>(4)?.max(0) as u64,
+                extension: (!ext.is_empty()).then_some(ext),
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
 fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, String> {
     let query = query.trim();
     if query.len() < 2 {
         return Ok(Vec::new());
+    }
+
+    if let Ok(results) = index_search_fts(root, query, max) {
+        if !results.is_empty() {
+            return Ok(results);
+        }
     }
 
     let conn = open_index_connection()?;
@@ -3594,12 +4636,42 @@ fn index_status_for_settings(settings: &NativeSettings) -> IndexStatus {
     status
 }
 
+/// Returns false when the system is on battery with less than 20% charge.
+/// Background indexing should pause in that case to avoid draining the battery.
+fn indexing_permitted() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+        let mut s = SYSTEM_POWER_STATUS::default();
+        if unsafe { GetSystemPowerStatus(&mut s) }.is_err() {
+            return true;
+        }
+        // BatteryFlag 128 = no battery (desktop), 255 = status unknown
+        let no_battery = s.BatteryFlag & 128 != 0 || s.BatteryFlag == 255;
+        let plugged_in = s.ACLineStatus == 1;
+        let charge_ok = s.BatteryLifePercent == 255 || s.BatteryLifePercent >= 20;
+        no_battery || plugged_in || charge_ok
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
+}
+
 fn schedule_index_roots(roots: Vec<String>) {
     if roots.is_empty() {
         return;
     }
     std::thread::spawn(move || {
+        // Skip background indexing when on low battery to avoid draining it.
+        if !indexing_permitted() {
+            return;
+        }
         for root in roots {
+            // Re-check permission periodically between roots.
+            if !indexing_permitted() {
+                break;
+            }
             let root_path = PathBuf::from(&root);
             if !root_path.is_dir() {
                 continue;
@@ -3634,10 +4706,12 @@ fn schedule_index_roots(roots: Vec<String>) {
                     for (parent, entries) in batch {
                         let _ = index_directory_entries(&parent, &entries);
                     }
+                    std::thread::sleep(Duration::from_millis(20));
                 }
             }
             for (parent, entries) in by_parent {
                 let _ = index_directory_entries(&parent, &entries);
+                std::thread::sleep(Duration::from_millis(5));
             }
         }
     });
@@ -3876,6 +4950,16 @@ fn native_list_directory(state: &AppState, path: &str) -> Result<Vec<FileEntry>,
     state.store_directory(path, entries.clone());
     schedule_index_directory(path.to_string(), entries.clone());
     Ok(entries)
+}
+
+fn native_list_directory_page(state: &AppState, path: &str) -> Result<DirectoryPage, String> {
+    if let Some(entries) = state.cached_directory(path) {
+        return Ok(DirectoryPage {
+            entries,
+            partial: false,
+        });
+    }
+    list_directory_chunk(Path::new(path), FIRST_DIRECTORY_CHUNK)
 }
 
 fn native_read_preview(
@@ -4123,8 +5207,8 @@ fn format_modified(secs: u64) -> String {
         format!("{} min ago", diff / 60)
     } else if diff < 86_400 {
         format!("{} hr ago", diff / 3600)
-    } else if diff < 604_800 {
-        format!("{} day ago", diff / 86_400)
+    } else if diff < 172_800 {
+        "1 day ago".to_string()
     } else {
         format!("{} days ago", diff / 86_400)
     }
@@ -4686,10 +5770,10 @@ fn editor_def_from_ui(ui: &MainWindow) -> ThemeDefinition {
 
 #[cfg(target_os = "windows")]
 fn apply_window_finish(ui: &MainWindow, finish: &str) {
-    use i_slint_backend_winit::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use i_slint_backend_winit::WinitWindowAccessor;
+    use i_slint_backend_winit::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
+    use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
 
     const DWMWA_SYSTEMBACKDROP_TYPE_ID: i32 = 38;
     const DWMSBT_MAINWINDOW: i32 = 2;
@@ -4759,6 +5843,9 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Locked File Inspector", "", "locked-file"),
     ("Tools", "Native Properties", "Alt+Enter", "properties"),
     ("Tools", "Show More Options", "", "show-more-options"),
+    ("Tools", "Open With", "", "open-with"),
+    ("Tools", "Scan with Microsoft Defender", "", "defender-scan"),
+    ("Tools", "Shell Verb Bridge", "", "shell-verbs"),
     ("Tools", "Cloud State", "", "cloud-state"),
     ("Tools", "Run as Administrator", "", "run-as-admin"),
     ("Tools", "Take Ownership", "", "take-ownership"),
@@ -4769,6 +5856,10 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Power Rename Presets", "", "rename-presets"),
     ("Tools", "Image Tools", "", "image-tools"),
     ("Tools", "Archive Browser", "", "archive-browser"),
+    ("Tools", "Extract Here", "", "extract-here"),
+    ("Tools", "Create ZIP Archive", "", "create-zip"),
+    ("Tools", "Create 7z Archive", "", "create-7z"),
+    ("Tools", "Create tar.gz Archive", "", "create-tar-gz"),
     ("Tools", "Compare Folder", "", "compare-folder"),
     ("Tools", "Rules and Automation", "", "rules"),
     ("Tools", "Smart Folders", "", "smart-folders"),
@@ -4823,20 +5914,51 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
     false
 }
 
+fn command_match_score(group: &str, label: &str, command: &str, query: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let label_l = label.to_lowercase();
+    let group_l = group.to_lowercase();
+    let command_l = command.to_lowercase();
+    if label_l == query {
+        Some(0)
+    } else if label_l.starts_with(query) {
+        Some(10)
+    } else if label_l.contains(query) {
+        Some(30)
+    } else if command_l.starts_with(query) {
+        Some(40)
+    } else if command_l.contains(query) {
+        Some(55)
+    } else if group_l.contains(query) {
+        Some(70)
+    } else if fuzzy_match(&label_l, query) {
+        Some(90 + (label_l.len() as i32 - query.len() as i32).max(0))
+    } else if fuzzy_match(&command_l, query) {
+        Some(120)
+    } else {
+        None
+    }
+}
+
 fn command_items_filtered(query: &str) -> ModelRc<CommandItem> {
     let q = query.to_lowercase();
+    let mut matches: Vec<(i32, &(&str, &str, &str, &str))> = ALL_COMMANDS
+        .iter()
+        .filter_map(|item @ (group, label, _, command)| {
+            command_match_score(group, label, command, &q).map(|score| (score, item))
+        })
+        .collect();
+    matches.sort_by(|(score_a, a), (score_b, b)| {
+        score_a
+            .cmp(score_b)
+            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+    });
     model_from_vec(
-        ALL_COMMANDS
-            .iter()
-            .filter(|(group, label, _, command)| {
-                q.is_empty()
-                    || label.to_lowercase().contains(&q)
-                    || group.to_lowercase().contains(&q)
-                    || command.to_lowercase().contains(&q)
-                    || fuzzy_match(label, &q)
-                    || fuzzy_match(command, &q)
-            })
-            .map(|(group, label, hint, command)| CommandItem {
+        matches
+            .into_iter()
+            .map(|(_, (group, label, hint, command))| CommandItem {
                 group: ss(*group),
                 label: ss(*label),
                 hint: ss(*hint),
@@ -4871,6 +5993,7 @@ impl NativeController {
             current_path: current_path.clone(),
             files: Vec::new(),
             visible_files: Vec::new(),
+            active_archive: None,
             selected_index: -1,
             selected_set: std::collections::HashSet::new(),
             select_anchor: -1,
@@ -4922,6 +6045,10 @@ impl NativeController {
             pending_git_status: Arc::new(Mutex::new(None)),
             operation_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_operation_result: Arc::new(Mutex::new(None)),
+            directory_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pending_directory_result: Arc::new(Mutex::new(None)),
+            search_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pending_search_result: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -5247,7 +6374,12 @@ impl NativeController {
         };
 
         ui.set_status_left(ss(left));
-        ui.set_status_right(ss(&self.current_path));
+        let shown_path = self
+            .active_archive
+            .as_ref()
+            .map(|archive| archive_display_path(&archive.archive_path, &archive.prefix))
+            .unwrap_or_else(|| self.current_path.clone());
+        ui.set_status_right(ss(shown_path));
     }
 
     fn update_models(&mut self, ui: &MainWindow) {
@@ -5302,10 +6434,20 @@ impl NativeController {
         ui.set_side_items(model_from_vec(self.side_items()));
         ui.set_tabs(model_from_vec(self.tab_items()));
         ui.set_selected_index(self.selected_index);
-        ui.set_current_path(ss(&self.current_path));
-        ui.set_address_text(ss(&self.current_path));
+        let shown_path = self
+            .active_archive
+            .as_ref()
+            .map(|archive| archive_display_path(&archive.archive_path, &archive.prefix))
+            .unwrap_or_else(|| self.current_path.clone());
+        ui.set_current_path(ss(&shown_path));
+        ui.set_address_text(ss(&shown_path));
         ui.set_search_text(ss(&self.search_query));
-        ui.set_breadcrumbs(model_from_vec(build_breadcrumbs(&self.current_path)));
+        ui.set_breadcrumbs(model_from_vec(
+            self.active_archive
+                .as_ref()
+                .map(|archive| archive_breadcrumbs(&archive.archive_path, &archive.prefix))
+                .unwrap_or_else(|| build_breadcrumbs(&self.current_path)),
+        ));
         self.update_status(ui);
     }
 
@@ -5559,19 +6701,72 @@ impl NativeController {
             .collect()
     }
 
+    fn open_archive_view(
+        &mut self,
+        ui: &MainWindow,
+        archive_path: String,
+        prefix: String,
+        push_history: bool,
+    ) {
+        let prefix = normalize_archive_prefix(&prefix);
+        match list_archive_virtual_dir(&archive_path, &prefix) {
+            Ok(files) => {
+                let return_path = self
+                    .active_archive
+                    .as_ref()
+                    .map(|archive| archive.return_path.clone())
+                    .unwrap_or_else(|| self.current_path.clone());
+                let virtual_path = archive_virtual_path(&archive_path, &prefix);
+                self.active_archive = Some(ArchiveView {
+                    archive_path: archive_path.clone(),
+                    prefix: prefix.clone(),
+                    return_path,
+                });
+                self.current_path = virtual_path.clone();
+                self.files = files;
+                self.visible_files.clear();
+                self.search_query.clear();
+                self.selected_index = -1;
+                self.selected_set.clear();
+                self.select_anchor = -1;
+                self.files_model = None;
+                self.git_status = Arc::new(GitStatusMap::new());
+                self.git_dir_status.clear();
+                ui.set_view_mode(ss("list"));
+                ui.set_empty_state(ss(""));
+                self.apply_filter();
+                self.update_models(ui);
+                self.update_preview(ui);
+                if push_history {
+                    self.history.truncate(self.history_index + 1);
+                    self.history.push(virtual_path);
+                    self.history_index = self.history.len().saturating_sub(1);
+                }
+            }
+            Err(error) => self.show_toast_kind(ui, error, "error"),
+        }
+    }
+
     fn navigate(&mut self, ui: &MainWindow, path: String, push_history: bool) {
         let path = if path.trim().is_empty() {
             self.current_path.clone()
         } else {
             path
         };
+        if let Some((archive_path, prefix)) = parse_archive_virtual_path(&path) {
+            self.open_archive_view(ui, archive_path, prefix, push_history);
+            return;
+        }
         let is_accessible = Path::new(&path).is_dir();
         if !is_accessible && !path.is_empty() {
             ui.set_empty_state(ss(format!("Cannot open \"{}\"", path)));
             return;
         }
-        match native_list_directory(&self.app_state, &path) {
-            Ok(files) => {
+        match native_list_directory_page(&self.app_state, &path) {
+            Ok(page) => {
+                self.active_archive = None;
+                let partial = page.partial;
+                let files = page.entries;
                 ui.set_nav_opacity(0.0);
 
                 // Save view+sort for the folder we are leaving
@@ -5616,7 +6811,9 @@ impl NativeController {
                 self.select_anchor = -1;
                 self.files_model = None;
                 // Fetch git status in the background to avoid blocking UI
-                if is_inside_git_worktree(Path::new(&path)) {
+                if self.files.len() <= LARGE_DIRECTORY_GIT_CAP
+                    && is_inside_git_worktree(Path::new(&path))
+                {
                     let ready = self.git_status_ready.clone();
                     let pending = self.pending_git_status.clone();
                     let state = self.app_state.clone();
@@ -5643,12 +6840,23 @@ impl NativeController {
                 }
 
                 // Set empty state message
-                ui.set_empty_state(ss(""));
+                ui.set_empty_state(ss(if partial {
+                    format!(
+                        "Showing the first {} items while the full folder loads.",
+                        self.files.len()
+                    )
+                } else {
+                    String::new()
+                }));
 
                 self.apply_filter();
                 self.update_models(ui);
                 self.update_preview(ui);
                 self.save_session();
+
+                if partial {
+                    self.schedule_full_directory_load(path.clone());
+                }
 
                 // Background thumbnail generation for image files
                 let image_entries: Vec<(String, u64)> = self
@@ -5660,7 +6868,7 @@ impl NativeController {
                     .collect();
                 if !image_entries.is_empty() {
                     let ready_flag = self.thumbnail_ready.clone();
-                    std::thread::spawn(move || {
+                    THUMBNAIL_POOL.spawn(move || {
                         for (path, mtime) in image_entries {
                             let pb = PathBuf::from(&path);
                             let ck = thumbnail_cache_key(&pb, mtime, 160);
@@ -5731,7 +6939,28 @@ impl NativeController {
         }
     }
 
+    fn schedule_full_directory_load(&mut self, path: String) {
+        let state = self.app_state.clone();
+        let ready = self.directory_ready.clone();
+        let pending = self.pending_directory_result.clone();
+        std::thread::spawn(move || {
+            let Ok(entries) = list_directory_uncached(Path::new(&path)) else {
+                return;
+            };
+            state.store_directory(&path, entries.clone());
+            let _ = index_directory_entries(&path, &entries);
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(NativeDirectoryResult { path, entries });
+            }
+            ready.store(true, Ordering::Release);
+        });
+    }
+
     fn refresh(&mut self, ui: &MainWindow) {
+        if let Some(archive) = self.active_archive.clone() {
+            self.open_archive_view(ui, archive.archive_path, archive.prefix, false);
+            return;
+        }
         self.app_state
             .invalidate_directory_path(Path::new(&self.current_path));
         let path = self.current_path.clone();
@@ -5817,8 +7046,29 @@ impl NativeController {
         let Some(entry) = self.visible_files.get(index as usize).cloned() else {
             return;
         };
+        if let Some(archive) = self.active_archive.clone() {
+            if entry.kind == FileKind::Directory {
+                if let Some((_, prefix)) = parse_archive_virtual_path(&entry.path) {
+                    self.open_archive_view(ui, archive.archive_path, prefix, true);
+                }
+            } else {
+                ui.set_preview_title(ss(&entry.name));
+                ui.set_preview_body(ss(format!(
+                    "{}\n\nUse Extract Here to unpack files from this archive.",
+                    archive_display_path(&archive.archive_path, &archive.prefix)
+                )));
+                ui.set_preview_meta(ss(format!(
+                    "Archive item | {} | {}",
+                    entry_type(&entry),
+                    format_size_short(entry.size)
+                )));
+            }
+            return;
+        }
         if entry.kind == FileKind::Directory {
             self.navigate(ui, entry.path, true);
+        } else if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
+            self.open_archive_view(ui, entry.path, String::new(), true);
         } else if let Err(error) = open_file(entry.path) {
             self.show_toast(ui, error);
         }
@@ -5838,6 +7088,25 @@ impl NativeController {
         };
 
         ui.set_preview_title(ss(&entry.name));
+
+        if let Some(archive) = &self.active_archive {
+            ui.set_preview_is_image(false);
+            ui.set_preview_body(ss(if entry.kind == FileKind::Directory {
+                "Archive folder".to_string()
+            } else {
+                "Archive file. Use Extract Here to unpack it.".to_string()
+            }));
+            ui.set_preview_meta(ss(format!(
+                "Archive: {}\nInside: {}\nSize: {}\nType: {}",
+                archive.archive_path,
+                parse_archive_virtual_path(&entry.path)
+                    .map(|(_, prefix)| prefix)
+                    .unwrap_or_default(),
+                format_size_short(entry.size),
+                entry_type(&entry)
+            )));
+            return;
+        }
 
         // Try to load image preview from thumbnail cache
         let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
@@ -5921,6 +7190,19 @@ impl NativeController {
     }
 
     fn go_up(&mut self, ui: &MainWindow) {
+        if let Some(archive) = self.active_archive.clone() {
+            if archive.prefix.is_empty() {
+                self.navigate(ui, archive.return_path, true);
+            } else {
+                self.open_archive_view(
+                    ui,
+                    archive.archive_path,
+                    archive_parent_prefix(&archive.prefix),
+                    true,
+                );
+            }
+            return;
+        }
         if let Some(parent) = Path::new(&self.current_path).parent() {
             self.navigate(ui, parent.to_string_lossy().to_string(), true);
         }
@@ -5974,17 +7256,53 @@ impl NativeController {
         self.selected_set.clear();
         self.select_anchor = -1;
         self.files_model = None;
-        let indexed = if self.search_query.trim().starts_with("tag:") {
+        let trimmed = self.search_query.trim().to_string();
+        let indexed = if trimmed.starts_with("tag:") || trimmed.starts_with("smart:") {
             Vec::new()
         } else {
-            index_search(&self.current_path, &self.search_query, 500).unwrap_or_default()
+            index_search(&self.current_path, &trimmed, SEARCH_INDEX_LIMIT).unwrap_or_default()
         };
-        if indexed.is_empty() {
+        if trimmed.is_empty() || indexed.is_empty() {
             self.apply_filter();
         } else {
             self.visible_files = indexed;
+            self.apply_sort();
+            ui.set_empty_state(ss(""));
         }
         self.update_models(ui);
+
+        if trimmed.len() >= 2 && !trimmed.starts_with("tag:") && !trimmed.starts_with("smart:") {
+            self.schedule_background_search(ui, trimmed);
+        }
+    }
+
+    fn schedule_background_search(&mut self, ui: &MainWindow, query: String) {
+        let path = self.current_path.clone();
+        let token = self
+            .app_state
+            .search_generation
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        let state = self.app_state.clone();
+        let ready = self.search_ready.clone();
+        let pending = self.pending_search_result.clone();
+        ui.set_status_right(ss(format!("{path}  |  searching...")));
+        std::thread::spawn(move || {
+            let (entries, source) =
+                hybrid_search_background(&state, &path, &query, SEARCH_LIVE_SCAN_LIMIT, token);
+            if state.search_generation.load(Ordering::SeqCst) != token {
+                return;
+            }
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(NativeSearchResult {
+                    path,
+                    query,
+                    entries,
+                    source,
+                });
+            }
+            ready.store(true, Ordering::Release);
+        });
     }
 
     fn new_tab(&mut self, ui: &MainWindow) {
@@ -6130,6 +7448,37 @@ impl NativeController {
                     self.show_toast(ui, "Select a file first.");
                 }
             }
+            "open-with" => {
+                if let Some(entry) = self.selected_entry() {
+                    match open_with_dialog(&entry.path) {
+                        Ok(()) => self.show_toast(ui, "Opening Windows Open With"),
+                        Err(error) => self.show_toast_kind(ui, error, "error"),
+                    }
+                } else {
+                    self.show_toast(ui, "Select a file first.");
+                }
+            }
+            "defender-scan" => {
+                if let Some(entry) = self.selected_entry() {
+                    match defender_scan_path(&entry.path) {
+                        Ok(()) => self.show_toast(ui, "Microsoft Defender scan started"),
+                        Err(error) => self.show_toast_kind(ui, error, "error"),
+                    }
+                } else {
+                    self.show_toast(ui, "Select a file first.");
+                }
+            }
+            "shell-verbs" => {
+                if let Some(entry) = self.selected_entry() {
+                    ui.set_preview_title(ss("Shell Verb Bridge"));
+                    ui.set_preview_body(ss(shell_verb_summary(&entry.path)));
+                    ui.set_preview_meta(ss(
+                        "Pathfinder keeps common verbs native and delegates special verbs to Windows.",
+                    ));
+                } else {
+                    self.show_toast(ui, "Select a file first.");
+                }
+            }
             "run-as-admin" => {
                 if let Some(entry) = self.selected_entry() {
                     match run_as_admin(&entry.path) {
@@ -6158,11 +7507,9 @@ impl NativeController {
                     let versions = list_previous_versions(&entry.path);
                     if versions.is_empty() {
                         ui.set_preview_title(ss("Previous Versions"));
-                        ui.set_preview_body(ss(
-                            "No shadow copies found for this drive.\n\n\
+                        ui.set_preview_body(ss("No shadow copies found for this drive.\n\n\
                              Enable File History, a restore point, or Volume Shadow \
-                             Copy Service (VSS) snapshots to create previous versions.",
-                        ));
+                             Copy Service (VSS) snapshots to create previous versions."));
                     } else {
                         ui.set_preview_title(ss("Previous Versions"));
                         ui.set_preview_body(ss(versions.join("\n")));
@@ -6211,6 +7558,10 @@ impl NativeController {
             "rename-presets" => self.show_rename_presets(ui),
             "image-tools" => self.show_image_tools(ui),
             "archive-browser" => self.show_archive_browser(ui),
+            "extract-here" => self.extract_selected_archive(ui),
+            "create-zip" => self.create_archive_from_selection(ui, "zip"),
+            "create-7z" => self.create_archive_from_selection(ui, "7z"),
+            "create-tar-gz" => self.create_archive_from_selection(ui, "tar.gz"),
             "compare-folder" => self.prompt_compare_folder(ui),
             "rules" => self.show_rules(ui),
             "smart-folders" => self.show_smart_folders(ui),
@@ -6377,6 +7728,21 @@ impl NativeController {
                 let _ = write_native_json("notes.json", &self.notes);
                 self.update_models(ui);
                 self.show_toast_kind(ui, "Note saved", "success");
+            }
+            Some(PendingPrompt::ArchivePassword {
+                archive_path,
+                dest,
+                selected,
+                conflict,
+            }) => {
+                self.start_archive_extract_async(
+                    ui,
+                    archive_path,
+                    dest,
+                    selected,
+                    Some(value),
+                    conflict,
+                );
             }
             Some(PendingPrompt::NewTemplate(template)) => {
                 let base = value.trim();
@@ -7085,16 +8451,201 @@ impl NativeController {
             self.show_toast(ui, "Select an archive first.");
             return;
         }
-        match archive_listing_preview(Path::new(&entry.path), 240) {
-            Ok(body) => {
-                ui.set_preview_title(ss(format!("Archive Browser - {}", entry.name)));
-                ui.set_preview_body(ss(body));
-                ui.set_preview_meta(ss(
-                    "ZIP files list inline. Other archives open through shell or extract tools.",
-                ));
+        self.open_archive_view(ui, entry.path, String::new(), true);
+    }
+
+    fn selected_archive_items(&self) -> Vec<String> {
+        let mut selected = Vec::new();
+        let indices: Vec<usize> = if self.selected_set.is_empty() {
+            (self.selected_index >= 0)
+                .then_some(self.selected_index as usize)
+                .into_iter()
+                .collect()
+        } else {
+            self.selected_set.iter().copied().collect()
+        };
+
+        for index in indices {
+            if let Some(entry) = self.visible_files.get(index) {
+                if let Some((_, prefix)) = parse_archive_virtual_path(&entry.path) {
+                    selected.push(prefix);
+                }
             }
-            Err(error) => self.show_toast(ui, error),
         }
+        selected.sort_unstable();
+        selected.dedup();
+        selected
+    }
+
+    fn start_archive_extract_async(
+        &mut self,
+        ui: &MainWindow,
+        source: String,
+        dest: String,
+        selected: Vec<String>,
+        password: Option<String>,
+        conflict: String,
+    ) {
+        ui.set_op_drawer_text(ss(format!(
+            "Extracting {}",
+            Path::new(&source)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| source.clone())
+        )));
+        ui.set_op_drawer_visible(true);
+        let state = self.app_state.clone();
+        let ready = self.operation_ready.clone();
+        let pending = self.pending_operation_result.clone();
+        std::thread::spawn(move || {
+            let result = match extract_archive_impl(
+                &state,
+                &source,
+                &dest,
+                &selected,
+                password.as_deref(),
+                &conflict,
+            ) {
+                Ok(()) => NativeOperationResult {
+                    message: format!("Extracted to {dest}"),
+                    kind: "success".to_string(),
+                    refresh: true,
+                    clear_clipboard: false,
+                },
+                Err(error) => NativeOperationResult {
+                    message: error,
+                    kind: "error".to_string(),
+                    refresh: false,
+                    clear_clipboard: false,
+                },
+            };
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(result);
+            }
+            ready.store(true, Ordering::Release);
+        });
+    }
+
+    fn extract_selected_archive(&mut self, ui: &MainWindow) {
+        if let Some(archive) = self.active_archive.clone() {
+            let selected = self.selected_archive_items();
+            let selected = if selected.is_empty() && !archive.prefix.is_empty() {
+                vec![archive.prefix.clone()]
+            } else {
+                selected
+            };
+            let dest = keep_both_destination(
+                &PathBuf::from(&archive.return_path).join(
+                    Path::new(&archive.archive_path)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+            );
+            let dest = dest.to_string_lossy().to_string();
+            if archive_has_encrypted_entries(&archive.archive_path) {
+                self.pending_prompt = Some(PendingPrompt::ArchivePassword {
+                    archive_path: archive.archive_path,
+                    dest,
+                    selected,
+                    conflict: "keep".to_string(),
+                });
+                ui.set_prompt_title(ss("Archive password"));
+                ui.set_prompt_value(ss(""));
+                ui.set_prompt_visible(true);
+            } else {
+                self.start_archive_extract_async(
+                    ui,
+                    archive.archive_path,
+                    dest,
+                    selected,
+                    None,
+                    "keep".to_string(),
+                );
+            }
+            return;
+        }
+
+        let Some(entry) = self.selected_entry() else {
+            self.show_toast(ui, "Select an archive first.");
+            return;
+        };
+        let ext = entry.extension.clone().unwrap_or_default();
+        if !is_archive_ext(&ext) {
+            self.show_toast(ui, "Select an archive first.");
+            return;
+        }
+        let dest = keep_both_destination(
+            &PathBuf::from(&self.current_path).join(
+                Path::new(&entry.name)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+        );
+        let source = entry.path.clone();
+        let dest = dest.to_string_lossy().to_string();
+        if archive_has_encrypted_entries(&source) {
+            self.pending_prompt = Some(PendingPrompt::ArchivePassword {
+                archive_path: source,
+                dest,
+                selected: Vec::new(),
+                conflict: "keep".to_string(),
+            });
+            ui.set_prompt_title(ss("Archive password"));
+            ui.set_prompt_value(ss(""));
+            ui.set_prompt_visible(true);
+        } else {
+            self.start_archive_extract_async(
+                ui,
+                source,
+                dest,
+                Vec::new(),
+                None,
+                "keep".to_string(),
+            );
+        }
+    }
+
+    fn create_archive_from_selection(&mut self, ui: &MainWindow, format: &str) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            self.show_toast(ui, "Select files first.");
+            return;
+        }
+        let dest = keep_both_destination(&PathBuf::from(&self.current_path).join(match format {
+            "7z" => "Archive.7z",
+            "tar.gz" => "Archive.tar.gz",
+            _ => "Archive.zip",
+        }));
+        ui.set_op_drawer_text(ss(format!("Creating {}", dest.display())));
+        ui.set_op_drawer_visible(true);
+        let state = self.app_state.clone();
+        let ready = self.operation_ready.clone();
+        let pending = self.pending_operation_result.clone();
+        let dest_string = dest.to_string_lossy().to_string();
+        std::thread::spawn(move || {
+            let result = match create_archive_impl(&state, &paths, &dest_string) {
+                Ok(()) => NativeOperationResult {
+                    message: format!("Created {}", dest_string),
+                    kind: "success".to_string(),
+                    refresh: true,
+                    clear_clipboard: false,
+                },
+                Err(error) => NativeOperationResult {
+                    message: error,
+                    kind: "error".to_string(),
+                    refresh: false,
+                    clear_clipboard: false,
+                },
+            };
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(result);
+            }
+            ready.store(true, Ordering::Release);
+        });
     }
 
     fn prompt_compare_folder(&mut self, ui: &MainWindow) {
@@ -7158,9 +8709,28 @@ impl NativeController {
             .map(|c| c.len())
             .unwrap_or(0);
         let watchers = self.app_state.watchers.lock().map(|w| w.len()).unwrap_or(0);
+        let op_queue = self
+            .app_state
+            .operation_queue
+            .lock()
+            .map(|q| q.len())
+            .unwrap_or(0);
+        let op_queue_paused = self.app_state.queue_is_paused();
+        let battery_ok = indexing_permitted();
         ui.set_preview_title(ss("Performance Debug"));
         ui.set_preview_body(ss(format!(
-            "Index mode: {}\nIndexed files: {}\nIndex file: {}\nThumbnail cache: {} / {}\nDirectory cache entries: {}\nPreview cache entries: {}\nWatchers: {}\nRoots:\n{}",
+            "Index mode: {}\n\
+             Indexed files: {}\n\
+             Index size: {}\n\
+             Thumbnail cache: {} / {}\n\
+             Directory cache: {} entries\n\
+             Preview cache: {} entries\n\
+             Active watchers: {} / 8\n\
+             Operation queue: {} items{}\n\
+             Background indexing: {}\n\
+             Current folder: {} items\n\
+             Search mode: {}\n\
+             Roots:\n{}",
             status.mode,
             status.indexed_files,
             format_size_short(status.index_bytes),
@@ -7169,7 +8739,24 @@ impl NativeController {
             dir_cache,
             preview_cache,
             watchers,
-            if status.roots.is_empty() { "Visited folders only".to_string() } else { status.roots.join("\n") }
+            op_queue,
+            if op_queue_paused { " (paused)" } else { "" },
+            if battery_ok {
+                "permitted"
+            } else {
+                "paused (low battery)"
+            },
+            self.visible_files.len(),
+            if self.search_query.is_empty() {
+                "browsing"
+            } else {
+                "filtered"
+            },
+            if status.roots.is_empty() {
+                "Visited folders only".to_string()
+            } else {
+                status.roots.join("\n")
+            }
         )));
         ui.set_preview_meta(ss(status.estimated_storage));
     }
@@ -7269,7 +8856,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_file_context(move |index| {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().select(&ui, index);
+            let should_select = {
+                let ctrl = c.borrow();
+                index >= 0 && !ctrl.selected_set.contains(&(index as usize))
+            };
+            if should_select {
+                c.borrow_mut().select(&ui, index);
+            }
             ui.set_context_visible(true);
         }
     });
@@ -7518,6 +9111,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let pending_git = controller.borrow().pending_git_status.clone();
         let op_ready = controller.borrow().operation_ready.clone();
         let pending_op = controller.borrow().pending_operation_result.clone();
+        let dir_ready = controller.borrow().directory_ready.clone();
+        let pending_dir = controller.borrow().pending_directory_result.clone();
+        let search_ready = controller.borrow().search_ready.clone();
+        let pending_search = controller.borrow().pending_search_result.clone();
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
@@ -7526,6 +9123,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let thumb_fired = ready_flag.swap(false, Ordering::AcqRel);
                 let git_fired = git_ready.swap(false, Ordering::AcqRel);
                 let op_fired = op_ready.swap(false, Ordering::AcqRel);
+                let dir_fired = dir_ready.swap(false, Ordering::AcqRel);
+                let search_fired = search_ready.swap(false, Ordering::AcqRel);
                 if git_fired {
                     if let Ok(mut lock) = pending_git.lock() {
                         if let Some(status) = lock.take() {
@@ -7537,6 +9136,38 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     }
                 }
                 if let Some(ui) = weak.upgrade() {
+                    if dir_fired {
+                        let result = pending_dir.lock().ok().and_then(|mut lock| lock.take());
+                        if let Some(result) = result {
+                            if let Ok(mut ctrl) = c.try_borrow_mut() {
+                                if same_path_string(&ctrl.current_path, &result.path) {
+                                    ctrl.files = result.entries;
+                                    ctrl.apply_filter();
+                                    ctrl.update_models(&ui);
+                                    ui.set_empty_state(ss(""));
+                                }
+                            }
+                        }
+                    }
+                    if search_fired {
+                        let result = pending_search.lock().ok().and_then(|mut lock| lock.take());
+                        if let Some(result) = result {
+                            if let Ok(mut ctrl) = c.try_borrow_mut() {
+                                if same_path_string(&ctrl.current_path, &result.path)
+                                    && ctrl.search_query == result.query
+                                {
+                                    ctrl.visible_files = result.entries;
+                                    ctrl.apply_sort();
+                                    ctrl.update_models(&ui);
+                                    ctrl.show_toast_kind(
+                                        &ui,
+                                        format!("Search refreshed from {}", result.source),
+                                        "info",
+                                    );
+                                }
+                            }
+                        }
+                    }
                     if op_fired {
                         let result = pending_op.lock().ok().and_then(|mut lock| lock.take());
                         ui.set_op_drawer_visible(false);
@@ -7884,10 +9515,10 @@ fn start_native_drag(ui: &MainWindow) {
 
 #[cfg(target_os = "windows")]
 fn apply_mica(ui: &MainWindow) {
-    use i_slint_backend_winit::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use i_slint_backend_winit::WinitWindowAccessor;
+    use i_slint_backend_winit::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
+    use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
 
     const DWMWA_SYSTEMBACKDROP_TYPE_ID: i32 = 38;
     const DWMSBT_MAINWINDOW: i32 = 2;
@@ -7920,7 +9551,9 @@ fn apply_mica(_ui: &MainWindow) {}
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn get_context_menu_actions(path: String) -> Result<Vec<windows_integration::ContextMenuAction>, String> {
+fn get_context_menu_actions(
+    path: String,
+) -> Result<Vec<windows_integration::ContextMenuAction>, String> {
     windows_integration::get_context_menu_actions(&path)
 }
 
@@ -7944,7 +9577,9 @@ fn invoke_context_menu_action(_path: String, _action_id: u32) -> Result<(), Stri
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn get_previous_versions(path: String) -> Result<Vec<windows_integration::PreviousVersion>, String> {
+fn get_previous_versions(
+    path: String,
+) -> Result<Vec<windows_integration::PreviousVersion>, String> {
     windows_integration::get_previous_versions(&path)
 }
 
@@ -7980,7 +9615,10 @@ fn is_process_elevated() -> bool {
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn retry_as_administrator(operation: String, path: String) -> Result<windows_integration::AdminRetryResult, String> {
+fn retry_as_administrator(
+    operation: String,
+    path: String,
+) -> Result<windows_integration::AdminRetryResult, String> {
     windows_integration::retry_as_administrator(&operation, &path)
 }
 
@@ -8081,7 +9719,7 @@ pub fn run() {
     // COM must be initialised on the main thread before any shell APIs are used.
     #[cfg(target_os = "windows")]
     unsafe {
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
 

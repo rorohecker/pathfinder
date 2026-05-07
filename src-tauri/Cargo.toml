@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "0.3.6"
+version = "0.4.0"
 edition = "2024"
 
 [lib]
@@ -35,12 +35,17 @@ memchr = "2"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
+    "Win32_Security",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Power",
+    "Win32_System_Registry",
     "Win32_System_RestartManager",
     "Win32_System_Threading",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
-    "Win32_Security",
 ] }
 
 [profile.release]

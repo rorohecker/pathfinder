@@ -1,6 +1,6 @@
 # Pathfinder
 
-Pathfinder is a native Windows 11 file manager built in Rust with a Slint UI. It covers the everyday File Explorer experience while adding search filters, tags, notes, themes, batch operations, storage views, git badges, and a command palette.
+Pathfinder is a native Windows 11 file manager built in Rust with a Slint UI. It covers the everyday File Explorer experience while adding fast search, tags, notes, themes, batch operations, storage views, git badges, and a command palette. Every shell operation uses direct Win32 API calls rather than spawning external processes, so interactions feel instant.
 
 ## Features
 
@@ -9,17 +9,23 @@ Pathfinder is a native Windows 11 file manager built in Rust with a Slint UI. It
 - **Multi-select** - Ctrl+click to toggle individual files, Shift+click to extend a range, or Ctrl+A to select everything
 - **Multiple views** - icon grid, details list, gallery view, preview pane, and dual-pane mode
 - **Inline rename** - press F2 or use the context menu to rename in place without a dialog
-- **Fast folders** - directory caching, background file watching, and a SQLite index of visited directories for instant cross-directory search
-- **Search** - Windows Search integration where available, recursive fallback search, and prefix filters: `ext:`, `kind:`, `size:`, `name:`, `content:`, `modified:`, `tag:`
+- **Fast folders** - directory caching using the Windows FindFirstFileExW cache, background file watching, and a SQLite index of visited directories for instant cross-directory search
+- **Search** - Windows Search integration where available, recursive fallback scan, and prefix filters: `ext:`, `kind:`, `size:`, `name:`, `content:`, `modified:`, `tag:`
+- **Command palette** - Ctrl+P to run any action by name, with results ranked by relevance so exact matches always come first
 - **File tools** - copy, cut, paste, rename, delete to Recycle Bin, new folder, archive actions, checksums, batch rename, duplicate finder, and storage treemap
+- **Smart duplicate detection** - three-phase finder that groups by file size first, then compares a 64 KB partial hash, then reads the full file only for candidates that survived both filters
+- **File preview** - text with binary detection, images with dimension metadata for files too large to inline, and generic metadata for everything else
 - **Tags and notes** - local color tags and per-file notes with visible indicators in all views
 - **Git badges** - file and folder status badges for repositories without any extension or daemon
 - **Themes** - Mica Dark, Mica Light, Warm, Flat, Terminal, Paper, Retro, Fantasy, and Cyberpunk, with accent color and density controls in the Settings panel
 - **Settings panel** - tabbed Appearance, View, and AI tabs accessible from the toolbar or Ctrl+,
-- **Command palette** - Ctrl+P to run any action by name
 - **AI status** - detects NPU, GPU, or CPU acceleration on startup and reports it in the AI settings tab
-- **Windows integration** - shell extensions context menu, VSS Previous Versions, UAC/TrustedInstaller handling, and taskbar/Start menu pinning
+- **Windows integration** - shell extensions context menu, VSS Previous Versions, UAC and TrustedInstaller handling, and taskbar and Start menu pinning
+- **Win32 shell operations** - properties dialog, shortcut creation, run as administrator, and clipboard writes all go through Win32 APIs directly with no PowerShell process overhead
 - **Admin features** - retry operations as administrator, take ownership of TrustedInstaller files, and manage system-protected items
+- **Battery-aware indexing** - background indexing pauses automatically when the device is on battery below 20 percent charge
+- **Thumbnail pool** - image thumbnails are generated on a dedicated two-thread pool running at below-normal priority so they never compete with foreground work
+- **Operation limits** - at most two heavy background operations run at the same time so the app stays responsive during large scans or duplicate searches
 
 ## Download
 
