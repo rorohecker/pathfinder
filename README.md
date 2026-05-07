@@ -18,6 +18,8 @@ Pathfinder is a native Windows 11 file manager built in Rust with a Slint UI. It
 - **Settings panel** - tabbed Appearance, View, and AI tabs accessible from the toolbar or Ctrl+,
 - **Command palette** - Ctrl+P to run any action by name
 - **AI status** - detects NPU, GPU, or CPU acceleration on startup and reports it in the AI settings tab
+- **Windows integration** - shell extensions context menu, VSS Previous Versions, UAC/TrustedInstaller handling, and taskbar/Start menu pinning
+- **Admin features** - retry operations as administrator, take ownership of TrustedInstaller files, and manage system-protected items
 
 ## Download
 
