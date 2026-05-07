@@ -5,22 +5,6 @@ use std::process::Command;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 
-// Note: Many Windows API imports are available but unused in PowerShell-based approach.
-// They're kept for future direct COM interop implementations.
-#[allow(unused_imports)]
-use windows::Win32::Foundation::{S_OK, HWND};
-#[allow(unused_imports)]
-use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_QUERY};
-#[allow(unused_imports)]
-use windows::Win32::System::Com::{
-    CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED,
-};
-#[allow(unused_imports)]
-use windows::Win32::System::Com::IShellFolder;
-#[allow(unused_imports)]
-use windows::Win32::System::ShellExecute::ShellExecuteW;
-#[allow(unused_imports)]
-use windows::Win32::UI::Shell::IContextMenu;
 
 // ============================================================================
 // Data Structures
@@ -72,35 +56,23 @@ fn from_wide(v: &[u16]) -> String {
     String::from_utf16_lossy(&v[..len]).to_string()
 }
 
-#[cfg(target_os = "windows")]
 fn is_elevated() -> bool {
-    use windows::Win32::Foundation::FALSE;
-    use windows::Win32::Security::OpenProcessToken;
-    use windows::Win32::System::Threading::GetCurrentProcess;
-    use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_QUERY, TOKEN_ELEVATION};
-    
-    unsafe {
-        let mut token = std::mem::zeroed();
-        let current_process = GetCurrentProcess();
-        
-        if OpenProcessToken(current_process, TOKEN_QUERY, &mut token).is_ok() {
-            let mut elevation = TOKEN_ELEVATION::default();
-            let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
-            
-            if GetTokenInformation(
-                token,
-                TokenElevation,
-                Some(&mut elevation as *mut _ as *mut std::ffi::c_void),
-                size,
-                &mut size,
-            ).is_ok() {
-                let _ = windows::Win32::Foundation::CloseHandle(token);
-                return elevation.TokenIsElevated != 0;
-            }
-            let _ = windows::Win32::Foundation::CloseHandle(token);
-        }
-    }
-    false
+    Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "([Security.Principal.WindowsPrincipal]\
+              [Security.Principal.WindowsIdentity]::GetCurrent())\
+              .IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+        ])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .eq_ignore_ascii_case("True")
+        })
+        .unwrap_or(false)
 }
 
 // ============================================================================
@@ -315,19 +287,19 @@ $versionId = '{}'
 # Get the shadow copy
 $shadow = Get-WmiObject -Query "SELECT * FROM Win32_ShadowCopy WHERE ID='$versionId'" -ErrorAction Stop
 
-if ($shadow) {
+if ($shadow) {{
     $device = $shadow.DeviceObject
     $versionPath = "$device\$path"
-    
-    if (Test-Path $versionPath) {
+
+    if (Test-Path $versionPath) {{
         Copy-Item -LiteralPath $versionPath -Destination $path -Force -Recurse
         Write-Host "Successfully restored from version $versionId"
-    } else {
+    }} else {{
         throw "Version path not found: $versionPath"
-    }
-} else {
+    }}
+}} else {{
     throw "Shadow copy not found: $versionId"
-}
+}}
 "#,
         path.replace('\'', "''"),
         version_id.replace('\'', "''")
@@ -536,7 +508,10 @@ pub fn pin_to_taskbar(path: &str) -> Result<PinningResult, String> {
     let temp_shortcut = format!(
         "{}\\pathfinder_temp_{}.lnk",
         std::env::temp_dir().to_string_lossy(),
-        uuid::Uuid::new_v4()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_micros()
     );
 
     create_shortcut(path, &temp_shortcut, None, None)?;
@@ -595,7 +570,10 @@ pub fn pin_to_start_menu(path: &str) -> Result<PinningResult, String> {
     let temp_shortcut = format!(
         "{}\\pathfinder_temp_{}.lnk",
         std::env::temp_dir().to_string_lossy(),
-        uuid::Uuid::new_v4()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_micros()
     );
 
     create_shortcut(path, &temp_shortcut, None, None)?;

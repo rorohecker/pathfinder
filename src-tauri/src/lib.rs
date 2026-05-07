@@ -1313,7 +1313,68 @@ fn open_windows_properties(path: &str) -> Result<(), String> {
     }
 }
 
-fn open_more_options(path: &str) -> Result<(), String> {
+// ── Windows-specific shell helpers ──────────────────────────────────────────
+
+/// Run a file elevated via PowerShell Start-Process -Verb RunAs.
+fn run_as_admin(path: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let escaped = path.replace('\'', "''");
+        ProcessCommand::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!("Start-Process -FilePath '{}' -Verb RunAs", escaped),
+            ])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Run as Administrator failed: {e}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err("Run as Administrator is only available on Windows.".to_string())
+    }
+}
+
+/// List VSS shadow copies for the drive that contains `path`.
+/// Returns human-readable lines; empty vec means none found or vssadmin not available.
+fn list_previous_versions(path: &str) -> Vec<String> {
+    let drive = Path::new(path)
+        .components()
+        .next()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if drive.is_empty() {
+        return Vec::new();
+    }
+    let out = ProcessCommand::new("vssadmin")
+        .args(["list", "shadows", &format!("/for={}", drive)])
+        .output()
+        .ok();
+    let stdout = match out {
+        Some(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        None => return Vec::new(),
+    };
+    let mut versions = Vec::new();
+    let mut current_time = String::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Creation Time:") {
+            current_time = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("Shadow Copy Volume:") {
+            if !current_time.is_empty() {
+                versions.push(format!("{} — {}", current_time, rest.trim()));
+                current_time.clear();
+            }
+        }
+    }
+    versions
+}
+
+/// Open Explorer with the file selected so the user can access the full shell context menu.
+fn open_more_options(path: &str, _ui: &MainWindow) -> Result<(), String> {
     reveal_in_folder(path.to_string())
 }
 
@@ -4699,6 +4760,11 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Native Properties", "Alt+Enter", "properties"),
     ("Tools", "Show More Options", "", "show-more-options"),
     ("Tools", "Cloud State", "", "cloud-state"),
+    ("Tools", "Run as Administrator", "", "run-as-admin"),
+    ("Tools", "Take Ownership", "", "take-ownership"),
+    ("Tools", "Previous Versions", "", "previous-versions"),
+    ("Tools", "Pin to Taskbar", "", "pin-to-taskbar"),
+    ("Tools", "Pin to Start", "", "pin-to-start"),
     ("Tools", "New From Template", "", "new-template"),
     ("Tools", "Power Rename Presets", "", "rename-presets"),
     ("Tools", "Image Tools", "", "image-tools"),
@@ -6057,10 +6123,77 @@ impl NativeController {
             }
             "show-more-options" => {
                 if let Some(entry) = self.selected_entry() {
-                    match open_more_options(&entry.path) {
-                        Ok(()) => self.show_toast(ui, "Opened in Explorer for shell options"),
-                        Err(error) => self.show_toast(ui, error),
+                    if let Err(e) = open_more_options(&entry.path, ui) {
+                        self.show_toast(ui, e);
                     }
+                } else {
+                    self.show_toast(ui, "Select a file first.");
+                }
+            }
+            "run-as-admin" => {
+                if let Some(entry) = self.selected_entry() {
+                    match run_as_admin(&entry.path) {
+                        Ok(()) => {}
+                        Err(e) => self.show_toast(ui, e),
+                    }
+                } else {
+                    self.show_toast(ui, "Select a file first.");
+                }
+            }
+            "take-ownership" => {
+                if let Some(entry) = self.selected_entry() {
+                    #[cfg(target_os = "windows")]
+                    match windows_integration::take_ownership(&entry.path) {
+                        Ok(r) => self.show_toast(ui, &r.message),
+                        Err(e) => self.show_toast(ui, e),
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    self.show_toast(ui, "Take Ownership is only available on Windows.");
+                } else {
+                    self.show_toast(ui, "Select a file first.");
+                }
+            }
+            "previous-versions" => {
+                if let Some(entry) = self.selected_entry() {
+                    let versions = list_previous_versions(&entry.path);
+                    if versions.is_empty() {
+                        ui.set_preview_title(ss("Previous Versions"));
+                        ui.set_preview_body(ss(
+                            "No shadow copies found for this drive.\n\n\
+                             Enable File History, a restore point, or Volume Shadow \
+                             Copy Service (VSS) snapshots to create previous versions.",
+                        ));
+                    } else {
+                        ui.set_preview_title(ss("Previous Versions"));
+                        ui.set_preview_body(ss(versions.join("\n")));
+                    }
+                    ui.set_preview_meta(ss(&entry.path));
+                } else {
+                    self.show_toast(ui, "Select a file first.");
+                }
+            }
+            "pin-to-taskbar" => {
+                if let Some(entry) = self.selected_entry() {
+                    #[cfg(target_os = "windows")]
+                    match windows_integration::pin_to_taskbar(&entry.path) {
+                        Ok(r) => self.show_toast(ui, &r.message),
+                        Err(e) => self.show_toast(ui, e),
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    self.show_toast(ui, "Pin to Taskbar is only available on Windows.");
+                } else {
+                    self.show_toast(ui, "Select a file first.");
+                }
+            }
+            "pin-to-start" => {
+                if let Some(entry) = self.selected_entry() {
+                    #[cfg(target_os = "windows")]
+                    match windows_integration::pin_to_start_menu(&entry.path) {
+                        Ok(r) => self.show_toast(ui, &r.message),
+                        Err(e) => self.show_toast(ui, e),
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    self.show_toast(ui, "Pin to Start is only available on Windows.");
                 } else {
                     self.show_toast(ui, "Select a file first.");
                 }
@@ -7945,6 +8078,13 @@ fn unpin_from_start_menu(_path: String) -> Result<serde_json::Value, String> {
 }
 
 pub fn run() {
+    // COM must be initialised on the main thread before any shell APIs are used.
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+
     let _ = slint::platform::set_platform(Box::new(
         i_slint_backend_winit::Backend::new().expect("failed to create Slint winit backend"),
     ));

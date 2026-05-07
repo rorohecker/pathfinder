@@ -1465,7 +1465,7 @@ export component MainWindow inherits Window {
         x: root.context_x;
         y: root.context_y;
         width: 226px;
-        height: 460px;
+        height: 610px;
         border-width: 1px;
         border-color: ThemePalette.border_strong;
         border-radius: AppMetrics.radius;
@@ -1489,6 +1489,12 @@ export component MainWindow inherits Window {
             ChoiceMenuRow { width: parent.width; label: "Properties"; command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Show More Options"; command_name: "show-more-options"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Cloud State"; command_name: "cloud-state"; picked(c) => { root.context_visible = false; root.command(c); } }
+            Rectangle { height: 1px; background: ThemePalette.border; }
+            ChoiceMenuRow { width: parent.width; label: "Run as Administrator"; command_name: "run-as-admin"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Take Ownership"; command_name: "take-ownership"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Previous Versions"; command_name: "previous-versions"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Pin to Taskbar"; command_name: "pin-to-taskbar"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Pin to Start"; command_name: "pin-to-start"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { width: parent.width; label: "Copy as Path"; command_name: "copy-as-path"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Copy as PowerShell Path"; command_name: "copy-as-powershell"; picked(c) => { root.context_visible = false; root.command(c); } }
