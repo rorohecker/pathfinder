@@ -3,11 +3,12 @@
 use base64::{engine::general_purpose, Engine as _};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use rayon::prelude::*;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ const DIRECTORY_CACHE_TTL: Duration = Duration::from_secs(20);
 const PREVIEW_CACHE_TTL: Duration = Duration::from_secs(180);
 const MAX_DIRECTORY_CACHE_ENTRIES: usize = 64;
 const MAX_PREVIEW_CACHE_ENTRIES: usize = 96;
+const INDEX_DB_FILE: &str = ".pathfinder-index.sqlite3";
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum FileKind {
@@ -40,6 +42,7 @@ pub enum FileKind {
 pub struct FileEntry {
     pub path: String,
     pub name: String,
+    pub name_lower: String,
     pub kind: FileKind,
     pub size: u64,
     pub modified: u64,
@@ -153,7 +156,7 @@ pub struct SessionTab {
 }
 
 type GitStatusMap = HashMap<String, String>;
-type GitCacheMap = HashMap<String, (GitStatusMap, Instant)>;
+type GitCacheMap = HashMap<String, (Arc<GitStatusMap>, Instant)>;
 
 #[derive(Clone)]
 struct AppState {
@@ -242,9 +245,11 @@ fn path_to_entry(entry_path: &Path, metadata: &fs::Metadata) -> FileEntry {
     } else {
         None
     };
+    let name_lower = name.to_lowercase();
 
     FileEntry {
         path: entry_path.to_string_lossy().to_string(),
+        name_lower,
         name,
         kind: file_kind(entry_path, metadata),
         size: metadata.len(),
@@ -290,15 +295,10 @@ fn same_destination(left: &Path, right: &Path) -> bool {
 }
 
 fn cache_key(path: &Path) -> String {
-    let value = path.to_string_lossy().to_string();
     #[cfg(target_os = "windows")]
-    {
-        value.to_lowercase()
-    }
+    return path.to_string_lossy().to_ascii_lowercase();
     #[cfg(not(target_os = "windows"))]
-    {
-        value
-    }
+    return path.to_string_lossy().into_owned();
 }
 
 fn cache_key_str(path: &str) -> String {
@@ -307,40 +307,40 @@ fn cache_key_str(path: &str) -> String {
 
 fn sort_entries(entries: &mut [FileEntry]) {
     entries.sort_by(|a, b| match (&a.kind, &b.kind) {
-        (FileKind::Directory, FileKind::Directory) => {
-            a.name.to_lowercase().cmp(&b.name.to_lowercase())
-        }
+        (FileKind::Directory, FileKind::Directory) => a.name_lower.cmp(&b.name_lower),
         (FileKind::Directory, _) => std::cmp::Ordering::Less,
         (_, FileKind::Directory) => std::cmp::Ordering::Greater,
-        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        _ => a.name_lower.cmp(&b.name_lower),
     });
 }
 
 fn trim_dir_cache(cache: &mut HashMap<String, CachedDirectory>, max_entries: usize) {
-    while cache.len() > max_entries {
-        if let Some(key) = cache
-            .iter()
-            .min_by_key(|(_, v)| v.loaded_at)
-            .map(|(k, _)| k.clone())
-        {
-            cache.remove(&key);
-        } else {
-            break;
-        }
+    if cache.len() <= max_entries {
+        return;
+    }
+    let excess = cache.len() - max_entries;
+    let mut keys: Vec<(String, Instant)> = cache
+        .iter()
+        .map(|(k, v)| (k.clone(), v.loaded_at))
+        .collect();
+    keys.sort_unstable_by_key(|(_, t)| *t);
+    for (k, _) in keys.iter().take(excess) {
+        cache.remove(k);
     }
 }
 
 fn trim_preview_cache(cache: &mut HashMap<String, CachedPreview>, max_entries: usize) {
-    while cache.len() > max_entries {
-        if let Some(key) = cache
-            .iter()
-            .min_by_key(|(_, v)| v.loaded_at)
-            .map(|(k, _)| k.clone())
-        {
-            cache.remove(&key);
-        } else {
-            break;
-        }
+    if cache.len() <= max_entries {
+        return;
+    }
+    let excess = cache.len() - max_entries;
+    let mut keys: Vec<(String, Instant)> = cache
+        .iter()
+        .map(|(k, v)| (k.clone(), v.loaded_at))
+        .collect();
+    keys.sort_unstable_by_key(|(_, t)| *t);
+    for (k, _) in keys.iter().take(excess) {
+        cache.remove(k);
     }
 }
 
@@ -744,6 +744,7 @@ fn list_directory(state: State<'_, AppState>, path: String) -> Result<Vec<FileEn
     let dir = PathBuf::from(&path);
     let entries = list_directory_uncached(&dir)?;
     state.store_directory(&path, entries.clone());
+    schedule_index_directory(path, entries.clone());
     Ok(entries)
 }
 
@@ -1302,8 +1303,20 @@ fn watch_paths(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), Str
         let mut watcher = RecommendedWatcher::new(
             move |result: notify::Result<notify::Event>| {
                 if let Ok(event) = result {
+                    let mut touched = HashSet::new();
                     for path in event.paths {
                         callback_state.invalidate_path(&path);
+                        if let Some(parent) = path.parent() {
+                            touched.insert(parent.to_path_buf());
+                        }
+                    }
+
+                    for parent in touched {
+                        let parent_string = parent.to_string_lossy().to_string();
+                        if let Ok(entries) = list_directory_uncached(&parent) {
+                            callback_state.store_directory(&parent_string, entries.clone());
+                            schedule_index_directory(parent_string, entries);
+                        }
                     }
                 }
             },
@@ -1614,31 +1627,9 @@ fn batch_rename(state: State<'_, AppState>, ops: Vec<RenameOp>) -> Result<Vec<St
 
 // ───── git status ─────
 
-#[tauri::command]
-fn get_git_status(
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<HashMap<String, String>, String> {
-    let key = cache_key_str(&path);
-    if let Ok(cache) = state.git_cache.lock() {
-        if let Some((map, at)) = cache.get(&key) {
-            if at.elapsed() < Duration::from_secs(10) {
-                return Ok(map.clone());
-            }
-        }
-    }
-
-    let output = ProcessCommand::new("git")
-        .args(["-C", &path, "status", "--porcelain", "-u"])
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-        return Err("Not a git repository".to_string());
-    }
-
-    let mut statuses: HashMap<String, String> = HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+fn parse_git_porcelain(stdout: &[u8], base_path: &str) -> GitStatusMap {
+    let mut statuses = GitStatusMap::new();
+    for line in String::from_utf8_lossy(stdout).lines() {
         if line.len() < 4 {
             continue;
         }
@@ -1658,19 +1649,47 @@ fn get_git_status(
             _ if xy.contains('M') => "modified",
             _ => continue,
         };
-        let full = PathBuf::from(&path).join(name);
-        statuses.insert(full.to_string_lossy().to_string(), status.to_string());
+        statuses.insert(
+            PathBuf::from(base_path)
+                .join(name)
+                .to_string_lossy()
+                .into_owned(),
+            status.to_string(),
+        );
+    }
+    statuses
+}
+
+#[tauri::command]
+fn get_git_status(state: State<'_, AppState>, path: String) -> Result<GitStatusMap, String> {
+    let key = cache_key_str(&path);
+    if let Ok(cache) = state.git_cache.lock() {
+        if let Some((arc, at)) = cache.get(&key) {
+            if at.elapsed() < Duration::from_secs(10) {
+                return Ok((**arc).clone());
+            }
+        }
     }
 
+    let output = ProcessCommand::new("git")
+        .args(["-C", &path, "status", "--porcelain", "-u"])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err("Not a git repository".to_string());
+    }
+
+    let arc = Arc::new(parse_git_porcelain(&output.stdout, &path));
     if let Ok(mut cache) = state.git_cache.lock() {
-        cache.insert(key, (statuses.clone(), Instant::now()));
+        cache.insert(key, (Arc::clone(&arc), Instant::now()));
         if cache.len() > 32 {
             if let Some(k) = cache.keys().next().cloned() {
                 cache.remove(&k);
             }
         }
     }
-    Ok(statuses)
+    Ok((*arc).clone())
 }
 
 // ───── image info ─────
@@ -1758,31 +1777,30 @@ fn build_storage_tree(root: &Path, max_depth: u32) -> StorageNode {
         let Ok(read) = fs::read_dir(&dir) else {
             continue;
         };
-        let items: Vec<_> = read.filter_map(Result::ok).collect();
-
-        entries[idx].file_size = items
-            .par_iter()
-            .filter_map(|e| {
-                let m = fs::metadata(e.path()).ok()?;
-                m.is_file().then_some(m.len())
-            })
-            .sum();
-
-        if depth < max_depth {
-            for e in &items {
-                let p = e.path();
-                if p.is_dir() && !p.is_symlink() {
-                    let child_idx = entries.len();
-                    entries.push(Entry {
-                        path: p,
-                        depth: depth + 1,
-                        file_size: 0,
-                        children: vec![],
-                    });
-                    entries[idx].children.push(child_idx);
-                    queue.push(child_idx);
+        let mut file_size = 0u64;
+        let mut subdirs: Vec<PathBuf> = Vec::new();
+        for e in read.filter_map(Result::ok) {
+            let p = e.path();
+            if let Ok(m) = fs::metadata(&p) {
+                if m.is_file() {
+                    file_size += m.len();
+                } else if m.is_dir() && depth < max_depth && !p.is_symlink() {
+                    subdirs.push(p);
                 }
             }
+        }
+        entries[idx].file_size = file_size;
+
+        for p in subdirs {
+            let child_idx = entries.len();
+            entries.push(Entry {
+                path: p,
+                depth: depth + 1,
+                file_size: 0,
+                children: vec![],
+            });
+            entries[idx].children.push(child_idx);
+            queue.push(child_idx);
         }
     }
 
@@ -2114,7 +2132,8 @@ struct NativeController {
     bookmarks: Vec<Bookmark>,
     tags: HashMap<String, String>,
     notes: HashMap<String, String>,
-    git_status: HashMap<String, String>,
+    git_status: Arc<GitStatusMap>,
+    git_dir_status: HashMap<String, String>,
     settings: NativeSettings,
     ai: AiCapabilities,
     clipboard: Option<NativeClipboard>,
@@ -2155,6 +2174,195 @@ fn native_data_file(name: &str) -> PathBuf {
     native_data_dir().join(name)
 }
 
+fn native_index_file() -> PathBuf {
+    native_data_file(INDEX_DB_FILE)
+}
+
+fn mark_hidden(path: &Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = ProcessCommand::new("attrib").arg("+H").arg(path).output();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+    }
+}
+
+fn open_index_connection() -> Result<Connection, String> {
+    let path = native_index_file();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "journal_mode", "DELETE")
+        .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "synchronous", "NORMAL")
+        .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")
+        .map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS files (
+            path TEXT PRIMARY KEY,
+            parent TEXT NOT NULL,
+            name TEXT NOT NULL,
+            extension TEXT NOT NULL,
+            is_dir INTEGER NOT NULL,
+            size INTEGER NOT NULL,
+            modified INTEGER NOT NULL,
+            indexed_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_files_parent ON files(parent);
+        CREATE INDEX IF NOT EXISTS idx_files_name ON files(name COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_files_extension ON files(extension);
+        ",
+    )
+    .map_err(|e| e.to_string())?;
+    mark_hidden(&path);
+    Ok(conn)
+}
+
+fn schedule_index_directory(parent: String, entries: Vec<FileEntry>) {
+    std::thread::spawn(move || {
+        let _ = index_directory_entries(&parent, &entries);
+    });
+}
+
+fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), String> {
+    let mut conn = open_index_connection()?;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let paths: HashSet<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    {
+        let mut upsert = tx
+            .prepare(
+                "
+                INSERT INTO files(path, parent, name, extension, is_dir, size, modified, indexed_at)
+                VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ON CONFLICT(path) DO UPDATE SET
+                    parent = excluded.parent,
+                    name = excluded.name,
+                    extension = excluded.extension,
+                    is_dir = excluded.is_dir,
+                    size = excluded.size,
+                    modified = excluded.modified,
+                    indexed_at = excluded.indexed_at
+                ",
+            )
+            .map_err(|e| e.to_string())?;
+
+        for entry in entries {
+            upsert
+                .execute(params![
+                    entry.path,
+                    parent,
+                    entry.name,
+                    entry.extension.clone().unwrap_or_default().to_lowercase(),
+                    i64::from(entry.kind == FileKind::Directory),
+                    entry.size as i64,
+                    entry.modified as i64,
+                    now
+                ])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    let stale_paths = {
+        let mut select = tx
+            .prepare("SELECT path FROM files WHERE parent = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = select
+            .query_map(params![parent], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut stale = Vec::new();
+        for path in rows.flatten() {
+            if !paths.contains(path.as_str()) {
+                stale.push(path);
+            }
+        }
+        stale
+    };
+
+    for path in stale_paths {
+        tx.execute("DELETE FROM files WHERE path = ?1", params![path])
+            .map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+    let _ = conn.execute_batch("PRAGMA incremental_vacuum(16); PRAGMA optimize;");
+    Ok(())
+}
+
+fn like_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, String> {
+    let query = query.trim();
+    if query.len() < 2 {
+        return Ok(Vec::new());
+    }
+
+    let conn = open_index_connection()?;
+    let root_prefix = format!("{}%", root.trim_end_matches(['\\', '/']));
+    let (name_like, ext_exact) = if let Some(ext) = query.strip_prefix("ext:") {
+        ("%".to_string(), ext.trim_start_matches('.').to_lowercase())
+    } else if let Some(name) = query.strip_prefix("name:") {
+        (format!("%{}%", like_escape(name)), String::new())
+    } else {
+        (format!("%{}%", like_escape(query)), query.to_lowercase())
+    };
+
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT path, name, is_dir, size, modified, extension
+            FROM files
+            WHERE path LIKE ?1 ESCAPE '\\'
+              AND (name LIKE ?2 ESCAPE '\\' OR extension = ?3)
+            ORDER BY is_dir DESC, name COLLATE NOCASE ASC
+            LIMIT ?4
+            ",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(
+            params![root_prefix, name_like, ext_exact, max as i64],
+            |row| {
+                let is_dir = row.get::<_, i64>(2)? == 1;
+                let ext = row.get::<_, String>(5)?;
+                let name: String = row.get(1)?;
+                Ok(FileEntry {
+                    path: row.get(0)?,
+                    name_lower: name.to_lowercase(),
+                    name,
+                    kind: if is_dir {
+                        FileKind::Directory
+                    } else {
+                        FileKind::File
+                    },
+                    size: row.get::<_, i64>(3)?.max(0) as u64,
+                    modified: row.get::<_, i64>(4)?.max(0) as u64,
+                    extension: (!ext.is_empty()).then_some(ext),
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
 fn read_native_json<T: serde::de::DeserializeOwned>(name: &str, fallback: T) -> T {
     fs::read_to_string(native_data_file(name))
         .ok()
@@ -2190,18 +2398,13 @@ fn model_from_vec<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
 
 fn build_breadcrumbs(path: &str) -> Vec<ChoiceItem> {
     let mut crumbs = Vec::new();
-    let mut accumulated = String::new();
-    let normalized = path.replace('/', "\\");
-    for part in normalized.split('\\') {
+    let mut accumulated = String::with_capacity(path.len() + 1);
+    for part in path.split(['/', '\\']) {
         if part.is_empty() {
             continue;
         }
-        if accumulated.is_empty() {
-            // Windows drive like "C:" displays as "C:\"
-            accumulated = format!("{}\\", part);
-        } else {
-            accumulated = format!("{}{}\\", accumulated, part);
-        }
+        accumulated.push_str(part);
+        accumulated.push('\\');
         crumbs.push(ChoiceItem {
             id: ss(accumulated.trim_end_matches('\\')),
             label: ss(part),
@@ -2253,6 +2456,7 @@ fn native_list_directory(state: &AppState, path: &str) -> Result<Vec<FileEntry>,
     }
     let entries = list_directory_uncached(&PathBuf::from(path))?;
     state.store_directory(path, entries.clone());
+    schedule_index_directory(path.to_string(), entries.clone());
     Ok(entries)
 }
 
@@ -2277,16 +2481,16 @@ fn native_read_preview(
     Ok(content)
 }
 
-fn native_git_status(state: &AppState, path: &str) -> HashMap<String, String> {
+fn native_git_status(state: &AppState, path: &str) -> Arc<GitStatusMap> {
     if !is_inside_git_worktree(Path::new(path)) {
-        return HashMap::new();
+        return Arc::new(GitStatusMap::new());
     }
 
     let key = cache_key_str(path);
     if let Ok(cache) = state.git_cache.lock() {
-        if let Some((map, loaded_at)) = cache.get(&key) {
+        if let Some((arc, loaded_at)) = cache.get(&key) {
             if loaded_at.elapsed() < Duration::from_secs(10) {
-                return map.clone();
+                return Arc::clone(arc);
             }
         }
     }
@@ -2302,41 +2506,15 @@ fn native_git_status(state: &AppState, path: &str) -> HashMap<String, String> {
         .output();
 
     let Ok(output) = output else {
-        return HashMap::new();
+        return Arc::new(GitStatusMap::new());
     };
     if !output.status.success() {
-        return HashMap::new();
+        return Arc::new(GitStatusMap::new());
     }
 
-    let mut statuses = HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let xy = &line[..2];
-        let name = line[3..].trim();
-        let name = if name.contains(" -> ") {
-            name.split(" -> ").last().unwrap_or(name)
-        } else {
-            name
-        };
-        let status = match xy.trim() {
-            "M" | "MM" => "modified",
-            "A" | "AM" => "added",
-            "D" => "deleted",
-            "R" | "RM" => "renamed",
-            "??" => "untracked",
-            _ if xy.contains('M') => "modified",
-            _ => continue,
-        };
-        statuses.insert(
-            PathBuf::from(path).join(name).to_string_lossy().to_string(),
-            status.to_string(),
-        );
-    }
-
+    let arc = Arc::new(parse_git_porcelain(&output.stdout, path));
     if let Ok(mut cache) = state.git_cache.lock() {
-        cache.insert(key, (statuses.clone(), Instant::now()));
+        cache.insert(key, (Arc::clone(&arc), Instant::now()));
         if cache.len() > 32 {
             if let Some(k) = cache.keys().next().cloned() {
                 cache.remove(&k);
@@ -2344,7 +2522,7 @@ fn native_git_status(state: &AppState, path: &str) -> HashMap<String, String> {
         }
     }
 
-    statuses
+    arc
 }
 
 fn is_inside_git_worktree(path: &Path) -> bool {
@@ -2979,7 +3157,8 @@ impl NativeController {
             bookmarks: native_bookmarks(),
             tags: read_native_json("tags.json", HashMap::new()),
             notes: read_native_json("notes.json", HashMap::new()),
-            git_status: HashMap::new(),
+            git_status: Arc::new(HashMap::new()),
+            git_dir_status: HashMap::new(),
             settings,
             ai: AiCapabilities {
                 npu_available: false,
@@ -3083,51 +3262,44 @@ impl NativeController {
 
     fn apply_filter(&mut self) {
         let query = self.search_query.trim().to_lowercase();
+        self.visible_files.clear();
         if query.is_empty() {
-            self.visible_files = self.files.clone();
+            self.visible_files.extend_from_slice(&self.files);
             return;
         }
-
-        self.visible_files = self
-            .files
-            .iter()
-            .filter(|entry| {
-                let name = entry.name.to_lowercase();
-                let ext = entry.extension.clone().unwrap_or_default().to_lowercase();
-                if let Some(expected) = query.strip_prefix("ext:") {
-                    return ext == expected.trim_start_matches('.');
-                }
-                if let Some(expected) = query.strip_prefix("name:") {
-                    return name.contains(expected);
-                }
-                if let Some(expected) = query.strip_prefix("tag:") {
-                    return self
-                        .tags
-                        .get(&entry.path)
-                        .map(|tag| tag == expected)
-                        .unwrap_or(false);
-                }
-                if let Some(expected) = query.strip_prefix("kind:") {
-                    let kind = if entry.kind == FileKind::Directory {
-                        "folder"
-                    } else {
-                        match ext.as_str() {
-                            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "ico" => {
-                                "image"
-                            }
-                            "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" => "video",
-                            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
-                            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt"
-                            | "md" => "doc",
-                            _ => "file",
+        for entry in &self.files {
+            let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
+            let matched = if let Some(expected) = query.strip_prefix("ext:") {
+                ext == expected.trim_start_matches('.')
+            } else if let Some(expected) = query.strip_prefix("name:") {
+                entry.name_lower.contains(expected)
+            } else if let Some(expected) = query.strip_prefix("tag:") {
+                self.tags
+                    .get(&entry.path)
+                    .map(|tag| tag == expected)
+                    .unwrap_or(false)
+            } else if let Some(expected) = query.strip_prefix("kind:") {
+                let kind = if entry.kind == FileKind::Directory {
+                    "folder"
+                } else {
+                    match ext.as_str() {
+                        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "ico" => "image",
+                        "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" => "video",
+                        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
+                        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" => {
+                            "doc"
                         }
-                    };
-                    return kind == expected;
-                }
-                name.contains(&query) || ext.contains(&query)
-            })
-            .cloned()
-            .collect();
+                        _ => "file",
+                    }
+                };
+                kind == expected
+            } else {
+                entry.name_lower.contains(&query) || ext.contains(&query)
+            };
+            if matched {
+                self.visible_files.push(entry.clone());
+            }
+        }
     }
 
     fn update_status(&self, ui: &MainWindow) {
@@ -3208,22 +3380,32 @@ impl NativeController {
         }
     }
 
+    fn rebuild_git_dir_status(&mut self) {
+        self.git_dir_status.clear();
+        for (file_path, status) in self.git_status.iter() {
+            let mut p = Path::new(file_path);
+            while let Some(parent) = p.parent() {
+                let key = parent.to_string_lossy().into_owned();
+                if key.is_empty() {
+                    break;
+                }
+                self.git_dir_status
+                    .entry(key)
+                    .or_insert_with(|| status.clone());
+                p = parent;
+            }
+        }
+    }
+
     fn git_for_entry(&self, entry: &FileEntry) -> String {
         if let Some(status) = self.git_status.get(&entry.path) {
             return status.clone();
         }
         if entry.kind == FileKind::Directory {
-            let prefix = format!("{}{}", entry.path, std::path::MAIN_SEPARATOR);
-            let mut counts: HashMap<&str, usize> = HashMap::new();
-            for (path, status) in &self.git_status {
-                if path.starts_with(&prefix) {
-                    *counts.entry(status.as_str()).or_default() += 1;
-                }
-            }
-            return counts
-                .into_iter()
-                .max_by_key(|(_, count)| *count)
-                .map(|(status, _)| status.to_string())
+            return self
+                .git_dir_status
+                .get(&entry.path)
+                .cloned()
                 .unwrap_or_default();
         }
         String::new()
@@ -3367,6 +3549,7 @@ impl NativeController {
                 self.select_anchor = -1;
                 self.files_model = None;
                 self.git_status = native_git_status(&self.app_state, &path);
+                self.rebuild_git_dir_status();
                 if push_history {
                     self.history.truncate(self.history_index + 1);
                     self.history.push(path.clone());
@@ -3571,7 +3754,19 @@ impl NativeController {
     fn search(&mut self, ui: &MainWindow, query: String) {
         self.search_query = query;
         self.selected_index = -1;
-        self.apply_filter();
+        self.selected_set.clear();
+        self.select_anchor = -1;
+        self.files_model = None;
+        let indexed = if self.search_query.trim().starts_with("tag:") {
+            Vec::new()
+        } else {
+            index_search(&self.current_path, &self.search_query, 500).unwrap_or_default()
+        };
+        if indexed.is_empty() {
+            self.apply_filter();
+        } else {
+            self.visible_files = indexed;
+        }
         self.update_models(ui);
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 
 [lib]
@@ -28,6 +28,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 sha2 = "0.10"
 hex = "0.4"
 zip = "2"
+rusqlite = { version = "0.39.0", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
