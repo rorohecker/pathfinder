@@ -355,7 +355,7 @@ component FileRow inherits Rectangle {
     property <bool> shift_held: false;
     property <bool> is_renaming: root.rename_index == root.index;
 
-    height: root.view_mode == "list" ? AppMetrics.row_h : (root.view_mode == "gallery" ? 154px : AppMetrics.grid_h);
+    height: root.view_mode == "list" ? AppMetrics.row_h : (root.view_mode == "gallery" ? 154px : (root.view_mode == "compact" ? 32px : AppMetrics.grid_h));
     border-radius: AppMetrics.radius;
     border-width: root.item.is_selected ? 1px : 0px;
     border-color: root.item.is_selected ? ThemePalette.accent : rgba(0, 0, 0, 0);
@@ -524,6 +524,42 @@ component FileRow inherits Rectangle {
             font-size: 9px;
             font-weight: 700;
             vertical-alignment: center;
+        }
+    }
+
+    // Compact view: small icon + name in one horizontal row
+    if root.view_mode == "compact": NodeVisual {
+        x: 4px;
+        y: (parent.height - 18px) / 2;
+        visual_width: root.item.is_dir ? 22px : 18px;
+        visual_height: 18px;
+        is_dir: root.item.is_dir;
+        extension: root.item.extension;
+    }
+
+    if root.view_mode == "compact" && !root.is_renaming: Text {
+        x: 30px;
+        y: 0;
+        width: parent.width - 38px;
+        height: parent.height;
+        text: root.item.name;
+        color: root.item.is_selected ? ThemePalette.text : ThemePalette.text_muted;
+        font-size: 12px;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    if root.view_mode == "compact" && root.is_renaming: rename_compact := LineEdit {
+        x: 30px;
+        y: 3px;
+        width: parent.width - 38px;
+        height: parent.height - 6px;
+        text: root.item.name;
+        font-size: 12px;
+        accepted(val) => { root.rename_commit(root.index, val); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { root.rename_commit(root.index, ""); accept }
+            else { reject }
         }
     }
 
@@ -849,15 +885,15 @@ export component MainWindow inherits Window {
     property <length> status_h: 26px;
     property <length> preview_w: root.preview_visible ? 326px : 0px;
     property <length> file_area_w: root.width - root.sidebar_w - root.preview_w - AppMetrics.pad * 2;
-    property <int> grid_columns: Math.max(1, Math.floor(root.file_area_w / AppMetrics.grid_w));
+    property <int> grid_columns: Math.max(1, Math.floor(root.file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
     property <length> grid_cell_w: root.file_area_w / root.grid_columns;
-    property <length> grid_item_h: root.view_mode == "gallery" ? 154px : AppMetrics.grid_h;
+    property <length> grid_item_h: root.view_mode == "gallery" ? 154px : (root.view_mode == "compact" ? 32px : AppMetrics.grid_h);
     property <int> grid_rows: (root.files.length + root.grid_columns - 1) / root.grid_columns;
     // gap on each side of each grid cell for uniform spacing
-    property <length> grid_gap: 8px;
+    property <length> grid_gap: root.view_mode == "compact" ? 2px : 8px;
 
     in-out property <float> nav_opacity: 1.0;
-    animate nav_opacity { duration: 160ms; easing: ease-in-out; }
+    animate nav_opacity { duration: 80ms; easing: ease-out; }
 
     app := Rectangle {
         width: parent.width;
@@ -891,7 +927,7 @@ export component MainWindow inherits Window {
                 width: 18px;
                 height: 15px;
                 border-radius: 3px;
-                background: @linear-gradient(180deg, ThemePalette.accent_strong 0%, ThemePalette.accent 100%);
+                background: @linear-gradient(180deg, ThemePalette.icon_folder_1 0%, ThemePalette.icon_folder_2 100%);
             }
 
             Rectangle {
@@ -900,7 +936,7 @@ export component MainWindow inherits Window {
                 width: 8px;
                 height: 5px;
                 border-radius: 3px;
-                background: ThemePalette.accent_strong;
+                background: ThemePalette.icon_folder_1;
             }
 
             Text {
@@ -997,12 +1033,13 @@ export component MainWindow inherits Window {
             Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: ThemePalette.border; }
         }
 
-        // Toolbar
+        // Toolbar — z:10 so tooltip pop-overs render above the file area below
         Rectangle {
             x: root.sidebar_w;
             y: root.title_h;
             width: parent.width - root.sidebar_w;
             height: root.toolbar_h;
+            z: 10;
             background: ThemePalette.panel;
 
             ToolButton { x: 10px; y: 6px; icon_data: "M15 18l-6-6 6-6"; tooltip: "Back"; clicked => { root.go_back(); } }
@@ -1154,7 +1191,7 @@ export component MainWindow inherits Window {
             Rectangle {
                 x: parent.width - 541px;
                 y: 6px;
-                width: 280px;
+                width: 246px;
                 height: 31px;
                 border-width: 1px;
                 border-color: search.has-focus ? ThemePalette.accent : ThemePalette.border;
@@ -1179,8 +1216,9 @@ export component MainWindow inherits Window {
                 Text { x: parent.width - 48px; width: 40px; height: parent.height; text: "Ctrl+F"; color: ThemePalette.text_faint; font-family: AppMetrics.mono_font; font-size: 10px; vertical-alignment: center; horizontal-alignment: right; }
             }
 
-            Rectangle { x: parent.width - 249px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 238px; y: 6px; icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z"; tooltip: "Icon view"; active: root.view_mode == "grid"; clicked => { root.set_view("grid"); } }
+            Rectangle { x: parent.width - 283px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
+            ToolButton { x: parent.width - 272px; y: 6px; icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z"; tooltip: "Icon view"; active: root.view_mode == "grid"; clicked => { root.set_view("grid"); } }
+            ToolButton { x: parent.width - 238px; y: 6px; icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12"; tooltip: "Compact view"; active: root.view_mode == "compact"; clicked => { root.set_view("compact"); } }
             ToolButton { x: parent.width - 204px; y: 6px; icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01"; tooltip: "Details view"; active: root.view_mode == "list"; clicked => { root.set_view("list"); } }
             ToolButton { x: parent.width - 170px; y: 6px; icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01"; tooltip: "Gallery view"; active: root.view_mode == "gallery"; clicked => { root.set_view("gallery"); } }
             ToolButton { x: parent.width - 136px; y: 6px; icon_data: "M3 4h18v16H3z M14 4v16"; tooltip: "Preview pane"; active: root.preview_visible; clicked => { root.toggle_preview(); } }
