@@ -2039,7 +2039,12 @@ fn read_preview(
 }
 
 fn find_7z() -> Option<PathBuf> {
-    if ProcessCommand::new("7z").arg("i").no_window().output().is_ok() {
+    if ProcessCommand::new("7z")
+        .arg("i")
+        .no_window()
+        .output()
+        .is_ok()
+    {
         return Some(PathBuf::from("7z"));
     }
     #[cfg(target_os = "windows")]
@@ -3907,6 +3912,7 @@ struct NativeController {
     select_anchor: i32,
     files_model: Option<ModelRc<FileItem>>,
     search_query: String,
+    search_all_scope: bool,
     history: Vec<String>,
     history_index: usize,
     tabs: Vec<SessionTab>,
@@ -4143,10 +4149,14 @@ fn mark_hidden(path: &Path) {
     {
         use std::os::windows::ffi::OsStrExt;
         use windows::Win32::Storage::FileSystem::{
-            GetFileAttributesW, SetFileAttributesW, FILE_FLAGS_AND_ATTRIBUTES,
+            FILE_FLAGS_AND_ATTRIBUTES, GetFileAttributesW, SetFileAttributesW,
         };
         use windows::core::PCWSTR;
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
         let pcwstr = PCWSTR(wide.as_ptr());
         unsafe {
             let attrs = GetFileAttributesW(pcwstr);
@@ -4961,6 +4971,46 @@ fn same_path_string(left: &str, right: &str) -> bool {
     }
 }
 
+fn drive_root_for_path(path: &str) -> String {
+    let path = Path::new(path);
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(std::path::Component::Prefix(prefix)) = path.components().next() {
+            return format!("{}\\", prefix.as_os_str().to_string_lossy());
+        }
+    }
+    path.ancestors()
+        .last()
+        .filter(|root| !root.as_os_str().is_empty())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
+}
+
+fn compact_drive_label(path: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(std::path::Component::Prefix(prefix)) = Path::new(path).components().next() {
+            let text = prefix.as_os_str().to_string_lossy();
+            return text.trim_end_matches('\\').to_string();
+        }
+    }
+    "All".to_string()
+}
+
+fn user_facing_error(message: String) -> String {
+    let lower = message.to_lowercase();
+    if lower.contains("access is denied")
+        || lower.contains("access denied")
+        || lower.contains("permission denied")
+        || lower.contains("requires elevation")
+    {
+        "Access denied. Windows blocked this item. Try Show More Options, Run as Administrator, or Take Ownership for protected paths.".to_string()
+    } else {
+        message
+    }
+}
+
 fn native_bookmarks() -> Vec<Bookmark> {
     let saved: Vec<Bookmark> = read_native_json("bookmarks.json", Vec::new());
     if !saved.is_empty() {
@@ -5291,6 +5341,18 @@ fn tag_color(id: &str) -> Color {
         "blue" => color("#4f9cff"),
         "violet" => color("#8b6cff"),
         _ => rgba_u8(0, 0, 0, 0.0),
+    }
+}
+
+fn tag_label(id: &str) -> &'static str {
+    match id {
+        "red" => "Urgent",
+        "orange" => "Important",
+        "yellow" => "Review",
+        "green" => "Done",
+        "blue" => "Personal",
+        "violet" => "Code",
+        _ => "Tag",
     }
 }
 
@@ -6038,6 +6100,7 @@ impl NativeController {
             select_anchor: -1,
             files_model: None,
             search_query: String::new(),
+            search_all_scope: false,
             history: vec![current_path],
             history_index: 0,
             tabs: if tabs.is_empty() {
@@ -6194,8 +6257,8 @@ impl NativeController {
     }
 
     fn show_toast_kind(&mut self, ui: &MainWindow, message: impl Into<String>, kind: &str) {
-        self.toast_queue
-            .push_back((message.into(), kind.to_string()));
+        let message = user_facing_error(message.into());
+        self.toast_queue.push_back((message, kind.to_string()));
         if !self.toast_showing {
             self.advance_toast_display(ui);
         }
@@ -6253,6 +6316,40 @@ impl NativeController {
 
     fn save_session(&self) {
         let _ = write_native_json("session.json", &self.tabs);
+    }
+
+    fn search_root(&self) -> String {
+        if self.search_all_scope {
+            drive_root_for_path(&self.current_path)
+        } else {
+            self.current_path.clone()
+        }
+    }
+
+    fn sync_search_scope(&self, ui: &MainWindow) {
+        ui.set_search_scope_all(self.search_all_scope);
+        ui.set_search_scope_label(ss(if self.search_all_scope {
+            compact_drive_label(&self.current_path)
+        } else {
+            "Folder".to_string()
+        }));
+    }
+
+    fn toggle_search_scope(&mut self, ui: &MainWindow) {
+        self.search_all_scope = !self.search_all_scope;
+        self.sync_search_scope(ui);
+        if self.search_query.trim().len() >= 2 {
+            self.search(ui, self.search_query.clone());
+        } else {
+            self.show_toast(
+                ui,
+                if self.search_all_scope {
+                    format!("Search scope: {}", drive_root_for_path(&self.current_path))
+                } else {
+                    "Search scope: current folder".to_string()
+                },
+            );
+        }
     }
 
     fn selected_entry(&self) -> Option<FileEntry> {
@@ -6473,6 +6570,7 @@ impl NativeController {
         ui.set_side_items(model_from_vec(self.side_items()));
         ui.set_tabs(model_from_vec(self.tab_items()));
         ui.set_selected_index(self.selected_index);
+        self.sync_search_scope(ui);
         let shown_path = self
             .active_archive
             .as_ref()
@@ -7296,10 +7394,11 @@ impl NativeController {
         self.select_anchor = -1;
         self.files_model = None;
         let trimmed = self.search_query.trim().to_string();
+        let search_root = self.search_root();
         let indexed = if trimmed.starts_with("tag:") || trimmed.starts_with("smart:") {
             Vec::new()
         } else {
-            index_search(&self.current_path, &trimmed, SEARCH_INDEX_LIMIT).unwrap_or_default()
+            index_search(&search_root, &trimmed, SEARCH_INDEX_LIMIT).unwrap_or_default()
         };
         if trimmed.is_empty() || indexed.is_empty() {
             self.apply_filter();
@@ -7316,7 +7415,7 @@ impl NativeController {
     }
 
     fn schedule_background_search(&mut self, ui: &MainWindow, query: String) {
-        let path = self.current_path.clone();
+        let path = self.search_root();
         let token = self
             .app_state
             .search_generation
@@ -7325,7 +7424,11 @@ impl NativeController {
         let state = self.app_state.clone();
         let ready = self.search_ready.clone();
         let pending = self.pending_search_result.clone();
-        ui.set_status_right(ss(format!("{path}  |  searching...")));
+        ui.set_status_right(ss(if self.search_all_scope {
+            format!("{path}  |  searching drive...")
+        } else {
+            format!("{path}  |  searching...")
+        }));
         std::thread::spawn(move || {
             let (entries, source) =
                 hybrid_search_background(&state, &path, &query, SEARCH_LIVE_SCAN_LIMIT, token);
@@ -7403,7 +7506,54 @@ impl NativeController {
         self.update_models(ui);
     }
 
+    fn set_selected_tag(&mut self, ui: &MainWindow, tag: &str) {
+        let valid = matches!(
+            tag,
+            "red" | "orange" | "yellow" | "green" | "blue" | "violet" | "clear"
+        );
+        if !valid {
+            self.show_toast(ui, "Unknown tag.");
+            return;
+        }
+
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        }
+
+        for path in &paths {
+            if tag == "clear" {
+                self.tags.remove(path);
+            } else {
+                self.tags.insert(path.clone(), tag.to_string());
+            }
+        }
+        let _ = write_native_json("tags.json", &self.tags);
+        self.apply_filter();
+        self.update_models(ui);
+
+        if tag == "clear" {
+            self.show_toast_kind(
+                ui,
+                format!("Cleared tags on {} item(s)", paths.len()),
+                "success",
+            );
+        } else {
+            self.show_toast_kind(
+                ui,
+                format!("Tagged {} item(s) as {}", paths.len(), tag_label(tag)),
+                "success",
+            );
+        }
+    }
+
     fn command(&mut self, ui: &MainWindow, command: &str) {
+        if let Some(tag) = command.strip_prefix("tag-") {
+            self.set_selected_tag(ui, tag);
+            return;
+        }
+
         match command {
             "new-tab" => self.new_tab(ui),
             "close-tab" => self.close_tab(ui, -1),
@@ -8991,6 +9141,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_toggle_search_scope(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().toggle_search_scope(&ui);
+        }
+    });
+
     // Address bar autocomplete with 150ms debounce
     let addr_debounce = Rc::new(slint::Timer::default());
     let weak = ui.as_weak();
@@ -9192,7 +9350,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         let result = pending_search.lock().ok().and_then(|mut lock| lock.take());
                         if let Some(result) = result {
                             if let Ok(mut ctrl) = c.try_borrow_mut() {
-                                if same_path_string(&ctrl.current_path, &result.path)
+                                if same_path_string(&ctrl.search_root(), &result.path)
                                     && ctrl.search_query == result.query
                                 {
                                     ctrl.visible_files = result.entries;

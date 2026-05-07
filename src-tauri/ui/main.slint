@@ -166,6 +166,8 @@ component TabButton inherits Rectangle {
     border-width: root.tab.active ? 1px : 0px;
     border-color: ThemePalette.border;
     background: root.tab.active ? ThemePalette.panel : (touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0));
+    animate background { duration: 55ms; easing: ease-out; }
+    animate border-color { duration: 55ms; easing: ease-out; }
 
     Text {
         x: 10px;
@@ -177,6 +179,7 @@ component TabButton inherits Rectangle {
         font-size: 12px;
         overflow: elide;
         vertical-alignment: center;
+        animate color { duration: 55ms; easing: ease-out; }
     }
 
     ToolButton {
@@ -360,6 +363,8 @@ component FileRow inherits Rectangle {
     border-width: root.item.is_selected ? 1px : 0px;
     border-color: root.item.is_selected ? ThemePalette.accent : rgba(0, 0, 0, 0);
     background: root.item.is_selected ? ThemePalette.accent_soft : (touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0));
+    animate background { duration: 70ms; easing: ease-out; }
+    animate border-color { duration: 70ms; easing: ease-out; }
 
     if root.view_mode == "list": NodeVisual {
         x: 10px;
@@ -443,7 +448,7 @@ component FileRow inherits Rectangle {
         background: root.item.tag_color;
     }
 
-    if root.view_mode != "list" && root.item.has_thumbnail: Rectangle {
+    if root.view_mode != "list" && root.view_mode != "compact" && root.item.has_thumbnail: Rectangle {
         x: (parent.width - (root.view_mode == "gallery" ? 64px : 54px)) / 2;
         y: root.view_mode == "gallery" ? 18px : 12px;
         width: root.view_mode == "gallery" ? 64px : 54px;
@@ -458,7 +463,7 @@ component FileRow inherits Rectangle {
         }
     }
 
-    if root.view_mode != "list" && !root.item.has_thumbnail: NodeVisual {
+    if root.view_mode != "list" && root.view_mode != "compact" && !root.item.has_thumbnail: NodeVisual {
         x: (parent.width - 64px) / 2;
         y: root.view_mode == "gallery" ? 18px : 12px;
         visual_width: root.view_mode == "gallery" ? 64px : 54px;
@@ -468,7 +473,7 @@ component FileRow inherits Rectangle {
     }
 
     // Grid/gallery: name as text (not renaming)
-    if root.view_mode != "list" && !root.is_renaming: Text {
+    if root.view_mode != "list" && root.view_mode != "compact" && !root.is_renaming: Text {
         x: 18px;
         y: parent.height - 38px;
         width: parent.width - 36px;
@@ -481,7 +486,7 @@ component FileRow inherits Rectangle {
     }
 
     // Grid/gallery: inline rename input
-    if root.view_mode != "list" && root.is_renaming: rename_grid := LineEdit {
+    if root.view_mode != "list" && root.view_mode != "compact" && root.is_renaming: rename_grid := LineEdit {
         x: 8px;
         y: parent.height - 40px;
         width: parent.width - 16px;
@@ -766,6 +771,8 @@ export component MainWindow inherits Window {
     in-out property <string> current_path: "";
     in-out property <string> address_text: "";
     in-out property <string> search_text: "";
+    in-out property <bool> search_scope_all: false;
+    in-out property <string> search_scope_label: "Folder";
     in-out property <string> active_theme: "mica-dark";
     in-out property <string> active_accent: "blue";
     in-out property <string> active_density: "cozy";
@@ -829,6 +836,7 @@ export component MainWindow inherits Window {
     callback refresh();
     callback search_requested(string);
     callback search_immediate(string);
+    callback toggle_search_scope();
     callback address_changed(string);
     callback set_view(string);
     callback toggle_preview();
@@ -884,9 +892,16 @@ export component MainWindow inherits Window {
     property <length> toolbar_h: 44px;
     property <length> status_h: 26px;
     property <length> preview_w: root.preview_visible ? 326px : 0px;
-    property <length> file_area_w: root.width - root.sidebar_w - root.preview_w - AppMetrics.pad * 2;
+    property <length> main_content_w: root.width - root.sidebar_w - root.preview_w;
+    property <length> pane_splitter_w: root.dual_pane ? 4px : 0px;
+    property <length> primary_pane_w: root.dual_pane ? (root.main_content_w - root.pane_splitter_w) / 2 : root.main_content_w;
+    property <length> secondary_pane_w: root.dual_pane ? root.main_content_w - root.primary_pane_w - root.pane_splitter_w : 0px;
+    property <length> file_area_w: root.primary_pane_w - AppMetrics.pad * 2;
+    property <length> secondary_file_area_w: root.secondary_pane_w - AppMetrics.pad * 2;
     property <int> grid_columns: Math.max(1, Math.floor(root.file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
+    property <int> secondary_grid_columns: Math.max(1, Math.floor(root.secondary_file_area_w / 200px));
     property <length> grid_cell_w: root.file_area_w / root.grid_columns;
+    property <length> secondary_grid_cell_w: root.secondary_file_area_w / root.secondary_grid_columns;
     property <length> grid_item_h: root.view_mode == "gallery" ? 154px : (root.view_mode == "compact" ? 32px : AppMetrics.grid_h);
     property <int> grid_rows: (root.files.length + root.grid_columns - 1) / root.grid_columns;
     // gap on each side of each grid cell for uniform spacing
@@ -1052,7 +1067,7 @@ export component MainWindow inherits Window {
             Rectangle {
                 x: 167px;
                 y: 6px;
-                width: parent.width - 718px;
+                width: parent.width - 752px;
                 height: 31px;
                 border-width: 1px;
                 border-color: ThemePalette.border;
@@ -1189,9 +1204,9 @@ export component MainWindow inherits Window {
             }
 
             Rectangle {
-                x: parent.width - 541px;
+                x: parent.width - 573px;
                 y: 6px;
-                width: 246px;
+                width: 278px;
                 height: 31px;
                 border-width: 1px;
                 border-color: search.has-focus ? ThemePalette.accent : ThemePalette.border;
@@ -1202,16 +1217,41 @@ export component MainWindow inherits Window {
                 search := LineEdit {
                     x: 30px;
                     y: 0;
-                    width: parent.width - 82px;
+                    width: parent.width - 132px;
                     height: parent.height;
                     text: root.search_text;
-                    placeholder-text: "Search ext:pdf size:>1mb";
+                    placeholder-text: root.search_scope_all ? "Search current drive" : "Search this folder";
                     font-size: 12.5px;
                     edited(value) => {
                         root.search_text = value;
                         root.search_requested(value);
                     }
                     accepted(value) => { root.search_immediate(value); }
+                }
+
+                Rectangle {
+                    x: parent.width - 96px;
+                    y: 5px;
+                    width: 44px;
+                    height: 21px;
+                    border-radius: 4px;
+                    border-width: root.search_scope_all ? 1px : 0px;
+                    border-color: ThemePalette.accent;
+                    background: scope_touch.has-hover || root.search_scope_all ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: root.search_scope_label;
+                        color: root.search_scope_all ? ThemePalette.accent_strong : ThemePalette.text_faint;
+                        font-size: 10.5px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    scope_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.toggle_search_scope(); }
+                    }
                 }
                 Text { x: parent.width - 48px; width: 40px; height: parent.height; text: "Ctrl+F"; color: ThemePalette.text_faint; font-family: AppMetrics.mono_font; font-size: 10px; vertical-alignment: center; horizontal-alignment: right; }
             }
@@ -1240,7 +1280,7 @@ export component MainWindow inherits Window {
             Rectangle {
                 x: 0;
                 y: 0;
-                width: parent.width - root.preview_w;
+                width: root.primary_pane_w;
                 height: parent.height;
                 background: rgba(0, 0, 0, 0);
                 opacity: root.nav_opacity;
@@ -1351,10 +1391,73 @@ export component MainWindow inherits Window {
                         Text {
                             visible: root.search_text != "";
                             width: parent.width;
-                            text: "Try a different query or search in a parent folder";
+                            text: root.search_scope_all ? "Try a different query or switch back to this folder" : "Try a different query or search the whole drive";
                             color: ThemePalette.text_faint;
                             font-size: 11px;
                             horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            if root.dual_pane: Rectangle {
+                x: root.primary_pane_w;
+                y: 0;
+                width: root.pane_splitter_w;
+                height: parent.height;
+                background: split_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.border;
+                split_touch := TouchArea { mouse-cursor: ew-resize; }
+            }
+
+            if root.dual_pane: Rectangle {
+                x: root.primary_pane_w + root.pane_splitter_w;
+                y: 0;
+                width: root.secondary_pane_w;
+                height: parent.height;
+                background: ThemePalette.bg_soft;
+                border-width: 0px;
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: 32px;
+                    background: ThemePalette.panel;
+                    Text {
+                        x: 12px;
+                        width: parent.width - 24px;
+                        height: parent.height;
+                        text: root.current_path;
+                        color: ThemePalette.text_muted;
+                        font-size: 11.5px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
+                }
+
+                ListView {
+                    x: AppMetrics.pad;
+                    y: 32px + AppMetrics.pad;
+                    width: parent.width - AppMetrics.pad * 2;
+                    height: parent.height - 32px - AppMetrics.pad * 2;
+                    for file[index] in root.files: FileRow {
+                        width: parent.width;
+                        item: file;
+                        index: index;
+                        view_mode: "compact";
+                        rename_index: root.rename_index;
+                        selected(i, ctrl, shift) => { root.file_selected(i, ctrl, shift); }
+                        opened(i) => { root.file_opened(i); }
+                        context(i, cx, cy) => {
+                            root.context_x = cx.clamp(0px, root.width - 240px);
+                            root.context_y = cy.clamp(0px, root.height - 440px);
+                            root.context_visible = true;
+                            root.file_context(i);
+                        }
+                        rename_commit(i, val) => {
+                            root.rename_index = -1;
+                            if (val != "") { root.rename_file(i, val); }
                         }
                     }
                 }
@@ -1532,6 +1635,15 @@ export component MainWindow inherits Window {
             ChoiceMenuRow { width: parent.width; label: "Batch Rename"; command_name: "batch-rename"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Checksum"; command_name: "checksum"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Add Note"; command_name: "note"; picked(c) => { root.context_visible = false; root.command(c); } }
+            Rectangle { height: 1px; background: ThemePalette.border; }
+            ChoiceMenuRow { width: parent.width; label: "Tag: Urgent"; command_name: "tag-red"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Tag: Important"; command_name: "tag-orange"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Tag: Review"; command_name: "tag-yellow"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Tag: Done"; command_name: "tag-green"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Tag: Personal"; command_name: "tag-blue"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Tag: Code"; command_name: "tag-violet"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Clear Tag"; command_name: "tag-clear"; picked(c) => { root.context_visible = false; root.command(c); } }
+            Rectangle { height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { width: parent.width; label: "Locked File Inspector"; command_name: "locked-file"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Properties"; command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Show More Options"; command_name: "show-more-options"; picked(c) => { root.context_visible = false; root.command(c); } }
