@@ -76,6 +76,21 @@ impl Drop for HeavyOpGuard {
         ACTIVE_HEAVY_OPS.fetch_sub(1, Ordering::SeqCst);
     }
 }
+
+// Suppress the blank console window that Windows shows when spawning a child process.
+trait NoWindow {
+    fn no_window(&mut self) -> &mut Self;
+}
+impl NoWindow for ProcessCommand {
+    fn no_window(&mut self) -> &mut Self {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            self.creation_flags(0x0800_0000);
+        }
+        self
+    }
+}
 const FIRST_DIRECTORY_CHUNK: usize = 2_500;
 const LARGE_DIRECTORY_GIT_CAP: usize = 20_000;
 const SEARCH_INDEX_LIMIT: usize = 800;
@@ -1290,6 +1305,7 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
         };
         ProcessCommand::new("explorer")
             .arg(target)
+            .no_window()
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -1486,6 +1502,7 @@ fn list_previous_versions(path: &str) -> Vec<String> {
     }
     let out = ProcessCommand::new("vssadmin")
         .args(["list", "shadows", &format!("/for={}", drive)])
+        .no_window()
         .output()
         .ok();
     let stdout = match out {
@@ -1518,6 +1535,7 @@ fn open_with_dialog(path: &str) -> Result<(), String> {
     {
         ProcessCommand::new("rundll32.exe")
             .args(["shell32.dll,OpenAs_RunDLL", path])
+            .no_window()
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -1540,6 +1558,7 @@ fn defender_scan_path(path: &str) -> Result<(), String> {
             .arg("-Command")
             .arg("Start-MpScan -ScanType CustomScan -ScanPath $args[0]")
             .arg(path)
+            .no_window()
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -1849,6 +1868,7 @@ ConvertTo-Json -InputObject @($paths) -Compress
         .arg(&cleaned)
         .arg(path)
         .arg(max_results.to_string())
+        .no_window()
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -2019,7 +2039,7 @@ fn read_preview(
 }
 
 fn find_7z() -> Option<PathBuf> {
-    if ProcessCommand::new("7z").arg("i").output().is_ok() {
+    if ProcessCommand::new("7z").arg("i").no_window().output().is_ok() {
         return Some(PathBuf::from("7z"));
     }
     #[cfg(target_os = "windows")]
@@ -2059,6 +2079,7 @@ fn list_7z_archive(path: &Path, max_items: usize) -> Result<Vec<ArchiveEntry>, S
         .arg("l")
         .arg("-slt")
         .arg(path)
+        .no_window()
         .output()
         .map_err(|e| e.to_string())?;
     if !output.status.success() {
@@ -2588,6 +2609,7 @@ ConvertTo-Json -InputObject @($devices) -Compress
         .arg("Bypass")
         .arg("-Command")
         .arg(script)
+        .no_window()
         .output();
 
     output
@@ -2909,6 +2931,7 @@ fn get_git_status(state: State<'_, AppState>, path: String) -> Result<GitStatusM
 
     let output = ProcessCommand::new("git")
         .args(["-C", &path, "status", "--porcelain", "-u"])
+        .no_window()
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -3247,6 +3270,7 @@ fn extract_with_7z(
     for item in selected {
         command.arg(item);
     }
+    command.no_window();
     let output = command.output().map_err(|e| e.to_string())?;
     if output.status.success() {
         state.invalidate_path(dest);
@@ -3371,6 +3395,7 @@ fn create_archive_impl(state: &AppState, paths: &[String], dest: &str) -> Result
     for path in paths {
         command.arg(path);
     }
+    command.no_window();
     let output = command.output().map_err(|e| e.to_string())?;
     if output.status.success() {
         state.invalidate_path(&dst);
@@ -4081,6 +4106,7 @@ fn list_system_fonts() -> Vec<String> {
              [System.Drawing.Text.InstalledFontCollection]::new().Families | \
              ForEach-Object { $_.Name }",
         ])
+        .no_window()
         .output();
     match result {
         Ok(out) if out.status.success() => {
@@ -4115,7 +4141,19 @@ fn color_to_hex(c: Color) -> String {
 fn mark_hidden(path: &Path) {
     #[cfg(target_os = "windows")]
     {
-        let _ = ProcessCommand::new("attrib").arg("+H").arg(path).output();
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Storage::FileSystem::{
+            GetFileAttributesW, SetFileAttributesW, FILE_FLAGS_AND_ATTRIBUTES,
+        };
+        use windows::core::PCWSTR;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let pcwstr = PCWSTR(wide.as_ptr());
+        unsafe {
+            let attrs = GetFileAttributesW(pcwstr);
+            if attrs != u32::MAX {
+                let _ = SetFileAttributesW(pcwstr, FILE_FLAGS_AND_ATTRIBUTES(attrs | 0x2));
+            }
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -5005,6 +5043,7 @@ fn native_git_status(state: &AppState, path: &str) -> Arc<GitStatusMap> {
             "--porcelain",
             "--untracked-files=normal",
         ])
+        .no_window()
         .output();
 
     let Ok(output) = output else {

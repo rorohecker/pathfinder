@@ -1186,7 +1186,7 @@ export component MainWindow inherits Window {
             ToolButton { x: parent.width - 136px; y: 6px; icon_data: "M3 4h18v16H3z M14 4v16"; tooltip: "Preview pane"; active: root.preview_visible; clicked => { root.toggle_preview(); } }
             ToolButton { x: parent.width - 102px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
             ToolButton { x: parent.width - 68px; y: 6px; icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"; tooltip: "Command palette"; clicked => { root.command_visible = true; } }
-            ToolButton { x: parent.width - 34px; y: 6px; icon_data: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 8v4 M12 16h.01"; tooltip: "Settings"; clicked => { root.settings_visible = true; } }
+            ToolButton { x: parent.width - 34px; y: 6px; icon_data: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"; tooltip: "Settings"; clicked => { root.settings_visible = true; } }
 
             Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
         }
@@ -1265,7 +1265,7 @@ export component MainWindow inherits Window {
 
                     for file[index] in root.files: FileRow {
                         x: Math.mod(index, root.grid_columns) * root.grid_cell_w + root.grid_gap / 2;
-                        y: (index / root.grid_columns) * (root.grid_item_h + root.grid_gap);
+                        y: Math.floor(index / root.grid_columns) * (root.grid_item_h + root.grid_gap);
                         width: root.grid_cell_w - root.grid_gap;
                         item: file;
                         index: index;
@@ -1463,17 +1463,26 @@ export component MainWindow inherits Window {
     // Context menu
     if root.context_visible: Rectangle {
         x: root.context_x;
-        y: root.context_y;
+        y: root.context_y.clamp(0px, root.height - 580px);
         width: 226px;
-        height: 610px;
+        height: 560px;
         border-width: 1px;
         border-color: ThemePalette.border_strong;
         border-radius: AppMetrics.radius;
         background: ThemePalette.panel_solid;
         drop-shadow-blur: 24px;
         drop-shadow-color: rgba(0, 0, 0, 0.38);
+        clip: true;
+
+        ScrollView {
+            x: 0;
+            y: 0;
+            width: 226px;
+            height: parent.height;
+            viewport-width: 216px;
 
         VerticalLayout {
+            width: 216px;
             padding: 5px;
             spacing: 2px;
             ChoiceMenuRow { width: parent.width; label: "Open"; command_name: "open"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -1506,6 +1515,7 @@ export component MainWindow inherits Window {
             ChoiceMenuRow { width: parent.width; label: "Create ZIP"; command_name: "create-zip"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Image Tools"; command_name: "image-tools"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Delete"; command_name: "delete"; danger: true; picked(c) => { root.context_visible = false; root.command(c); } }
+        }
         }
     }
 

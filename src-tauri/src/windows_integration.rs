@@ -2,8 +2,11 @@
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 // ============================================================================
 // Data Structures
@@ -236,6 +239,7 @@ try {
         .arg("-Command")
         .arg(script)
         .arg(path)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -275,12 +279,14 @@ pub fn invoke_context_menu_action(path: &str, action_id: u32) -> Result<(), Stri
                 .join("Microsoft\\Windows\\SendTo");
             Command::new("explorer")
                 .arg(send_to)
+                .creation_flags(CREATE_NO_WINDOW)
                 .spawn()
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         }
         4 => Command::new("rundll32.exe")
             .args(["shell32.dll,OpenAs_RunDLL", path])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string()),
@@ -355,6 +361,7 @@ ConvertTo-Json -InputObject $versions -Compress
         .arg("-Command")
         .arg(script)
         .arg(path)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -399,6 +406,7 @@ if ($shadow) {{
         .arg("-NoProfile")
         .arg("-Command")
         .arg(&script)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -443,6 +451,7 @@ Start-Process -FilePath pwsh -ArgumentList "-Command", "Write-Host 'Administrato
         .arg("-NoProfile")
         .arg("-Command")
         .arg(&script)
+        .creation_flags(CREATE_NO_WINDOW)
         .output();
 
     match output {
@@ -487,6 +496,7 @@ if ($owners -match 'TrustedInstaller') {{
         .arg("-NoProfile")
         .arg("-Command")
         .arg(&script)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -526,6 +536,7 @@ if ($acl.Owner -match $env:USERNAME -or $acl.Owner -match 'Administrators') {{
         .arg("-NoProfile")
         .arg("-Command")
         .arg(&script)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -640,6 +651,7 @@ if ($verb) {{
         .arg("-NoProfile")
         .arg("-Command")
         .arg(&script)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -714,6 +726,7 @@ if ($pinned) {{ 'success' }} else {{ 'failed' }}
         .arg("-NoProfile")
         .arg("-Command")
         .arg(&script)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -764,6 +777,7 @@ if ($verb) {{
         .arg("-NoProfile")
         .arg("-Command")
         .arg(&script)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -809,6 +823,7 @@ if ($verb) {{
         .arg("-NoProfile")
         .arg("-Command")
         .arg(&script)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| e.to_string())?;
 
