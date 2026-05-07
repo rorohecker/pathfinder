@@ -2203,9 +2203,28 @@ fn native_read_preview(
     Ok(content)
 }
 
-fn native_git_status(path: &str) -> HashMap<String, String> {
+fn native_git_status(state: &AppState, path: &str) -> HashMap<String, String> {
+    if !is_inside_git_worktree(Path::new(path)) {
+        return HashMap::new();
+    }
+
+    let key = cache_key_str(path);
+    if let Ok(cache) = state.git_cache.lock() {
+        if let Some((map, loaded_at)) = cache.get(&key) {
+            if loaded_at.elapsed() < Duration::from_secs(10) {
+                return map.clone();
+            }
+        }
+    }
+
     let output = ProcessCommand::new("git")
-        .args(["-C", path, "status", "--porcelain", "-u"])
+        .args([
+            "-C",
+            path,
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+        ])
         .output();
 
     let Ok(output) = output else {
@@ -2241,7 +2260,34 @@ fn native_git_status(path: &str) -> HashMap<String, String> {
             status.to_string(),
         );
     }
+
+    if let Ok(mut cache) = state.git_cache.lock() {
+        cache.insert(key, (statuses.clone(), Instant::now()));
+        if cache.len() > 32 {
+            if let Some(k) = cache.keys().next().cloned() {
+                cache.remove(&k);
+            }
+        }
+    }
+
     statuses
+}
+
+fn is_inside_git_worktree(path: &Path) -> bool {
+    let mut current = if path.is_dir() {
+        Some(path)
+    } else {
+        path.parent()
+    };
+
+    while let Some(dir) = current {
+        if dir.join(".git").exists() {
+            return true;
+        }
+        current = dir.parent();
+    }
+
+    false
 }
 
 fn native_rename(state: &AppState, path: &str, new_name: &str) -> Result<String, String> {
@@ -2987,6 +3033,15 @@ impl NativeController {
             .collect();
     }
 
+    fn update_status(&self, ui: &MainWindow) {
+        ui.set_status_left(ss(format!(
+            "{} items | {} selected",
+            self.visible_files.len(),
+            if self.selected_index >= 0 { 1 } else { 0 }
+        )));
+        ui.set_status_right(ss(self.current_path.clone()));
+    }
+
     fn update_models(&self, ui: &MainWindow) {
         ui.set_files(model_from_vec(
             self.visible_files
@@ -3000,12 +3055,7 @@ impl NativeController {
         ui.set_current_path(ss(&self.current_path));
         ui.set_address_text(ss(&self.current_path));
         ui.set_search_text(ss(&self.search_query));
-        ui.set_status_left(ss(format!(
-            "{} items | {} selected",
-            self.visible_files.len(),
-            if self.selected_index >= 0 { 1 } else { 0 }
-        )));
-        ui.set_status_right(ss(self.current_path.clone()));
+        self.update_status(ui);
     }
 
     fn file_item(&self, entry: &FileEntry) -> FileItem {
@@ -3189,7 +3239,7 @@ impl NativeController {
                 self.files = files;
                 self.search_query.clear();
                 self.selected_index = -1;
-                self.git_status = native_git_status(&path);
+                self.git_status = native_git_status(&self.app_state, &path);
                 if push_history {
                     self.history.truncate(self.history_index + 1);
                     self.history.push(path.clone());
@@ -3222,8 +3272,11 @@ impl NativeController {
         } else {
             ui.set_selected_name(ss(""));
         }
-        self.update_models(ui);
-        self.update_preview(ui);
+        ui.set_selected_index(self.selected_index);
+        self.update_status(ui);
+        if ui.get_preview_visible() {
+            self.update_preview(ui);
+        }
     }
 
     fn open_index(&mut self, ui: &MainWindow, index: i32) {
@@ -3241,6 +3294,10 @@ impl NativeController {
     }
 
     fn update_preview(&self, ui: &MainWindow) {
+        if !ui.get_preview_visible() {
+            return;
+        }
+
         let Some(entry) = self.selected_entry() else {
             ui.set_preview_title(ss(""));
             ui.set_preview_body(ss(""));
@@ -3326,6 +3383,13 @@ impl NativeController {
         self.save_session();
     }
 
+    fn set_preview_visible(&self, ui: &MainWindow, visible: bool) {
+        ui.set_preview_visible(visible);
+        if visible {
+            self.update_preview(ui);
+        }
+    }
+
     fn search(&mut self, ui: &MainWindow, query: String) {
         self.search_query = query;
         self.selected_index = -1;
@@ -3382,7 +3446,7 @@ impl NativeController {
             "view-grid" => self.set_view(ui, "grid"),
             "view-list" => self.set_view(ui, "list"),
             "view-gallery" => self.set_view(ui, "gallery"),
-            "toggle-preview" => ui.set_preview_visible(!ui.get_preview_visible()),
+            "toggle-preview" => self.set_preview_visible(ui, !ui.get_preview_visible()),
             "toggle-dual" => ui.set_dual_pane(!ui.get_dual_pane()),
             "open" => self.open_index(ui, self.selected_index),
             "rename" => self.prompt_rename(ui),
@@ -3785,9 +3849,11 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_toggle_preview(move || {
         if let Some(ui) = weak.upgrade() {
-            ui.set_preview_visible(!ui.get_preview_visible());
+            let visible = !ui.get_preview_visible();
+            c.borrow().set_preview_visible(&ui, visible);
         }
     });
 

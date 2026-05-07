@@ -666,6 +666,11 @@ export component MainWindow inherits Window {
     property <length> toolbar_h: 44px;
     property <length> status_h: 26px;
     property <length> preview_w: root.preview_visible ? 326px : 0px;
+    property <length> file_area_w: root.width - root.sidebar_w - root.preview_w - AppMetrics.pad * 2;
+    property <int> grid_columns: Math.max(1, Math.floor(root.file_area_w / AppMetrics.grid_w));
+    property <length> grid_cell_w: root.file_area_w / root.grid_columns;
+    property <length> grid_item_h: root.view_mode == "gallery" ? 154px : AppMetrics.grid_h;
+    property <int> grid_rows: (root.files.length + root.grid_columns - 1) / root.grid_columns;
 
     Rectangle {
         width: parent.width;
@@ -947,12 +952,35 @@ export component MainWindow inherits Window {
                     width: parent.width - AppMetrics.pad * 2;
                 }
 
-                ListView {
+                if root.view_mode == "list": ListView {
                     x: AppMetrics.pad;
-                    y: AppMetrics.pad + (root.view_mode == "list" ? 32px : 0px);
+                    y: AppMetrics.pad + 32px;
                     width: parent.width - AppMetrics.pad * 2;
-                    height: parent.height - AppMetrics.pad * 2 - (root.view_mode == "list" ? 32px : 0px);
+                    height: parent.height - AppMetrics.pad * 2 - 32px;
                     for file[index] in root.files: FileRow {
+                        width: parent.width;
+                        item: file;
+                        index: index;
+                        selected_index: root.selected_index;
+                        view_mode: root.view_mode;
+                        selected(i) => { root.file_selected(i); }
+                        opened(i) => { root.file_opened(i); }
+                        context(i) => { root.file_context(i); }
+                    }
+                }
+
+                if root.view_mode != "list": ScrollView {
+                    x: AppMetrics.pad;
+                    y: AppMetrics.pad;
+                    width: parent.width - AppMetrics.pad * 2;
+                    height: parent.height - AppMetrics.pad * 2;
+                    viewport-width: parent.width - AppMetrics.pad * 2;
+                    viewport-height: Math.max(parent.height - AppMetrics.pad * 2, root.grid_rows * (root.grid_item_h + 9px));
+
+                    for file[index] in root.files: FileRow {
+                        x: Math.mod(index, root.grid_columns) * root.grid_cell_w;
+                        y: (index / root.grid_columns) * (root.grid_item_h + 9px);
+                        width: root.grid_cell_w - 9px;
                         item: file;
                         index: index;
                         selected_index: root.selected_index;
