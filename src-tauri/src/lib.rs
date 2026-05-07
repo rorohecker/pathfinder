@@ -257,16 +257,19 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
     if to.exists() {
         return Err(format!("Destination already exists: {}", to.display()));
     }
-
     fs::create_dir_all(to).map_err(|e| e.to_string())?;
-    for entry in fs::read_dir(from).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let src = entry.path();
-        let dst = to.join(entry.file_name());
-        if src.is_dir() && !src.is_symlink() {
-            copy_dir_recursive(&src, &dst)?;
-        } else {
-            fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+    let mut stack: Vec<(PathBuf, PathBuf)> = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((src_dir, dst_dir)) = stack.pop() {
+        for entry in fs::read_dir(&src_dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let src = entry.path();
+            let dst = dst_dir.join(entry.file_name());
+            if src.is_dir() && !src.is_symlink() {
+                fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+                stack.push((src, dst));
+            } else {
+                fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+            }
         }
     }
     Ok(())
@@ -1320,8 +1323,12 @@ fn watch_paths(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), Str
 #[cfg(target_os = "windows")]
 fn detect_npu_names() -> Vec<String> {
     let script = r#"
+$pattern = '(?i)(\bNPU\b|Neural Processing|Neural Processor|AI Boost|Ryzen AI|Hexagon|Hailo|Movidius|\bVPU\b)'
 $devices = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
-  Where-Object { $_.FriendlyName -match 'NPU|Neural|AI Boost|VPU|Ryzen AI|Hexagon|Hailo|Movidius|Neural Processing' } |
+  Where-Object {
+    ($_.Class -in @('ComputeAccelerator', 'System')) -and
+    ($_.FriendlyName -match $pattern)
+  } |
   Select-Object -ExpandProperty FriendlyName
 ConvertTo-Json -InputObject @($devices) -Compress
 "#;
@@ -1348,32 +1355,37 @@ fn detect_npu_names() -> Vec<String> {
 
 fn compute_ai_capabilities() -> AiCapabilities {
     let devices = detect_npu_names();
-    let npu_available = !devices.is_empty();
+    let npu_hardware_found = !devices.is_empty();
     let runtime_configured = std::env::var("PATHFINDER_LOCAL_AI_RUNTIME")
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
-    let enabled = npu_available && runtime_configured;
+    let enabled = npu_hardware_found && runtime_configured;
     let reason = if enabled {
         format!(
             "NPU detected and local AI runtime configured: {}",
             devices.join(", ")
         )
-    } else if npu_available {
-        format!(
-            "NPU detected ({}) but no PATHFINDER_LOCAL_AI_RUNTIME is configured.",
-            devices.join(", ")
-        )
+    } else if npu_hardware_found {
+        "No active NPU runtime was detected. Using CPU fallback.".to_string()
     } else {
-        "No supported NPU was detected. Local AI features are disabled.".to_string()
+        "No supported active NPU runtime was detected. Using CPU fallback.".to_string()
     };
 
     AiCapabilities {
-        npu_available,
+        npu_available: enabled,
         semantic_search: enabled,
         automatic_summaries: enabled,
         image_classification: enabled,
         local_embeddings: enabled,
         reason,
+    }
+}
+
+fn ai_status_label(capabilities: &AiCapabilities) -> &'static str {
+    if capabilities.npu_available {
+        "NPU Accelerated"
+    } else {
+        "CPU Fallback"
     }
 }
 
@@ -1724,49 +1736,84 @@ fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEn
 
 // ───── storage tree ─────
 
-fn build_storage_tree(dir: &Path, depth: u32, max_depth: u32) -> StorageNode {
-    let name = dir
-        .file_name()
-        .unwrap_or(dir.as_os_str())
-        .to_string_lossy()
-        .to_string();
-    let mut node = StorageNode {
-        name,
-        path: dir.to_string_lossy().to_string(),
-        size: 0,
+fn build_storage_tree(root: &Path, max_depth: u32) -> StorageNode {
+    struct Entry {
+        path: PathBuf,
+        depth: u32,
+        file_size: u64,
+        children: Vec<usize>,
+    }
+
+    let mut entries: Vec<Entry> = vec![Entry {
+        path: root.to_path_buf(),
+        depth: 0,
+        file_size: 0,
         children: vec![],
-    };
+    }];
+    let mut queue: Vec<usize> = vec![0];
 
-    let Ok(entries) = fs::read_dir(dir) else {
-        return node;
-    };
-    let items: Vec<_> = entries.filter_map(Result::ok).collect();
+    while let Some(idx) = queue.pop() {
+        let dir = entries[idx].path.clone();
+        let depth = entries[idx].depth;
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let items: Vec<_> = read.filter_map(Result::ok).collect();
 
-    let file_size: u64 = items
-        .par_iter()
-        .filter_map(|e| {
-            let m = fs::metadata(e.path()).ok()?;
-            m.is_file().then_some(m.len())
-        })
-        .sum();
-
-    node.children = if depth < max_depth {
-        items
+        entries[idx].file_size = items
             .par_iter()
             .filter_map(|e| {
-                let p = e.path();
-                let m = fs::metadata(&p).ok()?;
-                m.is_dir()
-                    .then(|| build_storage_tree(&p, depth + 1, max_depth))
+                let m = fs::metadata(e.path()).ok()?;
+                m.is_file().then_some(m.len())
             })
-            .collect()
-    } else {
-        vec![]
-    };
+            .sum();
 
-    let child_size: u64 = node.children.iter().map(|c| c.size).sum();
-    node.size = file_size + child_size;
-    node
+        if depth < max_depth {
+            for e in &items {
+                let p = e.path();
+                if p.is_dir() && !p.is_symlink() {
+                    let child_idx = entries.len();
+                    entries.push(Entry {
+                        path: p,
+                        depth: depth + 1,
+                        file_size: 0,
+                        children: vec![],
+                    });
+                    entries[idx].children.push(child_idx);
+                    queue.push(child_idx);
+                }
+            }
+        }
+    }
+
+    let n = entries.len();
+    let mut sizes = vec![0u64; n];
+    for i in (0..n).rev() {
+        let child_sum: u64 = entries[i].children.iter().map(|&c| sizes[c]).sum();
+        sizes[i] = entries[i].file_size + child_sum;
+    }
+
+    fn build(entries: &[Entry], sizes: &[u64], idx: usize) -> StorageNode {
+        let e = &entries[idx];
+        let name = e
+            .path
+            .file_name()
+            .unwrap_or(e.path.as_os_str())
+            .to_string_lossy()
+            .to_string();
+        StorageNode {
+            name,
+            path: e.path.to_string_lossy().to_string(),
+            size: sizes[idx],
+            children: e
+                .children
+                .iter()
+                .map(|&c| build(entries, sizes, c))
+                .collect(),
+        }
+    }
+
+    build(&entries, &sizes, 0)
 }
 
 #[tauri::command]
@@ -1775,7 +1822,7 @@ fn get_storage_tree(path: String, max_depth: Option<u32>) -> Result<StorageNode,
     if !dir.is_dir() {
         return Err(format!("Not a directory: {path}"));
     }
-    Ok(build_storage_tree(&dir, 0, max_depth.unwrap_or(3)))
+    Ok(build_storage_tree(&dir, max_depth.unwrap_or(3)))
 }
 
 // ───── archives ─────
@@ -2054,6 +2101,9 @@ struct NativeController {
     files: Vec<FileEntry>,
     visible_files: Vec<FileEntry>,
     selected_index: i32,
+    selected_set: std::collections::HashSet<usize>,
+    select_anchor: i32,
+    files_model: Option<ModelRc<FileItem>>,
     search_query: String,
     history: Vec<String>,
     history_index: usize,
@@ -2136,6 +2186,30 @@ fn rgba_u8(r: u8, g: u8, b: u8, alpha: f32) -> Color {
 
 fn model_from_vec<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
     ModelRc::new(VecModel::from(items))
+}
+
+fn build_breadcrumbs(path: &str) -> Vec<ChoiceItem> {
+    let mut crumbs = Vec::new();
+    let mut accumulated = String::new();
+    let normalized = path.replace('/', "\\");
+    for part in normalized.split('\\') {
+        if part.is_empty() {
+            continue;
+        }
+        if accumulated.is_empty() {
+            // Windows drive like "C:" displays as "C:\"
+            accumulated = format!("{}\\", part);
+        } else {
+            accumulated = format!("{}{}\\", accumulated, part);
+        }
+        crumbs.push(ChoiceItem {
+            id: ss(accumulated.trim_end_matches('\\')),
+            label: ss(part),
+            description: ss(""),
+            color: slint::Color::from_argb_u8(0, 0, 0, 0),
+        });
+    }
+    crumbs
 }
 
 fn ss(value: impl Into<String>) -> SharedString {
@@ -2813,33 +2887,40 @@ fn choice_items(items: &[(&str, &str, &str, &str)]) -> ModelRc<ChoiceItem> {
     )
 }
 
-fn command_items() -> ModelRc<CommandItem> {
-    let items = [
-        ("Navigation", "New Tab", "Ctrl+T", "new-tab"),
-        ("Navigation", "Close Tab", "Ctrl+W", "close-tab"),
-        ("Navigation", "Refresh", "F5", "refresh"),
-        ("Files", "New Folder", "Ctrl+Shift+N", "new-folder"),
-        ("Files", "Rename", "F2", "rename"),
-        ("Files", "Delete", "Del", "delete"),
-        ("Files", "Copy", "Ctrl+C", "copy"),
-        ("Files", "Cut", "Ctrl+X", "cut"),
-        ("Files", "Paste", "Ctrl+V", "paste"),
-        ("Tools", "Checksum", "", "checksum"),
-        ("Tools", "Storage Treemap", "", "storage"),
-        ("Tools", "Find Duplicates", "", "duplicates"),
-        ("Tools", "Operation Log", "", "operation-log"),
-        ("Tools", "Undo Last Operation", "Ctrl+Z", "undo"),
-        ("View", "Icon View", "Ctrl+1", "view-grid"),
-        ("View", "Details View", "Ctrl+2", "view-list"),
-        ("View", "Gallery View", "Ctrl+3", "view-gallery"),
-        ("View", "Toggle Preview", "Ctrl+I", "toggle-preview"),
-        ("View", "Toggle Dual Pane", "F3", "toggle-dual"),
-        ("Settings", "Open Settings", "Ctrl+,", "settings"),
-    ];
+const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
+    ("Navigation", "New Tab", "Ctrl+T", "new-tab"),
+    ("Navigation", "Close Tab", "Ctrl+W", "close-tab"),
+    ("Navigation", "Refresh", "F5", "refresh"),
+    ("Files", "New Folder", "Ctrl+Shift+N", "new-folder"),
+    ("Files", "Rename", "F2", "rename"),
+    ("Files", "Delete", "Del", "delete"),
+    ("Files", "Copy", "Ctrl+C", "copy"),
+    ("Files", "Cut", "Ctrl+X", "cut"),
+    ("Files", "Paste", "Ctrl+V", "paste"),
+    ("Tools", "Checksum", "", "checksum"),
+    ("Tools", "Storage Treemap", "", "storage"),
+    ("Tools", "Find Duplicates", "", "duplicates"),
+    ("Tools", "Operation Log", "", "operation-log"),
+    ("Tools", "Undo Last Operation", "Ctrl+Z", "undo"),
+    ("View", "Icon View", "Ctrl+1", "view-grid"),
+    ("View", "Details View", "Ctrl+2", "view-list"),
+    ("View", "Gallery View", "Ctrl+3", "view-gallery"),
+    ("View", "Toggle Preview", "Ctrl+I", "toggle-preview"),
+    ("View", "Toggle Dual Pane", "F3", "toggle-dual"),
+    ("Settings", "Open Settings", "Ctrl+,", "settings"),
+];
 
+fn command_items_filtered(query: &str) -> ModelRc<CommandItem> {
+    let q = query.to_lowercase();
     model_from_vec(
-        items
+        ALL_COMMANDS
             .iter()
+            .filter(|(group, label, _, command)| {
+                q.is_empty()
+                    || label.to_lowercase().contains(&q)
+                    || group.to_lowercase().contains(&q)
+                    || command.to_lowercase().contains(&q)
+            })
             .map(|(group, label, hint, command)| CommandItem {
                 group: ss(*group),
                 label: ss(*label),
@@ -2848,6 +2929,10 @@ fn command_items() -> ModelRc<CommandItem> {
             })
             .collect(),
     )
+}
+
+fn command_items() -> ModelRc<CommandItem> {
+    command_items_filtered("")
 }
 
 impl NativeController {
@@ -2872,6 +2957,9 @@ impl NativeController {
             files: Vec::new(),
             visible_files: Vec::new(),
             selected_index: -1,
+            selected_set: std::collections::HashSet::new(),
+            select_anchor: -1,
+            files_model: None,
             search_query: String::new(),
             history: vec![current_path],
             history_index: 0,
@@ -2893,7 +2981,14 @@ impl NativeController {
             notes: read_native_json("notes.json", HashMap::new()),
             git_status: HashMap::new(),
             settings,
-            ai: compute_ai_capabilities(),
+            ai: AiCapabilities {
+                npu_available: false,
+                semantic_search: false,
+                automatic_summaries: false,
+                image_classification: false,
+                local_embeddings: false,
+                reason: "Detecting...".to_string(),
+            },
             clipboard: None,
             pending_prompt: None,
         }
@@ -2956,11 +3051,7 @@ impl NativeController {
         ]));
         ui.set_command_items(command_items());
         ui.set_ai_device(ss(&self.ai.reason));
-        ui.set_ai_label(ss(if self.ai.npu_available {
-            "NPU Accelerated"
-        } else {
-            "CPU Fallback"
-        }));
+        ui.set_ai_label(ss(ai_status_label(&self.ai)));
         apply_theme(ui, &self.settings);
         let path = self.current_path.clone();
         self.navigate(ui, path, false);
@@ -2968,6 +3059,12 @@ impl NativeController {
 
     fn show_toast(&self, ui: &MainWindow, message: impl Into<String>) {
         ui.set_toast_text(ss(message));
+        let weak = ui.as_weak();
+        slint::Timer::single_shot(Duration::from_millis(3000), move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_toast_text(ss(""));
+            }
+        });
     }
 
     fn save_settings(&self) {
@@ -3034,31 +3131,56 @@ impl NativeController {
     }
 
     fn update_status(&self, ui: &MainWindow) {
+        let sel_count = self.selected_set.len();
         ui.set_status_left(ss(format!(
-            "{} items | {} selected",
+            "{} items{}",
             self.visible_files.len(),
-            if self.selected_index >= 0 { 1 } else { 0 }
+            if sel_count > 0 {
+                format!(" | {} selected", sel_count)
+            } else {
+                String::new()
+            }
         )));
         ui.set_status_right(ss(self.current_path.clone()));
     }
 
-    fn update_models(&self, ui: &MainWindow) {
-        ui.set_files(model_from_vec(
-            self.visible_files
-                .iter()
-                .map(|entry| self.file_item(entry))
-                .collect(),
-        ));
+    fn update_models(&mut self, ui: &MainWindow) {
+        let items: Vec<FileItem> = self
+            .visible_files
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| self.file_item(entry, self.selected_set.contains(&i)))
+            .collect();
+        let model = model_from_vec(items);
+        ui.set_files(model.clone());
+        self.files_model = Some(model);
         ui.set_side_items(model_from_vec(self.side_items()));
         ui.set_tabs(model_from_vec(self.tab_items()));
         ui.set_selected_index(self.selected_index);
         ui.set_current_path(ss(&self.current_path));
         ui.set_address_text(ss(&self.current_path));
         ui.set_search_text(ss(&self.search_query));
+        ui.set_breadcrumbs(model_from_vec(build_breadcrumbs(&self.current_path)));
         self.update_status(ui);
     }
 
-    fn file_item(&self, entry: &FileEntry) -> FileItem {
+    fn update_selection_in_model(&mut self, ui: &MainWindow, changed: &[usize]) {
+        if let Some(model) = &self.files_model {
+            use slint::Model;
+            for &i in changed {
+                if let Some(entry) = self.visible_files.get(i) {
+                    let item = self.file_item(entry, self.selected_set.contains(&i));
+                    if let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() {
+                        m.set_row_data(i, item);
+                    }
+                }
+            }
+        }
+        ui.set_selected_index(self.selected_index);
+        self.update_status(ui);
+    }
+
+    fn file_item(&self, entry: &FileEntry, selected: bool) -> FileItem {
         let tag_id = self.tags.get(&entry.path).cloned().unwrap_or_default();
         let git_status = self.git_for_entry(entry);
         FileItem {
@@ -3082,6 +3204,7 @@ impl NativeController {
             git_badge: ss(git_label(&git_status)),
             git_color: git_color(&git_status),
             has_note: self.notes.contains_key(&entry.path),
+            is_selected: selected,
         }
     }
 
@@ -3235,10 +3358,14 @@ impl NativeController {
         };
         match native_list_directory(&self.app_state, &path) {
             Ok(files) => {
+                ui.set_nav_opacity(0.0);
                 self.current_path = path.clone();
                 self.files = files;
                 self.search_query.clear();
                 self.selected_index = -1;
+                self.selected_set.clear();
+                self.select_anchor = -1;
+                self.files_model = None;
                 self.git_status = native_git_status(&self.app_state, &path);
                 if push_history {
                     self.history.truncate(self.history_index + 1);
@@ -3253,6 +3380,12 @@ impl NativeController {
                 self.update_models(ui);
                 self.update_preview(ui);
                 self.save_session();
+                let weak = ui.as_weak();
+                slint::Timer::single_shot(Duration::from_millis(40), move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_nav_opacity(1.0);
+                    }
+                });
             }
             Err(error) => self.show_toast(ui, error),
         }
@@ -3266,14 +3399,59 @@ impl NativeController {
     }
 
     fn select(&mut self, ui: &MainWindow, index: i32) {
+        self.select_with_modifiers(ui, index, false, false);
+    }
+
+    fn select_with_modifiers(&mut self, ui: &MainWindow, index: i32, ctrl: bool, shift: bool) {
+        let n = self.visible_files.len();
+        let mut changed: Vec<usize> = Vec::new();
+
+        if shift && self.select_anchor >= 0 && index >= 0 {
+            // Range select from anchor to index
+            let lo = (self.select_anchor as usize).min(index as usize);
+            let hi = (self.select_anchor as usize).max(index as usize);
+            // Clear current non-anchor selection, keep anchor, add range
+            let old = std::mem::take(&mut self.selected_set);
+            for i in 0..n {
+                if (i >= lo && i <= hi) || i == self.select_anchor as usize {
+                    self.selected_set.insert(i);
+                    if !old.contains(&i) {
+                        changed.push(i);
+                    }
+                } else if old.contains(&i) {
+                    changed.push(i);
+                }
+            }
+        } else if ctrl && index >= 0 {
+            // Toggle this item
+            let i = index as usize;
+            if self.selected_set.contains(&i) {
+                self.selected_set.remove(&i);
+            } else {
+                self.selected_set.insert(i);
+                self.select_anchor = index;
+            }
+            changed.push(i);
+        } else {
+            // Plain click: clear all, select one
+            let old = std::mem::take(&mut self.selected_set);
+            for i in old {
+                changed.push(i);
+            }
+            if index >= 0 && (index as usize) < n {
+                self.selected_set.insert(index as usize);
+                changed.push(index as usize);
+                self.select_anchor = index;
+            }
+        }
+
         self.selected_index = index;
         if let Some(entry) = self.selected_entry() {
             ui.set_selected_name(ss(&entry.name));
         } else {
             ui.set_selected_name(ss(""));
         }
-        ui.set_selected_index(self.selected_index);
-        self.update_status(ui);
+        self.update_selection_in_model(ui, &changed);
         if ui.get_preview_visible() {
             self.update_preview(ui);
         }
@@ -3614,7 +3792,7 @@ impl NativeController {
     }
 
     fn show_storage(&mut self, ui: &MainWindow) {
-        match build_storage_tree(Path::new(&self.current_path), 0, 4) {
+        match build_storage_tree(Path::new(&self.current_path), 4) {
             tree if tree.size > 0 => {
                 ui.set_preview_title(ss("Storage Treemap"));
                 let mut children = tree.children;
@@ -3753,9 +3931,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
 
     let weak = ui.as_weak();
     let c = controller.clone();
-    ui.on_file_selected(move |index| {
+    ui.on_file_selected(move |index, ctrl, shift| {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().select(&ui, index);
+            c.borrow_mut()
+                .select_with_modifiers(&ui, index, ctrl, shift);
         }
     });
 
@@ -3865,6 +4044,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
+    ui.on_toggle_hidden(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_show_hidden(!ui.get_show_hidden());
+        }
+    });
+
+    let weak = ui.as_weak();
     let c = controller.clone();
     ui.on_command(move |command| {
         if let Some(ui) = weak.upgrade() {
@@ -3940,10 +4126,60 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
-    let c = controller;
+    let c = controller.clone();
     ui.on_prompt_accept(move |value| {
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut().accept_prompt(&ui, value.to_string());
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_filter_commands(move |query| {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_command_items(command_items_filtered(&query));
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_crumb_navigate(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            let path = {
+                use slint::Model;
+                ui.get_breadcrumbs()
+                    .row_data(index as usize)
+                    .map(|item| item.id.to_string())
+            };
+            if let Some(path) = path {
+                c.borrow_mut().navigate(&ui, path, true);
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_rename_file(move |index, new_name| {
+        if let Some(ui) = weak.upgrade() {
+            let result = {
+                let ctrl = c.borrow();
+                ctrl.visible_files
+                    .get(index as usize)
+                    .map(|e| (e.path.clone(), e.name.clone()))
+            };
+            if let Some((old_path, _old_name)) = result {
+                let parent = PathBuf::from(&old_path)
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_default();
+                let new_path = parent.join(new_name.as_str());
+                match fs::rename(&old_path, &new_path) {
+                    Ok(()) => {
+                        c.borrow_mut().refresh(&ui);
+                        c.borrow().show_toast(&ui, "Renamed");
+                    }
+                    Err(e) => c.borrow().show_toast(&ui, e.to_string()),
+                }
+            }
         }
     });
 }
@@ -4002,7 +4238,20 @@ pub fn run() {
     let ui = MainWindow::new().expect("failed to create Pathfinder window");
     let controller = Rc::new(RefCell::new(NativeController::new()));
     controller.borrow_mut().initialize_ui(&ui);
-    wire_native_callbacks(&ui, controller);
+    wire_native_callbacks(&ui, controller.clone());
+
+    // Detect NPU/AI capabilities in background; update UI labels once done
+    let weak_ui = ui.as_weak();
+    std::thread::spawn(move || {
+        let caps = compute_ai_capabilities();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak_ui.upgrade() {
+                ui.set_ai_device(SharedString::from(&caps.reason));
+                ui.set_ai_label(SharedString::from(ai_status_label(&caps)));
+            }
+        });
+    });
+
     ui.show().expect("failed to show Pathfinder window");
     apply_mica(&ui);
     slint::run_event_loop().expect("error while running Slint event loop");
