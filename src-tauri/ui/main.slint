@@ -1,4 +1,4 @@
-import { LineEdit, ListView, ScrollView } from "std-widgets.slint";
+import { LineEdit, ListView, ScrollView, Slider } from "std-widgets.slint";
 
 export struct FileItem {
     name: string,
@@ -14,6 +14,8 @@ export struct FileItem {
     git_color: color,
     has_note: bool,
     is_selected: bool,
+    has_thumbnail: bool,
+    thumbnail: image,
 }
 
 export struct SideItem {
@@ -65,6 +67,8 @@ export global ThemePalette {
     in-out property <color> danger: #e5484d;
     in-out property <color> success: #37b26c;
     in-out property <color> warning: #e3a524;
+    in-out property <color> icon_folder_1: #ffd86a;
+    in-out property <color> icon_folder_2: #e2a934;
 }
 
 component SvgIcon {
@@ -286,7 +290,7 @@ component NodeVisual {
         width: parent.width - 8px;
         height: parent.height - 11px;
         border-radius: 5px;
-        background: @linear-gradient(180deg, #ffd86a 0%, #e2a934 100%);
+        background: @linear-gradient(180deg, ThemePalette.icon_folder_1 0%, ThemePalette.icon_folder_2 100%);
     }
 
     if root.is_dir: Rectangle {
@@ -295,7 +299,7 @@ component NodeVisual {
         width: 22px;
         height: 10px;
         border-radius: 5px;
-        background: #ffe28d;
+        background: ThemePalette.icon_folder_1;
     }
 
     if !root.is_dir: Rectangle {
@@ -439,7 +443,22 @@ component FileRow inherits Rectangle {
         background: root.item.tag_color;
     }
 
-    if root.view_mode != "list": NodeVisual {
+    if root.view_mode != "list" && root.item.has_thumbnail: Rectangle {
+        x: (parent.width - (root.view_mode == "gallery" ? 64px : 54px)) / 2;
+        y: root.view_mode == "gallery" ? 18px : 12px;
+        width: root.view_mode == "gallery" ? 64px : 54px;
+        height: root.view_mode == "gallery" ? 70px : 54px;
+        border-radius: 4px;
+        clip: true;
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.item.thumbnail;
+            image-fit: cover;
+        }
+    }
+
+    if root.view_mode != "list" && !root.item.has_thumbnail: NodeVisual {
         x: (parent.width - 64px) / 2;
         y: root.view_mode == "gallery" ? 18px : 12px;
         visual_width: root.view_mode == "gallery" ? 64px : 54px;
@@ -537,14 +556,46 @@ component FileRow inherits Rectangle {
 }
 
 component ListHeader inherits Rectangle {
+    in property <string> sort_by: "name";
+    in property <string> sort_dir: "asc";
+    callback sort_col(string);
+
     height: 32px;
     background: ThemePalette.panel_solid;
     border-width: 0px;
 
-    Text { x: 44px; width: parent.width - 486px; height: parent.height; text: "NAME"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
-    Text { x: parent.width - 428px; width: 112px; height: parent.height; text: "SIZE"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
-    Text { x: parent.width - 306px; width: 146px; height: parent.height; text: "MODIFIED"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
-    Text { x: parent.width - 150px; width: 90px; height: parent.height; text: "TYPE"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+    // NAME
+    Rectangle {
+        x: 44px; width: parent.width - 486px; height: parent.height;
+        background: nh.has-hover ? rgba(255,255,255,0.04) : transparent;
+        Text { x: 0; width: parent.width - 14px; height: parent.height; text: "NAME"; color: root.sort_by == "name" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+        Text { visible: root.sort_by == "name"; x: parent.width - 13px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "↑" : "↓"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
+        nh := TouchArea { mouse-cursor: pointer; clicked => { root.sort_col("name"); } }
+    }
+    // SIZE
+    Rectangle {
+        x: parent.width - 428px; width: 112px; height: parent.height;
+        background: sh.has-hover ? rgba(255,255,255,0.04) : transparent;
+        Text { x: 0; width: 98px; height: parent.height; text: "SIZE"; color: root.sort_by == "size" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+        Text { visible: root.sort_by == "size"; x: 98px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "↑" : "↓"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
+        sh := TouchArea { mouse-cursor: pointer; clicked => { root.sort_col("size"); } }
+    }
+    // MODIFIED
+    Rectangle {
+        x: parent.width - 306px; width: 146px; height: parent.height;
+        background: mh.has-hover ? rgba(255,255,255,0.04) : transparent;
+        Text { x: 0; width: 132px; height: parent.height; text: "MODIFIED"; color: root.sort_by == "modified" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+        Text { visible: root.sort_by == "modified"; x: 132px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "↑" : "↓"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
+        mh := TouchArea { mouse-cursor: pointer; clicked => { root.sort_col("modified"); } }
+    }
+    // TYPE
+    Rectangle {
+        x: parent.width - 150px; width: 90px; height: parent.height;
+        background: th.has-hover ? rgba(255,255,255,0.04) : transparent;
+        Text { x: 0; width: 78px; height: parent.height; text: "TYPE"; color: root.sort_by == "type" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+        Text { visible: root.sort_by == "type"; x: 78px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "↑" : "↓"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
+        th := TouchArea { mouse-cursor: pointer; clicked => { root.sort_col("type"); } }
+    }
 
     Rectangle { y: parent.height - 1px; height: 1px; width: parent.width; background: ThemePalette.border; }
 }
@@ -673,6 +724,7 @@ export component MainWindow inherits Window {
     in-out property <[ChoiceItem]> theme_choices;
     in-out property <[ChoiceItem]> accent_choices;
     in-out property <[ChoiceItem]> density_choices;
+    in-out property <[ChoiceItem]> index_choices;
     in-out property <[CommandItem]> command_items;
 
     in-out property <string> current_path: "";
@@ -681,6 +733,9 @@ export component MainWindow inherits Window {
     in-out property <string> active_theme: "mica-dark";
     in-out property <string> active_accent: "blue";
     in-out property <string> active_density: "cozy";
+    in-out property <string> active_index_mode: "low";
+    in-out property <string> index_status: "";
+    in-out property <string> thumbnail_status: "";
     in-out property <string> view_mode: "grid";
     in-out property <bool> preview_visible: true;
     in-out property <bool> dual_pane: false;
@@ -692,11 +747,14 @@ export component MainWindow inherits Window {
     in-out property <bool> confirm_visible: false;
     in-out property <bool> prompt_visible: false;
     in-out property <bool> address_editing: false;
+    in-out property <[string]> addr_suggestions: [];
     in-out property <int> selected_index: -1;
     in-out property <string> selected_name: "";
     in-out property <string> preview_title: "";
     in-out property <string> preview_body: "";
     in-out property <string> preview_meta: "";
+    in-out property <bool> preview_is_image: false;
+    in-out property <image> preview_image;
     in-out property <string> status_left: "Ready";
     in-out property <string> status_right: "";
     in-out property <string> toast_text: "";
@@ -710,6 +768,13 @@ export component MainWindow inherits Window {
     in-out property <string> command_filter: "";
     in-out property <int> rename_index: -1;
     in-out property <[ChoiceItem]> breadcrumbs;
+
+    in-out property <string> empty_state: "";
+    in-out property <string> sort_by: "name";
+    in-out property <string> sort_dir: "asc";
+    in-out property <string> toast_kind: "info";
+    in-out property <bool> op_drawer_visible: false;
+    in-out property <string> op_drawer_text: "";
 
     callback filter_commands(string);
     callback navigate(string);
@@ -727,6 +792,8 @@ export component MainWindow inherits Window {
     callback go_up();
     callback refresh();
     callback search_requested(string);
+    callback search_immediate(string);
+    callback address_changed(string);
     callback set_view(string);
     callback toggle_preview();
     callback toggle_dual_pane();
@@ -735,12 +802,46 @@ export component MainWindow inherits Window {
     callback theme_selected(string);
     callback accent_selected(string);
     callback density_selected(string);
+    callback index_mode_selected(string);
+    callback clear_thumbnail_cache();
+    callback rebuild_index();
     callback minimize();
     callback maximize();
     callback close();
     callback drag_window();
     callback confirm_delete();
     callback prompt_accept(string);
+    callback sort_column(string);
+
+    // Custom theme editor state
+    in-out property <string> ce_name: "My Theme";
+    in-out property <[color]> ce_token_colors: [];
+    in-out property <[string]> ce_token_hexes: [];
+    in-out property <[string]> ce_saved_themes: [];
+    in-out property <int> ce_selected_token: -1;
+    in-out property <string> ce_token_hex: "";
+    in-out property <string> ce_token_label: "";
+    in-out property <float> ce_radius: 8;
+    in-out property <float> ce_anim_speed: 1.0;
+    in-out property <string> ce_finish: "mica-dark";
+    in-out property <string> ce_ui_font: "Segoe UI";
+    in-out property <string> ce_mono_font: "Cascadia Mono";
+    in-out property <int> ce_font_size_delta: 0;
+    in-out property <string> ce_icon_folder_hex: "#e2a934";
+    in-out property <string> ce_icon_set: "";
+
+    callback ce_select_token(int);
+    callback ce_color_changed(int, string);
+    callback ce_radius_changed(float);
+    callback ce_anim_changed(float);
+    callback ce_finish_changed(string);
+    callback ce_font_changed(string, string);
+    callback ce_font_size_changed(int);
+    callback ce_icon_tint_changed(string);
+    callback ce_save(string);
+    callback ce_load(string);
+    callback ce_delete(string);
+    callback ce_reset_to_active();
 
     property <length> sidebar_w: 238px;
     property <length> title_h: 36px;
@@ -973,16 +1074,67 @@ export component MainWindow inherits Window {
                     text: root.address_text;
                     font-size: 12px;
                     font-family: AppMetrics.mono_font;
+                    edited(value) => {
+                        root.address_text = value;
+                        root.address_changed(value);
+                    }
                     accepted(path) => {
+                        root.addr_suggestions = [];
                         root.address_editing = false;
                         root.navigate(path);
                     }
                     key-pressed(event) => {
                         if (event.text == Key.Escape) {
+                            root.addr_suggestions = [];
                             root.address_editing = false;
                             accept
                         } else {
                             reject
+                        }
+                    }
+                }
+
+                // Autocomplete dropdown
+                if root.address_editing && root.addr_suggestions.length > 0: Rectangle {
+                    x: 0;
+                    y: parent.height;
+                    width: parent.width;
+                    height: min(root.addr_suggestions.length * 28px + 4px, 168px);
+                    background: ThemePalette.panel_solid;
+                    border-width: 1px;
+                    border-color: ThemePalette.border_strong;
+                    border-radius: AppMetrics.radius;
+                    drop-shadow-blur: 12px;
+                    drop-shadow-color: rgba(0, 0, 0, 0.3);
+                    clip: true;
+                    VerticalLayout {
+                        padding: 2px;
+                        spacing: 0;
+                        for sug[i] in root.addr_suggestions: Rectangle {
+                            height: 28px;
+                            width: parent.width - 4px;
+                            x: 2px;
+                            border-radius: AppMetrics.radius - 1px;
+                            background: sug_ta.has-hover ? rgba(255, 255, 255, 0.07) : transparent;
+                            Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: parent.height;
+                                text: sug;
+                                color: ThemePalette.text;
+                                font-size: 12px;
+                                font-family: AppMetrics.mono_font;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            sug_ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.addr_suggestions = [];
+                                    root.address_editing = false;
+                                    root.navigate(sug);
+                                }
+                            }
                         }
                     }
                 }
@@ -1022,7 +1174,7 @@ export component MainWindow inherits Window {
                         root.search_text = value;
                         root.search_requested(value);
                     }
-                    accepted(value) => { root.search_requested(value); }
+                    accepted(value) => { root.search_immediate(value); }
                 }
                 Text { x: parent.width - 48px; width: 40px; height: parent.height; text: "Ctrl+F"; color: ThemePalette.text_faint; font-family: AppMetrics.mono_font; font-size: 10px; vertical-alignment: center; horizontal-alignment: right; }
             }
@@ -1061,7 +1213,7 @@ export component MainWindow inherits Window {
                     pointer-event(event) => {
                         if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                             root.context_x = (self.absolute-position.x + self.mouse-x).clamp(0px, root.width - 240px);
-                            root.context_y = (self.absolute-position.y + self.mouse-y).clamp(0px, root.height - 280px);
+                            root.context_y = (self.absolute-position.y + self.mouse-y).clamp(0px, root.height - 440px);
                             root.context_visible = true;
                             root.file_context(-1);
                         }
@@ -1072,6 +1224,9 @@ export component MainWindow inherits Window {
                     x: AppMetrics.pad;
                     y: AppMetrics.pad;
                     width: parent.width - AppMetrics.pad * 2;
+                    sort_by: root.sort_by;
+                    sort_dir: root.sort_dir;
+                    sort_col(col) => { root.sort_column(col); }
                 }
 
                 if root.view_mode == "list": ListView {
@@ -1089,7 +1244,7 @@ export component MainWindow inherits Window {
                         opened(i) => { root.file_opened(i); }
                         context(i, cx, cy) => {
                             root.context_x = cx.clamp(0px, root.width - 240px);
-                            root.context_y = cy.clamp(0px, root.height - 280px);
+                            root.context_y = cy.clamp(0px, root.height - 440px);
                             root.context_visible = true;
                             root.file_context(i);
                         }
@@ -1120,7 +1275,7 @@ export component MainWindow inherits Window {
                         opened(i) => { root.file_opened(i); }
                         context(i, cx, cy) => {
                             root.context_x = cx.clamp(0px, root.width - 240px);
-                            root.context_y = cy.clamp(0px, root.height - 280px);
+                            root.context_y = cy.clamp(0px, root.height - 440px);
                             root.context_visible = true;
                             root.file_context(i);
                         }
@@ -1131,15 +1286,39 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                Text {
+                Rectangle {
                     visible: root.files.length == 0;
                     width: parent.width;
                     height: parent.height;
-                    text: "No files";
-                    color: ThemePalette.text_faint;
-                    font-size: 13px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        SvgIcon {
+                            x: (parent.width - 32px) / 2;
+                            icon_size: 32px;
+                            data: root.search_text != "" ?
+                                "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3" :
+                                "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z";
+                            tint: ThemePalette.text_faint;
+                        }
+                        Text {
+                            width: parent.width;
+                            text: root.empty_state != "" ? root.empty_state :
+                                  root.search_text != "" ? "No results for \"" + root.search_text + "\"" :
+                                  "This folder is empty";
+                            color: ThemePalette.text_faint;
+                            font-size: 13px;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            visible: root.search_text != "";
+                            width: parent.width;
+                            text: "Try a different query or search in a parent folder";
+                            color: ThemePalette.text_faint;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                        }
+                    }
                 }
             }
 
@@ -1189,17 +1368,80 @@ export component MainWindow inherits Window {
                 }
 
                 ScrollView {
-                    x: 16px;
-                    y: 62px;
-                    width: parent.width - 32px;
-                    height: parent.height - 78px;
-                    Text {
+                    x: 0px;
+                    y: 48px;
+                    width: parent.width;
+                    height: parent.height - 48px;
+
+                    VerticalLayout {
                         width: parent.width;
-                        text: root.preview_body == "" ? "Select a file to preview details." : root.preview_body + "\n\n" + root.preview_meta;
-                        color: root.preview_body == "" ? ThemePalette.text_faint : ThemePalette.text_muted;
-                        font-size: root.preview_body == "" ? 12.5px : 11.5px;
-                        font-family: root.preview_body == "" ? AppMetrics.ui_font : AppMetrics.mono_font;
-                        wrap: word-wrap;
+                        padding: 0;
+                        spacing: 0;
+
+                        // Image preview area
+                        if root.preview_is_image: Rectangle {
+                            width: parent.width;
+                            height: 150px;
+                            background: ThemePalette.bg;
+                            border-width: 0;
+                            Image {
+                                x: (parent.width - 150px) / 2;
+                                y: 10px;
+                                width: 150px;
+                                height: 130px;
+                                source: root.preview_image;
+                                image-fit: contain;
+                            }
+                        }
+
+                        // Meta info block (path, type, size, modified)
+                        if root.preview_meta != "": Rectangle {
+                            width: parent.width;
+                            height: 8px;
+                        }
+                        if root.preview_meta != "": Text {
+                            x: 16px;
+                            width: parent.width - 32px;
+                            text: root.preview_meta;
+                            color: ThemePalette.text_faint;
+                            font-size: 10.5px;
+                            font-family: AppMetrics.mono_font;
+                            wrap: word-wrap;
+                        }
+
+                        // Divider + body content
+                        if root.preview_body != "" && root.preview_meta != "": Rectangle {
+                            width: parent.width - 32px;
+                            x: 16px;
+                            height: 1px;
+                            background: ThemePalette.border;
+                        }
+                        if root.preview_body != "" && root.preview_meta != "": Rectangle {
+                            width: parent.width; height: 8px;
+                        }
+
+                        if root.preview_body != "": Text {
+                            x: 16px;
+                            width: parent.width - 32px;
+                            text: root.preview_body;
+                            color: ThemePalette.text_muted;
+                            font-size: 11.5px;
+                            font-family: AppMetrics.mono_font;
+                            wrap: word-wrap;
+                        }
+
+                        // Empty state
+                        if root.preview_body == "" && root.preview_meta == "": Text {
+                            x: 16px;
+                            width: parent.width - 32px;
+                            height: 200px;
+                            text: "Select a file to preview details.";
+                            color: ThemePalette.text_faint;
+                            font-size: 12.5px;
+                            font-family: AppMetrics.ui_font;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
                     }
                 }
             }
@@ -1223,7 +1465,7 @@ export component MainWindow inherits Window {
         x: root.context_x;
         y: root.context_y;
         width: 226px;
-        height: 248px;
+        height: 460px;
         border-width: 1px;
         border-color: ThemePalette.border_strong;
         border-radius: AppMetrics.radius;
@@ -1243,6 +1485,16 @@ export component MainWindow inherits Window {
             ChoiceMenuRow { width: parent.width; label: "Batch Rename"; command_name: "batch-rename"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Checksum"; command_name: "checksum"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Add Note"; command_name: "note"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Locked File Inspector"; command_name: "locked-file"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Properties"; command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Show More Options"; command_name: "show-more-options"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Cloud State"; command_name: "cloud-state"; picked(c) => { root.context_visible = false; root.command(c); } }
+            Rectangle { height: 1px; background: ThemePalette.border; }
+            ChoiceMenuRow { width: parent.width; label: "Copy as Path"; command_name: "copy-as-path"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Copy as PowerShell Path"; command_name: "copy-as-powershell"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Open in Terminal"; command_name: "open-terminal"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Archive Browser"; command_name: "archive-browser"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Image Tools"; command_name: "image-tools"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Delete"; command_name: "delete"; danger: true; picked(c) => { root.context_visible = false; root.command(c); } }
         }
     }
@@ -1338,12 +1590,12 @@ export component MainWindow inherits Window {
                 background: transparent;
                 Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
 
-                for tab_label[ti] in ["Appearance", "View", "AI"]: Rectangle {
-                    property <string> tid: ti == 0 ? "appearance" : (ti == 1 ? "view" : "ai");
+                for tab_label[ti] in ["Appearance", "View", "Performance", "Themes", "AI"]: Rectangle {
+                    property <string> tid: ti == 0 ? "appearance" : (ti == 1 ? "view" : (ti == 2 ? "performance" : (ti == 3 ? "themes" : "ai")));
                     property <bool> is_active: root.settings_tab == self.tid;
-                    x: 20px + ti * 110px;
+                    x: 20px + ti * 102px;
                     y: 0;
-                    width: 106px;
+                    width: 98px;
                     height: parent.height;
                     background: transparent;
                     Text {
@@ -1511,6 +1763,423 @@ export component MainWindow inherits Window {
                 }
             }
 
+            if root.settings_tab == "themes": ScrollView {
+                x: 20px;
+                y: 112px;
+                width: parent.width - 40px;
+                height: parent.height - 124px;
+                viewport-width: parent.width - 40px;
+
+                VerticalLayout {
+                    width: parent.width;
+                    spacing: 16px;
+                    padding-bottom: 20px;
+
+                    // Saved themes
+                    Text { text: "SAVED THEMES"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Rectangle {
+                        height: 38px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        clip: true;
+                        if root.ce_saved_themes.length == 0: Text {
+                            x: 14px;
+                            width: parent.width - 28px;
+                            height: parent.height;
+                            text: "No saved themes yet";
+                            color: ThemePalette.text_faint;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        for saved_name[ni] in root.ce_saved_themes: Rectangle {
+                            x: 8px + ni * (saved_chip_text.preferred-width + 28px);
+                            y: 7px;
+                            height: 24px;
+                            width: saved_chip_text.preferred-width + 20px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: ThemePalette.border_strong;
+                            background: saved_chip_ta.has-hover ? ThemePalette.panel_alt : ThemePalette.panel_solid;
+                            saved_chip_text := Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: parent.height;
+                                text: saved_name;
+                                color: ThemePalette.text_muted;
+                                font-size: 11.5px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            saved_chip_ta := TouchArea {
+                                clicked => { root.ce_load(saved_name); }
+                            }
+                        }
+                    }
+
+                    // Name
+                    Text { text: "THEME NAME"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    LineEdit {
+                        height: 34px;
+                        text: root.ce_name;
+                        placeholder-text: "My Theme";
+                        font-size: 13px;
+                        edited(val) => { root.ce_name = val; }
+                    }
+
+                    // Colors
+                    Text { text: "COLORS"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text {
+                        text: "Click a swatch to select it, then edit the hex value below.";
+                        color: ThemePalette.text_faint;
+                        font-size: 11px;
+                    }
+                    Rectangle {
+                        height: 44px;
+                        for col[ci] in root.ce_token_colors: Rectangle {
+                            x: ci * 62px;
+                            y: 8px;
+                            width: 28px;
+                            height: 28px;
+                            border-radius: 14px;
+                            background: col;
+                            border-width: root.ce_selected_token == ci ? 2px : 1px;
+                            border-color: root.ce_selected_token == ci ? ThemePalette.accent : ThemePalette.border_strong;
+                            TouchArea {
+                                clicked => { root.ce_select_token(ci); }
+                            }
+                        }
+                    }
+                    if root.ce_selected_token >= 0: Rectangle {
+                        height: 38px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text {
+                            x: 14px;
+                            width: 140px;
+                            height: parent.height;
+                            text: root.ce_token_label;
+                            color: ThemePalette.text;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                        LineEdit {
+                            x: 154px;
+                            y: 6px;
+                            width: 130px;
+                            height: 26px;
+                            text: root.ce_token_hex;
+                            font-family: AppMetrics.mono_font;
+                            font-size: 12px;
+                            placeholder-text: "#rrggbb";
+                            edited(val) => { root.ce_color_changed(root.ce_selected_token, val); }
+                        }
+                        Rectangle {
+                            x: parent.width - 46px;
+                            y: 7px;
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 12px;
+                            background: root.ce_token_colors.length > root.ce_selected_token && root.ce_selected_token >= 0
+                                ? root.ce_token_colors[root.ce_selected_token]
+                                : ThemePalette.border_strong;
+                            border-width: 1px;
+                            border-color: ThemePalette.border_strong;
+                        }
+                    }
+
+                    // Feel
+                    Text { text: "FEEL"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Rectangle {
+                        height: 38px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; width: 140px; height: parent.height; text: "Corner radius"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        Slider {
+                            x: 158px;
+                            y: 9px;
+                            width: parent.width - 230px;
+                            height: 20px;
+                            minimum: 0;
+                            maximum: 16;
+                            value: root.ce_radius;
+                            changed(v) => { root.ce_radius_changed(v); }
+                        }
+                        Text {
+                            x: parent.width - 60px;
+                            width: 50px;
+                            height: parent.height;
+                            text: Math.round(root.ce_radius) + "px";
+                            color: ThemePalette.text_muted;
+                            font-family: AppMetrics.mono_font;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Rectangle {
+                        height: 38px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; width: 130px; height: parent.height; text: "Animations"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        HorizontalLayout {
+                            x: 148px;
+                            y: 6px;
+                            width: parent.width - 162px;
+                            height: parent.height - 12px;
+                            spacing: 4px;
+                            for speed_label[si] in ["Off", "Fast", "Normal", "Slow"]: Rectangle {
+                                property <float> sv: si == 0 ? 0.0 : (si == 1 ? 0.5 : (si == 2 ? 1.0 : 2.0));
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: root.ce_anim_speed == self.sv ? ThemePalette.accent : ThemePalette.border;
+                                background: root.ce_anim_speed == self.sv ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: speed_label;
+                                    color: root.ce_anim_speed == parent.sv ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                TouchArea { clicked => { root.ce_anim_changed(sv); } }
+                            }
+                        }
+                    }
+
+                    // Finish
+                    Text { text: "FINISH"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    HorizontalLayout {
+                        height: 38px;
+                        spacing: 6px;
+                        for finish_label[fi] in ["Mica Dark", "Mica Light", "Flat", "Solid"]: Rectangle {
+                            property <string> fid: fi == 0 ? "mica-dark" : (fi == 1 ? "mica-light" : (fi == 2 ? "flat" : "solid"));
+                            border-radius: AppMetrics.radius_small;
+                            border-width: 1px;
+                            border-color: root.ce_finish == self.fid ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_finish == self.fid ? ThemePalette.accent_soft : ThemePalette.panel;
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: finish_label;
+                                color: root.ce_finish == parent.fid ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            TouchArea { clicked => { root.ce_finish_changed(fid); } }
+                        }
+                    }
+
+                    // Typography
+                    Text { text: "TYPOGRAPHY"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Rectangle {
+                        height: 38px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; width: 100px; height: parent.height; text: "UI Font"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        LineEdit {
+                            x: 114px;
+                            y: 6px;
+                            width: parent.width - 128px;
+                            height: 26px;
+                            text: root.ce_ui_font;
+                            font-size: 12px;
+                            placeholder-text: "Segoe UI";
+                            edited(val) => { root.ce_font_changed(val, root.ce_mono_font); }
+                        }
+                    }
+                    Rectangle {
+                        height: 38px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; width: 100px; height: parent.height; text: "Mono Font"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        LineEdit {
+                            x: 114px;
+                            y: 6px;
+                            width: parent.width - 128px;
+                            height: 26px;
+                            text: root.ce_mono_font;
+                            font-size: 12px;
+                            placeholder-text: "Cascadia Mono";
+                            edited(val) => { root.ce_font_changed(root.ce_ui_font, val); }
+                        }
+                    }
+                    Rectangle {
+                        height: 38px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; width: 100px; height: parent.height; text: "Size"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        HorizontalLayout {
+                            x: 114px;
+                            y: 6px;
+                            width: parent.width - 128px;
+                            height: parent.height - 12px;
+                            spacing: 4px;
+                            for size_label[sz] in ["Small", "Normal", "Large"]: Rectangle {
+                                property <int> sdv: sz - 1;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: root.ce_font_size_delta == self.sdv ? ThemePalette.accent : ThemePalette.border;
+                                background: root.ce_font_size_delta == self.sdv ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: size_label;
+                                    color: root.ce_font_size_delta == parent.sdv ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                TouchArea { clicked => { root.ce_font_size_changed(sdv); } }
+                            }
+                        }
+                    }
+
+                    // Icons
+                    Text { text: "ICONS"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Rectangle {
+                        height: 38px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; width: 120px; height: parent.height; text: "Folder color"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        LineEdit {
+                            x: 134px;
+                            y: 6px;
+                            width: 130px;
+                            height: 26px;
+                            text: root.ce_icon_folder_hex;
+                            font-family: AppMetrics.mono_font;
+                            font-size: 12px;
+                            placeholder-text: "#e2a934";
+                            edited(val) => { root.ce_icon_tint_changed(val); }
+                        }
+                        Rectangle {
+                            x: parent.width - 46px;
+                            y: 7px;
+                            width: 24px;
+                            height: 24px;
+                            border-radius: 12px;
+                            background: ThemePalette.icon_folder_2;
+                            border-width: 1px;
+                            border-color: ThemePalette.border_strong;
+                        }
+                    }
+                    Rectangle {
+                        height: 38px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; width: 100px; height: parent.height; text: "Icon set"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        LineEdit {
+                            x: 114px;
+                            y: 6px;
+                            width: parent.width - 128px;
+                            height: 26px;
+                            text: root.ce_icon_set;
+                            placeholder-text: "Path to icon set folder...";
+                            font-size: 11.5px;
+                            edited(val) => { root.ce_icon_set = val; }
+                        }
+                    }
+
+                    // Actions
+                    HorizontalLayout {
+                        height: 36px;
+                        spacing: 8px;
+                        alignment: end;
+                        DialogButton {
+                            label: "Reset";
+                            clicked => { root.ce_reset_to_active(); }
+                        }
+                        DialogButton {
+                            label: "Delete";
+                            danger: true;
+                            visible: root.ce_saved_themes.length > 0;
+                            clicked => { root.ce_delete(root.ce_name); }
+                        }
+                        DialogButton {
+                            label: "Save Theme";
+                            primary: true;
+                            clicked => { root.ce_save(root.ce_name); }
+                        }
+                    }
+                }
+            }
+
+            if root.settings_tab == "performance": ScrollView {
+                x: 20px;
+                y: 112px;
+                width: parent.width - 40px;
+                height: parent.height - 124px;
+                viewport-width: parent.width - 40px;
+
+                VerticalLayout {
+                    width: parent.width;
+                    spacing: 14px;
+                    padding-bottom: 16px;
+
+                    Text { text: "SEARCH PERFORMANCE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Rectangle {
+                        width: parent.width;
+                        height: Math.ceil(root.index_choices.length / 2) * (AppMetrics.row_h + 16px);
+                        for mode[i] in root.index_choices: ChoiceChip {
+                            x: Math.mod(i, 2) == 0 ? 0px : (parent.width / 2 + 3px);
+                            y: Math.floor(i / 2) * (AppMetrics.row_h + 16px);
+                            width: parent.width / 2 - 3px;
+                            item: mode;
+                            active: root.active_index_mode == mode.id;
+                            picked(id) => { root.index_mode_selected(id); }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 92px;
+                        border-radius: AppMetrics.radius;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; y: 12px; width: parent.width - 28px; height: 20px; text: "Index estimate"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
+                        Text { x: 14px; y: 36px; width: parent.width - 28px; height: 44px; text: root.index_status; color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap; }
+                    }
+
+                    Text { text: "THUMBNAIL CACHE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Rectangle {
+                        height: 76px;
+                        border-radius: AppMetrics.radius;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; y: 12px; width: parent.width - 112px; height: 20px; text: "Automatic thumbnail cleanup"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
+                        Text { x: 14px; y: 36px; width: parent.width - 112px; height: 22px; text: root.thumbnail_status; color: ThemePalette.text_muted; font-size: 12px; overflow: elide; }
+                        DialogButton { x: parent.width - 92px; y: 22px; label: "Clear"; clicked => { root.clear_thumbnail_cache(); } }
+                    }
+
+                    HorizontalLayout {
+                        height: 34px;
+                        spacing: 8px;
+                        DialogButton { label: "Rebuild"; primary: true; clicked => { root.rebuild_index(); } }
+                        DialogButton { label: "Debug"; clicked => { root.command("performance-debug"); } }
+                    }
+                }
+            }
+
             if root.settings_tab == "ai": VerticalLayout {
                 x: 20px;
                 y: 112px;
@@ -1603,17 +2272,76 @@ export component MainWindow inherits Window {
         }
     }
 
+    if root.op_drawer_visible: Rectangle {
+        x: (parent.width - 420px) / 2;
+        y: parent.height - 124px;
+        width: 420px;
+        height: 52px;
+        border-width: 1px;
+        border-color: ThemePalette.border_strong;
+        border-radius: AppMetrics.radius;
+        background: ThemePalette.panel_solid;
+        drop-shadow-blur: 18px;
+        drop-shadow-color: rgba(0, 0, 0, 0.35);
+
+        Rectangle {
+            x: 0; y: 0; width: 3px; height: parent.height;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.accent;
+        }
+
+        SvgIcon {
+            x: 14px; y: (parent.height - 16px) / 2;
+            icon_size: 16px;
+            data: "M12 2v4 M12 18v4 M4.93 4.93l2.83 2.83 M16.24 16.24l2.83 2.83 M2 12h4 M18 12h4 M4.93 19.07l2.83-2.83 M16.24 7.76l2.83-2.83";
+            tint: ThemePalette.accent;
+        }
+
+        Text {
+            x: 38px;
+            width: parent.width - 74px;
+            height: parent.height;
+            text: root.op_drawer_text;
+            color: ThemePalette.text;
+            font-size: 12.5px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        ToolButton {
+            x: parent.width - 34px;
+            y: (parent.height - 26px) / 2;
+            button_width: 26px;
+            button_height: 26px;
+            icon_data: "M18 6L6 18 M6 6l12 12";
+            clicked => { root.op_drawer_visible = false; }
+        }
+    }
+
     if root.toast_text != "": Rectangle {
         x: (parent.width - 360px) / 2;
         y: parent.height - 78px;
         width: 360px;
         height: 38px;
         border-width: 1px;
-        border-color: ThemePalette.border_strong;
+        border-color: root.toast_kind == "error" ? ThemePalette.danger :
+                      root.toast_kind == "success" ? ThemePalette.success :
+                      root.toast_kind == "warning" ? ThemePalette.warning :
+                      ThemePalette.border_strong;
         border-radius: AppMetrics.radius;
         background: ThemePalette.panel_solid;
         drop-shadow-blur: 24px;
         drop-shadow-color: rgba(0, 0, 0, 0.38);
+
+        Rectangle {
+            x: 0; y: 0; width: 3px; height: parent.height;
+            border-radius: AppMetrics.radius;
+            background: root.toast_kind == "error" ? ThemePalette.danger :
+                        root.toast_kind == "success" ? ThemePalette.success :
+                        root.toast_kind == "warning" ? ThemePalette.warning :
+                        ThemePalette.accent;
+        }
+
         Text { x: 13px; width: parent.width - 26px; height: parent.height; text: root.toast_text; color: ThemePalette.text; font-size: 12.5px; vertical-alignment: center; overflow: elide; }
     }
 
@@ -1642,7 +2370,12 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(Delete); activated => { root.command("delete"); } }
         KeyBinding { keys: @keys(F2); activated => { root.rename_index = root.selected_index; } }
         KeyBinding { keys: @keys(Return); activated => { root.file_opened(root.selected_index); } }
-        KeyBinding { keys: @keys(Escape); activated => { root.context_visible = false; root.command_visible = false; root.settings_visible = false; root.confirm_visible = false; root.prompt_visible = false; root.address_editing = false; } }
+        KeyBinding { keys: @keys(Space); activated => { root.toggle_preview(); } }
+        KeyBinding { keys: @keys(Control+D); activated => { root.command("duplicates"); } }
+        KeyBinding { keys: @keys(Control+Shift+C); activated => { root.command("checksum"); } }
+        KeyBinding { keys: @keys(UpArrow); activated => { root.file_selected(max(0, root.selected_index - 1), false, false); } }
+        KeyBinding { keys: @keys(DownArrow); activated => { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } }
+        KeyBinding { keys: @keys(Escape); activated => { root.context_visible = false; root.command_visible = false; root.settings_visible = false; root.confirm_visible = false; root.prompt_visible = false; root.address_editing = false; root.addr_suggestions = []; } }
     }
 }
 

@@ -4824,6 +4824,7 @@ dependencies = [
  "hex",
  "i-slint-backend-winit",
  "image",
+ "memchr",
  "notify",
  "open",
  "rayon",

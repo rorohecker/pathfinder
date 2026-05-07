@@ -29,9 +29,10 @@ sha2 = "0.10"
 hex = "0.4"
 zip = "2"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
+memchr = "2"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_RestartManager", "Win32_System_Threading"] }
 
 [profile.release]
 codegen-units = 1
