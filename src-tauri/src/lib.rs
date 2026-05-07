@@ -22,6 +22,9 @@ use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Manager, State, Window};
 use walkdir::WalkDir;
 
+#[cfg(target_os = "windows")]
+mod windows_integration;
+
 slint::include_modules!();
 
 const DIRECTORY_CACHE_TTL: Duration = Duration::from_secs(20);
@@ -7777,6 +7780,169 @@ fn apply_mica(ui: &MainWindow) {
 
 #[cfg(not(target_os = "windows"))]
 fn apply_mica(_ui: &MainWindow) {}
+
+// ============================================================================
+// Windows Integration Commands (COM Interop, VSS, UAC, Taskbar Pinning)
+// ============================================================================
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_context_menu_actions(path: String) -> Result<Vec<windows_integration::ContextMenuAction>, String> {
+    windows_integration::get_context_menu_actions(&path)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn get_context_menu_actions(_path: String) -> Result<Vec<serde_json::Value>, String> {
+    Err("Context menu actions are Windows-only".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn invoke_context_menu_action(path: String, action_id: u32) -> Result<(), String> {
+    windows_integration::invoke_context_menu_action(&path, action_id)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn invoke_context_menu_action(_path: String, _action_id: u32) -> Result<(), String> {
+    Err("Context menu actions are Windows-only".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_previous_versions(path: String) -> Result<Vec<windows_integration::PreviousVersion>, String> {
+    windows_integration::get_previous_versions(&path)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn get_previous_versions(_path: String) -> Result<Vec<serde_json::Value>, String> {
+    Err("Previous versions (VSS) are Windows-only".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn restore_from_previous_version(path: String, version_id: String) -> Result<(), String> {
+    windows_integration::restore_from_previous_version(&path, &version_id)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn restore_from_previous_version(_path: String, _version_id: String) -> Result<(), String> {
+    Err("Previous versions (VSS) are Windows-only".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn is_process_elevated() -> bool {
+    windows_integration::is_process_elevated()
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn is_process_elevated() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn retry_as_administrator(operation: String, path: String) -> Result<windows_integration::AdminRetryResult, String> {
+    windows_integration::retry_as_administrator(&operation, &path)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn retry_as_administrator(_operation: String, _path: String) -> Result<serde_json::Value, String> {
+    Err("Administrator retry is Windows-only".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn take_ownership(path: String) -> Result<windows_integration::AdminRetryResult, String> {
+    windows_integration::take_ownership(&path)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn take_ownership(_path: String) -> Result<serde_json::Value, String> {
+    Err("Take ownership is Windows-only".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn create_shortcut(
+    target_path: String,
+    shortcut_path: String,
+    args: Option<String>,
+    working_dir: Option<String>,
+) -> Result<(), String> {
+    windows_integration::create_shortcut(
+        &target_path,
+        &shortcut_path,
+        args.as_deref(),
+        working_dir.as_deref(),
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn create_shortcut(
+    _target_path: String,
+    _shortcut_path: String,
+    _args: Option<String>,
+    _working_dir: Option<String>,
+) -> Result<(), String> {
+    Err("Shortcut creation is Windows-only".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn pin_to_taskbar(path: String) -> Result<windows_integration::PinningResult, String> {
+    windows_integration::pin_to_taskbar(&path)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn pin_to_taskbar(_path: String) -> Result<serde_json::Value, String> {
+    Err("Taskbar pinning is Windows-only".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn pin_to_start_menu(path: String) -> Result<windows_integration::PinningResult, String> {
+    windows_integration::pin_to_start_menu(&path)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn pin_to_start_menu(_path: String) -> Result<serde_json::Value, String> {
+    Err("Start menu pinning is Windows-only".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn unpin_from_taskbar(path: String) -> Result<windows_integration::PinningResult, String> {
+    windows_integration::unpin_from_taskbar(&path)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn unpin_from_taskbar(_path: String) -> Result<serde_json::Value, String> {
+    Err("Taskbar unpinning is Windows-only".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn unpin_from_start_menu(path: String) -> Result<windows_integration::PinningResult, String> {
+    windows_integration::unpin_from_start_menu(&path)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn unpin_from_start_menu(_path: String) -> Result<serde_json::Value, String> {
+    Err("Start menu unpinning is Windows-only".to_string())
+}
 
 pub fn run() {
     let _ = slint::platform::set_platform(Box::new(
