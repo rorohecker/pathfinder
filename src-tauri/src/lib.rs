@@ -2264,7 +2264,7 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
                     entry.path,
                     parent,
                     entry.name,
-                    entry.extension.clone().unwrap_or_default().to_lowercase(),
+                    entry.extension.as_deref().unwrap_or("").to_lowercase(),
                     i64::from(entry.kind == FileKind::Directory),
                     entry.size as i64,
                     entry.modified as i64,
