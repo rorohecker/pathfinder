@@ -4299,6 +4299,7 @@ enum ActivePane {
 enum PendingPrompt {
     Rename(String),
     NewFolder,
+    NewFile,
     Note(String),
     Archive,
     ArchivePassword {
@@ -5978,6 +5979,25 @@ fn native_create_directory(state: &AppState, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn native_create_file(state: &AppState, path: &str) -> Result<(), String> {
+    if state.queue_is_paused() {
+        return Err("Operation queue is paused.".to_string());
+    }
+    let path_buf = PathBuf::from(path);
+    if path_buf.exists() {
+        return Err(format!("File already exists: {}", path_buf.display()));
+    }
+    if let Some(parent) = path_buf.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    File::create(&path_buf).map_err(|e| e.to_string())?;
+    state.invalidate_path(&path_buf);
+    if let Some(parent) = path_buf.parent() {
+        state.invalidate_path(parent);
+    }
+    Ok(())
+}
+
 fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
     if state.queue_is_paused() {
         return Err("Operation queue is paused.".to_string());
@@ -6751,6 +6771,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Navigation", "Close Tab", "Ctrl+W", "close-tab"),
     ("Navigation", "Refresh", "F5", "refresh"),
     ("Files", "New Folder", "Ctrl+Shift+N", "new-folder"),
+    ("Files", "New File", "", "new-file"),
     ("Files", "Rename", "F2", "rename"),
     ("Files", "Delete", "Del", "delete"),
     ("Files", "Copy", "Ctrl+C", "copy"),
@@ -6759,6 +6780,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Files", "Select All", "Ctrl+A", "select-all"),
     ("Files", "Batch Rename", "", "batch-rename"),
     ("Tools", "Checksum", "", "checksum"),
+    ("Tools", "File Note", "", "note"),
     ("Tools", "Storage Treemap", "", "storage"),
     ("Tools", "Find Duplicates", "", "duplicates"),
     ("Tools", "Operation Log", "", "operation-log"),
@@ -6769,6 +6791,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Locked File Inspector", "", "locked-file"),
     ("Tools", "Native Properties", "Alt+Enter", "properties"),
     ("Tools", "Show More Options", "", "show-more-options"),
+    ("Tools", "Open in Terminal", "", "open-terminal"),
     ("Tools", "Open With", "", "open-with"),
     ("Tools", "Scan with Microsoft Defender", "", "defender-scan"),
     ("Tools", "Shell Verb Bridge", "", "shell-verbs"),
@@ -8754,6 +8777,7 @@ impl NativeController {
             "rename" => self.prompt_rename(ui),
             "delete" => self.prompt_delete(ui),
             "new-folder" => self.prompt_new_folder(ui),
+            "new-file" => self.prompt_new_file(ui),
             "copy" => self.copy_selected(false, ui),
             "cut" => self.copy_selected(true, ui),
             "paste" => self.paste_async(ui),
@@ -9060,6 +9084,13 @@ impl NativeController {
         ui.set_prompt_visible(true);
     }
 
+    fn prompt_new_file(&mut self, ui: &MainWindow) {
+        self.pending_prompt = Some(PendingPrompt::NewFile);
+        ui.set_prompt_title(ss("New file"));
+        ui.set_prompt_value(ss("New Text Document.txt"));
+        ui.set_prompt_visible(true);
+    }
+
     fn prompt_note(&mut self, ui: &MainWindow) {
         let Some(entry) = self.selected_entry() else {
             self.show_toast(ui, "Select a file first.");
@@ -9137,6 +9168,30 @@ impl NativeController {
                             self.refresh(ui);
                         }
                         self.show_toast_kind(ui, "Folder created", "success");
+                    }
+                    Err(error) => self.show_toast_kind(ui, error, "error"),
+                }
+            }
+            Some(PendingPrompt::NewFile) => {
+                let name = value.trim();
+                if name.is_empty() {
+                    self.show_toast_kind(ui, "Name cannot be empty", "error");
+                    return;
+                }
+                if name.contains('/') || name.contains('\\') {
+                    self.show_toast_kind(ui, "Name cannot contain path separators", "error");
+                    return;
+                }
+                let dest_dir = self.active_directory().to_string();
+                let path = PathBuf::from(&dest_dir).join(name);
+                match native_create_file(&self.app_state, &path.to_string_lossy()) {
+                    Ok(()) => {
+                        if self.active_pane == ActivePane::Secondary {
+                            self.secondary_navigate(ui, dest_dir);
+                        } else {
+                            self.refresh(ui);
+                        }
+                        self.show_toast_kind(ui, "File created", "success");
                     }
                     Err(error) => self.show_toast_kind(ui, error, "error"),
                 }
