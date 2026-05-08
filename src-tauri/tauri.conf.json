@@ -1,6 +1,6 @@
 {
   "productName": "Pathfinder",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "identifier": "com.fusntuff.pathfinder",
   "build": {
     "frontendDist": null
@@ -22,5 +22,15 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/rorohecker/pathfinder/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

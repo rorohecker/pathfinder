@@ -41,6 +41,9 @@ const THUMBNAIL_CACHE_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
 const INDEX_ESTIMATE_BYTES_PER_FILE: u64 = 420;
 const MAX_OPERATION_QUEUE_ITEMS: usize = 200;
 const MAX_HEAVY_OPS: usize = 2;
+const GITHUB_LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/rorohecker/pathfinder/releases/latest";
+const GITHUB_RELEASES_URL: &str = "https://github.com/rorohecker/pathfinder/releases";
 
 static ACTIVE_HEAVY_OPS: AtomicUsize = AtomicUsize::new(0);
 
@@ -149,6 +152,14 @@ pub struct Bookmark {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UserPin {
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+    pub pinned_at: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PreviewContent {
     pub kind: String,
     pub mime: Option<String>,
@@ -164,6 +175,9 @@ pub struct AiCapabilities {
     pub automatic_summaries: bool,
     pub image_classification: bool,
     pub local_embeddings: bool,
+    pub device_name: String,
+    pub acceleration_kind: String,
+    pub runtime_configured: bool,
     pub reason: String,
 }
 
@@ -301,6 +315,43 @@ pub struct IndexStatus {
     pub thumbnail_limit: u64,
     pub estimated_storage: String,
     pub roots: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StoredDataItem {
+    pub label: String,
+    pub path: String,
+    pub bytes: u64,
+    pub description: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PrivacyStorageInfo {
+    pub data_dir: String,
+    pub cache_dir: String,
+    pub index_path: String,
+    pub thumbnail_cache_dir: String,
+    pub directory_cache_entries: usize,
+    pub preview_cache_entries: usize,
+    pub watcher_count: usize,
+    pub index_bytes: u64,
+    pub thumbnail_cache_bytes: u64,
+    pub thumbnail_cache_limit: u64,
+    pub update_checks_enabled: bool,
+    pub network_downloads_enabled: bool,
+    pub network_uploads_enabled: bool,
+    pub stored_items: Vec<StoredDataItem>,
+    pub policy: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UpdateCheckResult {
+    pub available: bool,
+    pub current_version: String,
+    pub latest_version: String,
+    pub release_url: String,
+    pub notes: String,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -814,6 +865,13 @@ fn bookmarks_path(app: &AppHandle) -> PathBuf {
         .join("bookmarks.json")
 }
 
+fn user_pins_path(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| native_data_dir())
+        .join("user_pins.json")
+}
+
 fn push_known(list: &mut Vec<KnownFolder>, id: &str, name: &str, path: Option<PathBuf>) {
     if let Some(path) = path {
         if path.exists() {
@@ -876,6 +934,10 @@ fn mime_for_ext(ext: &str) -> Option<&'static str> {
         "gif" => Some("image/gif"),
         "webp" => Some("image/webp"),
         "bmp" => Some("image/bmp"),
+        "tif" | "tiff" => Some("image/tiff"),
+        "tga" => Some("image/x-tga"),
+        "heic" => Some("image/heic"),
+        "heif" => Some("image/heif"),
         "svg" => Some("image/svg+xml"),
         "ico" => Some("image/x-icon"),
         _ => None,
@@ -888,7 +950,8 @@ fn file_type_for_query(path: &Path, metadata: &fs::Metadata) -> &'static str {
     }
 
     match extension(path).as_str() {
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "ico" | "heic" => "image",
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "ico" | "tif" | "tiff"
+        | "tga" | "heic" | "heif" => "image",
         "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" => "video",
         "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
         "zip" | "7z" | "rar" | "tar" | "gz" | "xz" => "archive",
@@ -2477,15 +2540,22 @@ fn read_preview_uncached(
         });
     }
 
-    if let Some(mime) = mime_for_ext(&ext) {
+    if is_image_ext(&ext) {
+        let mime = mime_for_ext(&ext).unwrap_or("image/*");
         // Inline embedding limit: 8 MB. Larger images get a metadata preview with dimensions
         // read from the image header only — no full decode needed.
         const INLINE_MAX: u64 = 8 * 1024 * 1024;
-        if metadata.len() > INLINE_MAX {
-            let dims = image::ImageReader::open(path_buf)
-                .ok()
-                .and_then(|r| r.with_guessed_format().ok())
-                .and_then(|r| r.into_dimensions().ok());
+        let can_inline = is_inline_preview_image_ext(&ext);
+        let can_decode = is_thumbnail_image_ext(&ext);
+        if !can_inline || metadata.len() > INLINE_MAX {
+            let dims = if can_decode {
+                image::ImageReader::open(path_buf)
+                    .ok()
+                    .and_then(|r| r.with_guessed_format().ok())
+                    .and_then(|r| r.into_dimensions().ok())
+            } else {
+                None
+            };
             let text = match dims {
                 Some((w, h)) => format!(
                     "Kind: Image\nExtension: {}\nDimensions: {} x {}\nSize: {}\nModified: {}\nPath: {}",
@@ -2496,10 +2566,20 @@ fn read_preview_uncached(
                     format_modified(unix_secs(metadata.modified())),
                     path_buf.display()
                 ),
-                None => generic_metadata_preview(path_buf, metadata, "Image"),
+                None => {
+                    let mut text = generic_metadata_preview(path_buf, metadata, "Image");
+                    if !can_decode {
+                        text.push_str("\nPreview: metadata only for this image container");
+                    }
+                    text
+                }
             };
             return Ok(PreviewContent {
-                kind: "image-too-large".to_string(),
+                kind: if can_inline {
+                    "image-too-large".to_string()
+                } else {
+                    "image-metadata".to_string()
+                },
                 mime: Some(mime.to_string()),
                 text: Some(text),
                 data_url: None,
@@ -2666,10 +2746,10 @@ fn watch_paths(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), Str
 #[cfg(target_os = "windows")]
 fn detect_npu_names() -> Vec<String> {
     let script = r#"
-$pattern = '(?i)(\bNPU\b|Neural Processing|Neural Processor|AI Boost|Ryzen AI|Hexagon|Hailo|Movidius|\bVPU\b)'
+$pattern = '(?i)(\bNPU\b|Neural Processing Unit|Neural Processor|Intel\(R\) AI Boost|Intel AI Boost|Ryzen AI|Qualcomm Hexagon|Hailo|Movidius|\bVPU\b)'
 $devices = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
   Where-Object {
-    ($_.Class -in @('ComputeAccelerator', 'System')) -and
+    ($_.Class -in @('ComputeAccelerator')) -and
     ($_.FriendlyName -match $pattern)
   } |
   Select-Object -ExpandProperty FriendlyName
@@ -2703,30 +2783,42 @@ fn compute_ai_capabilities() -> AiCapabilities {
     let runtime_configured = std::env::var("PATHFINDER_LOCAL_AI_RUNTIME")
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
-    let enabled = npu_hardware_found && runtime_configured;
-    let reason = if enabled {
+    let npu_enabled = npu_hardware_found && runtime_configured;
+    let device_name = if npu_enabled {
+        devices.join(", ")
+    } else {
+        "CPU Fallback".to_string()
+    };
+    let acceleration_kind = if npu_enabled { "NPU" } else { "CPU" }.to_string();
+    let reason = if npu_enabled {
         format!(
-            "NPU detected and local AI runtime configured: {}",
-            devices.join(", ")
+            "NPU acceleration enabled: {}. Local AI features stay on-device.",
+            device_name
         )
     } else if npu_hardware_found {
-        "No active NPU runtime was detected. Using CPU fallback.".to_string()
+        format!(
+            "NPU candidate detected ({}) but no PATHFINDER_LOCAL_AI_RUNTIME is configured. CPU fallback is enabled and stays on-device.",
+            devices.join(", ")
+        )
     } else {
-        "No supported active NPU runtime was detected. Using CPU fallback.".to_string()
+        "No supported NPU was detected. CPU fallback is enabled and stays on-device.".to_string()
     };
 
     AiCapabilities {
-        npu_available: enabled,
-        semantic_search: enabled,
-        automatic_summaries: enabled,
-        image_classification: enabled,
-        local_embeddings: enabled,
+        npu_available: npu_enabled,
+        semantic_search: true,
+        automatic_summaries: true,
+        image_classification: true,
+        local_embeddings: true,
+        device_name,
+        acceleration_kind,
+        runtime_configured,
         reason,
     }
 }
 
 fn ai_status_label(capabilities: &AiCapabilities) -> &'static str {
-    if capabilities.npu_available {
+    if capabilities.npu_available && capabilities.acceleration_kind == "NPU" {
         "NPU Accelerated"
     } else {
         "CPU Fallback"
@@ -2755,18 +2847,14 @@ fn ai_semantic_search(
     max_results: Option<usize>,
 ) -> Result<Vec<FileEntry>, String> {
     let capabilities = get_ai_capabilities(state.clone());
-    if !capabilities.semantic_search {
-        return Err(capabilities.reason);
-    }
+    let _ = capabilities;
     search_files(state, query, path, max_results, Some(true))
 }
 
 #[tauri::command]
 fn ai_summarize_file(state: State<'_, AppState>, path: String) -> Result<String, String> {
     let capabilities = get_ai_capabilities(state.clone());
-    if !capabilities.automatic_summaries {
-        return Err(capabilities.reason);
-    }
+    let _ = capabilities;
 
     let preview = read_preview(state, path, Some(64 * 1024))?;
     if let Some(text) = preview.text {
@@ -2787,36 +2875,79 @@ fn ai_summarize_file(state: State<'_, AppState>, path: String) -> Result<String,
 
 #[tauri::command]
 fn get_bookmarks(app: AppHandle) -> Vec<Bookmark> {
-    let path = bookmarks_path(&app);
-    if let Ok(data) = fs::read_to_string(&path) {
-        if let Ok(bookmarks) = serde_json::from_str::<Vec<Bookmark>>(&data) {
-            return bookmarks
-                .into_iter()
-                .filter(|bookmark| Path::new(&bookmark.path).exists())
-                .collect();
-        }
-    }
-
-    let mut bookmarks = Vec::new();
-    for folder in get_known_folders() {
-        if matches!(folder.id.as_str(), "documents" | "downloads" | "desktop") {
-            bookmarks.push(Bookmark {
-                name: folder.name,
-                path: folder.path,
-            });
-        }
-    }
-    bookmarks
+    get_user_pins(app)
+        .into_iter()
+        .map(|pin| Bookmark {
+            name: pin.name,
+            path: pin.path,
+        })
+        .collect()
 }
 
 #[tauri::command]
 fn save_bookmarks(app: AppHandle, bookmarks: Vec<Bookmark>) -> Result<(), String> {
-    let path = bookmarks_path(&app);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let pins = bookmarks
+        .into_iter()
+        .map(bookmark_to_pin)
+        .collect::<Vec<_>>();
+    save_user_pins(app, pins)
+}
+
+#[tauri::command]
+fn get_user_pins(app: AppHandle) -> Vec<UserPin> {
+    let path = user_pins_path(&app);
+    if let Ok(data) = fs::read_to_string(&path) {
+        if let Ok(pins) = serde_json::from_str::<Vec<UserPin>>(&data) {
+            return pins
+                .into_iter()
+                .filter(|pin| Path::new(&pin.path).exists())
+                .collect();
+        }
     }
-    let data = serde_json::to_string_pretty(&bookmarks).map_err(|e| e.to_string())?;
-    fs::write(&path, data).map_err(|e| e.to_string())
+
+    native_user_pins()
+}
+
+#[tauri::command]
+fn save_user_pins(app: AppHandle, pins: Vec<UserPin>) -> Result<(), String> {
+    let path = user_pins_path(&app);
+    write_json_file(&path, &pins)?;
+    let _ = save_native_user_pins(&pins);
+    Ok(())
+}
+
+#[tauri::command]
+fn add_user_pin(
+    app: AppHandle,
+    path: String,
+    name: Option<String>,
+) -> Result<Vec<UserPin>, String> {
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.exists() {
+        return Err(format!("Path does not exist: {path}"));
+    }
+    let normalized = path_buf.to_string_lossy().to_string();
+    let mut pins = get_user_pins(app.clone());
+    pins.retain(|pin| !same_path_string(&pin.path, &normalized));
+    pins.insert(
+        0,
+        UserPin {
+            name: pin_name_for_path(&path_buf, name),
+            path: normalized,
+            kind: if path_buf.is_dir() { "folder" } else { "file" }.to_string(),
+            pinned_at: now_unix_secs(),
+        },
+    );
+    save_user_pins(app, pins.clone())?;
+    Ok(pins)
+}
+
+#[tauri::command]
+fn remove_user_pin(app: AppHandle, path: String) -> Result<Vec<UserPin>, String> {
+    let mut pins = get_user_pins(app.clone());
+    pins.retain(|pin| !same_path_string(&pin.path, &path));
+    save_user_pins(app, pins.clone())?;
+    Ok(pins)
 }
 
 #[tauri::command]
@@ -3029,6 +3160,13 @@ fn get_git_status(state: State<'_, AppState>, path: String) -> Result<GitStatusM
 #[tauri::command]
 fn get_image_info(path: String) -> Result<ImageInfo, String> {
     let ext = extension(Path::new(&path));
+    if is_image_ext(&ext) && !is_thumbnail_image_ext(&ext) {
+        return Ok(ImageInfo {
+            width: 0,
+            height: 0,
+            format: ext.to_uppercase(),
+        });
+    }
     // Read only the image header for dimensions — avoids decoding the full file.
     let (width, height) = image::ImageReader::open(&path)
         .ok()
@@ -3639,7 +3777,32 @@ fn undo_last_operation(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 fn is_image_ext(ext: &str) -> bool {
-    matches!(ext, "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp")
+    matches!(
+        ext,
+        "jpg"
+            | "jpeg"
+            | "png"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "ico"
+            | "tif"
+            | "tiff"
+            | "tga"
+            | "heic"
+            | "heif"
+    )
+}
+
+fn is_thumbnail_image_ext(ext: &str) -> bool {
+    matches!(
+        ext,
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff" | "tga"
+    )
+}
+
+fn is_inline_preview_image_ext(ext: &str) -> bool {
+    matches!(ext, "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "ico")
 }
 
 #[derive(Clone, Copy)]
@@ -3758,7 +3921,7 @@ fn save_image_with_extension(
 }
 
 fn process_image_tool(source: &Path, action: ImageToolAction) -> Result<PathBuf, String> {
-    if !source.is_file() || !is_image_ext(&extension(source)) {
+    if !source.is_file() || !is_thumbnail_image_ext(&extension(source)) {
         return Err(format!("'{}' is not a supported image", source.display()));
     }
 
@@ -3979,7 +4142,7 @@ fn fetch_thumbnails(
             .par_iter()
             .filter_map(|path| {
                 let path_buf = PathBuf::from(path);
-                if !is_image_ext(&extension(&path_buf)) {
+                if !is_thumbnail_image_ext(&extension(&path_buf)) {
                     return None;
                 }
                 let metadata = fs::metadata(&path_buf).ok()?;
@@ -4049,6 +4212,8 @@ struct NativeSettings {
     index_mode: String,
     index_roots: Vec<String>,
     thumbnail_cache_limit_mb: u64,
+    update_checks_enabled: bool,
+    network_downloads_enabled: bool,
 }
 
 impl Default for NativeSettings {
@@ -4062,6 +4227,8 @@ impl Default for NativeSettings {
             index_mode: "low".to_string(),
             index_roots: Vec::new(),
             thumbnail_cache_limit_mb: 50,
+            update_checks_enabled: false,
+            network_downloads_enabled: false,
         }
     }
 }
@@ -4169,7 +4336,7 @@ struct NativeController {
     active_tab: usize,
     known_folders: Vec<KnownFolder>,
     drives: Vec<DriveInfo>,
-    bookmarks: Vec<Bookmark>,
+    user_pins: Vec<UserPin>,
     recent_locations: Vec<String>,
     folder_views: HashMap<String, String>,
     tags: HashMap<String, String>,
@@ -4922,6 +5089,241 @@ fn index_status_for_settings(settings: &NativeSettings) -> IndexStatus {
     status
 }
 
+fn file_size_or_zero(path: &Path) -> u64 {
+    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn stored_data_item(label: &str, file_name: &str, description: &str) -> StoredDataItem {
+    let path = native_data_file(file_name);
+    StoredDataItem {
+        label: label.to_string(),
+        path: path.to_string_lossy().to_string(),
+        bytes: file_size_or_zero(&path),
+        description: description.to_string(),
+    }
+}
+
+fn privacy_storage_info_for_state(
+    state: &AppState,
+    settings: &NativeSettings,
+) -> PrivacyStorageInfo {
+    let index_path = native_index_file();
+    let thumb_dir = thumbnail_cache_dir();
+    let directory_cache_entries = state
+        .directory_cache
+        .lock()
+        .map(|cache| cache.len())
+        .unwrap_or(0);
+    let preview_cache_entries = state
+        .preview_cache
+        .lock()
+        .map(|cache| cache.len())
+        .unwrap_or(0);
+    let watcher_count = state
+        .watchers
+        .lock()
+        .map(|watchers| watchers.len())
+        .unwrap_or(0);
+    let status = index_status_for_settings(settings);
+
+    PrivacyStorageInfo {
+        data_dir: native_data_dir().to_string_lossy().to_string(),
+        cache_dir: native_cache_dir().to_string_lossy().to_string(),
+        index_path: index_path.to_string_lossy().to_string(),
+        thumbnail_cache_dir: thumb_dir.to_string_lossy().to_string(),
+        directory_cache_entries,
+        preview_cache_entries,
+        watcher_count,
+        index_bytes: status.index_bytes,
+        thumbnail_cache_bytes: status.thumbnail_bytes,
+        thumbnail_cache_limit: status.thumbnail_limit,
+        update_checks_enabled: settings.update_checks_enabled,
+        network_downloads_enabled: settings.network_downloads_enabled,
+        network_uploads_enabled: false,
+        stored_items: vec![
+            stored_data_item("Settings", "settings.json", "Theme, density, indexing, and privacy preferences."),
+            stored_data_item("User Pins", "user_pins.json", "Pinned files and folders shown in the sidebar."),
+            stored_data_item("Legacy Bookmarks", "bookmarks.json", "Old bookmark data migrated into user pins when present."),
+            stored_data_item("Tags", "tags.json", "File path to tag color mappings."),
+            stored_data_item("Tag Labels", "tag_labels.json", "Custom tag display names."),
+            stored_data_item("Smart Folder Labels", "smart_folder_labels.json", "Custom smart folder display names."),
+            stored_data_item("Notes", "notes.json", "Local file notes keyed by path."),
+            stored_data_item("Saved Searches", "searches.json", "Named search queries and scopes."),
+            stored_data_item("Session", "session.json", "Open tabs, paths, and view preferences."),
+            stored_data_item("Recent Locations", "recent_locations.json", "Condensed local navigation history."),
+        ],
+        policy: "Pathfinder stores local metadata, thumbnails, and an optional SQLite search index only on this PC. It does not upload files. Update checks are off unless enabled, and update downloads require an explicit user action.".to_string(),
+    }
+}
+
+#[tauri::command]
+fn get_privacy_storage_info(state: State<'_, AppState>) -> PrivacyStorageInfo {
+    let settings = read_native_json("settings.json", NativeSettings::default());
+    privacy_storage_info_for_state(&state, &settings)
+}
+
+#[tauri::command]
+fn clear_local_caches(state: State<'_, AppState>) -> Result<PrivacyStorageInfo, String> {
+    if let Ok(mut cache) = state.directory_cache.lock() {
+        cache.clear();
+    }
+    if let Ok(mut cache) = state.preview_cache.lock() {
+        cache.clear();
+    }
+    if let Ok(mut cache) = state.git_cache.lock() {
+        cache.clear();
+    }
+    let _ = clear_thumbnail_cache()?;
+    let settings = read_native_json("settings.json", NativeSettings::default());
+    Ok(privacy_storage_info_for_state(&state, &settings))
+}
+
+#[tauri::command]
+fn clear_search_index() -> Result<u64, String> {
+    let path = native_index_file();
+    let bytes = file_size_or_zero(&path);
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(bytes)
+}
+
+#[tauri::command]
+fn set_update_checks_enabled(enabled: bool) -> Result<(), String> {
+    let mut settings = read_native_json("settings.json", NativeSettings::default());
+    settings.update_checks_enabled = enabled;
+    write_native_json("settings.json", &settings)
+}
+
+fn normalize_version(version: &str) -> String {
+    version
+        .trim()
+        .trim_start_matches('v')
+        .trim_start_matches('V')
+        .to_string()
+}
+
+fn version_numbers(version: &str) -> Vec<u64> {
+    normalize_version(version)
+        .split(|c| c == '.' || c == '-' || c == '+')
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+fn version_is_newer(latest: &str, current: &str) -> bool {
+    let mut latest_parts = version_numbers(latest);
+    let mut current_parts = version_numbers(current);
+    let max = latest_parts.len().max(current_parts.len());
+    latest_parts.resize(max, 0);
+    current_parts.resize(max, 0);
+    latest_parts > current_parts
+}
+
+fn update_disabled_result() -> UpdateCheckResult {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    UpdateCheckResult {
+        available: false,
+        current_version: current.clone(),
+        latest_version: current,
+        release_url: GITHUB_RELEASES_URL.to_string(),
+        notes: String::new(),
+        message: "Update checks are off. Pathfinder will not contact GitHub until you enable or manually run update checks.".to_string(),
+    }
+}
+
+fn check_github_release_now() -> Result<UpdateCheckResult, String> {
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$url = $args[0]
+$headers = @{ 'User-Agent' = 'Pathfinder' }
+$release = Invoke-RestMethod -Uri $url -Headers $headers -ErrorAction Stop
+ConvertTo-Json -InputObject $release -Depth 8 -Compress
+"#;
+    let output = ProcessCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(script)
+        .arg(GITHUB_LATEST_RELEASE_API)
+        .no_window()
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    let latest_raw = value
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("name").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let latest_version = normalize_version(&latest_raw);
+    let release_url = value
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or(GITHUB_RELEASES_URL)
+        .to_string();
+    let notes = value
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .chars()
+        .take(4_000)
+        .collect::<String>();
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let available =
+        !latest_version.is_empty() && version_is_newer(&latest_version, &current_version);
+    Ok(UpdateCheckResult {
+        available,
+        current_version: current_version.clone(),
+        latest_version: if latest_version.is_empty() {
+            current_version.clone()
+        } else {
+            latest_version.clone()
+        },
+        release_url,
+        notes,
+        message: if available {
+            format!("Pathfinder {latest_version} is available.")
+        } else {
+            "Pathfinder is up to date.".to_string()
+        },
+    })
+}
+
+#[tauri::command]
+fn check_for_updates() -> Result<UpdateCheckResult, String> {
+    let settings = read_native_json("settings.json", NativeSettings::default());
+    if !settings.update_checks_enabled {
+        return Ok(update_disabled_result());
+    }
+    check_github_release_now()
+}
+
+#[tauri::command]
+fn check_for_updates_now() -> Result<UpdateCheckResult, String> {
+    check_github_release_now()
+}
+
+#[tauri::command]
+fn open_update_release(release_url: Option<String>) -> Result<(), String> {
+    let url = release_url
+        .filter(|url| url.starts_with("https://github.com/"))
+        .unwrap_or_else(|| GITHUB_RELEASES_URL.to_string());
+    open::that(url).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn apply_update(release_url: Option<String>) -> Result<(), String> {
+    // Deliberately opens the signed GitHub Releases page instead of downloading silently.
+    open_update_release(release_url)
+}
+
 /// Returns false when the system is on battery with less than 20% charge.
 /// Background indexing should pause in that case to avoid draining the battery.
 fn indexing_permitted() -> bool {
@@ -5073,6 +5475,59 @@ fn default_smart_folders(current_path: &str) -> Vec<SmartFolder> {
             description: "Files marked untracked by git status".to_string(),
         },
     ]
+}
+
+fn smart_folder_labels() -> HashMap<String, String> {
+    read_native_json("smart_folder_labels.json", HashMap::new())
+}
+
+fn smart_folders_for_path(current_path: &str) -> Vec<SmartFolder> {
+    let labels = smart_folder_labels();
+    default_smart_folders(current_path)
+        .into_iter()
+        .map(|mut folder| {
+            if let Some(label) = labels.get(&folder.id) {
+                folder.name = label.clone();
+            }
+            folder
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn get_smart_folders(path: String) -> Vec<SmartFolder> {
+    smart_folders_for_path(&path)
+}
+
+#[tauri::command]
+fn rename_smart_folder(id: String, name: String) -> Result<Vec<SmartFolder>, String> {
+    let mut labels = smart_folder_labels();
+    let name = name.trim();
+    if name.is_empty() {
+        labels.remove(&id);
+    } else {
+        labels.insert(id, name.to_string());
+    }
+    write_native_json("smart_folder_labels.json", &labels)?;
+    Ok(smart_folders_for_path(""))
+}
+
+#[tauri::command]
+fn get_tag_labels() -> HashMap<String, String> {
+    read_native_json("tag_labels.json", HashMap::new())
+}
+
+#[tauri::command]
+fn rename_tag_label(id: String, name: String) -> Result<HashMap<String, String>, String> {
+    let mut labels = get_tag_labels();
+    let name = name.trim();
+    if name.is_empty() {
+        labels.remove(&id);
+    } else {
+        labels.insert(id, name.to_string());
+    }
+    write_native_json("tag_labels.json", &labels)?;
+    Ok(labels)
 }
 
 fn default_file_templates() -> Vec<FileTemplate> {
@@ -5263,14 +5718,30 @@ fn user_facing_error(message: String) -> String {
 }
 
 fn native_bookmarks() -> Vec<Bookmark> {
-    let saved: Vec<Bookmark> = read_native_json("bookmarks.json", Vec::new());
-    if !saved.is_empty() {
-        return saved
-            .into_iter()
-            .filter(|bookmark| Path::new(&bookmark.path).exists())
-            .collect();
-    }
+    native_user_pins()
+        .into_iter()
+        .map(|pin| Bookmark {
+            name: pin.name,
+            path: pin.path,
+        })
+        .collect()
+}
 
+fn bookmark_to_pin(bookmark: Bookmark) -> UserPin {
+    let kind = if Path::new(&bookmark.path).is_dir() {
+        "folder"
+    } else {
+        "file"
+    };
+    UserPin {
+        name: bookmark.name,
+        path: bookmark.path,
+        kind: kind.to_string(),
+        pinned_at: now_unix_secs(),
+    }
+}
+
+fn default_user_pins() -> Vec<UserPin> {
     get_known_folders()
         .into_iter()
         .filter(|folder| matches!(folder.id.as_str(), "documents" | "downloads" | "desktop"))
@@ -5278,7 +5749,64 @@ fn native_bookmarks() -> Vec<Bookmark> {
             name: folder.name,
             path: folder.path,
         })
+        .map(bookmark_to_pin)
         .collect()
+}
+
+fn native_user_pins() -> Vec<UserPin> {
+    let saved: Vec<UserPin> = read_native_json("user_pins.json", Vec::new());
+    if !saved.is_empty() {
+        return saved
+            .into_iter()
+            .filter(|pin| Path::new(&pin.path).exists())
+            .collect();
+    }
+
+    let legacy: Vec<Bookmark> = read_native_json("bookmarks.json", Vec::new());
+    if !legacy.is_empty() {
+        let pins = legacy
+            .into_iter()
+            .filter(|bookmark| Path::new(&bookmark.path).exists())
+            .map(bookmark_to_pin)
+            .collect::<Vec<_>>();
+        let _ = write_native_json("user_pins.json", &pins);
+        return pins;
+    }
+
+    default_user_pins()
+}
+
+fn save_native_user_pins(pins: &[UserPin]) -> Result<(), String> {
+    write_native_json("user_pins.json", &pins)
+}
+
+fn pin_name_for_path(path: &Path, explicit_name: Option<String>) -> String {
+    explicit_name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
+}
+
+fn condense_recent_locations(paths: Vec<String>, max_items: usize) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut condensed = Vec::new();
+    for path in paths {
+        if path.trim().is_empty() || !Path::new(&path).exists() {
+            continue;
+        }
+        let key = cache_key(Path::new(&path));
+        if seen.insert(key) {
+            condensed.push(path);
+        }
+        if condensed.len() >= max_items {
+            break;
+        }
+    }
+    condensed
 }
 
 fn native_list_directory(state: &AppState, path: &str) -> Result<Vec<FileEntry>, String> {
@@ -6275,6 +6803,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
         "",
         "clear-thumbnail-cache",
     ),
+    ("Tools", "Clear Local Caches", "", "clear-local-caches"),
     ("Tools", "Rebuild Search Index", "", "rebuild-index"),
     (
         "Settings",
@@ -6282,6 +6811,8 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
         "",
         "performance-settings",
     ),
+    ("Settings", "Privacy and Storage", "", "privacy-storage"),
+    ("Settings", "Check for Updates", "", "check-updates"),
     ("Settings", "Shortcut Editor", "", "shortcut-editor"),
     ("Tools", "Undo Last Operation", "Ctrl+Z", "undo"),
     ("View", "Icon View", "Ctrl+1", "view-grid"),
@@ -6413,8 +6944,11 @@ impl NativeController {
             active_tab: 0,
             known_folders,
             drives: get_drives(),
-            bookmarks: native_bookmarks(),
-            recent_locations: read_native_json("recent_locations.json", Vec::new()),
+            user_pins: native_user_pins(),
+            recent_locations: condense_recent_locations(
+                read_native_json("recent_locations.json", Vec::new()),
+                12,
+            ),
             folder_views: read_native_json("folder_views.json", HashMap::new()),
             tags: read_native_json("tags.json", HashMap::new()),
             tag_labels: read_native_json("tag_labels.json", HashMap::new()),
@@ -6437,10 +6971,13 @@ impl NativeController {
             settings,
             ai: AiCapabilities {
                 npu_available: false,
-                semantic_search: false,
-                automatic_summaries: false,
-                image_classification: false,
-                local_embeddings: false,
+                semantic_search: true,
+                automatic_summaries: true,
+                image_classification: true,
+                local_embeddings: true,
+                device_name: "CPU Fallback".to_string(),
+                acceleration_kind: "CPU".to_string(),
+                runtime_configured: false,
                 reason: "Detecting...".to_string(),
             },
             clipboard: None,
@@ -6884,7 +7421,8 @@ impl NativeController {
         if ui.get_view_mode() != "list" {
             for entry in self.visible_files.iter().take(32) {
                 let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
-                if !is_image_ext(&ext) || self.thumbnail_memory.contains_key(&entry.path) {
+                if !is_thumbnail_image_ext(&ext) || self.thumbnail_memory.contains_key(&entry.path)
+                {
                     continue;
                 }
                 let disk_key = thumbnail_cache_key(Path::new(&entry.path), entry.modified, 160);
@@ -7086,7 +7624,7 @@ impl NativeController {
         }
 
         items.push(SideItem {
-            label: ss("BOOKMARKS"),
+            label: ss("PINS"),
             path: ss(""),
             icon: ss(""),
             count: ss(""),
@@ -7094,15 +7632,15 @@ impl NativeController {
             is_header: true,
             active: false,
         });
-        for bookmark in &self.bookmarks {
+        for pin in &self.user_pins {
             items.push(SideItem {
-                label: ss(&bookmark.name),
-                path: ss(&bookmark.path),
-                icon: ss("folder"),
+                label: ss(&pin.name),
+                path: ss(&pin.path),
+                icon: ss(if pin.kind == "file" { "file" } else { "folder" }),
                 count: ss(""),
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: false,
-                active: same_path_string(&self.current_path, &bookmark.path),
+                active: same_path_string(&self.current_path, &pin.path),
             });
         }
 
@@ -7115,7 +7653,7 @@ impl NativeController {
             is_header: true,
             active: false,
         });
-        for smart in default_smart_folders(&self.current_path) {
+        for smart in smart_folders_for_path(&self.current_path) {
             items.push(SideItem {
                 label: ss(smart.name),
                 path: ss(format!("smart:{}", smart.id)),
@@ -7296,7 +7834,8 @@ impl NativeController {
                 self.recent_locations
                     .retain(|p| !same_path_string(p, &path));
                 self.recent_locations.insert(0, path.clone());
-                self.recent_locations.truncate(20);
+                self.recent_locations =
+                    condense_recent_locations(self.recent_locations.clone(), 12);
                 let _ = write_native_json("recent_locations.json", &self.recent_locations);
 
                 // Restore view+sort for the new folder
@@ -7368,7 +7907,7 @@ impl NativeController {
                 let image_entries: Vec<(String, u64)> = self
                     .visible_files
                     .iter()
-                    .filter(|e| is_image_ext(e.extension.as_deref().unwrap_or("")))
+                    .filter(|e| is_thumbnail_image_ext(e.extension.as_deref().unwrap_or("")))
                     .take(64)
                     .map(|e| (e.path.clone(), e.modified))
                     .collect();
@@ -7636,7 +8175,7 @@ impl NativeController {
 
         // Try to load image preview from thumbnail cache
         let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
-        let is_image = is_image_ext(&ext);
+        let is_image = is_thumbnail_image_ext(&ext);
         if is_image {
             let disk_key = thumbnail_cache_key(Path::new(&entry.path), entry.modified, 160);
             let thumb_path = thumbnail_cache_dir().join(format!("{disk_key}.jpg"));
@@ -7658,9 +8197,8 @@ impl NativeController {
             Ok(preview) => {
                 let body = match preview.kind.as_str() {
                     "image" => String::new(),
-                    "text" | "svg" | "archive" | "pdf" | "font" | "media" => {
-                        preview.text.unwrap_or_default()
-                    }
+                    "text" | "svg" | "archive" | "pdf" | "font" | "media" | "image-too-large"
+                    | "image-metadata" => preview.text.unwrap_or_default(),
                     "folder" => String::new(),
                     other => format!("{other} file"),
                 };
@@ -8040,7 +8578,8 @@ impl NativeController {
             return;
         }
         if push_history {
-            self.secondary_history.truncate(self.secondary_history_pos + 1);
+            self.secondary_history
+                .truncate(self.secondary_history_pos + 1);
             if self.secondary_history.last().map(|p| p.as_str()) != Some(&path) {
                 self.secondary_history.push(path.clone());
                 self.secondary_history_pos = self.secondary_history.len() - 1;
@@ -8441,6 +8980,28 @@ impl NativeController {
                 }
                 Err(error) => self.show_toast(ui, error),
             },
+            "clear-local-caches" => {
+                if let Ok(mut cache) = self.app_state.directory_cache.lock() {
+                    cache.clear();
+                }
+                if let Ok(mut cache) = self.app_state.preview_cache.lock() {
+                    cache.clear();
+                }
+                if let Ok(mut cache) = self.app_state.git_cache.lock() {
+                    cache.clear();
+                }
+                match clear_thumbnail_cache() {
+                    Ok(bytes) => {
+                        self.thumbnail_memory.clear();
+                        self.sync_performance_status(ui);
+                        self.show_toast(
+                            ui,
+                            format!("Cleared local caches ({})", format_size_short(bytes)),
+                        );
+                    }
+                    Err(error) => self.show_toast(ui, error),
+                }
+            }
             "rebuild-index" => {
                 let roots = index_roots_for_mode(&self.settings);
                 if roots.is_empty() {
@@ -8454,6 +9015,26 @@ impl NativeController {
                 ui.set_settings_tab(ss("performance"));
                 ui.set_settings_visible(true);
             }
+            "privacy-storage" => self.show_privacy_storage(ui),
+            "check-updates" => match check_github_release_now() {
+                Ok(result) => {
+                    ui.set_preview_title(ss("Updates"));
+                    ui.set_preview_body(ss(format!(
+                        "{}\nCurrent: {}\nLatest: {}\nRelease: {}\n\n{}",
+                        result.message,
+                        result.current_version,
+                        result.latest_version,
+                        result.release_url,
+                        result.notes
+                    )));
+                    ui.set_preview_meta(ss(
+                        "No files are downloaded from update checks. Open the release to install manually.",
+                    ));
+                }
+                Err(error) => {
+                    self.show_toast_kind(ui, format!("Update check failed: {error}"), "error")
+                }
+            },
             "shortcut-editor" => self.show_shortcuts(ui),
             "undo" => self.undo(ui),
             "focus-search" => self.show_toast(ui, "Search is ready in the toolbar."),
@@ -9213,7 +9794,7 @@ impl NativeController {
     }
 
     fn show_smart_folders(&mut self, ui: &MainWindow) {
-        let body = default_smart_folders(&self.current_path)
+        let body = smart_folders_for_path(&self.current_path)
             .into_iter()
             .map(|s| format!("{} | {} | {}", s.name, s.query, s.description))
             .collect::<Vec<_>>()
@@ -9305,7 +9886,7 @@ impl NativeController {
             .into_iter()
             .filter(|path| {
                 let p = Path::new(path);
-                p.is_file() && is_image_ext(&extension(p))
+                p.is_file() && is_thumbnail_image_ext(&extension(p))
             })
             .collect();
 
@@ -9759,6 +10340,41 @@ impl NativeController {
         ui.set_preview_meta(ss(status.estimated_storage));
     }
 
+    fn show_privacy_storage(&mut self, ui: &MainWindow) {
+        let info = privacy_storage_info_for_state(&self.app_state, &self.settings);
+        let stored = info
+            .stored_items
+            .iter()
+            .map(|item| {
+                format!(
+                    "{}: {} | {}",
+                    item.label,
+                    format_size_short(item.bytes),
+                    item.description
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        ui.set_preview_title(ss("Privacy and Storage"));
+        ui.set_preview_body(ss(format!(
+            "{}\n\nData folder: {}\nCache folder: {}\nIndex: {}\nThumbnails: {} / {}\nMemory caches: {} folders, {} previews\nWatchers: {}\nUpdate checks: {}\nNetwork downloads: {}\nNetwork uploads: {}\n\nStored local data:\n{}",
+            info.policy,
+            info.data_dir,
+            info.cache_dir,
+            format_size_short(info.index_bytes),
+            format_size_short(info.thumbnail_cache_bytes),
+            format_size_short(info.thumbnail_cache_limit),
+            info.directory_cache_entries,
+            info.preview_cache_entries,
+            info.watcher_count,
+            if info.update_checks_enabled { "enabled" } else { "off" },
+            if info.network_downloads_enabled { "explicit only" } else { "off" },
+            if info.network_uploads_enabled { "enabled" } else { "off" },
+            if stored.is_empty() { "No local metadata yet.".to_string() } else { stored }
+        )));
+        ui.set_preview_meta(ss("Use Clear Thumbnail Cache or Clear Local Caches to remove generated cache data without deleting your files."));
+    }
+
     fn undo(&mut self, ui: &MainWindow) {
         let op = self
             .app_state
@@ -10118,11 +10734,15 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let t = text.to_string();
         let weak2 = weak.clone();
         let c2 = c.clone();
-        fd.start(slint::TimerMode::SingleShot, Duration::from_millis(150), move || {
-            if let Some(ui) = weak2.upgrade() {
-                c2.borrow_mut().set_folder_filter(&ui, t.clone());
-            }
-        });
+        fd.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(150),
+            move || {
+                if let Some(ui) = weak2.upgrade() {
+                    c2.borrow_mut().set_folder_filter(&ui, t.clone());
+                }
+            },
+        );
     });
 
     let weak = ui.as_weak();
