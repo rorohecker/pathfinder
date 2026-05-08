@@ -885,6 +885,10 @@ export component MainWindow inherits Window {
     in-out property <string> op_drawer_text: "";
     in-out property <[FileItem]> secondary_files;
     in-out property <string> secondary_path: "";
+    in-out property <string> secondary_sort_by: "name";
+    in-out property <string> secondary_sort_dir: "asc";
+    in-out property <string> filter_text: "";
+    in-out property <bool> filter_bar_visible: false;
     in-out property <[string]> tag_names: ["Urgent", "Important", "Review", "Done", "Personal", "Code"];
     in-out property <bool> context_on_file: false;
 
@@ -932,6 +936,9 @@ export component MainWindow inherits Window {
     callback secondary_file_selected(int, bool, bool);
     callback secondary_file_context(int);
     callback secondary_go_up();
+    callback secondary_go_back();
+    callback secondary_sort_column(string);
+    callback filter_changed(string);
 
     // Custom theme editor state
     in-out property <string> ce_name: "My Theme";
@@ -964,13 +971,15 @@ export component MainWindow inherits Window {
     callback ce_reset_to_active();
 
     property <length> sidebar_w: 238px;
+    property <float> split_ratio: 0.5;
     property <length> title_h: 36px;
     property <length> toolbar_h: 44px;
+    property <length> filter_bar_h: root.filter_bar_visible ? 36px : 0px;
     property <length> status_h: 26px;
     property <length> preview_w: root.preview_visible ? 326px : 0px;
     property <length> main_content_w: root.width - root.sidebar_w - root.preview_w;
     property <length> pane_splitter_w: root.dual_pane ? 4px : 0px;
-    property <length> primary_pane_w: root.dual_pane ? (root.main_content_w - root.pane_splitter_w) / 2 : root.main_content_w;
+    property <length> primary_pane_w: root.dual_pane ? (root.main_content_w - root.pane_splitter_w) * root.split_ratio : root.main_content_w;
     property <length> secondary_pane_w: root.dual_pane ? root.main_content_w - root.primary_pane_w - root.pane_splitter_w : 0px;
     property <length> file_area_w: root.primary_pane_w - AppMetrics.pad * 2;
     property <length> secondary_file_area_w: root.secondary_pane_w - AppMetrics.pad * 2;
@@ -1121,6 +1130,28 @@ export component MainWindow inherits Window {
             }
 
             Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: ThemePalette.border; }
+
+            // Sidebar resize handle
+            Rectangle {
+                x: parent.width - 4px;
+                y: 0;
+                width: 8px;
+                height: parent.height;
+                z: 5;
+                background: transparent;
+                sidebar_drag := TouchArea {
+                    mouse-cursor: ew-resize;
+                    property <length> sw_at_press: 238px;
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            sw_at_press = root.sidebar_w;
+                        }
+                    }
+                    moved => {
+                        root.sidebar_w = (sw_at_press + self.mouse-x - self.pressed-x).clamp(160px, 380px);
+                    }
+                }
+            }
         }
 
         // Toolbar — z:10 so tooltip pop-overs render above the file area below
@@ -1423,15 +1454,66 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Rectangle { x: parent.width - 283px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 272px; y: 6px; icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z"; tooltip: "Icon view"; active: root.view_mode == "grid"; clicked => { root.set_view("grid"); } }
-            ToolButton { x: parent.width - 238px; y: 6px; icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12"; tooltip: "Compact view"; active: root.view_mode == "compact"; clicked => { root.set_view("compact"); } }
-            ToolButton { x: parent.width - 204px; y: 6px; icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01"; tooltip: "Details view"; active: root.view_mode == "list"; clicked => { root.set_view("list"); } }
-            ToolButton { x: parent.width - 170px; y: 6px; icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01"; tooltip: "Gallery view"; active: root.view_mode == "gallery"; clicked => { root.set_view("gallery"); } }
-            ToolButton { x: parent.width - 136px; y: 6px; icon_data: "M3 4h18v16H3z M14 4v16"; tooltip: "Preview pane"; active: root.preview_visible; clicked => { root.toggle_preview(); } }
-            ToolButton { x: parent.width - 102px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
+            Rectangle { x: parent.width - 317px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
+            ToolButton { x: parent.width - 306px; y: 6px; icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z"; tooltip: "Icon view"; active: root.view_mode == "grid"; clicked => { root.set_view("grid"); } }
+            ToolButton { x: parent.width - 272px; y: 6px; icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12"; tooltip: "Compact view"; active: root.view_mode == "compact"; clicked => { root.set_view("compact"); } }
+            ToolButton { x: parent.width - 238px; y: 6px; icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01"; tooltip: "Details view"; active: root.view_mode == "list"; clicked => { root.set_view("list"); } }
+            ToolButton { x: parent.width - 204px; y: 6px; icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01"; tooltip: "Gallery view"; active: root.view_mode == "gallery"; clicked => { root.set_view("gallery"); } }
+            ToolButton { x: parent.width - 170px; y: 6px; icon_data: "M3 4h18v16H3z M14 4v16"; tooltip: "Preview pane"; active: root.preview_visible; clicked => { root.toggle_preview(); } }
+            ToolButton { x: parent.width - 136px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
+            ToolButton { x: parent.width - 102px; y: 6px; icon_data: "M3 6h18 M7 12h10 M10 18h4"; tooltip: "Filter files"; active: root.filter_bar_visible; clicked => { root.filter_bar_visible = !root.filter_bar_visible; if (!root.filter_bar_visible) { root.filter_text = ""; root.filter_changed(""); } } }
             ToolButton { x: parent.width - 68px; y: 6px; icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"; tooltip: "Command palette"; clicked => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; } }
             ToolButton { x: parent.width - 34px; y: 6px; icon_data: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"; tooltip: "Settings"; clicked => { root.settings_visible = true; } }
+
+            Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
+        }
+
+        // Filter bar (visible when filter_bar_visible)
+        if root.filter_bar_visible: Rectangle {
+            x: root.sidebar_w;
+            y: root.title_h + root.toolbar_h;
+            width: parent.width - root.sidebar_w;
+            height: root.filter_bar_h;
+            background: ThemePalette.panel;
+            z: 9;
+
+            Rectangle {
+                x: 10px; y: 6px;
+                width: parent.width - 20px;
+                height: 24px;
+                background: ThemePalette.bg_soft;
+                border-radius: AppMetrics.radius_small;
+                border-width: 1px;
+                border-color: ThemePalette.border;
+
+                filter_input := LineEdit {
+                    x: 6px; y: 0;
+                    width: parent.width - 28px;
+                    height: parent.height;
+                    text: root.filter_text;
+                    placeholder-text: "Filter by name…";
+                    font-size: 12px;
+                    edited(val) => {
+                        root.filter_text = val;
+                        root.filter_changed(val);
+                    }
+                }
+
+                if root.filter_text != "": Rectangle {
+                    x: parent.width - 22px; y: 0;
+                    width: 22px; height: parent.height;
+                    background: transparent;
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.filter_text = ""; root.filter_changed(""); }
+                    }
+                    Text {
+                        width: parent.width; height: parent.height;
+                        text: "×"; color: ThemePalette.text_muted;
+                        font-size: 14px; horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+            }
 
             Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
         }
@@ -1439,9 +1521,9 @@ export component MainWindow inherits Window {
         // Main area
         Rectangle {
             x: root.sidebar_w;
-            y: root.title_h + root.toolbar_h;
+            y: root.title_h + root.toolbar_h + root.filter_bar_h;
             width: parent.width - root.sidebar_w;
-            height: parent.height - root.title_h - root.toolbar_h - root.status_h;
+            height: parent.height - root.title_h - root.toolbar_h - root.filter_bar_h - root.status_h;
             background: ThemePalette.bg;
 
             Rectangle {
@@ -1591,8 +1673,19 @@ export component MainWindow inherits Window {
                 y: 0;
                 width: root.pane_splitter_w;
                 height: parent.height;
-                background: split_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.border;
-                split_touch := TouchArea { mouse-cursor: ew-resize; }
+                background: split_touch.has-hover || split_touch.pressed ? ThemePalette.accent : ThemePalette.border;
+                split_touch := TouchArea {
+                    mouse-cursor: ew-resize;
+                    property <float> ratio_at_press: 0.5;
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            ratio_at_press = root.split_ratio;
+                        }
+                    }
+                    moved => {
+                        root.split_ratio = (ratio_at_press + (self.mouse-x - self.pressed-x) / root.main_content_w).clamp(0.15, 0.85);
+                    }
+                }
             }
 
             if root.dual_pane: Rectangle {
@@ -1603,9 +1696,9 @@ export component MainWindow inherits Window {
                 background: ThemePalette.bg_soft;
                 border-width: 0px;
 
+                // Header bar
                 Rectangle {
-                    x: 0;
-                    y: 0;
+                    x: 0; y: 0;
                     width: parent.width;
                     height: 38px;
                     background: ThemePalette.panel;
@@ -1613,9 +1706,9 @@ export component MainWindow inherits Window {
                     ToolButton {
                         x: 4px; y: 4px;
                         button_width: 28px; button_height: 28px;
-                        icon_data: "M3 12h14 M10 5l7 7-7 7";
-                        tooltip: "Open left folder here";
-                        clicked => { root.secondary_navigate(root.current_path); }
+                        icon_data: "M15 18l-6-6 6-6";
+                        tooltip: "Back";
+                        clicked => { root.secondary_go_back(); }
                     }
                     ToolButton {
                         x: 34px; y: 4px;
@@ -1624,10 +1717,17 @@ export component MainWindow inherits Window {
                         tooltip: "Up";
                         clicked => { root.secondary_go_up(); }
                     }
+                    ToolButton {
+                        x: 64px; y: 4px;
+                        button_width: 28px; button_height: 28px;
+                        icon_data: "M3 12h14 M10 5l7 7-7 7";
+                        tooltip: "Open left folder here";
+                        clicked => { root.secondary_navigate(root.current_path); }
+                    }
 
                     Text {
-                        x: 66px;
-                        width: parent.width - 74px;
+                        x: 96px;
+                        width: parent.width - 104px;
                         height: parent.height;
                         text: root.secondary_path == "" ? "—" : root.secondary_path;
                         color: ThemePalette.text_muted;
@@ -1638,16 +1738,26 @@ export component MainWindow inherits Window {
                     Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
                 }
 
+                // Sort header (list mode only)
+                if root.view_mode == "list": ListHeader {
+                    x: AppMetrics.pad;
+                    y: 38px;
+                    width: parent.width - AppMetrics.pad * 2;
+                    sort_by: root.secondary_sort_by;
+                    sort_dir: root.secondary_sort_dir;
+                    sort_col(col) => { root.secondary_sort_column(col); }
+                }
+
                 ListView {
                     x: AppMetrics.pad;
-                    y: 38px + AppMetrics.pad;
+                    y: 38px + (root.view_mode == "list" ? 32px : AppMetrics.pad);
                     width: parent.width - AppMetrics.pad * 2;
-                    height: parent.height - 38px - AppMetrics.pad * 2;
+                    height: parent.height - 38px - (root.view_mode == "list" ? 32px : AppMetrics.pad) - AppMetrics.pad;
                     for file[index] in root.secondary_files: FileRow {
                         width: parent.width;
                         item: file;
                         index: index;
-                        view_mode: "compact";
+                        view_mode: root.view_mode == "gallery" ? "compact" : root.view_mode;
                         rename_index: -1;
                         selected(i, ctrl, shift) => { root.secondary_file_selected(i, ctrl, shift); }
                         opened(i) => { root.secondary_file_opened(i); }
@@ -1662,9 +1772,10 @@ export component MainWindow inherits Window {
                 }
 
                 if root.secondary_files.length == 0: Text {
-                    x: 0; y: 38px;
+                    x: 0;
+                    y: 38px + (root.view_mode == "list" ? 32px : 0px);
                     width: parent.width;
-                    height: parent.height - 38px;
+                    height: parent.height - 38px - (root.view_mode == "list" ? 32px : 0px);
                     text: root.secondary_path == "" ? "Enable dual pane to browse a second location" : "Empty folder";
                     color: ThemePalette.text_faint;
                     font-size: 12px;
@@ -1894,9 +2005,9 @@ export component MainWindow inherits Window {
     // Context menu — empty area
     if root.context_visible && !root.context_on_file: Rectangle {
         x: root.context_x;
-        y: root.context_y.clamp(0px, root.height - 180px);
+        y: root.context_y.clamp(0px, root.height - 186px);
         width: 226px;
-        height: 168px;
+        height: 176px;
         border-width: 1px;
         border-color: ThemePalette.border_strong;
         border-radius: AppMetrics.radius;

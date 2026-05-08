@@ -4176,6 +4176,10 @@ struct NativeController {
     tag_labels: HashMap<String, String>,
     notes: HashMap<String, String>,
     secondary_path: String,
+    secondary_history: Vec<String>,
+    secondary_history_pos: usize,
+    secondary_sort_by: String,
+    secondary_sort_dir: String,
     secondary_files: Vec<FileEntry>,
     secondary_visible_files: Vec<FileEntry>,
     secondary_selected_index: i32,
@@ -4183,6 +4187,7 @@ struct NativeController {
     secondary_select_anchor: i32,
     secondary_files_model: Option<ModelRc<FileItem>>,
     active_pane: ActivePane,
+    folder_filter: String,
     git_status: Arc<GitStatusMap>,
     git_dir_status: HashMap<String, String>,
     settings: NativeSettings,
@@ -5845,6 +5850,52 @@ fn theme_palette(id: &str) -> PaletteSpec {
             light_controls: false,
             outer_border: 0.0,
         },
+        "nord" => PaletteSpec {
+            bg: color("#2e3440"),
+            bg_soft: color("#3b4252"),
+            panel: rgba_u8(59, 66, 82, 0.90),
+            panel_solid: color("#3b4252"),
+            panel_alt: color("#434c5e"),
+            titlebar: rgba_u8(46, 52, 64, 0.95),
+            sidebar: rgba_u8(46, 52, 64, 0.88),
+            border: rgba_u8(216, 222, 233, 0.14),
+            border_strong: rgba_u8(216, 222, 233, 0.28),
+            text: color("#eceff4"),
+            text_muted: color("#d8dee9"),
+            text_faint: color("#9aa3b2"),
+            accent: color("#5e81ac"),
+            accent_soft: rgba_u8(94, 129, 172, 0.20),
+            accent_strong: color("#81a1c1"),
+            radius: 6.0,
+            radius_small: 4.0,
+            ui_font: "Segoe UI",
+            mono_font: "Cascadia Mono",
+            light_controls: false,
+            outer_border: 0.0,
+        },
+        "ocean" => PaletteSpec {
+            bg: color("#03045e"),
+            bg_soft: color("#023e8a"),
+            panel: rgba_u8(2, 62, 138, 0.85),
+            panel_solid: color("#023e8a"),
+            panel_alt: color("#0077b6"),
+            titlebar: rgba_u8(3, 4, 94, 0.96),
+            sidebar: rgba_u8(2, 62, 138, 0.80),
+            border: rgba_u8(0, 180, 216, 0.22),
+            border_strong: rgba_u8(0, 180, 216, 0.44),
+            text: color("#caf0f8"),
+            text_muted: color("#90e0ef"),
+            text_faint: color("#48cae4"),
+            accent: color("#00b4d8"),
+            accent_soft: rgba_u8(0, 180, 216, 0.18),
+            accent_strong: color("#90e0ef"),
+            radius: 8.0,
+            radius_small: 5.0,
+            ui_font: "Segoe UI",
+            mono_font: "Cascadia Mono",
+            light_controls: false,
+            outer_border: 0.0,
+        },
         _ => PaletteSpec {
             bg: color("#101318"),
             bg_soft: color("#171b22"),
@@ -5873,7 +5924,7 @@ fn theme_palette(id: &str) -> PaletteSpec {
     let (accent, accent_soft, accent_strong) = accent_override(id);
     if !matches!(
         id,
-        "warm" | "terminal" | "paper" | "retro" | "fantasy" | "cyberpunk"
+        "warm" | "terminal" | "paper" | "retro" | "fantasy" | "cyberpunk" | "nord" | "ocean"
     ) {
         p.accent = accent;
         p.accent_soft = accent_soft;
@@ -6369,6 +6420,10 @@ impl NativeController {
             tag_labels: read_native_json("tag_labels.json", HashMap::new()),
             notes: read_native_json("notes.json", HashMap::new()),
             secondary_path: current_path.clone(),
+            secondary_history: vec![current_path.clone()],
+            secondary_history_pos: 0,
+            secondary_sort_by: "name".to_string(),
+            secondary_sort_dir: "asc".to_string(),
             secondary_files: Vec::new(),
             secondary_visible_files: Vec::new(),
             secondary_selected_index: -1,
@@ -6376,6 +6431,7 @@ impl NativeController {
             secondary_select_anchor: -1,
             secondary_files_model: None,
             active_pane: ActivePane::Primary,
+            folder_filter: String::new(),
             git_status: Arc::new(HashMap::new()),
             git_dir_status: HashMap::new(),
             settings,
@@ -6440,6 +6496,8 @@ impl NativeController {
                 "#d9c38f",
             ),
             ("cyberpunk", "Cyberpunk", "Neon city file grid", "#ff39bc"),
+            ("nord", "Nord", "Arctic palette, calm and clean", "#5e81ac"),
+            ("ocean", "Ocean", "Deep sea blues and teals", "#00b4d8"),
         ]));
         ui.set_accent_choices(choice_items(&[
             ("blue", "Blue", "Default Pathfinder blue", "#4f9cff"),
@@ -6694,9 +6752,18 @@ impl NativeController {
     fn apply_secondary_sort(&mut self) {
         sort_entries_by(
             &mut self.secondary_visible_files,
-            &self.sort_by,
-            &self.sort_dir,
+            &self.secondary_sort_by,
+            &self.secondary_sort_dir,
         );
+    }
+
+    fn apply_folder_filter(&mut self) {
+        let filter = self.folder_filter.trim().to_lowercase();
+        if filter.is_empty() {
+            return;
+        }
+        self.visible_files
+            .retain(|e| e.name_lower.contains(&filter));
     }
 
     fn apply_filter(&mut self) {
@@ -6705,6 +6772,7 @@ impl NativeController {
         if query.is_empty() {
             self.visible_files.extend_from_slice(&self.files);
             self.apply_sort();
+            self.apply_folder_filter();
             return;
         }
         if let Some(id) = query.strip_prefix("smart:") {
@@ -7964,8 +8032,19 @@ impl NativeController {
     }
 
     fn secondary_navigate(&mut self, ui: &MainWindow, path: String) {
+        self.secondary_navigate_impl(ui, path, true);
+    }
+
+    fn secondary_navigate_impl(&mut self, ui: &MainWindow, path: String, push_history: bool) {
         if path.is_empty() || !Path::new(&path).is_dir() {
             return;
+        }
+        if push_history {
+            self.secondary_history.truncate(self.secondary_history_pos + 1);
+            if self.secondary_history.last().map(|p| p.as_str()) != Some(&path) {
+                self.secondary_history.push(path.clone());
+                self.secondary_history_pos = self.secondary_history.len() - 1;
+            }
         }
         self.active_pane = ActivePane::Secondary;
         self.secondary_path = path.clone();
@@ -7974,14 +8053,13 @@ impl NativeController {
         self.secondary_select_anchor = -1;
         match fs::read_dir(&path) {
             Ok(rd) => {
-                let mut entries: Vec<FileEntry> = rd
+                let entries: Vec<FileEntry> = rd
                     .filter_map(Result::ok)
                     .filter_map(|e| {
                         let p = e.path();
                         fs::metadata(&p).ok().map(|m| path_to_entry(&p, &m))
                     })
                     .collect();
-                sort_entries(&mut entries);
                 self.secondary_files = entries.clone();
                 self.secondary_visible_files = entries;
                 self.apply_secondary_sort();
@@ -7992,6 +8070,37 @@ impl NativeController {
             }
         }
         self.update_secondary_models(ui);
+    }
+
+    fn secondary_go_back(&mut self, ui: &MainWindow) {
+        if self.secondary_history_pos > 0 {
+            self.secondary_history_pos -= 1;
+            let path = self.secondary_history[self.secondary_history_pos].clone();
+            self.secondary_navigate_impl(ui, path, false);
+        }
+    }
+
+    fn sort_secondary_column(&mut self, ui: &MainWindow, col: &str) {
+        if self.secondary_sort_by == col {
+            self.secondary_sort_dir = if self.secondary_sort_dir == "asc" {
+                "desc".to_string()
+            } else {
+                "asc".to_string()
+            };
+        } else {
+            self.secondary_sort_by = col.to_string();
+            self.secondary_sort_dir = "asc".to_string();
+        }
+        ui.set_secondary_sort_by(ss(&self.secondary_sort_by));
+        ui.set_secondary_sort_dir(ss(&self.secondary_sort_dir));
+        self.apply_secondary_sort();
+        self.update_secondary_models(ui);
+    }
+
+    fn set_folder_filter(&mut self, ui: &MainWindow, text: String) {
+        self.folder_filter = text;
+        self.apply_filter();
+        self.update_models(ui);
     }
 
     fn secondary_file_selected(&mut self, index: i32, ctrl: bool, shift: bool) {
@@ -9986,6 +10095,30 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_secondary_go_back(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().secondary_go_back(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_secondary_sort_column(move |col| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().sort_secondary_column(&ui, &col);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_filter_changed(move |text| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().set_folder_filter(&ui, text.to_string());
+        }
+    });
+
+    let weak = ui.as_weak();
     ui.on_toggle_hidden(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_show_hidden(!ui.get_show_hidden());
@@ -10773,8 +10906,8 @@ unsafe extern "system" fn mouse_nav_wnd_proc(
 
             // Let Windows treat the app-name area as native caption. This
             // preserves normal Snap behavior without stealing clicks from tabs.
-            let in_titlebar = local_y >= 0 && local_y < 44;
-            let in_app_title_area = local_x >= 0 && local_x < 238;
+            let in_titlebar = (0..44).contains(&local_y);
+            let in_app_title_area = (0..238).contains(&local_x);
             let in_window_buttons = local_x >= width - 150;
             if in_titlebar && in_app_title_area && !in_window_buttons {
                 return windows::Win32::Foundation::LRESULT(HTCAPTION as isize);
