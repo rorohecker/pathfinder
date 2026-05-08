@@ -203,6 +203,7 @@ component SideRow inherits Rectangle {
     in property <SideItem> item;
     in property <int> index;
     callback activated(int);
+    callback rename_activated(string);
 
     height: root.item.is_header ? 24px : 32px;
     border-radius: AppMetrics.radius_small;
@@ -275,6 +276,9 @@ component SideRow inherits Rectangle {
         enabled: !root.item.is_header;
         mouse-cursor: pointer;
         clicked => { root.activated(root.index); }
+        double-clicked => {
+            if (root.item.icon == "tag") { root.rename_activated(root.item.path); }
+        }
     }
 }
 
@@ -363,8 +367,8 @@ component FileRow inherits Rectangle {
     border-width: root.item.is_selected ? 1px : 0px;
     border-color: root.item.is_selected ? ThemePalette.accent : rgba(0, 0, 0, 0);
     background: root.item.is_selected ? ThemePalette.accent_soft : (touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0));
-    animate background { duration: 70ms; easing: ease-out; }
-    animate border-color { duration: 70ms; easing: ease-out; }
+    animate background { duration: 25ms; easing: ease-out; }
+    animate border-color { duration: 25ms; easing: ease-out; }
 
     if root.view_mode == "list": NodeVisual {
         x: 10px;
@@ -818,6 +822,9 @@ export component MainWindow inherits Window {
     in-out property <string> toast_kind: "info";
     in-out property <bool> op_drawer_visible: false;
     in-out property <string> op_drawer_text: "";
+    in-out property <[FileItem]> secondary_files;
+    in-out property <string> secondary_path: "";
+    in-out property <[string]> tag_names: ["Urgent", "Important", "Review", "Done", "Personal", "Code"];
 
     callback filter_commands(string);
     callback navigate(string);
@@ -856,6 +863,12 @@ export component MainWindow inherits Window {
     callback confirm_delete();
     callback prompt_accept(string);
     callback sort_column(string);
+    callback clear_selection();
+    callback rename_tag_prompt(string);
+    callback secondary_navigate(string);
+    callback secondary_file_opened(int);
+    callback secondary_file_selected(int, bool, bool);
+    callback secondary_go_up();
 
     // Custom theme editor state
     in-out property <string> ce_name: "My Theme";
@@ -969,25 +982,23 @@ export component MainWindow inherits Window {
             HorizontalLayout {
                 x: root.sidebar_w;
                 y: 6px;
-                width: parent.width - root.sidebar_w - 170px;
+                width: parent.width - root.sidebar_w - 138px;
                 height: 30px;
                 spacing: 2px;
+                alignment: start;
                 for tab[index] in root.tabs: TabButton {
                     tab: tab;
                     index: index;
                     activated(i) => { root.tab_activated(i); }
                     closed(i) => { root.tab_closed(i); }
                 }
-            }
-
-            ToolButton {
-                x: parent.width - 164px;
-                y: 6px;
-                button_width: 24px;
-                button_height: 24px;
-                icon_data: "M12 5v14 M5 12h14";
-                tooltip: "New tab";
-                clicked => { root.new_tab(); }
+                ToolButton {
+                    button_width: 24px;
+                    button_height: 24px;
+                    icon_data: "M12 5v14 M5 12h14";
+                    tooltip: "New tab";
+                    clicked => { root.new_tab(); }
+                }
             }
 
             ToolButton {
@@ -1042,6 +1053,7 @@ export component MainWindow inherits Window {
                     item: item;
                     index: index;
                     activated(i) => { root.side_activated(i); }
+                    rename_activated(path) => { root.rename_tag_prompt(path); }
                 }
             }
 
@@ -1217,7 +1229,7 @@ export component MainWindow inherits Window {
                 search := LineEdit {
                     x: 30px;
                     y: 0;
-                    width: parent.width - 132px;
+                    width: root.search_text != "" ? parent.width - 158px : parent.width - 132px;
                     height: parent.height;
                     text: root.search_text;
                     placeholder-text: root.search_scope_all ? "Search current drive" : "Search this folder";
@@ -1227,6 +1239,25 @@ export component MainWindow inherits Window {
                         root.search_requested(value);
                     }
                     accepted(value) => { root.search_immediate(value); }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.search_text = "";
+                            root.search_requested("");
+                            accept
+                        } else { reject }
+                    }
+                }
+
+                if root.search_text != "": ToolButton {
+                    x: parent.width - 126px;
+                    y: 4px;
+                    button_width: 22px;
+                    button_height: 22px;
+                    icon_data: "M18 6L6 18 M6 6l12 12";
+                    clicked => {
+                        root.search_text = "";
+                        root.search_requested("");
+                    }
                 }
 
                 Rectangle {
@@ -1288,6 +1319,7 @@ export component MainWindow inherits Window {
                 empty_context := TouchArea {
                     width: parent.width;
                     height: parent.height;
+                    clicked => { root.clear_selection(); }
                     pointer-event(event) => {
                         if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                             root.context_x = (self.absolute-position.x + self.mouse-x).clamp(0px, root.width - 240px);
@@ -1421,13 +1453,29 @@ export component MainWindow inherits Window {
                     x: 0;
                     y: 0;
                     width: parent.width;
-                    height: 32px;
+                    height: 38px;
                     background: ThemePalette.panel;
+
+                    ToolButton {
+                        x: 4px; y: 4px;
+                        button_width: 28px; button_height: 28px;
+                        icon_data: "M15 18l-6-6 6-6";
+                        tooltip: "Back";
+                        clicked => { root.secondary_go_up(); }
+                    }
+                    ToolButton {
+                        x: 34px; y: 4px;
+                        button_width: 28px; button_height: 28px;
+                        icon_data: "M12 19V5 M5 12l7-7 7 7";
+                        tooltip: "Up";
+                        clicked => { root.secondary_go_up(); }
+                    }
+
                     Text {
-                        x: 12px;
-                        width: parent.width - 24px;
+                        x: 66px;
+                        width: parent.width - 74px;
                         height: parent.height;
-                        text: root.current_path;
+                        text: root.secondary_path == "" ? "—" : root.secondary_path;
                         color: ThemePalette.text_muted;
                         font-size: 11.5px;
                         overflow: elide;
@@ -1438,28 +1486,36 @@ export component MainWindow inherits Window {
 
                 ListView {
                     x: AppMetrics.pad;
-                    y: 32px + AppMetrics.pad;
+                    y: 38px + AppMetrics.pad;
                     width: parent.width - AppMetrics.pad * 2;
-                    height: parent.height - 32px - AppMetrics.pad * 2;
-                    for file[index] in root.files: FileRow {
+                    height: parent.height - 38px - AppMetrics.pad * 2;
+                    for file[index] in root.secondary_files: FileRow {
                         width: parent.width;
                         item: file;
                         index: index;
                         view_mode: "compact";
-                        rename_index: root.rename_index;
-                        selected(i, ctrl, shift) => { root.file_selected(i, ctrl, shift); }
-                        opened(i) => { root.file_opened(i); }
+                        rename_index: -1;
+                        selected(i, ctrl, shift) => { root.secondary_file_selected(i, ctrl, shift); }
+                        opened(i) => { root.secondary_file_opened(i); }
                         context(i, cx, cy) => {
                             root.context_x = cx.clamp(0px, root.width - 240px);
                             root.context_y = cy.clamp(0px, root.height - 440px);
                             root.context_visible = true;
                             root.file_context(i);
                         }
-                        rename_commit(i, val) => {
-                            root.rename_index = -1;
-                            if (val != "") { root.rename_file(i, val); }
-                        }
+                        rename_commit(i, val) => { }
                     }
+                }
+
+                if root.secondary_files.length == 0: Text {
+                    x: 0; y: 38px;
+                    width: parent.width;
+                    height: parent.height - 38px;
+                    text: root.secondary_path == "" ? "Enable dual pane to browse a second location" : "Empty folder";
+                    color: ThemePalette.text_faint;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
             }
 
@@ -1636,12 +1692,12 @@ export component MainWindow inherits Window {
             ChoiceMenuRow { width: parent.width; label: "Checksum"; command_name: "checksum"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Add Note"; command_name: "note"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { width: parent.width; label: "Tag: Urgent"; command_name: "tag-red"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Tag: Important"; command_name: "tag-orange"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Tag: Review"; command_name: "tag-yellow"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Tag: Done"; command_name: "tag-green"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Tag: Personal"; command_name: "tag-blue"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Tag: Code"; command_name: "tag-violet"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Tag: " + root.tag_names[0]; command_name: "tag-red"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Tag: " + root.tag_names[1]; command_name: "tag-orange"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Tag: " + root.tag_names[2]; command_name: "tag-yellow"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Tag: " + root.tag_names[3]; command_name: "tag-green"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Tag: " + root.tag_names[4]; command_name: "tag-blue"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Tag: " + root.tag_names[5]; command_name: "tag-violet"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Clear Tag"; command_name: "tag-clear"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { width: parent.width; label: "Locked File Inspector"; command_name: "locked-file"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -2545,7 +2601,7 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(Control+Shift+C); activated => { root.command("checksum"); } }
         KeyBinding { keys: @keys(UpArrow); activated => { root.file_selected(max(0, root.selected_index - 1), false, false); } }
         KeyBinding { keys: @keys(DownArrow); activated => { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } }
-        KeyBinding { keys: @keys(Escape); activated => { root.context_visible = false; root.command_visible = false; root.settings_visible = false; root.confirm_visible = false; root.prompt_visible = false; root.address_editing = false; root.addr_suggestions = []; } }
+        KeyBinding { keys: @keys(Escape); activated => { root.context_visible = false; root.command_visible = false; root.settings_visible = false; root.confirm_visible = false; root.prompt_visible = false; root.address_editing = false; root.addr_suggestions = []; root.clear_selection(); if (root.search_text != "") { root.search_text = ""; root.search_requested(""); } } }
     }
 }
 

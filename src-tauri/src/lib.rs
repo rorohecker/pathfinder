@@ -1936,9 +1936,31 @@ fn live_search_scan(
     let dir = PathBuf::from(root);
     let parsed = Arc::new(parse_query(query));
     let generation = state.search_generation.clone();
-    let work_units: Vec<PathBuf> = fs::read_dir(&dir)
+    let is_drive_root = {
+        #[cfg(target_os = "windows")]
+        { dir.components().count() == 1 }
+        #[cfg(not(target_os = "windows"))]
+        { dir.to_str() == Some("/") }
+    };
+    let mut work_units: Vec<PathBuf> = fs::read_dir(&dir)
         .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).collect())
         .unwrap_or_default();
+    if is_drive_root {
+        // Exclude Windows system directories that inflate result counts without user data
+        let skip: &[&str] = &[
+            "windows", "program files", "program files (x86)", "programdata",
+            "$recycle.bin", "system volume information", "perflogs", "recovery",
+        ];
+        work_units.retain(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+            !skip.contains(&name.as_str())
+        });
+        // Prioritize Users directory so user documents appear first
+        work_units.sort_by_key(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+            if name == "users" { 0u8 } else { 1u8 }
+        });
+    }
 
     let mut output: Vec<FileEntry> = work_units
         .into_par_iter()
@@ -3899,6 +3921,7 @@ enum PendingPrompt {
         dest: String,
         cut: bool,
     },
+    RenameTag(String),
 }
 
 struct NativeController {
@@ -3923,7 +3946,12 @@ struct NativeController {
     recent_locations: Vec<String>,
     folder_views: HashMap<String, String>,
     tags: HashMap<String, String>,
+    tag_labels: HashMap<String, String>,
     notes: HashMap<String, String>,
+    secondary_path: String,
+    secondary_files: Vec<FileEntry>,
+    secondary_visible_files: Vec<FileEntry>,
+    secondary_files_model: Option<ModelRc<FileItem>>,
     git_status: Arc<GitStatusMap>,
     git_dir_status: HashMap<String, String>,
     settings: NativeSettings,
@@ -6101,7 +6129,7 @@ impl NativeController {
             files_model: None,
             search_query: String::new(),
             search_all_scope: false,
-            history: vec![current_path],
+            history: vec![current_path.clone()],
             history_index: 0,
             tabs: if tabs.is_empty() {
                 vec![SessionTab {
@@ -6120,7 +6148,12 @@ impl NativeController {
             recent_locations: read_native_json("recent_locations.json", Vec::new()),
             folder_views: read_native_json("folder_views.json", HashMap::new()),
             tags: read_native_json("tags.json", HashMap::new()),
+            tag_labels: read_native_json("tag_labels.json", HashMap::new()),
             notes: read_native_json("notes.json", HashMap::new()),
+            secondary_path: current_path.clone(),
+            secondary_files: Vec::new(),
+            secondary_visible_files: Vec::new(),
+            secondary_files_model: None,
             git_status: Arc::new(HashMap::new()),
             git_dir_status: HashMap::new(),
             settings,
@@ -6521,7 +6554,7 @@ impl NativeController {
     fn update_models(&mut self, ui: &MainWindow) {
         // Pre-load any thumbnails that are cached on disk but not yet in memory
         if ui.get_view_mode() != "list" {
-            for entry in self.visible_files.iter().take(96) {
+            for entry in self.visible_files.iter().take(32) {
                 let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
                 if !is_image_ext(&ext) || self.thumbnail_memory.contains_key(&entry.path) {
                     continue;
@@ -6571,6 +6604,7 @@ impl NativeController {
         ui.set_tabs(model_from_vec(self.tab_items()));
         ui.set_selected_index(self.selected_index);
         self.sync_search_scope(ui);
+        self.sync_tag_names(ui);
         let shown_path = self
             .active_archive
             .as_ref()
@@ -6800,7 +6834,7 @@ impl NativeController {
             is_header: true,
             active: false,
         });
-        for (id, label) in [
+        for (id, default_label) in [
             ("red", "Urgent"),
             ("orange", "Important"),
             ("yellow", "Review"),
@@ -6808,6 +6842,7 @@ impl NativeController {
             ("blue", "Personal"),
             ("violet", "Code"),
         ] {
+            let label = self.tag_labels.get(id).map(|s| s.as_str()).unwrap_or(default_label);
             let count = self.tags.values().filter(|tag| tag.as_str() == id).count();
             items.push(SideItem {
                 label: ss(label),
@@ -7540,11 +7575,103 @@ impl NativeController {
                 "success",
             );
         } else {
+            let label = self.tag_effective_label(tag).to_string();
             self.show_toast_kind(
                 ui,
-                format!("Tagged {} item(s) as {}", paths.len(), tag_label(tag)),
+                format!("Tagged {} item(s) as {}", paths.len(), label),
                 "success",
             );
+        }
+    }
+
+    fn tag_effective_label<'a>(&'a self, id: &'a str) -> &'a str {
+        self.tag_labels.get(id).map(|s| s.as_str()).unwrap_or_else(|| tag_label(id))
+    }
+
+    fn sync_tag_names(&self, ui: &MainWindow) {
+        let names: Vec<slint::SharedString> = ["red", "orange", "yellow", "green", "blue", "violet"]
+            .iter()
+            .map(|id| ss(self.tag_effective_label(id)))
+            .collect();
+        ui.set_tag_names(std::rc::Rc::new(slint::VecModel::from(names)).into());
+    }
+
+    fn show_rename_tag_prompt(&mut self, ui: &MainWindow, tag_id: String) {
+        let current = self.tag_effective_label(&tag_id).to_string();
+        ui.set_prompt_title(ss("Rename Tag"));
+        ui.set_prompt_value(ss(&current));
+        self.pending_prompt = Some(PendingPrompt::RenameTag(tag_id));
+        ui.set_prompt_visible(true);
+    }
+
+    fn clear_selection(&mut self, ui: &MainWindow) {
+        if self.selected_index < 0 && self.selected_set.is_empty() {
+            return;
+        }
+        let changed: Vec<usize> = self.selected_set.iter().copied()
+            .chain(if self.selected_index >= 0 { Some(self.selected_index as usize) } else { None })
+            .collect();
+        self.selected_index = -1;
+        self.selected_set.clear();
+        self.select_anchor = -1;
+        self.update_selection_in_model(ui, &changed);
+        ui.set_selected_index(-1);
+    }
+
+    fn update_secondary_models(&mut self, ui: &MainWindow) {
+        let items: Vec<FileItem> = self.secondary_visible_files.iter().enumerate()
+            .map(|(_, entry)| self.file_item(entry, false))
+            .collect();
+        let model = model_from_vec(items);
+        ui.set_secondary_files(model.clone());
+        ui.set_secondary_path(ss(&self.secondary_path));
+        self.secondary_files_model = Some(model);
+    }
+
+    fn secondary_navigate(&mut self, ui: &MainWindow, path: String) {
+        if path.is_empty() || !Path::new(&path).is_dir() {
+            return;
+        }
+        self.secondary_path = path.clone();
+        match fs::read_dir(&path) {
+            Ok(rd) => {
+                let mut entries: Vec<FileEntry> = rd
+                    .filter_map(Result::ok)
+                    .filter_map(|e| {
+                        let p = e.path();
+                        fs::metadata(&p).ok().map(|m| path_to_entry(&p, &m))
+                    })
+                    .collect();
+                sort_entries(&mut entries);
+                self.secondary_files = entries.clone();
+                self.secondary_visible_files = entries;
+            }
+            Err(_) => {
+                self.secondary_files = Vec::new();
+                self.secondary_visible_files = Vec::new();
+            }
+        }
+        self.update_secondary_models(ui);
+    }
+
+    fn secondary_file_opened(&mut self, ui: &MainWindow, index: i32) {
+        if let Some(entry) = self.secondary_visible_files.get(index as usize).cloned() {
+            if entry.kind == FileKind::Directory {
+                self.secondary_navigate(ui, entry.path);
+            } else {
+                let _ = open::that(&entry.path);
+            }
+        }
+    }
+
+    fn secondary_go_up(&mut self, ui: &MainWindow) {
+        let parent = Path::new(&self.secondary_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string());
+        if let Some(parent_path) = parent {
+            if !parent_path.is_empty() {
+                self.secondary_navigate(ui, parent_path);
+            }
         }
     }
 
@@ -8065,6 +8192,18 @@ impl NativeController {
                     }
                     Err(error) => self.show_toast_kind(ui, error, "error"),
                 }
+            }
+            Some(PendingPrompt::RenameTag(tag_id)) => {
+                let new_label = value.trim().to_string();
+                if new_label.is_empty() {
+                    self.tag_labels.remove(&tag_id);
+                } else {
+                    self.tag_labels.insert(tag_id, new_label.clone());
+                }
+                let _ = write_native_json("tag_labels.json", &self.tag_labels);
+                self.sync_tag_names(ui);
+                ui.set_side_items(model_from_vec(self.side_items()));
+                self.show_toast_kind(ui, "Tag renamed", "success");
             }
             Some(PendingPrompt::Archive) | None => {}
         }
@@ -9187,9 +9326,63 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_toggle_dual_pane(move || {
         if let Some(ui) = weak.upgrade() {
-            ui.set_dual_pane(!ui.get_dual_pane());
+            let was_dual = ui.get_dual_pane();
+            ui.set_dual_pane(!was_dual);
+            if !was_dual {
+                // Initialize secondary pane to the current primary path
+                let path = c.borrow().current_path.clone();
+                c.borrow_mut().secondary_navigate(&ui, path);
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_clear_selection(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().clear_selection(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_rename_tag_prompt(move |path| {
+        if let Some(ui) = weak.upgrade() {
+            let p = path.to_string();
+            if let Some(tag_id) = p.strip_prefix("tag:") {
+                c.borrow_mut().show_rename_tag_prompt(&ui, tag_id.to_string());
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_secondary_navigate(move |path| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().secondary_navigate(&ui, path.to_string());
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_secondary_file_opened(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().secondary_file_opened(&ui, index);
+        }
+    });
+
+    ui.on_secondary_file_selected(move |_index, _ctrl, _shift| {
+        // secondary pane selection is visual-only for now
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_secondary_go_up(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().secondary_go_up(&ui);
         }
     });
 
