@@ -791,6 +791,7 @@ export component MainWindow inherits Window {
     in-out property <string> settings_tab: "appearance";
     in-out property <bool> command_visible: false;
     in-out property <bool> context_visible: false;
+    in-out property <bool> image_tools_visible: false;
     in-out property <bool> confirm_visible: false;
     in-out property <bool> prompt_visible: false;
     in-out property <bool> address_editing: false;
@@ -800,6 +801,8 @@ export component MainWindow inherits Window {
     in-out property <string> preview_title: "";
     in-out property <string> preview_body: "";
     in-out property <string> preview_meta: "";
+    in-out property <string> image_tools_title: "Image Tools";
+    in-out property <string> image_tools_subtitle: "";
     in-out property <bool> preview_is_image: false;
     in-out property <image> preview_image;
     in-out property <string> status_left: "Ready";
@@ -825,6 +828,7 @@ export component MainWindow inherits Window {
     in-out property <[FileItem]> secondary_files;
     in-out property <string> secondary_path: "";
     in-out property <[string]> tag_names: ["Urgent", "Important", "Review", "Done", "Personal", "Code"];
+    in-out property <bool> context_on_file: false;
 
     callback filter_commands(string);
     callback navigate(string);
@@ -868,6 +872,7 @@ export component MainWindow inherits Window {
     callback secondary_navigate(string);
     callback secondary_file_opened(int);
     callback secondary_file_selected(int, bool, bool);
+    callback secondary_file_context(int);
     callback secondary_go_up();
 
     // Custom theme editor state
@@ -1294,7 +1299,7 @@ export component MainWindow inherits Window {
             ToolButton { x: parent.width - 170px; y: 6px; icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01"; tooltip: "Gallery view"; active: root.view_mode == "gallery"; clicked => { root.set_view("gallery"); } }
             ToolButton { x: parent.width - 136px; y: 6px; icon_data: "M3 4h18v16H3z M14 4v16"; tooltip: "Preview pane"; active: root.preview_visible; clicked => { root.toggle_preview(); } }
             ToolButton { x: parent.width - 102px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
-            ToolButton { x: parent.width - 68px; y: 6px; icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"; tooltip: "Command palette"; clicked => { root.command_visible = true; } }
+            ToolButton { x: parent.width - 68px; y: 6px; icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"; tooltip: "Command palette"; clicked => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; } }
             ToolButton { x: parent.width - 34px; y: 6px; icon_data: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"; tooltip: "Settings"; clicked => { root.settings_visible = true; } }
 
             Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
@@ -1365,6 +1370,15 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                // Click-to-deselect area below list-view rows
+                if root.view_mode == "list": Rectangle {
+                    x: AppMetrics.pad;
+                    y: AppMetrics.pad + 32px + root.files.length * AppMetrics.row_h;
+                    width: parent.width - AppMetrics.pad * 2;
+                    height: parent.height - AppMetrics.pad - 32px - root.files.length * AppMetrics.row_h;
+                    TouchArea { clicked => { root.clear_selection(); } }
+                }
+
                 if root.view_mode != "list": ScrollView {
                     x: AppMetrics.pad;
                     y: AppMetrics.pad;
@@ -1372,6 +1386,14 @@ export component MainWindow inherits Window {
                     height: parent.height - AppMetrics.pad * 2;
                     viewport-width: parent.width - AppMetrics.pad * 2;
                     viewport-height: Math.max(parent.height - AppMetrics.pad * 2, root.grid_rows * (root.grid_item_h + root.grid_gap));
+
+                    // Background click-to-deselect (first = underneath file rows)
+                    Rectangle {
+                        x: 0; y: 0;
+                        width: root.file_area_w;
+                        height: Math.max(parent.height - AppMetrics.pad * 2, root.grid_rows * (root.grid_item_h + root.grid_gap));
+                        TouchArea { clicked => { root.clear_selection(); } }
+                    }
 
                     for file[index] in root.files: FileRow {
                         x: Math.mod(index, root.grid_columns) * root.grid_cell_w + root.grid_gap / 2;
@@ -1459,9 +1481,9 @@ export component MainWindow inherits Window {
                     ToolButton {
                         x: 4px; y: 4px;
                         button_width: 28px; button_height: 28px;
-                        icon_data: "M15 18l-6-6 6-6";
-                        tooltip: "Back";
-                        clicked => { root.secondary_go_up(); }
+                        icon_data: "M3 12h14 M10 5l7 7-7 7";
+                        tooltip: "Open left folder here";
+                        clicked => { root.secondary_navigate(root.current_path); }
                     }
                     ToolButton {
                         x: 34px; y: 4px;
@@ -1501,7 +1523,7 @@ export component MainWindow inherits Window {
                             root.context_x = cx.clamp(0px, root.width - 240px);
                             root.context_y = cy.clamp(0px, root.height - 440px);
                             root.context_visible = true;
-                            root.file_context(i);
+                            root.secondary_file_context(i);
                         }
                         rename_commit(i, val) => { }
                     }
@@ -1657,8 +1679,17 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Context menu
     if root.context_visible: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0);
+        TouchArea {
+            clicked => { root.context_visible = false; }
+        }
+    }
+
+    // Context menu — file
+    if root.context_visible && root.context_on_file: Rectangle {
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - 580px);
         width: 226px;
@@ -1700,12 +1731,21 @@ export component MainWindow inherits Window {
             ChoiceMenuRow { width: parent.width; label: "Tag: " + root.tag_names[5]; command_name: "tag-violet"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Clear Tag"; command_name: "tag-clear"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { width: parent.width; label: "Locked File Inspector"; command_name: "locked-file"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Properties"; command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Show More Options"; command_name: "show-more-options"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Copy as Path"; command_name: "copy-as-path"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Copy as PowerShell Path"; command_name: "copy-as-powershell"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Open in Terminal"; command_name: "open-terminal"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Open With"; command_name: "open-with"; picked(c) => { root.context_visible = false; root.command(c); } }
+            Rectangle { height: 1px; background: ThemePalette.border; }
+            ChoiceMenuRow { width: parent.width; label: "Archive Browser"; command_name: "archive-browser"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Extract Here"; command_name: "extract-here"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Create ZIP"; command_name: "create-zip"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Image Tools"; command_name: "image-tools"; picked(c) => { root.context_visible = false; root.command(c); } }
+            Rectangle { height: 1px; background: ThemePalette.border; }
+            ChoiceMenuRow { width: parent.width; label: "Locked File Inspector"; command_name: "locked-file"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Defender Scan"; command_name: "defender-scan"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Cloud State"; command_name: "cloud-state"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Properties"; command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Show More Options"; command_name: "show-more-options"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { width: parent.width; label: "Run as Administrator"; command_name: "run-as-admin"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Take Ownership"; command_name: "take-ownership"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -1713,15 +1753,119 @@ export component MainWindow inherits Window {
             ChoiceMenuRow { width: parent.width; label: "Pin to Taskbar"; command_name: "pin-to-taskbar"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Pin to Start"; command_name: "pin-to-start"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { width: parent.width; label: "Copy as Path"; command_name: "copy-as-path"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Copy as PowerShell Path"; command_name: "copy-as-powershell"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Open in Terminal"; command_name: "open-terminal"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Archive Browser"; command_name: "archive-browser"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Extract Here"; command_name: "extract-here"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Create ZIP"; command_name: "create-zip"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Image Tools"; command_name: "image-tools"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Delete"; command_name: "delete"; danger: true; picked(c) => { root.context_visible = false; root.command(c); } }
         }
+        }
+    }
+
+    // Context menu — empty area
+    if root.context_visible && !root.context_on_file: Rectangle {
+        x: root.context_x;
+        y: root.context_y.clamp(0px, root.height - 180px);
+        width: 226px;
+        height: 168px;
+        border-width: 1px;
+        border-color: ThemePalette.border_strong;
+        border-radius: AppMetrics.radius;
+        background: ThemePalette.panel_solid;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: rgba(0, 0, 0, 0.38);
+        clip: true;
+
+        VerticalLayout {
+            width: 216px;
+            x: 5px;
+            y: 5px;
+            spacing: 2px;
+            ChoiceMenuRow { width: parent.width; label: "New Folder"; command_name: "new-folder"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Paste"; command_name: "paste"; picked(c) => { root.context_visible = false; root.command(c); } }
+            Rectangle { height: 1px; background: ThemePalette.border; }
+            ChoiceMenuRow { width: parent.width; label: "Refresh"; command_name: "refresh"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: "Open in Terminal"; command_name: "open-terminal"; picked(c) => { root.context_visible = false; root.command(c); } }
+            Rectangle { height: 1px; background: ThemePalette.border; }
+            ChoiceMenuRow { width: parent.width; label: "Properties"; command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
+        }
+    }
+
+    if root.image_tools_visible: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.42);
+
+        TouchArea {
+            clicked => { root.image_tools_visible = false; }
+        }
+
+        Rectangle {
+            x: (parent.width - 520px) / 2;
+            y: 96px;
+            width: 520px;
+            height: 430px;
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            drop-shadow-blur: 32px;
+            drop-shadow-color: rgba(0, 0, 0, 0.38);
+
+            Text {
+                x: 18px;
+                y: 16px;
+                width: parent.width - 70px;
+                height: 24px;
+                text: root.image_tools_title;
+                color: ThemePalette.text;
+                font-size: 18px;
+                font-weight: 700;
+                overflow: elide;
+            }
+
+            ToolButton {
+                x: parent.width - 43px;
+                y: 12px;
+                icon_data: "M18 6L6 18 M6 6l12 12";
+                tooltip: "Close";
+                clicked => { root.image_tools_visible = false; }
+            }
+
+            Text {
+                x: 18px;
+                y: 45px;
+                width: parent.width - 36px;
+                height: 42px;
+                text: root.image_tools_subtitle;
+                color: ThemePalette.text_faint;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+
+            Rectangle { x: 18px; y: 96px; width: parent.width - 36px; height: 1px; background: ThemePalette.border; }
+
+            Text { x: 18px; y: 112px; width: 225px; height: 18px; text: "Adjust"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+            ChoiceMenuRow { x: 18px; y: 136px; width: 225px; label: "Rotate Left"; command_name: "image-rotate-left"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 18px; y: 170px; width: 225px; label: "Rotate Right"; command_name: "image-rotate-right"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 18px; y: 204px; width: 225px; label: "Resize to 50%"; command_name: "image-resize-half"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 18px; y: 238px; width: 225px; label: "Resize to 25%"; command_name: "image-resize-quarter"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+
+            Text { x: 277px; y: 112px; width: 225px; height: 18px; text: "Export"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+            ChoiceMenuRow { x: 277px; y: 136px; width: 225px; label: "Convert to JPEG"; command_name: "image-convert-jpeg"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 277px; y: 170px; width: 225px; label: "Convert to PNG"; command_name: "image-convert-png"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 277px; y: 204px; width: 225px; label: "Convert to WebP"; command_name: "image-convert-webp"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 277px; y: 238px; width: 225px; label: "Compress JPEG Copy"; command_name: "image-compress-jpeg"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+
+            Text { x: 18px; y: 292px; width: parent.width - 36px; height: 18px; text: "Privacy"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+            ChoiceMenuRow { x: 18px; y: 316px; width: parent.width - 36px; label: "Strip Metadata Copy"; command_name: "image-strip-metadata"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+
+            Text {
+                x: 18px;
+                y: 370px;
+                width: parent.width - 36px;
+                height: 34px;
+                text: "Actions create new files next to the original and keep the source unchanged.";
+                color: ThemePalette.text_faint;
+                font-size: 11.5px;
+                wrap: word-wrap;
+            }
         }
     }
 
@@ -1755,8 +1899,9 @@ export component MainWindow inherits Window {
                 cmd_search := LineEdit {
                     x: 34px;
                     y: 0;
-                    width: parent.width - 34px;
+                    width: root.command_filter != "" ? parent.width - 64px : parent.width - 34px;
                     height: parent.height;
+                    text: root.command_filter;
                     placeholder-text: "Type a command...";
                     font-size: 14px;
                     edited(value) => { root.command_filter = value; root.filter_commands(value); }
@@ -1766,6 +1911,17 @@ export component MainWindow inherits Window {
                             root.command_visible = false;
                             accept
                         } else { reject }
+                    }
+                }
+                if root.command_filter != "": ToolButton {
+                    x: parent.width - 30px;
+                    y: 4px;
+                    button_width: 26px;
+                    button_height: 26px;
+                    text_label: "✕";
+                    clicked => {
+                        root.command_filter = "";
+                        root.filter_commands("");
                     }
                 }
             }
@@ -2576,7 +2732,7 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(Control+W); activated => { root.tab_closed(-1); } }
         KeyBinding { keys: @keys(Control+L); activated => { root.address_text = root.current_path; root.address_editing = true; } }
         KeyBinding { keys: @keys(Control+F); activated => { root.command("focus-search"); } }
-        KeyBinding { keys: @keys(Control+P); activated => { root.command_visible = true; } }
+        KeyBinding { keys: @keys(Control+P); activated => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; } }
         KeyBinding { keys: @keys(Control+Comma); activated => { root.settings_visible = true; } }
         KeyBinding { keys: @keys(Control+"1"); activated => { root.set_view("grid"); } }
         KeyBinding { keys: @keys(Control+"2"); activated => { root.set_view("list"); } }
@@ -2601,7 +2757,7 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(Control+Shift+C); activated => { root.command("checksum"); } }
         KeyBinding { keys: @keys(UpArrow); activated => { root.file_selected(max(0, root.selected_index - 1), false, false); } }
         KeyBinding { keys: @keys(DownArrow); activated => { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } }
-        KeyBinding { keys: @keys(Escape); activated => { root.context_visible = false; root.command_visible = false; root.settings_visible = false; root.confirm_visible = false; root.prompt_visible = false; root.address_editing = false; root.addr_suggestions = []; root.clear_selection(); if (root.search_text != "") { root.search_text = ""; root.search_requested(""); } } }
+        KeyBinding { keys: @keys(Escape); activated => { root.context_visible = false; root.image_tools_visible = false; root.command_visible = false; root.settings_visible = false; root.confirm_visible = false; root.prompt_visible = false; root.address_editing = false; root.addr_suggestions = []; root.clear_selection(); if (root.search_text != "") { root.search_text = ""; root.search_requested(""); } } }
     }
 }
 

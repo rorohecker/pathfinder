@@ -1938,9 +1938,13 @@ fn live_search_scan(
     let generation = state.search_generation.clone();
     let is_drive_root = {
         #[cfg(target_os = "windows")]
-        { dir.components().count() == 1 }
+        {
+            dir.components().count() == 1
+        }
         #[cfg(not(target_os = "windows"))]
-        { dir.to_str() == Some("/") }
+        {
+            dir.to_str() == Some("/")
+        }
     };
     let mut work_units: Vec<PathBuf> = fs::read_dir(&dir)
         .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).collect())
@@ -1948,16 +1952,30 @@ fn live_search_scan(
     if is_drive_root {
         // Exclude Windows system directories that inflate result counts without user data
         let skip: &[&str] = &[
-            "windows", "program files", "program files (x86)", "programdata",
-            "$recycle.bin", "system volume information", "perflogs", "recovery",
+            "windows",
+            "program files",
+            "program files (x86)",
+            "programdata",
+            "$recycle.bin",
+            "system volume information",
+            "perflogs",
+            "recovery",
         ];
         work_units.retain(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             !skip.contains(&name.as_str())
         });
         // Prioritize Users directory so user documents appear first
         work_units.sort_by_key(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_lowercase();
             if name == "users" { 0u8 } else { 1u8 }
         });
     }
@@ -3596,6 +3614,181 @@ fn is_image_ext(ext: &str) -> bool {
     matches!(ext, "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp")
 }
 
+#[derive(Clone, Copy)]
+enum ImageToolAction {
+    RotateLeft,
+    RotateRight,
+    ResizeHalf,
+    ResizeQuarter,
+    ConvertJpeg,
+    ConvertPng,
+    ConvertWebp,
+    CompressJpeg,
+    StripMetadata,
+}
+
+impl ImageToolAction {
+    fn from_command(command: &str) -> Option<Self> {
+        match command {
+            "rotate-left" => Some(Self::RotateLeft),
+            "rotate-right" => Some(Self::RotateRight),
+            "resize-half" => Some(Self::ResizeHalf),
+            "resize-quarter" => Some(Self::ResizeQuarter),
+            "convert-jpeg" => Some(Self::ConvertJpeg),
+            "convert-png" => Some(Self::ConvertPng),
+            "convert-webp" => Some(Self::ConvertWebp),
+            "compress-jpeg" => Some(Self::CompressJpeg),
+            "strip-metadata" => Some(Self::StripMetadata),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::RotateLeft => "Rotated left",
+            Self::RotateRight => "Rotated right",
+            Self::ResizeHalf => "Resized to 50%",
+            Self::ResizeQuarter => "Resized to 25%",
+            Self::ConvertJpeg => "Converted to JPEG",
+            Self::ConvertPng => "Converted to PNG",
+            Self::ConvertWebp => "Converted to WebP",
+            Self::CompressJpeg => "Compressed JPEG",
+            Self::StripMetadata => "Stripped metadata",
+        }
+    }
+
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::RotateLeft => "rotated-left",
+            Self::RotateRight => "rotated-right",
+            Self::ResizeHalf => "50pct",
+            Self::ResizeQuarter => "25pct",
+            Self::ConvertJpeg => "jpeg",
+            Self::ConvertPng => "png",
+            Self::ConvertWebp => "webp",
+            Self::CompressJpeg => "compressed",
+            Self::StripMetadata => "clean",
+        }
+    }
+}
+
+fn image_output_path(source: &Path, suffix: &str, output_ext: &str) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image".to_string());
+    let parent = source.parent().map(Path::to_path_buf).unwrap_or_default();
+    keep_both_destination(&parent.join(format!("{stem}-{suffix}.{output_ext}")))
+}
+
+fn safe_image_output_ext(source: &Path) -> String {
+    match extension(source).as_str() {
+        "jpg" | "jpeg" => "jpg".to_string(),
+        "png" => "png".to_string(),
+        "webp" => "webp".to_string(),
+        "bmp" => "bmp".to_string(),
+        // GIF animation is not preserved by the image crate's single-frame path,
+        // so write edited copies as PNG rather than pretending it stayed animated.
+        _ => "png".to_string(),
+    }
+}
+
+fn save_jpeg_image(img: &image::DynamicImage, dest: &Path, quality: u8) -> Result<(), String> {
+    let rgb = img.to_rgb8();
+    let mut file = File::create(dest).map_err(|e| e.to_string())?;
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, quality);
+    encoder
+        .encode(
+            &rgb,
+            rgb.width(),
+            rgb.height(),
+            image::ColorType::Rgb8.into(),
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn save_image_with_extension(
+    img: &image::DynamicImage,
+    dest: &Path,
+    ext: &str,
+) -> Result<(), String> {
+    match ext {
+        "jpg" | "jpeg" => save_jpeg_image(img, dest, 92),
+        "png" => img
+            .save_with_format(dest, image::ImageFormat::Png)
+            .map_err(|e| e.to_string()),
+        "webp" => img
+            .save_with_format(dest, image::ImageFormat::WebP)
+            .map_err(|e| e.to_string()),
+        "bmp" => img
+            .save_with_format(dest, image::ImageFormat::Bmp)
+            .map_err(|e| e.to_string()),
+        _ => img
+            .save_with_format(dest, image::ImageFormat::Png)
+            .map_err(|e| e.to_string()),
+    }
+}
+
+fn process_image_tool(source: &Path, action: ImageToolAction) -> Result<PathBuf, String> {
+    if !source.is_file() || !is_image_ext(&extension(source)) {
+        return Err(format!("'{}' is not a supported image", source.display()));
+    }
+
+    let img = image::open(source).map_err(|e| e.to_string())?;
+    let source_ext = safe_image_output_ext(source);
+
+    match action {
+        ImageToolAction::RotateLeft => {
+            let dest = image_output_path(source, action.suffix(), &source_ext);
+            save_image_with_extension(&img.rotate270(), &dest, &source_ext)?;
+            Ok(dest)
+        }
+        ImageToolAction::RotateRight => {
+            let dest = image_output_path(source, action.suffix(), &source_ext);
+            save_image_with_extension(&img.rotate90(), &dest, &source_ext)?;
+            Ok(dest)
+        }
+        ImageToolAction::ResizeHalf | ImageToolAction::ResizeQuarter => {
+            let factor = if matches!(action, ImageToolAction::ResizeHalf) {
+                2
+            } else {
+                4
+            };
+            let width = (img.width() / factor).max(1);
+            let height = (img.height() / factor).max(1);
+            let resized = img.resize(width, height, image::imageops::FilterType::Lanczos3);
+            let dest = image_output_path(source, action.suffix(), &source_ext);
+            save_image_with_extension(&resized, &dest, &source_ext)?;
+            Ok(dest)
+        }
+        ImageToolAction::ConvertJpeg => {
+            let dest = image_output_path(source, action.suffix(), "jpg");
+            save_jpeg_image(&img, &dest, 92)?;
+            Ok(dest)
+        }
+        ImageToolAction::ConvertPng => {
+            let dest = image_output_path(source, action.suffix(), "png");
+            save_image_with_extension(&img, &dest, "png")?;
+            Ok(dest)
+        }
+        ImageToolAction::ConvertWebp => {
+            let dest = image_output_path(source, action.suffix(), "webp");
+            save_image_with_extension(&img, &dest, "webp")?;
+            Ok(dest)
+        }
+        ImageToolAction::CompressJpeg => {
+            let dest = image_output_path(source, action.suffix(), "jpg");
+            save_jpeg_image(&img, &dest, 76)?;
+            Ok(dest)
+        }
+        ImageToolAction::StripMetadata => {
+            let dest = image_output_path(source, action.suffix(), &source_ext);
+            save_image_with_extension(&img, &dest, &source_ext)?;
+            Ok(dest)
+        }
+    }
+}
+
 fn thumbnail_cache_key(path: &Path, modified: u64, px: u32) -> String {
     let mut hasher = Sha256::new();
     hasher.update(cache_key(path));
@@ -3902,6 +4095,12 @@ struct NativeClipboard {
     cut: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActivePane {
+    Primary,
+    Secondary,
+}
+
 enum PendingPrompt {
     Rename(String),
     NewFolder,
@@ -3951,7 +4150,11 @@ struct NativeController {
     secondary_path: String,
     secondary_files: Vec<FileEntry>,
     secondary_visible_files: Vec<FileEntry>,
+    secondary_selected_index: i32,
+    secondary_selected_set: std::collections::HashSet<usize>,
+    secondary_select_anchor: i32,
     secondary_files_model: Option<ModelRc<FileItem>>,
+    active_pane: ActivePane,
     git_status: Arc<GitStatusMap>,
     git_dir_status: HashMap<String, String>,
     settings: NativeSettings,
@@ -3982,6 +4185,7 @@ struct NativeOperationResult {
     message: String,
     kind: String,
     refresh: bool,
+    secondary_refresh_path: Option<String>,
     clear_clipboard: bool,
 }
 
@@ -6153,7 +6357,11 @@ impl NativeController {
             secondary_path: current_path.clone(),
             secondary_files: Vec::new(),
             secondary_visible_files: Vec::new(),
+            secondary_selected_index: -1,
+            secondary_selected_set: std::collections::HashSet::new(),
+            secondary_select_anchor: -1,
             secondary_files_model: None,
+            active_pane: ActivePane::Primary,
             git_status: Arc::new(HashMap::new()),
             git_dir_status: HashMap::new(),
             settings,
@@ -6385,13 +6593,70 @@ impl NativeController {
         }
     }
 
+    fn active_directory(&self) -> &str {
+        if self.active_pane == ActivePane::Secondary && !self.secondary_path.is_empty() {
+            &self.secondary_path
+        } else {
+            &self.current_path
+        }
+    }
+
+    fn default_secondary_path(&self) -> String {
+        if !self.secondary_path.is_empty()
+            && Path::new(&self.secondary_path).is_dir()
+            && !same_path_string(&self.secondary_path, &self.current_path)
+        {
+            return self.secondary_path.clone();
+        }
+
+        if let Some(parent) = Path::new(&self.current_path).parent() {
+            let parent = parent.to_string_lossy().to_string();
+            if !parent.is_empty() && !same_path_string(&parent, &self.current_path) {
+                return parent;
+            }
+        }
+
+        for folder in &self.known_folders {
+            if Path::new(&folder.path).is_dir()
+                && !same_path_string(&folder.path, &self.current_path)
+            {
+                return folder.path.clone();
+            }
+        }
+
+        self.current_path.clone()
+    }
+
     fn selected_entry(&self) -> Option<FileEntry> {
-        self.visible_files
-            .get(self.selected_index as usize)
-            .cloned()
+        if self.active_pane == ActivePane::Secondary {
+            self.secondary_visible_files
+                .get(self.secondary_selected_index as usize)
+                .cloned()
+        } else {
+            self.visible_files
+                .get(self.selected_index as usize)
+                .cloned()
+        }
     }
 
     fn selected_paths(&self) -> Vec<String> {
+        if self.active_pane == ActivePane::Secondary {
+            if self.secondary_selected_set.is_empty() {
+                return self
+                    .selected_entry()
+                    .map(|entry| vec![entry.path])
+                    .unwrap_or_default();
+            }
+
+            let mut sorted: Vec<usize> = self.secondary_selected_set.iter().copied().collect();
+            sorted.sort_unstable();
+            return sorted
+                .into_iter()
+                .filter_map(|i| self.secondary_visible_files.get(i))
+                .map(|entry| entry.path.clone())
+                .collect();
+        }
+
         if self.selected_set.is_empty() {
             return self
                 .selected_entry()
@@ -6842,7 +7107,11 @@ impl NativeController {
             ("blue", "Personal"),
             ("violet", "Code"),
         ] {
-            let label = self.tag_labels.get(id).map(|s| s.as_str()).unwrap_or(default_label);
+            let label = self
+                .tag_labels
+                .get(id)
+                .map(|s| s.as_str())
+                .unwrap_or(default_label);
             let count = self.tags.values().filter(|tag| tag.as_str() == id).count();
             items.push(SideItem {
                 label: ss(label),
@@ -6880,6 +7149,7 @@ impl NativeController {
         prefix: String,
         push_history: bool,
     ) {
+        self.active_pane = ActivePane::Primary;
         let prefix = normalize_archive_prefix(&prefix);
         match list_archive_virtual_dir(&archive_path, &prefix) {
             Ok(files) => {
@@ -6920,6 +7190,7 @@ impl NativeController {
     }
 
     fn navigate(&mut self, ui: &MainWindow, path: String, push_history: bool) {
+        self.active_pane = ActivePane::Primary;
         let path = if path.trim().is_empty() {
             self.current_path.clone()
         } else {
@@ -7129,6 +7400,11 @@ impl NativeController {
     }
 
     fn refresh(&mut self, ui: &MainWindow) {
+        if self.active_pane == ActivePane::Secondary {
+            let path = self.secondary_path.clone();
+            self.secondary_navigate(ui, path);
+            return;
+        }
         if let Some(archive) = self.active_archive.clone() {
             self.open_archive_view(ui, archive.archive_path, archive.prefix, false);
             return;
@@ -7144,6 +7420,7 @@ impl NativeController {
     }
 
     fn select_with_modifiers(&mut self, ui: &MainWindow, index: i32, ctrl: bool, shift: bool) {
+        self.active_pane = ActivePane::Primary;
         let n = self.visible_files.len();
         let mut changed: Vec<usize> = Vec::new();
 
@@ -7197,6 +7474,19 @@ impl NativeController {
     }
 
     fn select_all(&mut self, ui: &MainWindow) {
+        if self.active_pane == ActivePane::Secondary {
+            let n = self.secondary_visible_files.len();
+            if n == 0 {
+                return;
+            }
+            self.secondary_selected_set = (0..n).collect();
+            self.secondary_selected_index = 0;
+            self.secondary_select_anchor = 0;
+            let changed: Vec<usize> = (0..n).collect();
+            self.update_secondary_selection_in_model(&changed);
+            return;
+        }
+
         let n = self.visible_files.len();
         if n == 0 {
             return;
@@ -7212,6 +7502,7 @@ impl NativeController {
     }
 
     fn open_index(&mut self, ui: &MainWindow, index: i32) {
+        self.active_pane = ActivePane::Primary;
         if index < 0 {
             return;
         }
@@ -7567,6 +7858,7 @@ impl NativeController {
         let _ = write_native_json("tags.json", &self.tags);
         self.apply_filter();
         self.update_models(ui);
+        self.update_secondary_models(ui);
 
         if tag == "clear" {
             self.show_toast_kind(
@@ -7585,14 +7877,18 @@ impl NativeController {
     }
 
     fn tag_effective_label<'a>(&'a self, id: &'a str) -> &'a str {
-        self.tag_labels.get(id).map(|s| s.as_str()).unwrap_or_else(|| tag_label(id))
+        self.tag_labels
+            .get(id)
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| tag_label(id))
     }
 
     fn sync_tag_names(&self, ui: &MainWindow) {
-        let names: Vec<slint::SharedString> = ["red", "orange", "yellow", "green", "blue", "violet"]
-            .iter()
-            .map(|id| ss(self.tag_effective_label(id)))
-            .collect();
+        let names: Vec<slint::SharedString> =
+            ["red", "orange", "yellow", "green", "blue", "violet"]
+                .iter()
+                .map(|id| ss(self.tag_effective_label(id)))
+                .collect();
         ui.set_tag_names(std::rc::Rc::new(slint::VecModel::from(names)).into());
     }
 
@@ -7605,22 +7901,50 @@ impl NativeController {
     }
 
     fn clear_selection(&mut self, ui: &MainWindow) {
-        if self.selected_index < 0 && self.selected_set.is_empty() {
+        if self.selected_index < 0
+            && self.selected_set.is_empty()
+            && self.secondary_selected_index < 0
+            && self.secondary_selected_set.is_empty()
+        {
             return;
         }
-        let changed: Vec<usize> = self.selected_set.iter().copied()
-            .chain(if self.selected_index >= 0 { Some(self.selected_index as usize) } else { None })
+        let changed: Vec<usize> = self
+            .selected_set
+            .iter()
+            .copied()
+            .chain(if self.selected_index >= 0 {
+                Some(self.selected_index as usize)
+            } else {
+                None
+            })
+            .collect();
+        let secondary_changed: Vec<usize> = self
+            .secondary_selected_set
+            .iter()
+            .copied()
+            .chain(if self.secondary_selected_index >= 0 {
+                Some(self.secondary_selected_index as usize)
+            } else {
+                None
+            })
             .collect();
         self.selected_index = -1;
         self.selected_set.clear();
         self.select_anchor = -1;
+        self.secondary_selected_index = -1;
+        self.secondary_selected_set.clear();
+        self.secondary_select_anchor = -1;
         self.update_selection_in_model(ui, &changed);
+        self.update_secondary_selection_in_model(&secondary_changed);
         ui.set_selected_index(-1);
     }
 
     fn update_secondary_models(&mut self, ui: &MainWindow) {
-        let items: Vec<FileItem> = self.secondary_visible_files.iter().enumerate()
-            .map(|(_, entry)| self.file_item(entry, false))
+        let items: Vec<FileItem> = self
+            .secondary_visible_files
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| self.file_item(entry, self.secondary_selected_set.contains(&i)))
             .collect();
         let model = model_from_vec(items);
         ui.set_secondary_files(model.clone());
@@ -7628,11 +7952,29 @@ impl NativeController {
         self.secondary_files_model = Some(model);
     }
 
+    fn update_secondary_selection_in_model(&mut self, changed: &[usize]) {
+        if let Some(model) = &self.secondary_files_model {
+            use slint::Model;
+            for &i in changed {
+                if let Some(entry) = self.secondary_visible_files.get(i) {
+                    let item = self.file_item(entry, self.secondary_selected_set.contains(&i));
+                    if let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() {
+                        m.set_row_data(i, item);
+                    }
+                }
+            }
+        }
+    }
+
     fn secondary_navigate(&mut self, ui: &MainWindow, path: String) {
         if path.is_empty() || !Path::new(&path).is_dir() {
             return;
         }
+        self.active_pane = ActivePane::Secondary;
         self.secondary_path = path.clone();
+        self.secondary_selected_index = -1;
+        self.secondary_selected_set.clear();
+        self.secondary_select_anchor = -1;
         match fs::read_dir(&path) {
             Ok(rd) => {
                 let mut entries: Vec<FileEntry> = rd
@@ -7654,17 +7996,67 @@ impl NativeController {
         self.update_secondary_models(ui);
     }
 
+    fn secondary_file_selected(&mut self, index: i32, ctrl: bool, shift: bool) {
+        self.active_pane = ActivePane::Secondary;
+        let n = self.secondary_visible_files.len();
+        let mut changed: Vec<usize> = Vec::new();
+
+        if shift && self.secondary_select_anchor >= 0 && index >= 0 {
+            let lo = (self.secondary_select_anchor as usize).min(index as usize);
+            let hi = (self.secondary_select_anchor as usize).max(index as usize);
+            let old = std::mem::take(&mut self.secondary_selected_set);
+            for i in 0..n {
+                if i >= lo && i <= hi {
+                    self.secondary_selected_set.insert(i);
+                    if !old.contains(&i) {
+                        changed.push(i);
+                    }
+                } else if old.contains(&i) {
+                    changed.push(i);
+                }
+            }
+        } else if ctrl && index >= 0 {
+            let i = index as usize;
+            if self.secondary_selected_set.contains(&i) {
+                self.secondary_selected_set.remove(&i);
+            } else if i < n {
+                self.secondary_selected_set.insert(i);
+                self.secondary_select_anchor = index;
+            }
+            changed.push(i);
+        } else {
+            let old = std::mem::take(&mut self.secondary_selected_set);
+            for i in old {
+                changed.push(i);
+            }
+            if index >= 0 && (index as usize) < n {
+                self.secondary_selected_set.insert(index as usize);
+                changed.push(index as usize);
+                self.secondary_select_anchor = index;
+            }
+        }
+
+        self.secondary_selected_index = index;
+        self.update_secondary_selection_in_model(&changed);
+    }
+
     fn secondary_file_opened(&mut self, ui: &MainWindow, index: i32) {
+        self.active_pane = ActivePane::Secondary;
         if let Some(entry) = self.secondary_visible_files.get(index as usize).cloned() {
             if entry.kind == FileKind::Directory {
                 self.secondary_navigate(ui, entry.path);
+            } else if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
+                self.open_archive_view(ui, entry.path, String::new(), true);
             } else {
-                let _ = open::that(&entry.path);
+                if let Err(error) = open_file(entry.path) {
+                    self.show_toast(ui, error);
+                }
             }
         }
     }
 
     fn secondary_go_up(&mut self, ui: &MainWindow) {
+        self.active_pane = ActivePane::Secondary;
         let parent = Path::new(&self.secondary_path)
             .parent()
             .map(|p| p.to_string_lossy().to_string());
@@ -7680,6 +8072,13 @@ impl NativeController {
             self.set_selected_tag(ui, tag);
             return;
         }
+        if let Some(action) = command
+            .strip_prefix("image-")
+            .and_then(ImageToolAction::from_command)
+        {
+            self.run_image_tool(ui, action);
+            return;
+        }
 
         match command {
             "new-tab" => self.new_tab(ui),
@@ -7691,8 +8090,21 @@ impl NativeController {
             "view-list" => self.set_view(ui, "list"),
             "view-gallery" => self.set_view(ui, "gallery"),
             "toggle-preview" => self.set_preview_visible(ui, !ui.get_preview_visible()),
-            "toggle-dual" => ui.set_dual_pane(!ui.get_dual_pane()),
-            "open" => self.open_index(ui, self.selected_index),
+            "toggle-dual" => {
+                let was_dual = ui.get_dual_pane();
+                ui.set_dual_pane(!was_dual);
+                if !was_dual {
+                    let path = self.default_secondary_path();
+                    self.secondary_navigate(ui, path);
+                }
+            }
+            "open" => {
+                if self.active_pane == ActivePane::Secondary {
+                    self.secondary_file_opened(ui, self.secondary_selected_index);
+                } else {
+                    self.open_index(ui, self.selected_index);
+                }
+            }
             "rename" => self.prompt_rename(ui),
             "delete" => self.prompt_delete(ui),
             "new-folder" => self.prompt_new_folder(ui),
@@ -7711,10 +8123,10 @@ impl NativeController {
                         if e.kind == FileKind::Directory {
                             e.path
                         } else {
-                            self.current_path.clone()
+                            self.active_directory().to_string()
                         }
                     })
-                    .unwrap_or_else(|| self.current_path.clone());
+                    .unwrap_or_else(|| self.active_directory().to_string());
                 if let Err(e) = open_terminal(path) {
                     self.show_toast_kind(ui, e, "error");
                 }
@@ -8002,7 +8414,8 @@ impl NativeController {
     }
 
     fn prompt_delete(&mut self, ui: &MainWindow) {
-        let n = self.selected_set.len();
+        let paths = self.selected_paths();
+        let n = paths.len();
         if n > 1 {
             ui.set_confirm_text(ss(format!("Send {n} items to the Recycle Bin?")));
             ui.set_confirm_visible(true);
@@ -8026,10 +8439,15 @@ impl NativeController {
                 }
             }
             Some(PendingPrompt::NewFolder) => {
-                let path = PathBuf::from(&self.current_path).join(value.trim());
+                let dest_dir = self.active_directory().to_string();
+                let path = PathBuf::from(&dest_dir).join(value.trim());
                 match native_create_directory(&self.app_state, &path.to_string_lossy()) {
                     Ok(()) => {
-                        self.refresh(ui);
+                        if self.active_pane == ActivePane::Secondary {
+                            self.secondary_navigate(ui, dest_dir);
+                        } else {
+                            self.refresh(ui);
+                        }
                         self.show_toast_kind(ui, "Folder created", "success");
                     }
                     Err(error) => self.show_toast_kind(ui, error, "error"),
@@ -8066,7 +8484,8 @@ impl NativeController {
                     self.show_toast(ui, "Name cannot be empty.");
                     return;
                 }
-                let mut path = PathBuf::from(&self.current_path).join(base);
+                let dest_dir = self.active_directory().to_string();
+                let mut path = PathBuf::from(&dest_dir).join(base);
                 if path.extension().is_none() {
                     path.set_extension(&template.extension);
                 }
@@ -8076,7 +8495,11 @@ impl NativeController {
                 match File::create(&path).and_then(|mut f| f.write_all(template.content.as_bytes()))
                 {
                     Ok(()) => {
-                        self.refresh(ui);
+                        if self.active_pane == ActivePane::Secondary {
+                            self.secondary_navigate(ui, dest_dir);
+                        } else {
+                            self.refresh(ui);
+                        }
                         self.show_toast_kind(ui, "Template file created", "success");
                     }
                     Err(error) => self.show_toast_kind(ui, error.to_string(), "error"),
@@ -8210,19 +8633,7 @@ impl NativeController {
     }
 
     fn confirm_delete(&mut self, ui: &MainWindow) {
-        let paths: Vec<String> = if self.selected_set.len() > 1 {
-            let mut sorted: Vec<usize> = self.selected_set.iter().cloned().collect();
-            sorted.sort_unstable();
-            sorted
-                .into_iter()
-                .filter_map(|i| self.visible_files.get(i))
-                .map(|e| e.path.clone())
-                .collect()
-        } else {
-            self.selected_entry()
-                .map(|e| vec![e.path])
-                .unwrap_or_default()
-        };
+        let paths = self.selected_paths();
         if paths.is_empty() {
             return;
         }
@@ -8275,6 +8686,7 @@ impl NativeController {
             self.show_toast(ui, "Clipboard is empty.");
             return;
         };
+        let dest_dir = self.active_directory().to_string();
         let n = clipboard.paths.len();
         if n > 1 {
             let verb = if clipboard.cut { "Moving" } else { "Copying" };
@@ -8286,7 +8698,7 @@ impl NativeController {
             let Some(name) = Path::new(src).file_name() else {
                 continue;
             };
-            let dest = PathBuf::from(&self.current_path).join(name);
+            let dest = PathBuf::from(&dest_dir).join(name);
             if dest.exists() {
                 ui.set_op_drawer_visible(false);
                 let conflict = conflict_info(Path::new(src), &dest);
@@ -8329,7 +8741,11 @@ impl NativeController {
         if clipboard.cut {
             self.clipboard = None;
         }
-        self.refresh(ui);
+        if self.active_pane == ActivePane::Secondary {
+            self.secondary_navigate(ui, dest_dir);
+        } else {
+            self.refresh(ui);
+        }
         let verb = if clipboard.cut { "Moved" } else { "Pasted" };
         let msg = if pasted == 1 {
             format!("{verb} 1 item")
@@ -8345,7 +8761,8 @@ impl NativeController {
             return;
         };
 
-        let dest_dir = self.current_path.clone();
+        let dest_dir = self.active_directory().to_string();
+        let dest_is_secondary = self.active_pane == ActivePane::Secondary;
         for src in &clipboard.paths {
             let Some(name) = Path::new(src).file_name() else {
                 continue;
@@ -8431,7 +8848,12 @@ impl NativeController {
                 NativeOperationResult {
                     message: error,
                     kind: "error".to_string(),
-                    refresh: completed > 0,
+                    refresh: completed > 0 && !dest_is_secondary,
+                    secondary_refresh_path: if dest_is_secondary && completed > 0 {
+                        Some(dest_dir.clone())
+                    } else {
+                        None
+                    },
                     clear_clipboard: false,
                 }
             } else {
@@ -8442,7 +8864,12 @@ impl NativeController {
                         if completed == 1 { "" } else { "s" }
                     ),
                     kind: "success".to_string(),
-                    refresh: true,
+                    refresh: !dest_is_secondary,
+                    secondary_refresh_path: if dest_is_secondary {
+                        Some(dest_dir.clone())
+                    } else {
+                        None
+                    },
                     clear_clipboard: cut,
                 }
             };
@@ -8470,7 +8897,7 @@ impl NativeController {
     }
 
     fn show_storage(&mut self, ui: &MainWindow) {
-        match build_storage_tree(Path::new(&self.current_path), 4) {
+        match build_storage_tree(Path::new(self.active_directory()), 4) {
             tree if tree.size > 0 => {
                 ui.set_preview_title(ss("Storage Treemap"));
                 let mut children = tree.children;
@@ -8489,7 +8916,7 @@ impl NativeController {
     }
 
     fn show_duplicates(&mut self, ui: &MainWindow) {
-        match find_duplicates(self.current_path.clone(), Some(1024)) {
+        match find_duplicates(self.active_directory().to_string(), Some(1024)) {
             Ok(groups) => {
                 ui.set_preview_title(ss("Duplicate Finder"));
                 let body = if groups.is_empty() {
@@ -8761,12 +9188,136 @@ impl NativeController {
         ));
     }
 
+    fn selected_image_paths(&self) -> Result<Vec<String>, String> {
+        let selected = self.selected_paths();
+        if selected.is_empty() {
+            return Err("Select an image first.".to_string());
+        }
+
+        let images: Vec<String> = selected
+            .into_iter()
+            .filter(|path| {
+                let p = Path::new(path);
+                p.is_file() && is_image_ext(&extension(p))
+            })
+            .collect();
+
+        if images.is_empty() {
+            Err("Select a JPG, PNG, GIF, WebP, or BMP image first.".to_string())
+        } else {
+            Ok(images)
+        }
+    }
+
     fn show_image_tools(&mut self, ui: &MainWindow) {
-        ui.set_preview_title(ss("Image Tools"));
-        ui.set_preview_body(ss("Available actions: resize, convert to JPEG/PNG/WebP, rotate, compress, strip metadata. Actions run on demand from selected image files and keep the original unless replace is chosen."));
-        ui.set_preview_meta(ss(
-            "Lightweight panel added. Processing uses the image crate.",
-        ));
+        let images = match self.selected_image_paths() {
+            Ok(images) => images,
+            Err(error) => {
+                self.show_toast(ui, error);
+                return;
+            }
+        };
+
+        let title = if images.len() == 1 {
+            Path::new(&images[0])
+                .file_name()
+                .map(|name| format!("Image Tools - {}", name.to_string_lossy()))
+                .unwrap_or_else(|| "Image Tools".to_string())
+        } else {
+            format!("Image Tools - {} images", images.len())
+        };
+        let subtitle = if images.len() == 1 {
+            "Choose a quick action. Pathfinder creates a new copy next to the original.".to_string()
+        } else {
+            "Choose a quick action. It will run on every selected image and create safe copies."
+                .to_string()
+        };
+
+        ui.set_image_tools_title(ss(title));
+        ui.set_image_tools_subtitle(ss(subtitle));
+        ui.set_image_tools_visible(true);
+    }
+
+    fn run_image_tool(&mut self, ui: &MainWindow, action: ImageToolAction) {
+        let images = match self.selected_image_paths() {
+            Ok(images) => images,
+            Err(error) => {
+                self.show_toast(ui, error);
+                return;
+            }
+        };
+
+        let label = action.label().to_string();
+        let refresh_dir = self.active_directory().to_string();
+        let refresh_secondary = self.active_pane == ActivePane::Secondary;
+        ui.set_op_drawer_text(ss(format!(
+            "{} {} image{}",
+            label,
+            images.len(),
+            if images.len() == 1 { "" } else { "s" }
+        )));
+        ui.set_op_drawer_visible(true);
+
+        let state = self.app_state.clone();
+        let ready = self.operation_ready.clone();
+        let pending = self.pending_operation_result.clone();
+        std::thread::spawn(move || {
+            let mut created = Vec::new();
+            let mut first_error: Option<String> = None;
+
+            for source in &images {
+                match process_image_tool(Path::new(source), action) {
+                    Ok(dest) => {
+                        state.invalidate_path(&dest);
+                        if let Some(parent) = dest.parent() {
+                            state.invalidate_directory_path(parent);
+                        }
+                        created.push(dest);
+                    }
+                    Err(error) => {
+                        first_error = Some(format!("{source}: {error}"));
+                        break;
+                    }
+                }
+            }
+
+            let result = if let Some(error) = first_error {
+                NativeOperationResult {
+                    message: error,
+                    kind: "error".to_string(),
+                    refresh: !refresh_secondary && !created.is_empty(),
+                    secondary_refresh_path: if refresh_secondary && !created.is_empty() {
+                        Some(refresh_dir)
+                    } else {
+                        None
+                    },
+                    clear_clipboard: false,
+                }
+            } else {
+                let count = created.len();
+                NativeOperationResult {
+                    message: format!(
+                        "{} {} image{}",
+                        label,
+                        count,
+                        if count == 1 { "" } else { "s" }
+                    ),
+                    kind: "success".to_string(),
+                    refresh: !refresh_secondary,
+                    secondary_refresh_path: if refresh_secondary {
+                        Some(refresh_dir)
+                    } else {
+                        None
+                    },
+                    clear_clipboard: false,
+                }
+            };
+
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(result);
+            }
+            ready.store(true, Ordering::Release);
+        });
     }
 
     fn show_archive_browser(&mut self, ui: &MainWindow) {
@@ -8838,12 +9389,14 @@ impl NativeController {
                     message: format!("Extracted to {dest}"),
                     kind: "success".to_string(),
                     refresh: true,
+                    secondary_refresh_path: None,
                     clear_clipboard: false,
                 },
                 Err(error) => NativeOperationResult {
                     message: error,
                     kind: "error".to_string(),
                     refresh: false,
+                    secondary_refresh_path: None,
                     clear_clipboard: false,
                 },
             };
@@ -8905,7 +9458,7 @@ impl NativeController {
             return;
         }
         let dest = keep_both_destination(
-            &PathBuf::from(&self.current_path).join(
+            &PathBuf::from(self.active_directory()).join(
                 Path::new(&entry.name)
                     .file_stem()
                     .unwrap_or_default()
@@ -8943,7 +9496,9 @@ impl NativeController {
             self.show_toast(ui, "Select files first.");
             return;
         }
-        let dest = keep_both_destination(&PathBuf::from(&self.current_path).join(match format {
+        let dest_dir = self.active_directory().to_string();
+        let dest_is_secondary = self.active_pane == ActivePane::Secondary;
+        let dest = keep_both_destination(&PathBuf::from(&dest_dir).join(match format {
             "7z" => "Archive.7z",
             "tar.gz" => "Archive.tar.gz",
             _ => "Archive.zip",
@@ -8959,13 +9514,19 @@ impl NativeController {
                 Ok(()) => NativeOperationResult {
                     message: format!("Created {}", dest_string),
                     kind: "success".to_string(),
-                    refresh: true,
+                    refresh: !dest_is_secondary,
+                    secondary_refresh_path: if dest_is_secondary {
+                        Some(dest_dir.clone())
+                    } else {
+                        None
+                    },
                     clear_clipboard: false,
                 },
                 Err(error) => NativeOperationResult {
                     message: error,
                     kind: "error".to_string(),
                     refresh: false,
+                    secondary_refresh_path: None,
                     clear_clipboard: false,
                 },
             };
@@ -8977,7 +9538,9 @@ impl NativeController {
     }
 
     fn prompt_compare_folder(&mut self, ui: &MainWindow) {
-        self.pending_prompt = Some(PendingPrompt::CompareFolder(self.current_path.clone()));
+        self.pending_prompt = Some(PendingPrompt::CompareFolder(
+            self.active_directory().to_string(),
+        ));
         ui.set_prompt_title(ss("Compare with folder"));
         ui.set_prompt_value(ss(""));
         ui.set_prompt_visible(true);
@@ -9190,7 +9753,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             };
             if should_select {
                 c.borrow_mut().select(&ui, index);
+            } else {
+                c.borrow_mut().active_pane = ActivePane::Primary;
             }
+            ui.set_context_on_file(index >= 0);
             ui.set_context_visible(true);
         }
     });
@@ -9332,8 +9898,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             let was_dual = ui.get_dual_pane();
             ui.set_dual_pane(!was_dual);
             if !was_dual {
-                // Initialize secondary pane to the current primary path
-                let path = c.borrow().current_path.clone();
+                let path = c.borrow().default_secondary_path();
                 c.borrow_mut().secondary_navigate(&ui, path);
             }
         }
@@ -9353,7 +9918,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             let p = path.to_string();
             if let Some(tag_id) = p.strip_prefix("tag:") {
-                c.borrow_mut().show_rename_tag_prompt(&ui, tag_id.to_string());
+                c.borrow_mut()
+                    .show_rename_tag_prompt(&ui, tag_id.to_string());
             }
         }
     });
@@ -9374,8 +9940,43 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
-    ui.on_secondary_file_selected(move |_index, _ctrl, _shift| {
-        // secondary pane selection is visual-only for now
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    let pd = preview_debounce.clone();
+    ui.on_secondary_file_selected(move |index, ctrl, shift| {
+        if let Some(_ui) = weak.upgrade() {
+            c.borrow_mut().secondary_file_selected(index, ctrl, shift);
+        }
+        let weak2 = weak.clone();
+        let c2 = c.clone();
+        pd.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(150),
+            move || {
+                if let Some(ui) = weak2.upgrade() {
+                    c2.borrow().update_preview(&ui);
+                }
+            },
+        );
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_secondary_file_context(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            let should_select = {
+                let ctrl = c.borrow();
+                index >= 0 && !ctrl.secondary_selected_set.contains(&(index as usize))
+            };
+            if should_select {
+                c.borrow_mut().secondary_file_selected(index, false, false);
+            } else {
+                c.borrow_mut().active_pane = ActivePane::Secondary;
+            }
+            c.borrow().update_preview(&ui);
+            ui.set_context_on_file(index >= 0);
+            ui.set_context_visible(true);
+        }
     });
 
     let weak = ui.as_weak();
@@ -9568,6 +10169,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                 }
                                 if result.refresh {
                                     ctrl.refresh(&ui);
+                                }
+                                if let Some(path) = result.secondary_refresh_path {
+                                    ctrl.secondary_navigate(&ui, path);
                                 }
                                 ctrl.show_toast_kind(&ui, result.message, &result.kind);
                             }
