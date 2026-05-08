@@ -5205,7 +5205,7 @@ fn normalize_version(version: &str) -> String {
 
 fn version_numbers(version: &str) -> Vec<u64> {
     normalize_version(version)
-        .split(|c| c == '.' || c == '-' || c == '+')
+        .split(['.', '-', '+'])
         .filter_map(|part| part.parse::<u64>().ok())
         .collect()
 }
