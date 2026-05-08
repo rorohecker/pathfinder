@@ -596,6 +596,34 @@ fn sort_entries(entries: &mut [FileEntry]) {
     });
 }
 
+fn sort_entries_by(entries: &mut [FileEntry], sort_by: &str, sort_dir: &str) {
+    entries.sort_by(|a, b| {
+        if sort_by == "name" {
+            match (&a.kind, &b.kind) {
+                (FileKind::Directory, FileKind::Directory) => {}
+                (FileKind::Directory, _) => return std::cmp::Ordering::Less,
+                (_, FileKind::Directory) => return std::cmp::Ordering::Greater,
+                _ => {}
+            }
+        }
+        let ord = match sort_by {
+            "size" => a.size.cmp(&b.size),
+            "modified" => a.modified.cmp(&b.modified),
+            "type" => {
+                let ta = a.extension.as_deref().unwrap_or("").to_lowercase();
+                let tb = b.extension.as_deref().unwrap_or("").to_lowercase();
+                ta.cmp(&tb)
+            }
+            _ => a.name_lower.cmp(&b.name_lower),
+        };
+        if sort_dir == "desc" {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
+}
+
 fn trim_dir_cache(cache: &mut HashMap<String, CachedDirectory>, max_entries: usize) {
     if cache.len() <= max_entries {
         return;
@@ -4856,50 +4884,23 @@ fn index_roots_for_mode(settings: &NativeSettings) -> Vec<String> {
 }
 
 fn estimate_index_storage(roots: &[String], mode: &str) -> String {
-    if mode == "low" {
-        return "Low uses only folders you open, usually under 50 MB.".to_string();
-    }
-
-    let mut sampled = 0_u64;
-    let mut capped = false;
-    for root in roots {
-        for entry in WalkDir::new(root)
-            .max_depth(3)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            if entry.path().is_file() || entry.path().is_dir() {
-                sampled += 1;
-                if sampled >= 20_000 {
-                    capped = true;
-                    break;
-                }
-            }
-        }
-        if capped {
-            break;
-        }
-    }
-
-    let estimated = if capped {
-        sampled
-            .saturating_mul(INDEX_ESTIMATE_BYTES_PER_FILE)
-            .saturating_mul(3)
-    } else {
-        sampled.saturating_mul(INDEX_ESTIMATE_BYTES_PER_FILE)
-    };
-    if capped {
-        format!(
-            "{}+ sampled. Estimated index storage starts around {} and can grow as more files are indexed.",
-            sampled,
-            format_size_short(estimated)
-        )
-    } else {
-        format!(
-            "{} items found in a quick scan. Estimated index storage: {}.",
-            sampled,
-            format_size_short(estimated)
-        )
+    match mode {
+        "balanced" => format!(
+            "Balanced indexes {} common location{}. Typical storage is 50 MB to 250 MB.",
+            roots.len(),
+            if roots.len() == 1 { "" } else { "s" }
+        ),
+        "fast" => format!(
+            "Fast lookup indexes {} selected root{}. Typical storage is 150 MB to 600 MB.",
+            roots.len(),
+            if roots.len() == 1 { "" } else { "s" }
+        ),
+        "max" => format!(
+            "Max indexes {} local drive{}. Storage can reach 1 GB or more on large systems.",
+            roots.len(),
+            if roots.len() == 1 { "" } else { "s" }
+        ),
+        _ => "Low uses only folders you open, usually under 50 MB.".to_string(),
     }
 }
 
@@ -4943,6 +4944,15 @@ fn schedule_index_roots(roots: Vec<String>) {
         return;
     }
     std::thread::spawn(move || {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            use windows::Win32::System::Threading::{
+                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+            };
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        }
+        // Give the settings UI a beat to repaint before background I/O starts.
+        std::thread::sleep(Duration::from_millis(350));
         // Skip background indexing when on low battery to avoid draining it.
         if !indexing_permitted() {
             return;
@@ -4957,6 +4967,7 @@ fn schedule_index_roots(roots: Vec<String>) {
                 continue;
             }
             let mut by_parent: HashMap<String, Vec<FileEntry>> = HashMap::new();
+            let mut processed = 0usize;
             for entry in WalkDir::new(&root_path)
                 .follow_links(false)
                 .into_iter()
@@ -4980,6 +4991,7 @@ fn schedule_index_roots(roots: Vec<String>) {
                     .entry(parent.to_string_lossy().to_string())
                     .or_default()
                     .push(path_to_entry(path, &metadata));
+                processed += 1;
 
                 if by_parent.len() > 128 {
                     let batch = std::mem::take(&mut by_parent);
@@ -4987,6 +4999,8 @@ fn schedule_index_roots(roots: Vec<String>) {
                         let _ = index_directory_entries(&parent, &entries);
                     }
                     std::thread::sleep(Duration::from_millis(20));
+                } else if processed.is_multiple_of(1000) {
+                    std::thread::sleep(Duration::from_millis(3));
                 }
             }
             for (parent, entries) in by_parent {
@@ -6674,34 +6688,15 @@ impl NativeController {
     }
 
     fn apply_sort(&mut self) {
-        let sort_by = self.sort_by.clone();
-        let sort_dir = self.sort_dir.clone();
-        self.visible_files.sort_by(|a, b| {
-            // Directories always first when sorting by name
-            if sort_by == "name" {
-                match (&a.kind, &b.kind) {
-                    (FileKind::Directory, FileKind::Directory) => {}
-                    (FileKind::Directory, _) => return std::cmp::Ordering::Less,
-                    (_, FileKind::Directory) => return std::cmp::Ordering::Greater,
-                    _ => {}
-                }
-            }
-            let ord = match sort_by.as_str() {
-                "size" => a.size.cmp(&b.size),
-                "modified" => a.modified.cmp(&b.modified),
-                "type" => {
-                    let ta = a.extension.as_deref().unwrap_or("").to_lowercase();
-                    let tb = b.extension.as_deref().unwrap_or("").to_lowercase();
-                    ta.cmp(&tb)
-                }
-                _ => a.name_lower.cmp(&b.name_lower),
-            };
-            if sort_dir == "desc" {
-                ord.reverse()
-            } else {
-                ord
-            }
-        });
+        sort_entries_by(&mut self.visible_files, &self.sort_by, &self.sort_dir);
+    }
+
+    fn apply_secondary_sort(&mut self) {
+        sort_entries_by(
+            &mut self.secondary_visible_files,
+            &self.sort_by,
+            &self.sort_dir,
+        );
     }
 
     fn apply_filter(&mut self) {
@@ -7830,6 +7825,8 @@ impl NativeController {
             .insert(format!("{path}:sort_dir"), self.sort_dir.clone());
         self.apply_filter();
         self.update_models(ui);
+        self.apply_secondary_sort();
+        self.update_secondary_models(ui);
     }
 
     fn set_selected_tag(&mut self, ui: &MainWindow, tag: &str) {
@@ -7987,6 +7984,7 @@ impl NativeController {
                 sort_entries(&mut entries);
                 self.secondary_files = entries.clone();
                 self.secondary_visible_files = entries;
+                self.apply_secondary_sort();
             }
             Err(_) => {
                 self.secondary_files = Vec::new();
@@ -10507,6 +10505,17 @@ fn start_native_drag(ui: &MainWindow) {
     }
 }
 
+fn configure_native_window(ui: &MainWindow) {
+    use i_slint_backend_winit::WinitWindowAccessor;
+    use i_slint_backend_winit::winit::dpi::LogicalSize;
+
+    ui.window().with_winit_window(|window| {
+        window.set_resizable(true);
+        window.set_min_inner_size(Some(LogicalSize::new(900.0, 600.0)));
+        window.set_max_inner_size::<LogicalSize<f64>>(None);
+    });
+}
+
 #[cfg(target_os = "windows")]
 fn apply_mica(ui: &MainWindow) {
     use i_slint_backend_winit::WinitWindowAccessor;
@@ -10709,6 +10718,132 @@ fn unpin_from_start_menu(_path: String) -> Result<serde_json::Value, String> {
     Err("Start menu unpinning is Windows-only".to_string())
 }
 
+// ── Mouse back/forward button navigation ─────────────────────────────────────
+
+#[cfg(target_os = "windows")]
+static MOUSE_NAV_UI: std::sync::OnceLock<slint::Weak<MainWindow>> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "windows")]
+static MOUSE_NAV_ORIG_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn mouse_nav_wnd_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use std::sync::atomic::Ordering;
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT,
+        HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_NCHITTEST, WM_XBUTTONDOWN,
+    };
+
+    if msg == WM_NCHITTEST {
+        let x = ((lparam.0 as u32 & 0xffff) as i16) as i32;
+        let y = (((lparam.0 as u32 >> 16) & 0xffff) as i16) as i32;
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok() {
+            let local_x = x - rect.left;
+            let local_y = y - rect.top;
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            let border = 8;
+
+            let left = local_x >= 0 && local_x < border;
+            let right = local_x >= width - border && local_x < width;
+            let top = local_y >= 0 && local_y < border;
+            let bottom = local_y >= height - border && local_y < height;
+
+            let hit = match (left, right, top, bottom) {
+                (true, _, true, _) => Some(HTTOPLEFT),
+                (_, true, true, _) => Some(HTTOPRIGHT),
+                (true, _, _, true) => Some(HTBOTTOMLEFT),
+                (_, true, _, true) => Some(HTBOTTOMRIGHT),
+                (true, _, _, _) => Some(HTLEFT),
+                (_, true, _, _) => Some(HTRIGHT),
+                (_, _, true, _) => Some(HTTOP),
+                (_, _, _, true) => Some(HTBOTTOM),
+                _ => None,
+            };
+            if let Some(hit) = hit {
+                return windows::Win32::Foundation::LRESULT(hit as isize);
+            }
+
+            // Let Windows treat the app-name area as native caption. This
+            // preserves normal Snap behavior without stealing clicks from tabs.
+            let in_titlebar = local_y >= 0 && local_y < 44;
+            let in_app_title_area = local_x >= 0 && local_x < 238;
+            let in_window_buttons = local_x >= width - 150;
+            if in_titlebar && in_app_title_area && !in_window_buttons {
+                return windows::Win32::Foundation::LRESULT(HTCAPTION as isize);
+            }
+        }
+    }
+
+    if msg == WM_XBUTTONDOWN {
+        let button = ((wparam.0 as u32) >> 16) as u16;
+        if let Some(weak) = MOUSE_NAV_UI.get() {
+            let w = weak.clone();
+            let is_back = button == 1;
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    if is_back {
+                        ui.invoke_go_back();
+                    } else {
+                        ui.invoke_go_forward();
+                    }
+                }
+            });
+        }
+    }
+
+    let orig = MOUSE_NAV_ORIG_PROC.load(Ordering::Acquire);
+    if orig != 0 {
+        type RawProc = unsafe extern "system" fn(
+            windows::Win32::Foundation::HWND,
+            u32,
+            windows::Win32::Foundation::WPARAM,
+            windows::Win32::Foundation::LPARAM,
+        ) -> windows::Win32::Foundation::LRESULT;
+        // SAFETY: orig is the original WNDPROC stored by SetWindowLongPtrW.
+        let orig_fn: RawProc = unsafe { std::mem::transmute(orig as usize) };
+        unsafe { CallWindowProcW(Some(orig_fn), hwnd, msg, wparam, lparam) }
+    } else {
+        windows::Win32::Foundation::LRESULT(0)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn install_mouse_nav(ui: &MainWindow) {
+    use i_slint_backend_winit::WinitWindowAccessor;
+    use i_slint_backend_winit::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::sync::atomic::Ordering;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GWLP_WNDPROC, SetWindowLongPtrW};
+
+    let _ = MOUSE_NAV_UI.set(ui.as_weak());
+
+    ui.window().with_winit_window(|window| {
+        let Ok(handle) = window.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return;
+        };
+        let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
+        unsafe {
+            let orig =
+                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, mouse_nav_wnd_proc as *const () as isize);
+            MOUSE_NAV_ORIG_PROC.store(orig, Ordering::Release);
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn install_mouse_nav(_ui: &MainWindow) {}
+
 pub fn run() {
     // COM must be initialised on the main thread before any shell APIs are used.
     #[cfg(target_os = "windows")]
@@ -10722,6 +10857,7 @@ pub fn run() {
     ));
 
     let ui = MainWindow::new().expect("failed to create Pathfinder window");
+    configure_native_window(&ui);
     let controller = Rc::new(RefCell::new(NativeController::new()));
     controller.borrow_mut().initialize_ui(&ui);
     wire_native_callbacks(&ui, controller.clone());
@@ -10740,5 +10876,6 @@ pub fn run() {
 
     ui.show().expect("failed to show Pathfinder window");
     apply_mica(&ui);
+    install_mouse_nav(&ui);
     slint::run_event_loop().expect("error while running Slint event loop");
 }
