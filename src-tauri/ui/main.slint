@@ -931,6 +931,14 @@ export component MainWindow inherits Window {
     callback secondary_sort_column(string);
     callback secondary_navigate_path(string);
     callback filter_changed(string);
+    callback set_ui_mode(string);
+    callback ui_mode_prompt_choice(string);
+
+    in-out property <string> ui_mode: "normal";
+    in-out property <bool> ui_mode_prompt_visible: false;
+    in-out property <[SideItem]> side_items_simple: [];
+
+    property <bool> is_simple: root.ui_mode == "simple";
 
     // Custom theme editor state
     in-out property <string> ce_name: "My Theme";
@@ -1108,12 +1116,24 @@ export component MainWindow inherits Window {
             background: ThemePalette.sidebar;
             border-width: 0px;
 
-            ListView {
+            if !root.is_simple: ListView {
                 x: 10px;
                 y: 14px;
                 width: parent.width - 20px;
                 height: parent.height - 28px;
                 for item[index] in root.side_items: SideRow {
+                    item: item;
+                    index: index;
+                    activated(i) => { root.side_activated(i); }
+                    rename_activated(path) => { root.rename_tag_prompt(path); }
+                }
+            }
+            if root.is_simple: ListView {
+                x: 10px;
+                y: 14px;
+                width: parent.width - 20px;
+                height: parent.height - 28px;
+                for item[index] in root.side_items_simple: SideRow {
                     item: item;
                     index: index;
                     activated(i) => { root.side_activated(i); }
@@ -1437,7 +1457,7 @@ export component MainWindow inherits Window {
             ToolButton { x: parent.width - 238px; y: 6px; icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01"; tooltip: "Details view"; active: root.view_mode == "list"; clicked => { root.set_view("list"); } }
             ToolButton { x: parent.width - 204px; y: 6px; icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01"; tooltip: "Gallery view"; active: root.view_mode == "gallery"; clicked => { root.set_view("gallery"); } }
             ToolButton { x: parent.width - 170px; y: 6px; icon_data: "M3 4h18v16H3z M14 4v16"; tooltip: "Preview pane"; active: root.preview_visible; clicked => { root.toggle_preview(); } }
-            ToolButton { x: parent.width - 136px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
+            ToolButton { visible: !root.is_simple; x: parent.width - 136px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
             ToolButton { x: parent.width - 102px; y: 6px; icon_data: "M3 6h18 M7 12h10 M10 18h4"; tooltip: "Filter files"; active: root.filter_bar_visible; clicked => { root.filter_bar_visible = !root.filter_bar_visible; if (!root.filter_bar_visible) { root.filter_text = ""; root.filter_changed(""); } } }
             ToolButton { x: parent.width - 68px; y: 6px; icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"; tooltip: "Command palette"; clicked => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; } }
             ToolButton { x: parent.width - 34px; y: 6px; icon_data: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"; tooltip: "Settings"; clicked => { root.settings_visible = true; } }
@@ -1665,7 +1685,7 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.dual_pane: Rectangle {
+            if root.dual_pane && !root.is_simple: Rectangle {
                 x: root.primary_pane_w + root.pane_splitter_w;
                 y: 0;
                 width: root.secondary_pane_w;
@@ -1948,9 +1968,9 @@ export component MainWindow inherits Window {
     // Context menu — file
     if root.context_visible && root.context_on_file: Rectangle {
         x: root.context_x;
-        y: root.context_y.clamp(0px, root.height - 580px);
+        y: root.context_y.clamp(0px, root.height - (root.is_simple ? 410px : 580px));
         width: 226px;
-        height: 560px;
+        height: root.is_simple ? 390px : 560px;
         border-width: 1px;
         border-color: ThemePalette.border_strong;
         border-radius: AppMetrics.radius;
@@ -1977,8 +1997,8 @@ export component MainWindow inherits Window {
             ChoiceMenuRow { width: parent.width; label: "Cut"; command_name: "cut"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Paste"; command_name: "paste"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { width: parent.width; label: "Batch Rename"; command_name: "batch-rename"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Checksum"; command_name: "checksum"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: "Batch Rename"; command_name: "batch-rename"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: "Checksum"; command_name: "checksum"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Add Note"; command_name: "note"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
             Rectangle {
@@ -2011,13 +2031,14 @@ export component MainWindow inherits Window {
             ChoiceMenuRow { width: parent.width; label: "Copy as Path"; command_name: "copy-as-path"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Open in Terminal"; command_name: "open-terminal"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Open With"; command_name: "open-with"; picked(c) => { root.context_visible = false; root.command(c); } }
-            Rectangle { height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { width: parent.width; label: "Image Tools"; command_name: "image-tools"; picked(c) => { root.context_visible = false; root.command(c); } }
+            Rectangle { visible: !root.is_simple; height: 1px; background: ThemePalette.border; }
+            ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: "Image Tools"; command_name: "image-tools"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { width: parent.width; label: "Properties"; command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
 
             // ── Advanced toggle ────────────────────────────────────────
             Rectangle {
+                visible: !root.is_simple;
                 width: parent.width;
                 height: 26px;
                 background: adv_touch.has-hover ? ThemePalette.panel_alt : transparent;
@@ -2037,23 +2058,23 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // ── Advanced items (hidden by default) ────────────────────
-            if root.context_advanced: Rectangle { height: 1px; background: ThemePalette.border; }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Archive Browser"; command_name: "archive-browser"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Extract Here"; command_name: "extract-here"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Create ZIP"; command_name: "create-zip"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: Rectangle { height: 1px; background: ThemePalette.border; }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Copy as PowerShell Path"; command_name: "copy-as-powershell"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Locked File Inspector"; command_name: "locked-file"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Defender Scan"; command_name: "defender-scan"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Cloud State"; command_name: "cloud-state"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Show More Options"; command_name: "show-more-options"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: Rectangle { height: 1px; background: ThemePalette.border; }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Run as Administrator"; command_name: "run-as-admin"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Take Ownership"; command_name: "take-ownership"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Previous Versions"; command_name: "previous-versions"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Pin to Taskbar"; command_name: "pin-to-taskbar"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced: ChoiceMenuRow { width: parent.width; label: "Pin to Start"; command_name: "pin-to-start"; picked(c) => { root.context_visible = false; root.command(c); } }
+            // ── Advanced items (hidden by default, never shown in simple mode) ────────────────────
+            if root.context_advanced && !root.is_simple: Rectangle { height: 1px; background: ThemePalette.border; }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Archive Browser"; command_name: "archive-browser"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Extract Here"; command_name: "extract-here"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Create ZIP"; command_name: "create-zip"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: Rectangle { height: 1px; background: ThemePalette.border; }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Copy as PowerShell Path"; command_name: "copy-as-powershell"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Locked File Inspector"; command_name: "locked-file"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Defender Scan"; command_name: "defender-scan"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Cloud State"; command_name: "cloud-state"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Show More Options"; command_name: "show-more-options"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: Rectangle { height: 1px; background: ThemePalette.border; }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Run as Administrator"; command_name: "run-as-admin"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Take Ownership"; command_name: "take-ownership"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Previous Versions"; command_name: "previous-versions"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Pin to Taskbar"; command_name: "pin-to-taskbar"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Pin to Start"; command_name: "pin-to-start"; picked(c) => { root.context_visible = false; root.command(c); } }
 
             Rectangle { height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { width: parent.width; label: "Delete"; command_name: "delete"; danger: true; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -2284,6 +2305,7 @@ export component MainWindow inherits Window {
                 for tab_label[ti] in ["Appearance", "View", "Performance", "Themes", "AI"]: Rectangle {
                     property <string> tid: ti == 0 ? "appearance" : (ti == 1 ? "view" : (ti == 2 ? "performance" : (ti == 3 ? "themes" : "ai")));
                     property <bool> is_active: root.settings_tab == self.tid;
+                    visible: !(root.is_simple && tab_label == "AI");
                     x: 20px + ti * 102px;
                     y: 0;
                     width: 98px;
@@ -2362,6 +2384,39 @@ export component MainWindow inherits Window {
                             active: root.active_density == density.id;
                             picked(id) => { root.density_selected(id); }
                         }
+                    }
+
+                    Text { text: "INTERFACE MODE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        height: AppMetrics.row_h;
+                        for mode_label[mi] in ["Simple", "Normal"]: Rectangle {
+                            property <string> mode_id: mi == 0 ? "simple" : "normal";
+                            border-width: 1px;
+                            border-color: root.ui_mode == self.mode_id ? ThemePalette.accent : ThemePalette.border;
+                            border-radius: AppMetrics.radius;
+                            background: root.ui_mode == self.mode_id ? ThemePalette.accent_soft : ThemePalette.panel;
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: mode_label;
+                                color: root.ui_mode == parent.mode_id ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            mode_touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.ui_mode = mode_id; root.set_ui_mode(mode_id); }
+                            }
+                        }
+                    }
+                    Text {
+                        text: root.ui_mode == "simple" ? "Essential features only — hides dual pane, power tools, advanced menu, and AI settings." : "Full access to every feature including dual pane, power tools, and AI.";
+                        color: ThemePalette.text_faint;
+                        font-size: 11.5px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
                     }
                 }
             }
@@ -2972,7 +3027,7 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.settings_tab == "ai": VerticalLayout {
+            if root.settings_tab == "ai" && !root.is_simple: VerticalLayout {
                 x: 20px;
                 y: 112px;
                 width: parent.width - 40px;
@@ -3143,6 +3198,104 @@ export component MainWindow inherits Window {
         }
 
         Text { x: 13px; width: parent.width - 26px; height: parent.height; text: root.toast_text; color: ThemePalette.text; font-size: 12.5px; vertical-alignment: center; overflow: elide; }
+    }
+
+    // ── UI mode first-run prompt ──────────────────────────────────────
+    if root.ui_mode_prompt_visible: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.46);
+        z: 120;
+
+        Rectangle {
+            x: (parent.width - 500px) / 2;
+            y: (parent.height - 310px) / 2;
+            width: 500px;
+            height: 310px;
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            drop-shadow-blur: 36px;
+            drop-shadow-color: rgba(0, 0, 0, 0.45);
+            TouchArea {}
+
+            Text {
+                x: 24px; y: 22px;
+                width: parent.width - 48px; height: 28px;
+                text: "Choose your experience";
+                color: ThemePalette.text;
+                font-size: 18px; font-weight: 700;
+            }
+            Text {
+                x: 24px; y: 62px;
+                width: parent.width - 48px; height: 44px;
+                text: "Pick how much of Pathfinder you want to see. You can change this anytime in Settings → Appearance.";
+                color: ThemePalette.text_muted;
+                font-size: 12.5px;
+                wrap: word-wrap;
+            }
+
+            Rectangle {
+                x: 24px; y: 122px;
+                width: (parent.width - 64px) / 2; height: 130px;
+                border-width: 1px;
+                border-color: simple_card_touch.has-hover ? ThemePalette.accent : ThemePalette.border;
+                border-radius: AppMetrics.radius;
+                background: simple_card_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel;
+                animate background { duration: 80ms; easing: ease-out; }
+                Text {
+                    x: 16px; y: 16px; width: parent.width - 32px; height: 22px;
+                    text: "Simple";
+                    color: simple_card_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text;
+                    font-size: 14px; font-weight: 700;
+                }
+                Text {
+                    x: 16px; y: 44px; width: parent.width - 32px;
+                    text: "Essential features only.\nClean, focused experience.\nNo dual pane or power tools.";
+                    color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap;
+                    height: self.preferred-height;
+                }
+                simple_card_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.ui_mode_prompt_visible = false;
+                        root.ui_mode = "simple";
+                        root.ui_mode_prompt_choice("simple");
+                    }
+                }
+            }
+
+            Rectangle {
+                x: parent.width / 2 + 8px; y: 122px;
+                width: (parent.width - 64px) / 2; height: 130px;
+                border-width: 1px;
+                border-color: normal_card_touch.has-hover ? ThemePalette.accent : ThemePalette.border;
+                border-radius: AppMetrics.radius;
+                background: normal_card_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel;
+                animate background { duration: 80ms; easing: ease-out; }
+                Text {
+                    x: 16px; y: 16px; width: parent.width - 32px; height: 22px;
+                    text: "Normal";
+                    color: normal_card_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text;
+                    font-size: 14px; font-weight: 700;
+                }
+                Text {
+                    x: 16px; y: 44px; width: parent.width - 32px;
+                    text: "Full access to every feature:\ndual pane, power tools,\narchive tools, and AI.";
+                    color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap;
+                    height: self.preferred-height;
+                }
+                normal_card_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.ui_mode_prompt_visible = false;
+                        root.ui_mode = "normal";
+                        root.ui_mode_prompt_choice("normal");
+                    }
+                }
+            }
+        }
     }
 
     keys := FocusScope {
