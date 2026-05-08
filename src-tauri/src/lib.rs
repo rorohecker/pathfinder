@@ -10110,11 +10110,26 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
+    let filter_debounce = Rc::new(slint::Timer::default());
     let weak = ui.as_weak();
     let c = controller.clone();
+    let fd = filter_debounce.clone();
     ui.on_filter_changed(move |text| {
+        let t = text.to_string();
+        let weak2 = weak.clone();
+        let c2 = c.clone();
+        fd.start(slint::TimerMode::SingleShot, Duration::from_millis(150), move || {
+            if let Some(ui) = weak2.upgrade() {
+                c2.borrow_mut().set_folder_filter(&ui, t.clone());
+            }
+        });
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_secondary_navigate_path(move |path| {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().set_folder_filter(&ui, text.to_string());
+            c.borrow_mut().secondary_navigate(&ui, path.to_string());
         }
     });
 
