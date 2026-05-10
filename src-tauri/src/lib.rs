@@ -6713,7 +6713,8 @@ fn theme_palette(id: &str) -> PaletteSpec {
             light_controls: false,
             outer_border: 0.0,
         },
-        "mica-dark" | _ => PaletteSpec {
+        // mica-dark and the catch-all default both use the standard dark palette.
+        _ => PaletteSpec {
             bg: color("#0c0f13"),
             bg_soft: color("#141920"),
             panel: rgba_u8(34, 40, 50, 0.86),
@@ -6997,7 +6998,8 @@ fn apply_window_finish(ui: &MainWindow, finish: &str) {
     const DWMSBT_NONE: i32 = 1;
 
     let backdrop = match finish {
-        "mica-dark" | "mica-light" => DWMSBT_MAINWINDOW,
+        "mica-dark" => DWMSBT_MAINWINDOW,
+        "mica-light" => DWMSBT_MAINWINDOW,
         _ => DWMSBT_NONE,
     };
 
@@ -12206,9 +12208,9 @@ fn configure_native_window(ui: &MainWindow, settings: &NativeSettings) {
                 let phys = monitor.size();
                 let log_w = phys.width as f64 / scale;
                 let log_h = phys.height as f64 / scale;
-                let target_w = (log_w * 0.80).max(900.0).min(1600.0);
+                let target_w = (log_w * 0.80).clamp(900.0, 1600.0);
                 // Reserve ~10% of height for taskbar; clamp to safe range.
-                let target_h = ((log_h - 80.0) * 0.82).max(600.0).min(1000.0);
+                let target_h = ((log_h - 80.0) * 0.82).clamp(600.0, 1000.0);
                 let _ = window.request_inner_size(LogicalSize::new(target_w, target_h));
                 // Center horizontally; push down 40px from top so title bar is always visible.
                 let cx = ((log_w - target_w) / 2.0).max(0.0);

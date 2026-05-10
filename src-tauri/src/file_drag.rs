@@ -11,7 +11,7 @@ use std::os::windows::ffi::OsStrExt;
 use windows::Win32::Foundation::{E_FAIL, E_NOTIMPL, HGLOBAL, HWND, POINTL, S_OK, WPARAM};
 use windows::Win32::System::Com::{
     FORMATETC, IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA,
-    STGMEDIUM,
+    STGMEDIUM, STGMEDIUM_0,
 };
 use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
@@ -205,6 +205,7 @@ struct HDropData {
 
 #[allow(non_snake_case)]
 impl IDataObject_Impl for HDropData_Impl {
+    #[allow(clippy::field_reassign_with_default)]
     fn GetData(&self, pformatetcin: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
         unsafe {
             if (*pformatetcin).cfFormat != CF_HDROP {
@@ -212,9 +213,11 @@ impl IDataObject_Impl for HDropData_Impl {
             }
             let src = HGLOBAL(self.hglobal_raw as *mut _);
             let new_hg = clone_hglobal(src)?;
-            let mut med = STGMEDIUM::default();
-            med.tymed = 1u32;
-            med.u.hGlobal = new_hg;
+            let med = STGMEDIUM {
+                tymed: 1u32,
+                u: STGMEDIUM_0 { hGlobal: new_hg },
+                ..Default::default()
+            };
             Ok(med)
         }
     }
