@@ -30,6 +30,9 @@ use walkdir::WalkDir;
 #[cfg(target_os = "windows")]
 mod windows_integration;
 
+#[cfg(target_os = "windows")]
+mod file_drag;
+
 slint::include_modules!();
 
 const DIRECTORY_CACHE_TTL: Duration = Duration::from_secs(20);
@@ -350,6 +353,7 @@ pub struct UpdateCheckResult {
     pub current_version: String,
     pub latest_version: String,
     pub release_url: String,
+    pub download_url: String,
     pub notes: String,
     pub message: String,
 }
@@ -491,7 +495,7 @@ fn path_to_entry(entry_path: &Path, metadata: &fs::Metadata) -> FileEntry {
     let extension = if metadata.is_file() {
         entry_path
             .extension()
-            .map(|e| e.to_string_lossy().to_string())
+            .map(|e| e.to_string_lossy().to_lowercase())
     } else {
         None
     };
@@ -640,10 +644,10 @@ fn cache_key_str(path: &str) -> String {
 
 fn sort_entries(entries: &mut [FileEntry]) {
     entries.sort_by(|a, b| match (&a.kind, &b.kind) {
-        (FileKind::Directory, FileKind::Directory) => a.name_lower.cmp(&b.name_lower),
+        (FileKind::Directory, FileKind::Directory) => natural_cmp(&a.name_lower, &b.name_lower),
         (FileKind::Directory, _) => std::cmp::Ordering::Less,
         (_, FileKind::Directory) => std::cmp::Ordering::Greater,
-        _ => a.name_lower.cmp(&b.name_lower),
+        _ => natural_cmp(&a.name_lower, &b.name_lower),
     });
 }
 
@@ -663,9 +667,9 @@ fn sort_entries_by(entries: &mut [FileEntry], sort_by: &str, sort_dir: &str) {
             "type" => {
                 let ta = a.extension.as_deref().unwrap_or("").to_lowercase();
                 let tb = b.extension.as_deref().unwrap_or("").to_lowercase();
-                ta.cmp(&tb)
+                natural_cmp(&ta, &tb)
             }
-            _ => a.name_lower.cmp(&b.name_lower),
+            _ => natural_cmp(&a.name_lower, &b.name_lower),
         };
         if sort_dir == "desc" {
             ord.reverse()
@@ -673,6 +677,153 @@ fn sort_entries_by(entries: &mut [FileEntry], sort_by: &str, sort_dir: &str) {
             ord
         }
     });
+}
+
+/// Read the OS recycle bin and return its contents as virtual FileEntry rows.
+/// Path field carries the `recycle://<original-path>` URI so the controller can
+/// reverse-look-up the trash item later (for restore / permanent delete).
+fn list_recycle_bin_entries() -> Vec<FileEntry> {
+    let items = match trash::os_limited::list() {
+        Ok(items) => items,
+        Err(_) => return Vec::new(),
+    };
+    let mut entries: Vec<FileEntry> = items
+        .into_iter()
+        .map(|item| {
+            let original = item.original_path();
+            let original_str = original.to_string_lossy().into_owned();
+            let name: String = std::path::Path::new(&item.name)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| item.name.to_string_lossy().into_owned());
+            let virtual_path = format!("recycle://{}", original_str);
+            let extension = std::path::Path::new(&name)
+                .extension()
+                .map(|e| e.to_string_lossy().into_owned());
+            let modified = item.time_deleted.max(0) as u64;
+            FileEntry {
+                path: virtual_path,
+                name_lower: name.to_lowercase(),
+                name,
+                kind: FileKind::File,
+                size: 0,
+                modified,
+                extension,
+            }
+        })
+        .collect();
+    sort_entries(&mut entries);
+    entries
+}
+
+/// Apply a batch-rename template to one file and produce its new filename.
+///
+/// Tokens (case-sensitive):
+///   `{n}`     1-based sequence number (no padding)
+///   `{n:0N}`  zero-padded to N digits, e.g. `{n:04}` → `0007`
+///   `{name}`  original filename without extension
+///   `{ext}`   original extension (without the dot)
+///
+/// Anything else passes through literally. Unknown tokens render as themselves
+/// (e.g. `{foo}` stays `{foo}`) so typos don't silently corrupt output.
+fn apply_rename_template(template: &str, src: &std::path::Path, n: usize) -> String {
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = src
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut out = String::with_capacity(template.len() + 16);
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            // Find the matching '}'.
+            if let Some(end_off) = bytes[i + 1..].iter().position(|&b| b == b'}') {
+                let token = &template[i + 1..i + 1 + end_off];
+                let resolved = match token {
+                    "n" => n.to_string(),
+                    "name" => stem.clone(),
+                    "ext" => ext.clone(),
+                    t if t.starts_with("n:0") => {
+                        if let Ok(width) = t[3..].parse::<usize>() {
+                            format!("{:0width$}", n, width = width)
+                        } else {
+                            format!("{{{t}}}")
+                        }
+                    }
+                    other => format!("{{{other}}}"),
+                };
+                out.push_str(&resolved);
+                i += 1 + end_off + 1;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    // If the template ends in `.` because `{ext}` was empty (extension-less
+    // source file), drop the dangling separator. NTFS would strip the trailing
+    // dot anyway, so keeping it just makes the preview look wrong.
+    while out.ends_with('.') {
+        out.pop();
+    }
+    out
+}
+
+/// Natural / "Windows Explorer" string comparison: numeric runs are compared
+/// as numbers so `file2.txt` sorts before `file10.txt` instead of after.
+/// Both inputs should already be lowercase if you want case-insensitive ordering.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        let (ac, bc) = (ai.peek().copied(), bi.peek().copied());
+        match (ac, bc) {
+            (None, None) => return Ordering::Equal,
+            (None, _) => return Ordering::Less,
+            (_, None) => return Ordering::Greater,
+            (Some(ca), Some(cb)) => {
+                if ca.is_ascii_digit() && cb.is_ascii_digit() {
+                    // Compare numeric runs as integers (skipping leading zeros for
+                    // value comparison, but using the longer original-text length
+                    // as a tiebreaker so "01" sorts before "1").
+                    let mut na: u128 = 0;
+                    let mut la = 0usize;
+                    while let Some(c) = ai.peek().copied().filter(|c| c.is_ascii_digit()) {
+                        na = na.saturating_mul(10).saturating_add((c as u8 - b'0') as u128);
+                        la += 1;
+                        ai.next();
+                    }
+                    let mut nb: u128 = 0;
+                    let mut lb = 0usize;
+                    while let Some(c) = bi.peek().copied().filter(|c| c.is_ascii_digit()) {
+                        nb = nb.saturating_mul(10).saturating_add((c as u8 - b'0') as u128);
+                        lb += 1;
+                        bi.next();
+                    }
+                    match na.cmp(&nb) {
+                        Ordering::Equal => match la.cmp(&lb) {
+                            Ordering::Equal => continue,
+                            ord => return ord,
+                        },
+                        ord => return ord,
+                    }
+                } else {
+                    ai.next();
+                    bi.next();
+                    match ca.cmp(&cb) {
+                        Ordering::Equal => continue,
+                        ord => return ord,
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn trim_dir_cache(cache: &mut HashMap<String, CachedDirectory>, max_entries: usize) {
@@ -1428,7 +1579,7 @@ fn locked_file_processes(path: &str) -> Result<Vec<LockedProcessInfo>, String> {
 
     let mut session = 0_u32;
     let mut key = vec![0_u16; CCH_RM_SESSION_KEY as usize + 1];
-    let start = unsafe { RmStartSession(&mut session, 0, PWSTR(key.as_mut_ptr())) };
+    let start = unsafe { RmStartSession(&mut session, Some(0), PWSTR(key.as_mut_ptr())) };
     if start.0 != 0 {
         return Err(format!("Restart Manager failed to start: {}", start.0));
     }
@@ -1729,7 +1880,7 @@ fn cloud_state_label(path: &str) -> String {
 fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::Foundation::{HANDLE, HWND};
+        use windows::Win32::Foundation::HANDLE;
         use windows::Win32::System::DataExchange::{
             CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
         };
@@ -1749,13 +1900,13 @@ fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
             std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
             let _ = GlobalUnlock(hmem);
 
-            OpenClipboard(HWND(std::ptr::null_mut())).map_err(|e| e.to_string())?;
+            OpenClipboard(None).map_err(|e| e.to_string())?;
             if let Err(e) = EmptyClipboard() {
                 let _ = CloseClipboard();
                 return Err(e.to_string());
             }
             const CF_UNICODETEXT: u32 = 13;
-            if let Err(e) = SetClipboardData(CF_UNICODETEXT, HANDLE(hmem.0)) {
+            if let Err(e) = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0))) {
                 let _ = CloseClipboard();
                 return Err(e.to_string());
             }
@@ -3811,6 +3962,7 @@ enum ImageToolAction {
     RotateRight,
     ResizeHalf,
     ResizeQuarter,
+    ResizePct(u32),
     ConvertJpeg,
     ConvertPng,
     ConvertWebp,
@@ -3830,16 +3982,23 @@ impl ImageToolAction {
             "convert-webp" => Some(Self::ConvertWebp),
             "compress-jpeg" => Some(Self::CompressJpeg),
             "strip-metadata" => Some(Self::StripMetadata),
-            _ => None,
+            _ => {
+                if let Some(rest) = command.strip_prefix("resize-pct-") {
+                    rest.parse::<u32>().ok().filter(|&n| n > 0 && n <= 400).map(Self::ResizePct)
+                } else {
+                    None
+                }
+            }
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(&self) -> &'static str {
         match self {
             Self::RotateLeft => "Rotated left",
             Self::RotateRight => "Rotated right",
             Self::ResizeHalf => "Resized to 50%",
             Self::ResizeQuarter => "Resized to 25%",
+            Self::ResizePct(_) => "Resized",
             Self::ConvertJpeg => "Converted to JPEG",
             Self::ConvertPng => "Converted to PNG",
             Self::ConvertWebp => "Converted to WebP",
@@ -3848,17 +4007,18 @@ impl ImageToolAction {
         }
     }
 
-    fn suffix(self) -> &'static str {
+    fn suffix(&self) -> String {
         match self {
-            Self::RotateLeft => "rotated-left",
-            Self::RotateRight => "rotated-right",
-            Self::ResizeHalf => "50pct",
-            Self::ResizeQuarter => "25pct",
-            Self::ConvertJpeg => "jpeg",
-            Self::ConvertPng => "png",
-            Self::ConvertWebp => "webp",
-            Self::CompressJpeg => "compressed",
-            Self::StripMetadata => "clean",
+            Self::RotateLeft => "rotated-left".to_string(),
+            Self::RotateRight => "rotated-right".to_string(),
+            Self::ResizeHalf => "50pct".to_string(),
+            Self::ResizeQuarter => "25pct".to_string(),
+            Self::ResizePct(n) => format!("{n}pct"),
+            Self::ConvertJpeg => "jpeg".to_string(),
+            Self::ConvertPng => "png".to_string(),
+            Self::ConvertWebp => "webp".to_string(),
+            Self::CompressJpeg => "compressed".to_string(),
+            Self::StripMetadata => "clean".to_string(),
         }
     }
 }
@@ -3927,53 +4087,59 @@ fn process_image_tool(source: &Path, action: ImageToolAction) -> Result<PathBuf,
 
     let img = image::open(source).map_err(|e| e.to_string())?;
     let source_ext = safe_image_output_ext(source);
+    let suffix = action.suffix();
 
     match action {
         ImageToolAction::RotateLeft => {
-            let dest = image_output_path(source, action.suffix(), &source_ext);
+            let dest = image_output_path(source, &suffix, &source_ext);
             save_image_with_extension(&img.rotate270(), &dest, &source_ext)?;
             Ok(dest)
         }
         ImageToolAction::RotateRight => {
-            let dest = image_output_path(source, action.suffix(), &source_ext);
+            let dest = image_output_path(source, &suffix, &source_ext);
             save_image_with_extension(&img.rotate90(), &dest, &source_ext)?;
             Ok(dest)
         }
         ImageToolAction::ResizeHalf | ImageToolAction::ResizeQuarter => {
-            let factor = if matches!(action, ImageToolAction::ResizeHalf) {
-                2
-            } else {
-                4
-            };
+            let factor = if matches!(action, ImageToolAction::ResizeHalf) { 2 } else { 4 };
             let width = (img.width() / factor).max(1);
             let height = (img.height() / factor).max(1);
             let resized = img.resize(width, height, image::imageops::FilterType::Lanczos3);
-            let dest = image_output_path(source, action.suffix(), &source_ext);
+            let dest = image_output_path(source, &suffix, &source_ext);
+            save_image_with_extension(&resized, &dest, &source_ext)?;
+            Ok(dest)
+        }
+        ImageToolAction::ResizePct(pct) => {
+            let scale = pct as f32 / 100.0;
+            let width = ((img.width() as f32 * scale).round() as u32).max(1);
+            let height = ((img.height() as f32 * scale).round() as u32).max(1);
+            let resized = img.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+            let dest = image_output_path(source, &suffix, &source_ext);
             save_image_with_extension(&resized, &dest, &source_ext)?;
             Ok(dest)
         }
         ImageToolAction::ConvertJpeg => {
-            let dest = image_output_path(source, action.suffix(), "jpg");
+            let dest = image_output_path(source, &suffix, "jpg");
             save_jpeg_image(&img, &dest, 92)?;
             Ok(dest)
         }
         ImageToolAction::ConvertPng => {
-            let dest = image_output_path(source, action.suffix(), "png");
+            let dest = image_output_path(source, &suffix, "png");
             save_image_with_extension(&img, &dest, "png")?;
             Ok(dest)
         }
         ImageToolAction::ConvertWebp => {
-            let dest = image_output_path(source, action.suffix(), "webp");
+            let dest = image_output_path(source, &suffix, "webp");
             save_image_with_extension(&img, &dest, "webp")?;
             Ok(dest)
         }
         ImageToolAction::CompressJpeg => {
-            let dest = image_output_path(source, action.suffix(), "jpg");
+            let dest = image_output_path(source, &suffix, "jpg");
             save_jpeg_image(&img, &dest, 76)?;
             Ok(dest)
         }
         ImageToolAction::StripMetadata => {
-            let dest = image_output_path(source, action.suffix(), &source_ext);
+            let dest = image_output_path(source, &suffix, &source_ext);
             save_image_with_extension(&img, &dest, &source_ext)?;
             Ok(dest)
         }
@@ -4214,6 +4380,12 @@ struct NativeSettings {
     thumbnail_cache_limit_mb: u64,
     update_checks_enabled: bool,
     network_downloads_enabled: bool,
+    ui_mode: String,
+    window_x: i32,
+    window_y: i32,
+    window_w: u32,
+    window_h: u32,
+    window_maximized: bool,
 }
 
 impl Default for NativeSettings {
@@ -4229,6 +4401,12 @@ impl Default for NativeSettings {
             thumbnail_cache_limit_mb: 50,
             update_checks_enabled: false,
             network_downloads_enabled: false,
+            ui_mode: String::new(),
+            window_x: i32::MIN,
+            window_y: i32::MIN,
+            window_w: 0,
+            window_h: 0,
+            window_maximized: false,
         }
     }
 }
@@ -4449,12 +4627,47 @@ fn lighten_color(c: Color, factor: f32) -> Color {
     Color::from_rgb_u8(r, g, b)
 }
 
+fn theme_icons_dir() -> PathBuf {
+    let dir = native_data_dir().join("theme_icons");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+/// Load a per-theme folder icon PNG from `%APPDATA%\Pathfinder\theme_icons\{id}.png`.
+/// Returns the default (empty, width=0) image if the file is missing or unreadable;
+/// the Slint UI uses `width > 0px` to decide whether to overlay it on the fallback shape.
+///
+/// Restricted to themes whose folder visual is intentionally an image (cyberpunk
+/// and terminal — they were designed as PNGs with non-removable borders). Every
+/// other theme uses the procedural themed folder shape so palette tints flow
+/// through cleanly. This prevents stale `%APPDATA%` icon files from leaking into
+/// themes the user expects to render via the standard folder.
+fn load_theme_folder_icon(id: &str) -> slint::Image {
+    if id != "cyberpunk" && id != "terminal" {
+        return slint::Image::default();
+    }
+    let path = theme_icons_dir().join(format!("{id}.png"));
+    if path.exists() {
+        slint::Image::load_from_path(&path).unwrap_or_default()
+    } else {
+        slint::Image::default()
+    }
+}
+
 fn icon_folder_colors(id: &str) -> (Color, Color) {
+    // (top-tab / body-bottom). The standard folder shape draws a vertical
+    // gradient from icon_folder_1 → icon_folder_2 across the body, with the
+    // tab using icon_folder_1 directly.
     match id {
         "terminal" => (color("#9cffd8"), color("#45c97a")),
         "retro" => (color("#ffe46a"), color("#ffc800")),
         "cyberpunk" => (color("#ff6ae0"), color("#d000a0")),
-        "paper" | "warm" | "fantasy" => (color("#f5c26a"), color("#c88c28")),
+        "sunset" => (color("#ffb87a"), color("#d8421c")),
+        "frost" => (color("#cfe6ff"), color("#5ea0d8")),
+        "warm" => (color("#e0a070"), color("#9c5818")),
+        "paper" => (color("#e6d4a4"), color("#b6915c")),
+        "fantasy" => (color("#d8a440"), color("#8a4818")),
+        "flat" => (color("#cfd5dc"), color("#7c8a9c")),
         _ => (color("#ffd86a"), color("#e2a934")),
     }
 }
@@ -5227,6 +5440,7 @@ fn update_disabled_result() -> UpdateCheckResult {
         current_version: current.clone(),
         latest_version: current,
         release_url: GITHUB_RELEASES_URL.to_string(),
+        download_url: String::new(),
         notes: String::new(),
         message: "Update checks are off. Pathfinder will not contact GitHub until you enable or manually run update checks.".to_string(),
     }
@@ -5276,6 +5490,21 @@ ConvertTo-Json -InputObject $release -Depth 8 -Compress
         .chars()
         .take(4_000)
         .collect::<String>();
+    let download_url = value
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .and_then(|assets| {
+            assets.iter().find(|a| {
+                a.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.ends_with(".exe") || n.ends_with(".msi"))
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(|asset| asset.get("browser_download_url"))
+        .and_then(|u| u.as_str())
+        .unwrap_or("")
+        .to_string();
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let available =
         !latest_version.is_empty() && version_is_newer(&latest_version, &current_version);
@@ -5288,6 +5517,7 @@ ConvertTo-Json -InputObject $release -Depth 8 -Compress
             latest_version.clone()
         },
         release_url,
+        download_url,
         notes,
         message: if available {
             format!("Pathfinder {latest_version} is available.")
@@ -5295,6 +5525,28 @@ ConvertTo-Json -InputObject $release -Depth 8 -Compress
             "Pathfinder is up to date.".to_string()
         },
     })
+}
+
+fn download_and_install_update(url: &str) -> Result<(), String> {
+    let installer = std::env::temp_dir().join("pathfinder_update.exe");
+    let dest = installer.to_string_lossy().to_string();
+    let script = format!(
+        "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
+        url.replace('\'', "''"),
+        dest.replace('\'', "''")
+    );
+    let status = ProcessCommand::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .no_window()
+        .status()
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("Download failed.".to_string());
+    }
+    std::process::Command::new(&installer)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -6063,6 +6315,39 @@ fn native_move(state: &AppState, from: &str, to: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Return (free_bytes, total_bytes) for the volume that contains `path`.
+/// Returns None on non-Windows builds or if the OS call fails.
+#[cfg(target_os = "windows")]
+fn drive_free_space(path: &str) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    use windows::core::PCWSTR;
+
+    if path.is_empty() {
+        return None;
+    }
+    let wide: Vec<u16> = std::ffi::OsStr::new(path)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut free_caller: u64 = 0;
+    let mut total: u64 = 0;
+    let mut free_total: u64 = 0;
+    unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut free_caller),
+            Some(&mut total),
+            Some(&mut free_total),
+        )
+        .ok()?;
+    }
+    Some((free_caller, total))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn drive_free_space(_path: &str) -> Option<(u64, u64)> { None }
+
 fn format_size_short(bytes: u64) -> String {
     if bytes == 0 {
         return "0 B".to_string();
@@ -6215,18 +6500,18 @@ fn accent_override(id: &str) -> (Color, Color, Color) {
 fn theme_palette(id: &str) -> PaletteSpec {
     let mut p = match id {
         "mica-light" => PaletteSpec {
-            bg: color("#eef2f7"),
-            bg_soft: color("#f6f8fb"),
-            panel: rgba_u8(255, 255, 255, 0.78),
-            panel_solid: color("#ffffff"),
-            panel_alt: color("#edf1f6"),
-            titlebar: rgba_u8(242, 246, 251, 0.92),
-            sidebar: rgba_u8(236, 241, 247, 0.86),
-            border: rgba_u8(33, 52, 78, 0.13),
-            border_strong: rgba_u8(33, 52, 78, 0.23),
-            text: color("#19202a"),
-            text_muted: color("#526173"),
-            text_faint: color("#7f8c9d"),
+            bg: color("#e4ecf5"),
+            bg_soft: color("#eef4fb"),
+            panel: rgba_u8(252, 254, 255, 0.82),
+            panel_solid: color("#fafcfe"),
+            panel_alt: color("#dfe8f4"),
+            titlebar: rgba_u8(236, 244, 252, 0.94),
+            sidebar: rgba_u8(226, 236, 248, 0.88),
+            border: rgba_u8(56, 90, 132, 0.14),
+            border_strong: rgba_u8(56, 90, 132, 0.26),
+            text: color("#16202f"),
+            text_muted: color("#4d5f73"),
+            text_faint: color("#758497"),
             accent: color("#4f9cff"),
             accent_soft: rgba_u8(79, 156, 255, 0.16),
             accent_strong: color("#72b3ff"),
@@ -6238,38 +6523,39 @@ fn theme_palette(id: &str) -> PaletteSpec {
             outer_border: 0.0,
         },
         "warm" => PaletteSpec {
-            bg: color("#f2eee6"),
-            bg_soft: color("#faf6ee"),
-            panel: rgba_u8(255, 250, 241, 0.84),
-            panel_solid: color("#fffaf1"),
-            panel_alt: color("#eee4d3"),
-            titlebar: rgba_u8(240, 231, 216, 0.92),
-            sidebar: rgba_u8(235, 225, 210, 0.88),
-            border: rgba_u8(95, 75, 46, 0.15),
-            border_strong: rgba_u8(95, 75, 46, 0.28),
-            text: color("#2a241d"),
-            text_muted: color("#65594d"),
-            text_faint: color("#928576"),
-            accent: color("#d07920"),
-            accent_soft: rgba_u8(208, 121, 32, 0.16),
-            accent_strong: color("#b96218"),
+            // Deeper latte — more saturated honey tones, richer shadows
+            bg: color("#e8d8c0"),
+            bg_soft: color("#f4ead8"),
+            panel: rgba_u8(254, 244, 226, 0.92),
+            panel_solid: color("#fef0d8"),
+            panel_alt: color("#d8c4a0"),
+            titlebar: rgba_u8(230, 215, 192, 0.96),
+            sidebar: rgba_u8(220, 205, 180, 0.94),
+            border: rgba_u8(110, 78, 36, 0.18),
+            border_strong: rgba_u8(110, 78, 36, 0.35),
+            text: color("#241c10"),
+            text_muted: color("#5c4830"),
+            text_faint: color("#8a7260"),
+            accent: color("#c86010"),
+            accent_soft: rgba_u8(200, 96, 16, 0.18),
+            accent_strong: color("#a04c08"),
             radius: 8.0,
             radius_small: 5.0,
-            ui_font: "Segoe UI",
-            mono_font: "Cascadia Mono",
+            ui_font: "Georgia",
+            mono_font: "Consolas",
             light_controls: true,
             outer_border: 0.0,
         },
         "flat" => PaletteSpec {
-            bg: color("#f7f8fa"),
-            bg_soft: color("#ffffff"),
-            panel: color("#ffffff"),
+            bg: color("#eef0f3"),
+            bg_soft: color("#fafbfc"),
+            panel: color("#fdfdfd"),
             panel_solid: color("#ffffff"),
-            panel_alt: color("#f0f2f5"),
-            titlebar: color("#ffffff"),
-            sidebar: color("#f3f5f8"),
-            border: color("#e3e7ee"),
-            border_strong: color("#cdd5e0"),
+            panel_alt: color("#e6eaef"),
+            titlebar: color("#f9fafb"),
+            sidebar: color("#eceff3"),
+            border: color("#d4dce6"),
+            border_strong: color("#b9c6d4"),
             text: color("#161a20"),
             text_muted: color("#526071"),
             text_faint: color("#7d8795"),
@@ -6278,24 +6564,24 @@ fn theme_palette(id: &str) -> PaletteSpec {
             accent_strong: color("#3d5ac8"),
             radius: 4.0,
             radius_small: 3.0,
-            ui_font: "Segoe UI",
-            mono_font: "Cascadia Mono",
+            ui_font: "Calibri",
+            mono_font: "Consolas",
             light_controls: true,
             outer_border: 0.0,
         },
         "terminal" => PaletteSpec {
-            bg: color("#07110d"),
-            bg_soft: color("#0d1b14"),
-            panel: color("#0b1812"),
-            panel_solid: color("#0b1812"),
-            panel_alt: color("#10261b"),
-            titlebar: color("#06100b"),
-            sidebar: color("#08130d"),
-            border: rgba_u8(68, 255, 153, 0.22),
-            border_strong: rgba_u8(68, 255, 153, 0.42),
-            text: color("#c8ffd8"),
-            text_muted: color("#7de59f"),
-            text_faint: color("#4f996b"),
+            bg: color("#040a08"),
+            bg_soft: color("#081510"),
+            panel: color("#060e0b"),
+            panel_solid: color("#060e0b"),
+            panel_alt: color("#0a1e14"),
+            titlebar: color("#020705"),
+            sidebar: color("#040b08"),
+            border: rgba_u8(57, 255, 140, 0.32),
+            border_strong: rgba_u8(120, 255, 180, 0.52),
+            text: color("#cbffe0"),
+            text_muted: color("#6bdc97"),
+            text_faint: color("#3f8f5f"),
             accent: color("#7cff9d"),
             accent_soft: rgba_u8(124, 255, 157, 0.12),
             accent_strong: color("#c8ffd8"),
@@ -6304,16 +6590,16 @@ fn theme_palette(id: &str) -> PaletteSpec {
             ui_font: "Cascadia Mono",
             mono_font: "Cascadia Mono",
             light_controls: false,
-            outer_border: 0.0,
+            outer_border: 2.0,
         },
         "paper" => PaletteSpec {
-            bg: color("#eadfc9"),
-            bg_soft: color("#f8efd9"),
-            panel: color("#f5ead1"),
-            panel_solid: color("#f5ead1"),
-            panel_alt: color("#dfcfad"),
-            titlebar: color("#e4d4b3"),
-            sidebar: color("#deceb0"),
+            bg: color("#e3d6bc"),
+            bg_soft: color("#f2e6d0"),
+            panel: color("#efe3cc"),
+            panel_solid: color("#efe3cc"),
+            panel_alt: color("#d4c29e"),
+            titlebar: color("#dbc9a6"),
+            sidebar: color("#d6c6a0"),
             border: rgba_u8(88, 63, 34, 0.20),
             border_strong: rgba_u8(88, 63, 34, 0.34),
             text: color("#332617"),
@@ -6324,19 +6610,19 @@ fn theme_palette(id: &str) -> PaletteSpec {
             accent_strong: color("#7f2f21"),
             radius: 5.0,
             radius_small: 3.0,
-            ui_font: "Georgia",
-            mono_font: "Cascadia Mono",
+            ui_font: "Times New Roman",
+            mono_font: "Courier New",
             light_controls: true,
             outer_border: 0.0,
         },
         "retro" => PaletteSpec {
-            bg: color("#24205e"),
-            bg_soft: color("#342c86"),
-            panel: color("#302878"),
-            panel_solid: color("#302878"),
-            panel_alt: color("#4539a5"),
-            titlebar: color("#171446"),
-            sidebar: color("#211b62"),
+            bg: color("#1c1850"),
+            bg_soft: color("#2a2380"),
+            panel: color("#281f70"),
+            panel_solid: color("#281f70"),
+            panel_alt: color("#3d32a0"),
+            titlebar: color("#100d3a"),
+            sidebar: color("#181456"),
             border: color("#f8e76d"),
             border_strong: color("#fff4a8"),
             text: color("#fff7b0"),
@@ -6347,19 +6633,45 @@ fn theme_palette(id: &str) -> PaletteSpec {
             accent_strong: color("#ffef7a"),
             radius: 0.0,
             radius_small: 0.0,
-            ui_font: "Consolas",
-            mono_font: "Consolas",
+            // Press Start 2P (bundled, OFL) — true 8-bit arcade pixel font.
+            ui_font: "Press Start 2P",
+            mono_font: "Press Start 2P",
             light_controls: false,
             outer_border: 4.0,
         },
+        "cyberpunk" => PaletteSpec {
+            bg: color("#080318"),
+            bg_soft: color("#12062e"),
+            panel: rgba_u8(38, 8, 72, 0.90),
+            panel_solid: color("#260848"),
+            panel_alt: color("#35106c"),
+            titlebar: color("#040210"),
+            sidebar: color("#0c0624"),
+            border: rgba_u8(0, 255, 242, 0.30),
+            border_strong: rgba_u8(255, 40, 200, 0.58),
+            text: color("#f6f2ff"),
+            text_muted: color("#9cecff"),
+            text_faint: color("#ce6cff"),
+            accent: color("#ff39bc"),
+            accent_soft: rgba_u8(255, 57, 188, 0.18),
+            accent_strong: color("#00ecff"),
+            radius: 3.0,
+            radius_small: 2.0,
+            // Bahnschrift Condensed = narrow futuristic sans; Consolas for code.
+            ui_font: "Bahnschrift Condensed",
+            mono_font: "Consolas",
+            light_controls: false,
+            outer_border: 0.0,
+        },
         "fantasy" => PaletteSpec {
-            bg: color("#d9c38f"),
-            bg_soft: color("#f0dfaf"),
-            panel: rgba_u8(244, 226, 179, 0.90),
-            panel_solid: color("#f4e2b3"),
-            panel_alt: color("#ceb16f"),
-            titlebar: color("#c6a562"),
-            sidebar: color("#d3b976"),
+            // Aged parchment, brass-on-leather quest-board feel
+            bg: color("#cdb47a"),
+            bg_soft: color("#e8d49a"),
+            panel: rgba_u8(240, 218, 160, 0.92),
+            panel_solid: color("#edd9a8"),
+            panel_alt: color("#b89350"),
+            titlebar: color("#b88946"),
+            sidebar: color("#cca860"),
             border: rgba_u8(80, 50, 22, 0.28),
             border_strong: rgba_u8(80, 50, 22, 0.48),
             text: color("#2f2113"),
@@ -6370,96 +6682,53 @@ fn theme_palette(id: &str) -> PaletteSpec {
             accent_strong: color("#74450e"),
             radius: 6.0,
             radius_small: 5.0,
-            ui_font: "Georgia",
-            mono_font: "Cascadia Mono",
+            // Old-style serif with classical proportions for high-fantasy quest-board feel.
+            ui_font: "Book Antiqua",
+            mono_font: "Garamond",
             light_controls: true,
             outer_border: 0.0,
         },
-        "cyberpunk" => PaletteSpec {
-            bg: color("#100727"),
-            bg_soft: color("#190b3d"),
-            panel: rgba_u8(30, 13, 68, 0.88),
-            panel_solid: color("#1e0d44"),
-            panel_alt: color("#28105f"),
-            titlebar: color("#0b051f"),
-            sidebar: color("#13082f"),
-            border: rgba_u8(0, 236, 255, 0.24),
-            border_strong: rgba_u8(255, 57, 188, 0.54),
-            text: color("#f6f2ff"),
-            text_muted: color("#9cecff"),
-            text_faint: color("#ce6cff"),
-            accent: color("#ff39bc"),
-            accent_soft: rgba_u8(255, 57, 188, 0.18),
-            accent_strong: color("#00ecff"),
-            radius: 3.0,
-            radius_small: 2.0,
-            ui_font: "Segoe UI",
-            mono_font: "Cascadia Mono",
+        "sunset" => PaletteSpec {
+            // Dusk sky: deep aubergine bg, warm amber-to-rose gradient feel
+            bg: color("#160a1a"),
+            bg_soft: color("#22102a"),
+            panel: rgba_u8(48, 18, 52, 0.92),
+            panel_solid: color("#301232"),
+            panel_alt: color("#451c4c"),
+            titlebar: rgba_u8(10, 5, 12, 0.98),
+            sidebar: rgba_u8(26, 10, 30, 0.96),
+            border: rgba_u8(255, 120, 70, 0.20),
+            border_strong: rgba_u8(255, 160, 100, 0.36),
+            text: color("#ffe8d8"),
+            text_muted: color("#d4907a"),
+            text_faint: color("#8a5040"),
+            accent: color("#ff7043"),
+            accent_soft: rgba_u8(255, 112, 67, 0.16),
+            accent_strong: color("#ff9a7a"),
+            radius: 10.0,
+            radius_small: 6.0,
+            // Soft, hand-drawn feel — Segoe Script gives sunset a casual warmth.
+            ui_font: "Segoe Script",
+            mono_font: "Candara",
             light_controls: false,
             outer_border: 0.0,
         },
-        "nord" => PaletteSpec {
-            bg: color("#2e3440"),
-            bg_soft: color("#3b4252"),
-            panel: rgba_u8(59, 66, 82, 0.90),
-            panel_solid: color("#3b4252"),
-            panel_alt: color("#434c5e"),
-            titlebar: rgba_u8(46, 52, 64, 0.95),
-            sidebar: rgba_u8(46, 52, 64, 0.88),
-            border: rgba_u8(216, 222, 233, 0.14),
-            border_strong: rgba_u8(216, 222, 233, 0.28),
-            text: color("#eceff4"),
-            text_muted: color("#d8dee9"),
-            text_faint: color("#9aa3b2"),
-            accent: color("#5e81ac"),
-            accent_soft: rgba_u8(94, 129, 172, 0.20),
-            accent_strong: color("#81a1c1"),
-            radius: 6.0,
-            radius_small: 4.0,
-            ui_font: "Segoe UI",
-            mono_font: "Cascadia Mono",
-            light_controls: false,
-            outer_border: 0.0,
-        },
-        "ocean" => PaletteSpec {
-            bg: color("#03045e"),
-            bg_soft: color("#023e8a"),
-            panel: rgba_u8(2, 62, 138, 0.85),
-            panel_solid: color("#023e8a"),
-            panel_alt: color("#0077b6"),
-            titlebar: rgba_u8(3, 4, 94, 0.96),
-            sidebar: rgba_u8(2, 62, 138, 0.80),
-            border: rgba_u8(0, 180, 216, 0.22),
-            border_strong: rgba_u8(0, 180, 216, 0.44),
-            text: color("#caf0f8"),
-            text_muted: color("#90e0ef"),
-            text_faint: color("#48cae4"),
-            accent: color("#00b4d8"),
-            accent_soft: rgba_u8(0, 180, 216, 0.18),
-            accent_strong: color("#90e0ef"),
-            radius: 8.0,
-            radius_small: 5.0,
-            ui_font: "Segoe UI",
-            mono_font: "Cascadia Mono",
-            light_controls: false,
-            outer_border: 0.0,
-        },
-        _ => PaletteSpec {
-            bg: color("#101318"),
-            bg_soft: color("#171b22"),
-            panel: rgba_u8(28, 33, 42, 0.82),
-            panel_solid: color("#1c212a"),
-            panel_alt: color("#232936"),
-            titlebar: rgba_u8(18, 22, 29, 0.92),
-            sidebar: rgba_u8(22, 26, 34, 0.84),
-            border: rgba_u8(157, 172, 196, 0.16),
-            border_strong: rgba_u8(185, 198, 220, 0.26),
-            text: color("#f2f6fb"),
-            text_muted: color("#b5c0cf"),
-            text_faint: color("#7f8b9d"),
+        "mica-dark" | _ => PaletteSpec {
+            bg: color("#0c0f13"),
+            bg_soft: color("#141920"),
+            panel: rgba_u8(34, 40, 50, 0.86),
+            panel_solid: color("#232a34"),
+            panel_alt: color("#2b3440"),
+            titlebar: rgba_u8(10, 12, 15, 0.94),
+            sidebar: rgba_u8(26, 30, 37, 0.88),
+            border: rgba_u8(120, 150, 190, 0.14),
+            border_strong: rgba_u8(170, 195, 230, 0.24),
+            text: color("#f0f4fa"),
+            text_muted: color("#aab6c9"),
+            text_faint: color("#758296"),
             accent: color("#4f9cff"),
             accent_soft: rgba_u8(79, 156, 255, 0.16),
-            accent_strong: color("#72b3ff"),
+            accent_strong: color("#82bfff"),
             radius: 8.0,
             radius_small: 5.0,
             ui_font: "Segoe UI",
@@ -6472,7 +6741,7 @@ fn theme_palette(id: &str) -> PaletteSpec {
     let (accent, accent_soft, accent_strong) = accent_override(id);
     if !matches!(
         id,
-        "warm" | "terminal" | "paper" | "retro" | "fantasy" | "cyberpunk" | "nord" | "ocean"
+        "warm" | "terminal" | "paper" | "retro" | "fantasy" | "cyberpunk" | "sunset"
     ) {
         p.accent = accent;
         p.accent_soft = accent_soft;
@@ -6523,6 +6792,8 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
     let (folder_1, folder_2) = icon_folder_colors(&settings.theme);
     global.set_icon_folder_1(folder_1);
     global.set_icon_folder_2(folder_2);
+    global.set_active_theme(ss(&settings.theme));
+    global.set_folder_icon_image(load_theme_folder_icon(&settings.theme));
 
     let metrics = ui.global::<AppMetrics>();
     metrics.set_radius(palette.radius);
@@ -6793,6 +7064,9 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Show More Options", "", "show-more-options"),
     ("Tools", "Open in Terminal", "", "open-terminal"),
     ("Tools", "Open With", "", "open-with"),
+    ("Files", "Restore from Recycle Bin", "", "restore"),
+    ("Files", "Permanently Delete", "Shift+Del", "purge"),
+    ("Files", "Empty Recycle Bin", "", "empty-trash"),
     ("Tools", "Scan with Microsoft Defender", "", "defender-scan"),
     ("Tools", "Shell Verb Bridge", "", "shell-verbs"),
     ("Tools", "Cloud State", "", "cloud-state"),
@@ -7030,34 +7304,63 @@ impl NativeController {
             (
                 "mica-dark",
                 "Mica Dark",
-                "Windows-style dark Fluent",
-                "#101318",
+                "Cool graphite Fluent — frosted glass panels",
+                "#0c0f13",
             ),
             (
                 "mica-light",
                 "Mica Light",
-                "Windows-style light Mica",
-                "#eef2f7",
+                "Icy daylight — blue-tint chrome and white glass",
+                "#e4ecf5",
             ),
-            ("warm", "Warm Neutral", "Soft desktop workspace", "#d07920"),
-            ("flat", "Flat White", "Quiet and minimal", "#ffffff"),
+            (
+                "warm",
+                "Warm Neutral",
+                "Latte and oak — sepia UI for long sessions",
+                "#d07920",
+            ),
+            (
+                "flat",
+                "Flat White",
+                "Swiss studio — flat panels, sharp dividers",
+                "#eef0f3",
+            ),
             (
                 "terminal",
                 "Terminal",
-                "Phosphor green command room",
+                "CRT green — phosphor glow, scanline grid, mono type",
                 "#7cff9d",
             ),
-            ("paper", "Paper", "Letterpress and ink", "#eadfc9"),
-            ("retro", "Retro Arcade", "16-bit desktop energy", "#ffcf3f"),
+            (
+                "paper",
+                "Paper",
+                "Ink and cotton — editorial serif warmth",
+                "#e3d6bc",
+            ),
+            (
+                "retro",
+                "Retro Arcade",
+                "Neon cab — purple void, gold marquee",
+                "#ffcf3f",
+            ),
+            (
+                "cyberpunk",
+                "Cyberpunk",
+                "Synth district — magenta rail, cyan haze",
+                "#ff39bc",
+            ),
             (
                 "fantasy",
                 "High Fantasy",
-                "Parchment and gilded UI",
-                "#d9c38f",
+                "Quest board — aged parchment and brass",
+                "#cdb47a",
             ),
-            ("cyberpunk", "Cyberpunk", "Neon city file grid", "#ff39bc"),
-            ("nord", "Nord", "Arctic palette, calm and clean", "#5e81ac"),
-            ("ocean", "Ocean", "Deep sea blues and teals", "#00b4d8"),
+            (
+                "sunset",
+                "Sunset",
+                "Dusk sky — aubergine dark, amber-rose glow",
+                "#ff7043",
+            ),
         ]));
         ui.set_accent_choices(choice_items(&[
             ("blue", "Blue", "Default Pathfinder blue", "#4f9cff"),
@@ -7120,6 +7423,13 @@ impl NativeController {
         ui.set_ce_saved_themes(model_from_vec(
             saved.into_iter().map(SharedString::from).collect(),
         ));
+
+        if self.settings.ui_mode.is_empty() {
+            ui.set_ui_mode_prompt_visible(true);
+        } else {
+            ui.set_ui_mode(ss(&self.settings.ui_mode));
+        }
+        ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
 
         let path = self.current_path.clone();
         self.navigate(ui, path, false);
@@ -7431,12 +7741,23 @@ impl NativeController {
         };
 
         ui.set_status_left(ss(left));
+
+        // Status right shows path + free space on the current drive when available.
         let shown_path = self
             .active_archive
             .as_ref()
             .map(|archive| archive_display_path(&archive.archive_path, &archive.prefix))
             .unwrap_or_else(|| self.current_path.clone());
-        ui.set_status_right(ss(shown_path));
+        let right = match drive_free_space(&self.current_path) {
+            Some((free, total)) => format!(
+                "{} · {} free of {}",
+                shown_path,
+                format_size_short(free),
+                format_size_short(total)
+            ),
+            None => shown_path,
+        };
+        ui.set_status_right(ss(right));
     }
 
     fn update_models(&mut self, ui: &MainWindow) {
@@ -7490,6 +7811,7 @@ impl NativeController {
         ui.set_files(model.clone());
         self.files_model = Some(model);
         ui.set_side_items(model_from_vec(self.side_items()));
+        ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
         ui.set_tabs(model_from_vec(self.tab_items()));
         ui.set_selected_index(self.selected_index);
         self.sync_search_scope(ui);
@@ -7528,6 +7850,7 @@ impl NativeController {
     }
 
     fn file_item(&self, entry: &FileEntry, selected: bool) -> FileItem {
+        let in_recycle = self.current_path == "recycle://";
         let tag_id = self.tags.get(&entry.path).cloned().unwrap_or_default();
         let git_status = self.git_for_entry(entry);
         let (has_thumbnail, thumbnail) = self
@@ -7544,8 +7867,22 @@ impl NativeController {
             } else {
                 format_size_short(entry.size)
             }),
-            modified_text: ss(format_modified(entry.modified)),
-            type_text: ss(entry_type(entry)),
+            modified_text: ss(if in_recycle {
+                // In the recycle view, the `modified` field carries the
+                // deletion timestamp (set by list_recycle_bin_entries).
+                format!("Deleted {}", format_modified(entry.modified))
+            } else {
+                format_modified(entry.modified)
+            }),
+            type_text: ss(if in_recycle {
+                let original = entry.path.strip_prefix("recycle://").unwrap_or(&entry.path);
+                std::path::Path::new(original)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            } else {
+                entry_type(entry).to_string()
+            }),
             extension: ss(entry
                 .extension
                 .clone()
@@ -7593,6 +7930,36 @@ impl NativeController {
         String::new()
     }
 
+    /// Pick a sidebar icon name for a path. Tries (in order):
+    ///   1. exact match against any known-folder path → that folder's icon
+    ///   2. case-insensitive match of the basename against well-known names
+    ///      (Documents/Music/Videos/Pictures/Downloads/Desktop/Home)
+    ///   3. fallback to generic "folder"
+    fn icon_for_path(&self, path: &str, label: &str) -> &'static str {
+        for kf in &self.known_folders {
+            if same_path_string(&kf.path, path) {
+                return match kf.id.as_str() {
+                    "home" => "home",
+                    "downloads" => "download",
+                    "pictures" => "image",
+                    "documents" | "desktop" => "documents",
+                    "music" => "music",
+                    "videos" | "video" => "video",
+                    _ => "folder",
+                };
+            }
+        }
+        match label.to_lowercase().as_str() {
+            "documents" | "desktop" | "onedrive" | "icloud drive" => "documents",
+            "downloads" => "download",
+            "pictures" | "screenshots" | "camera roll" => "image",
+            "music" => "music",
+            "videos" | "movies" => "video",
+            "home" => "home",
+            _ => "folder",
+        }
+    }
+
     fn side_items(&self) -> Vec<SideItem> {
         let mut items = Vec::new();
         items.push(SideItem {
@@ -7612,6 +7979,9 @@ impl NativeController {
                     "home" => "home",
                     "downloads" => "download",
                     "pictures" => "image",
+                    "documents" | "desktop" => "documents",
+                    "music" => "music",
+                    "videos" | "video" => "video",
                     _ => "folder",
                 }),
                 count: ss(""),
@@ -7620,6 +7990,18 @@ impl NativeController {
                 active: same_path_string(&self.current_path, &folder.path),
             });
         }
+
+        // Recycle Bin entry — virtual `recycle://` path. Click to browse,
+        // right-click items inside to restore or delete permanently.
+        items.push(SideItem {
+            label: ss("Recycle Bin"),
+            path: ss("recycle://"),
+            icon: ss("trash"),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: false,
+            active: self.current_path == "recycle://",
+        });
 
         items.push(SideItem {
             label: ss("DRIVES"),
@@ -7646,48 +8028,6 @@ impl NativeController {
             });
         }
 
-        items.push(SideItem {
-            label: ss("PINS"),
-            path: ss(""),
-            icon: ss(""),
-            count: ss(""),
-            color: rgba_u8(0, 0, 0, 0.0),
-            is_header: true,
-            active: false,
-        });
-        for pin in &self.user_pins {
-            items.push(SideItem {
-                label: ss(&pin.name),
-                path: ss(&pin.path),
-                icon: ss(if pin.kind == "file" { "file" } else { "folder" }),
-                count: ss(""),
-                color: rgba_u8(0, 0, 0, 0.0),
-                is_header: false,
-                active: same_path_string(&self.current_path, &pin.path),
-            });
-        }
-
-        items.push(SideItem {
-            label: ss("SMART FOLDERS"),
-            path: ss(""),
-            icon: ss(""),
-            count: ss(""),
-            color: rgba_u8(0, 0, 0, 0.0),
-            is_header: true,
-            active: false,
-        });
-        for smart in smart_folders_for_path(&self.current_path) {
-            items.push(SideItem {
-                label: ss(smart.name),
-                path: ss(format!("smart:{}", smart.id)),
-                icon: ss("search"),
-                count: ss(""),
-                color: color("#4f9cff"),
-                is_header: false,
-                active: self.search_query == format!("smart:{}", smart.id),
-            });
-        }
-
         if !self.recent_locations.is_empty() {
             items.push(SideItem {
                 label: ss("RECENT"),
@@ -7699,13 +8039,14 @@ impl NativeController {
                 active: false,
             });
             for path in self.recent_locations.iter().take(5) {
+                let label_str = Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.clone());
                 items.push(SideItem {
-                    label: ss(Path::new(path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.clone())),
+                    label: ss(&label_str),
                     path: ss(path),
-                    icon: ss("folder"),
+                    icon: ss(self.icon_for_path(path, &label_str)),
                     count: ss(""),
                     color: rgba_u8(0, 0, 0, 0.0),
                     is_header: false,
@@ -7745,6 +8086,63 @@ impl NativeController {
                 color: tag_color(id),
                 is_header: false,
                 active: self.search_query == format!("tag:{id}"),
+            });
+        }
+        items
+    }
+
+    fn side_items_simple(&self) -> Vec<SideItem> {
+        let mut items = Vec::new();
+        items.push(SideItem {
+            label: ss("QUICK ACCESS"),
+            path: ss(""),
+            icon: ss(""),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: true,
+            active: false,
+        });
+        for folder in &self.known_folders {
+            items.push(SideItem {
+                label: ss(&folder.name),
+                path: ss(&folder.path),
+                icon: ss(match folder.id.as_str() {
+                    "home" => "home",
+                    "downloads" => "download",
+                    "pictures" => "image",
+                    "documents" | "desktop" => "documents",
+                    "music" => "music",
+                    "videos" | "video" => "video",
+                    _ => "folder",
+                }),
+                count: ss(""),
+                color: rgba_u8(0, 0, 0, 0.0),
+                is_header: false,
+                active: same_path_string(&self.current_path, &folder.path),
+            });
+        }
+        items.push(SideItem {
+            label: ss("DRIVES"),
+            path: ss(""),
+            icon: ss(""),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: true,
+            active: false,
+        });
+        for drive in &self.drives {
+            items.push(SideItem {
+                label: ss(if drive.name.is_empty() {
+                    &drive.path
+                } else {
+                    &drive.name
+                }),
+                path: ss(&drive.path),
+                icon: ss("drive"),
+                count: ss(&drive.kind),
+                color: rgba_u8(0, 0, 0, 0.0),
+                is_header: false,
+                active: self.current_path.starts_with(&drive.path),
             });
         }
         items
@@ -7820,6 +8218,11 @@ impl NativeController {
         } else {
             path
         };
+        // Virtual recycle-bin namespace — content comes from trash::os_limited.
+        if path == "recycle://" {
+            self.open_recycle_bin_view(ui, push_history);
+            return;
+        }
         if let Some((archive_path, prefix)) = parse_archive_virtual_path(&path) {
             self.open_archive_view(ui, archive_path, prefix, push_history);
             return;
@@ -7832,9 +8235,9 @@ impl NativeController {
         match native_list_directory_page(&self.app_state, &path) {
             Ok(page) => {
                 self.active_archive = None;
+                ui.set_in_recycle_bin(false);
                 let partial = page.partial;
                 let files = page.entries;
-                ui.set_nav_opacity(0.0);
 
                 // Save view+sort for the folder we are leaving
                 let prev_path = self.current_path.clone();
@@ -7993,12 +8396,7 @@ impl NativeController {
                     });
                 }
 
-                let weak = ui.as_weak();
-                slint::Timer::single_shot(Duration::from_millis(40), move || {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.set_nav_opacity(1.0);
-                    }
-                });
+                // No fade — content snaps in instantly for File-Explorer-level responsiveness.
             }
             Err(error) => {
                 ui.set_empty_state(ss(format!("Cannot read folder: {error}")));
@@ -8007,24 +8405,181 @@ impl NativeController {
         }
     }
 
+    /// Switch the primary view to a virtual listing of the OS recycle bin.
+    /// Right-click an item to restore (move back to original path) or delete
+    /// permanently. The view is read-only otherwise — paste/new-file disabled.
+    fn open_recycle_bin_view(&mut self, ui: &MainWindow, push_history: bool) {
+        let entries = list_recycle_bin_entries();
+        self.active_archive = None;
+        self.current_path = "recycle://".to_string();
+        self.files = entries;
+        self.search_query.clear();
+        self.selected_index = -1;
+        self.selected_set.clear();
+        self.select_anchor = -1;
+        self.files_model = None;
+        if push_history {
+            self.history.truncate(self.history_index + 1);
+            self.history.push("recycle://".to_string());
+            self.history_index = self.history.len().saturating_sub(1);
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.path = "recycle://".to_string();
+        }
+        ui.set_empty_state(ss(if self.files.is_empty() {
+            "Recycle Bin is empty.".to_string()
+        } else {
+            String::new()
+        }));
+        ui.set_in_recycle_bin(true);
+        self.apply_filter();
+        self.update_models(ui);
+        self.update_preview(ui);
+    }
+
+    /// Restore the currently selected recycle-bin items back to their original
+    /// paths. Looks up each file by its original_path against `trash::os_limited::list()`.
+    fn restore_from_recycle_bin(&mut self, ui: &MainWindow) {
+        let virtual_paths = self.selected_paths();
+        let target_originals: Vec<String> = virtual_paths
+            .iter()
+            .filter_map(|p| p.strip_prefix("recycle://").map(|s| s.to_string()))
+            .collect();
+        if target_originals.is_empty() {
+            return;
+        }
+        let items = match trash::os_limited::list() {
+            Ok(it) => it,
+            Err(e) => {
+                self.show_toast_kind(ui, format!("Cannot read trash: {e}"), "error");
+                return;
+            }
+        };
+        let to_restore: Vec<trash::TrashItem> = items
+            .into_iter()
+            .filter(|item| {
+                let orig = item.original_path().to_string_lossy().into_owned();
+                target_originals.iter().any(|t| t == &orig)
+            })
+            .collect();
+        let n = to_restore.len();
+        if n == 0 {
+            self.show_toast_kind(ui, "Items not found in trash.", "error");
+            return;
+        }
+        match trash::os_limited::restore_all(to_restore) {
+            Ok(()) => {
+                self.show_toast_kind(ui, format!("Restored {n} item(s)"), "success");
+                self.open_recycle_bin_view(ui, false);
+            }
+            Err(e) => self.show_toast_kind(ui, format!("Restore failed: {e}"), "error"),
+        }
+    }
+
+    /// Permanently delete the currently selected recycle-bin items.
+    fn purge_from_recycle_bin(&mut self, ui: &MainWindow) {
+        let virtual_paths = self.selected_paths();
+        let target_originals: Vec<String> = virtual_paths
+            .iter()
+            .filter_map(|p| p.strip_prefix("recycle://").map(|s| s.to_string()))
+            .collect();
+        if target_originals.is_empty() {
+            return;
+        }
+        let items = match trash::os_limited::list() {
+            Ok(it) => it,
+            Err(e) => {
+                self.show_toast_kind(ui, format!("Cannot read trash: {e}"), "error");
+                return;
+            }
+        };
+        let to_purge: Vec<trash::TrashItem> = items
+            .into_iter()
+            .filter(|item| {
+                let orig = item.original_path().to_string_lossy().into_owned();
+                target_originals.iter().any(|t| t == &orig)
+            })
+            .collect();
+        let n = to_purge.len();
+        if n == 0 {
+            return;
+        }
+        match trash::os_limited::purge_all(to_purge) {
+            Ok(()) => {
+                self.show_toast_kind(ui, format!("Permanently deleted {n} item(s)"), "success");
+                self.open_recycle_bin_view(ui, false);
+            }
+            Err(e) => self.show_toast_kind(ui, format!("Purge failed: {e}"), "error"),
+        }
+    }
+
+    /// Empty the entire OS recycle bin (all users see the same trash on Windows).
+    fn empty_recycle_bin(&mut self, ui: &MainWindow) {
+        let items = match trash::os_limited::list() {
+            Ok(it) => it,
+            Err(e) => {
+                self.show_toast_kind(ui, format!("Cannot read trash: {e}"), "error");
+                return;
+            }
+        };
+        let n = items.len();
+        if n == 0 {
+            self.show_toast(ui, "Recycle Bin is already empty.");
+            return;
+        }
+        match trash::os_limited::purge_all(items) {
+            Ok(()) => {
+                self.show_toast_kind(ui, format!("Emptied recycle bin ({n} items)"), "success");
+                self.open_recycle_bin_view(ui, false);
+            }
+            Err(e) => self.show_toast_kind(ui, format!("Empty failed: {e}"), "error"),
+        }
+    }
+
     fn schedule_full_directory_load(&mut self, path: String) {
         let state = self.app_state.clone();
         let ready = self.directory_ready.clone();
         let pending = self.pending_directory_result.clone();
         std::thread::spawn(move || {
-            let Ok(entries) = list_directory_uncached(Path::new(&path)) else {
-                return;
+            // Stream the load: read DirEntries first (fast), then fetch metadata
+            // in parallel chunks of 2000, publishing each chunk to the UI so very
+            // large folders fill in progressively rather than freezing on a final
+            // single replace. Each chunk is sorted and the running total is
+            // resorted before publishing — keeps the displayed order stable.
+            let dir = Path::new(&path);
+            let dir_entries: Vec<fs::DirEntry> = match fs::read_dir(dir) {
+                Ok(rd) => rd.filter_map(Result::ok).collect(),
+                Err(_) => return,
             };
-            state.store_directory(&path, entries.clone());
-            let _ = index_directory_entries(&path, &entries);
-            if let Ok(mut lock) = pending.lock() {
-                *lock = Some(NativeDirectoryResult { path, entries });
+            let total = dir_entries.len();
+            let chunk_size = 2000usize;
+            let mut accumulated: Vec<FileEntry> = Vec::with_capacity(total);
+            for chunk in dir_entries.chunks(chunk_size) {
+                let mut entries: Vec<FileEntry> = chunk
+                    .par_iter()
+                    .filter_map(|entry| {
+                        let path = entry.path();
+                        entry.metadata().ok().map(|m| path_to_entry(&path, &m))
+                    })
+                    .collect();
+                accumulated.append(&mut entries);
+                sort_entries(&mut accumulated);
+                if let Ok(mut lock) = pending.lock() {
+                    *lock = Some(NativeDirectoryResult {
+                        path: path.clone(),
+                        entries: accumulated.clone(),
+                    });
+                }
+                ready.store(true, Ordering::Release);
             }
-            ready.store(true, Ordering::Release);
+            // Final cache + index population once everything is in.
+            state.store_directory(&path, accumulated.clone());
+            let _ = index_directory_entries(&path, &accumulated);
         });
     }
 
     fn refresh(&mut self, ui: &MainWindow) {
+        self.sync_active_pane(ui);
         if self.active_pane == ActivePane::Secondary {
             let path = self.secondary_path.clone();
             self.secondary_navigate(ui, path);
@@ -8038,6 +8593,20 @@ impl NativeController {
             .invalidate_directory_path(Path::new(&self.current_path));
         let path = self.current_path.clone();
         self.navigate(ui, path, false);
+    }
+
+    fn sync_active_pane(&self, ui: &MainWindow) {
+        let s = if self.active_pane == ActivePane::Secondary { "secondary" } else { "primary" };
+        ui.set_active_pane(SharedString::from(s));
+        // Drive the recycle context menus from whichever pane is active so
+        // right-clicking a file in the non-recycle pane shows the regular
+        // menu even if the other pane is currently showing the trash.
+        let active_path = if self.active_pane == ActivePane::Secondary {
+            &self.secondary_path
+        } else {
+            &self.current_path
+        };
+        ui.set_in_recycle_bin(active_path == "recycle://");
     }
 
     fn select(&mut self, ui: &MainWindow, index: i32) {
@@ -8437,7 +9006,10 @@ impl NativeController {
     }
 
     fn sort_column(&mut self, ui: &MainWindow, col: &str) {
-        if self.sort_by == col {
+        if col == "reset" {
+            self.sort_by = "name".to_string();
+            self.sort_dir = "asc".to_string();
+        } else if self.sort_by == col {
             self.sort_dir = if self.sort_dir == "asc" {
                 "desc".to_string()
             } else {
@@ -9040,6 +9612,9 @@ impl NativeController {
                 ui.set_settings_visible(true);
             }
             "privacy-storage" => self.show_privacy_storage(ui),
+            "open-releases" => {
+                let _ = open::that(GITHUB_RELEASES_URL);
+            }
             "check-updates" => match check_github_release_now() {
                 Ok(result) => {
                     ui.set_preview_title(ss("Updates"));
@@ -9062,6 +9637,9 @@ impl NativeController {
             "shortcut-editor" => self.show_shortcuts(ui),
             "undo" => self.undo(ui),
             "focus-search" => self.show_toast(ui, "Search is ready in the toolbar."),
+            "restore" => self.restore_from_recycle_bin(ui),
+            "purge" => self.purge_from_recycle_bin(ui),
+            "empty-trash" => self.empty_recycle_bin(ui),
             _ => self.show_toast(ui, format!("Command not implemented: {command}")),
         }
     }
@@ -9108,27 +9686,30 @@ impl NativeController {
             self.show_toast(ui, "Select at least two items for batch rename.");
             return;
         }
+        let default_template = "Renamed_{n:03}.{ext}".to_string();
         let preview = paths
             .iter()
             .take(8)
             .enumerate()
             .map(|(i, path)| {
-                let original = Path::new(path)
+                let p = Path::new(path);
+                let original = p
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| path.clone());
-                format!("{original} -> Renamed {:03}", i + 1)
+                let renamed = apply_rename_template(&default_template, p, i + 1);
+                format!("{original}  →  {renamed}")
             })
             .collect::<Vec<_>>()
             .join("\n");
-        ui.set_preview_title(ss("Batch Rename"));
+        ui.set_preview_title(ss("Batch Rename — template syntax"));
         ui.set_preview_body(ss(format!(
-            "{preview}\n\nEnter a base name. Extensions are preserved."
+            "{preview}\n\nTokens:\n  {{n}}      sequence number (1-based)\n  {{n:04}}   zero-padded to N digits\n  {{name}}   original filename without extension\n  {{ext}}    original extension (no dot)\n\nExample: IMG_{{n:04}}.{{ext}}"
         )));
         ui.set_preview_meta(ss(format!("{} selected", paths.len())));
         self.pending_prompt = Some(PendingPrompt::BatchRename(paths));
-        ui.set_prompt_title(ss("Batch rename base name"));
-        ui.set_prompt_value(ss("Renamed"));
+        ui.set_prompt_title(ss("Batch rename template"));
+        ui.set_prompt_value(ss(default_template));
         ui.set_prompt_visible(true);
     }
 
@@ -9249,26 +9830,49 @@ impl NativeController {
                 }
             }
             Some(PendingPrompt::BatchRename(paths)) => {
-                let base = value.trim();
-                if base.is_empty() {
-                    self.show_toast(ui, "Name cannot be empty.");
+                let template = value.trim();
+                if template.is_empty() {
+                    self.show_toast(ui, "Template cannot be empty.");
                     return;
                 }
-                let width = paths.len().max(1).to_string().len().max(3);
+                // If template has no {n} token but we have multiple files, auto-append
+                // a counter so renames don't all collapse to the same name.
+                let needs_counter = paths.len() > 1
+                    && !template.contains("{n}")
+                    && !template.contains("{n:");
+                let width = paths.len().to_string().len().max(2);
+                let effective = if needs_counter {
+                    let pad = format!("{{n:0{width}}}");
+                    if template.contains("{ext}") {
+                        // Insert counter before extension token to keep ext at the end.
+                        template.replace("{ext}", &format!("_{pad}.{{ext}}"))
+                    } else {
+                        format!("{template}_{pad}")
+                    }
+                } else {
+                    template.to_string()
+                };
+
                 let mut ops = Vec::with_capacity(paths.len());
+                let mut seen_names = std::collections::HashSet::<String>::new();
                 for (index, from) in paths.iter().enumerate() {
                     let src = Path::new(from);
-                    let Some(parent) = src.parent() else {
-                        continue;
-                    };
-                    let ext = src.extension().map(|e| e.to_string_lossy().to_string());
-                    let file_name = if let Some(ext) = ext {
-                        format!("{base} {:0width$}.{ext}", index + 1)
-                    } else {
-                        format!("{base} {:0width$}", index + 1)
-                    };
-                    let to = parent.join(file_name);
-                    if to.exists() {
+                    let Some(parent) = src.parent() else { continue; };
+                    let new_name = apply_rename_template(&effective, src, index + 1);
+                    if new_name.is_empty() {
+                        self.show_toast_kind(ui, "Template produced empty name.", "error");
+                        return;
+                    }
+                    if !seen_names.insert(new_name.clone()) {
+                        self.show_toast_kind(
+                            ui,
+                            format!("Template produces duplicate name '{new_name}'. Use {{n}} or {{n:04}}."),
+                            "error",
+                        );
+                        return;
+                    }
+                    let to = parent.join(&new_name);
+                    if to.exists() && to != src {
                         self.show_toast_kind(
                             ui,
                             format!("'{}' already exists", to.display()),
@@ -9369,6 +9973,7 @@ impl NativeController {
                 let _ = write_native_json("tag_labels.json", &self.tag_labels);
                 self.sync_tag_names(ui);
                 ui.set_side_items(model_from_vec(self.side_items()));
+                ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
                 self.show_toast_kind(ui, "Tag renamed", "success");
             }
             Some(PendingPrompt::Archive) | None => {}
@@ -9463,8 +10068,12 @@ impl NativeController {
                     dest: dest.to_string_lossy().to_string(),
                     cut: clipboard.cut,
                 });
-                ui.set_prompt_title(ss("Conflict action"));
-                ui.set_prompt_value(ss("keep"));
+                ui.set_prompt_title(ss(format!(
+                    "{} already exists",
+                    Path::new(&dest).file_name().and_then(|n| n.to_str()).unwrap_or("File")
+                )));
+                ui.set_prompt_value(ss(""));
+                ui.set_prompt_kind(ss("conflict"));
                 ui.set_prompt_visible(true);
                 return;
             }
@@ -9496,6 +10105,92 @@ impl NativeController {
             format!("{verb} {pasted} items")
         };
         self.show_toast_kind(ui, msg, "success");
+    }
+
+    fn drop_files_from_drag(
+        &mut self,
+        ui: &MainWindow,
+        paths: Vec<String>,
+        is_move: bool,
+        dest_dir: String,
+    ) {
+        let mut count = 0usize;
+        let mut errors = 0usize;
+        let mut skipped_self = 0usize;
+        let mut last_error: Option<String> = None;
+        for src_str in &paths {
+            let src = Path::new(src_str);
+            let Some(name) = src.file_name() else { continue; };
+            // Skip self-drop (source already lives in destination directory).
+            if src.parent() == Some(Path::new(&dest_dir)) {
+                skipped_self += 1;
+                continue;
+            }
+            let dest = PathBuf::from(&dest_dir).join(name);
+            let result = if is_move {
+                native_move(&self.app_state, src_str, &dest.to_string_lossy())
+            } else {
+                native_copy(&self.app_state, src_str, &dest.to_string_lossy())
+            };
+            match result {
+                Ok(()) => count += 1,
+                Err(e) => {
+                    eprintln!(
+                        "[file_drag] {} '{}' -> '{}' FAILED: {}",
+                        if is_move { "move" } else { "copy" },
+                        src_str,
+                        dest.display(),
+                        e
+                    );
+                    last_error = Some(e);
+                    errors += 1;
+                }
+            }
+        }
+        if count == 0 && errors == 0 {
+            if skipped_self > 0 {
+                self.show_toast(ui, "Source and destination are the same folder.");
+            }
+            return;
+        }
+        // Refresh BOTH panes so files appear/disappear in primary AND secondary.
+        // Without this the destination pane (which is NOT the "active" pane in the
+        // dual-pane drag-from-A-to-B case) doesn't redraw and the move looks broken.
+        self.invalidate_and_refresh_both_panes(ui);
+        let verb = if is_move { "Moved" } else { "Copied" };
+        let kind = if errors > 0 { "error" } else { "success" };
+        let msg = if errors > 0 {
+            if count > 0 {
+                format!("{verb} {count}, {errors} failed: {}", last_error.as_deref().unwrap_or("unknown"))
+            } else {
+                format!("{verb} failed: {}", last_error.as_deref().unwrap_or("unknown"))
+            }
+        } else if count == 1 {
+            format!("{verb} 1 item to {}", Path::new(&dest_dir).file_name().and_then(|n| n.to_str()).unwrap_or(&dest_dir))
+        } else {
+            format!("{verb} {count} items to {}", Path::new(&dest_dir).file_name().and_then(|n| n.to_str()).unwrap_or(&dest_dir))
+        };
+        self.show_toast_kind(ui, msg, kind);
+    }
+
+    /// Refresh both primary and secondary panes after a drop, preserving which
+    /// pane is "active" (since drop_files_from_drag may not match active_pane).
+    fn invalidate_and_refresh_both_panes(&mut self, ui: &MainWindow) {
+        let saved_active = self.active_pane;
+        // Primary
+        self.app_state
+            .invalidate_directory_path(Path::new(&self.current_path));
+        let primary_path = self.current_path.clone();
+        self.navigate(ui, primary_path, false);
+        // Secondary
+        if !self.secondary_path.is_empty() {
+            self.app_state
+                .invalidate_directory_path(Path::new(&self.secondary_path));
+            let sec_path = self.secondary_path.clone();
+            self.secondary_navigate(ui, sec_path);
+        }
+        self.active_pane = saved_active;
+        self.sync_active_pane(ui);
     }
 
     fn paste_async(&mut self, ui: &MainWindow) {
@@ -9537,8 +10232,12 @@ impl NativeController {
                     dest: dest.to_string_lossy().to_string(),
                     cut: clipboard.cut,
                 });
-                ui.set_prompt_title(ss("Conflict action"));
-                ui.set_prompt_value(ss("keep"));
+                ui.set_prompt_title(ss(format!(
+                    "{} already exists",
+                    Path::new(&dest).file_name().and_then(|n| n.to_str()).unwrap_or("File")
+                )));
+                ui.set_prompt_value(ss(""));
+                ui.set_prompt_kind(ss("conflict"));
                 ui.set_prompt_visible(true);
                 return;
             }
@@ -10497,6 +11196,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut()
                 .select_with_modifiers(&ui, index, ctrl, shift);
+            c.borrow().sync_active_pane(&ui);
         }
         // Debounce preview update by 150ms so fast arrow-key navigation
         // doesn't trigger an expensive read for each skipped file.
@@ -10525,9 +11225,15 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_file_context(move |index| {
         if let Some(ui) = weak.upgrade() {
-            let should_select = {
+            let (should_select, is_archive) = {
                 let ctrl = c.borrow();
-                index >= 0 && !ctrl.selected_set.contains(&(index as usize))
+                let sel = index >= 0 && !ctrl.selected_set.contains(&(index as usize));
+                let arch = index >= 0 && ctrl.visible_files
+                    .get(index as usize)
+                    .and_then(|e| e.extension.as_deref())
+                    .map(is_archive_ext)
+                    .unwrap_or(false);
+                (sel, arch)
             };
             if should_select {
                 c.borrow_mut().select(&ui, index);
@@ -10535,9 +11241,52 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 c.borrow_mut().active_pane = ActivePane::Primary;
             }
             ui.set_context_on_file(index >= 0);
+            ui.set_context_is_archive(is_archive);
             ui.set_context_visible(true);
         }
     });
+
+    #[cfg(target_os = "windows")]
+    {
+        let weak = ui.as_weak();
+        let c = controller.clone();
+        ui.on_start_file_drag(move |index| {
+            let paths: Vec<String> = {
+                let ctrl = c.borrow();
+                if ctrl.selected_set.contains(&(index as usize)) && !ctrl.selected_set.is_empty() {
+                    ctrl.selected_set
+                        .iter()
+                        .filter_map(|&i| ctrl.visible_files.get(i).map(|e| e.path.clone()))
+                        .collect()
+                } else if index >= 0 {
+                    ctrl.visible_files
+                        .get(index as usize)
+                        .map(|e| e.path.clone())
+                        .into_iter()
+                        .collect()
+                } else {
+                    vec![]
+                }
+            };
+            if !paths.is_empty() {
+                let count = paths.len() as i32;
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<ThemePalette>().set_drag_count(count);
+                    ui.global::<ThemePalette>().set_is_dragging(true);
+                }
+                let effect = file_drag::start(paths);
+                if let Some(ui) = weak.upgrade() {
+                    ui.global::<ThemePalette>().set_is_dragging(false);
+                    ui.global::<ThemePalette>().set_drag_count(0);
+                    // If an external app moved the files, refresh so they disappear.
+                    use windows::Win32::System::Ole::DROPEFFECT_MOVE;
+                    if effect == DROPEFFECT_MOVE {
+                        c.borrow_mut().refresh(&ui);
+                    }
+                }
+            }
+        });
+    }
 
     let weak = ui.as_weak();
     let c = controller.clone();
@@ -10722,8 +11471,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     let pd = preview_debounce.clone();
     ui.on_secondary_file_selected(move |index, ctrl, shift| {
-        if let Some(_ui) = weak.upgrade() {
+        if let Some(ui) = weak.upgrade() {
             c.borrow_mut().secondary_file_selected(index, ctrl, shift);
+            c.borrow().sync_active_pane(&ui);
         }
         let weak2 = weak.clone();
         let c2 = c.clone();
@@ -10858,6 +11608,30 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
 
     let weak = ui.as_weak();
     let c = controller.clone();
+    ui.on_set_ui_mode(move |mode| {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.settings.ui_mode = mode.to_string();
+            ctrl.save_settings();
+            let simple = ctrl.side_items_simple();
+            ui.set_side_items_simple(model_from_vec(simple));
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_ui_mode_prompt_choice(move |mode| {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.settings.ui_mode = mode.to_string();
+            ctrl.save_settings();
+            let simple = ctrl.side_items_simple();
+            ui.set_side_items_simple(model_from_vec(simple));
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_index_mode_selected(move |mode| {
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut().set_index_mode(&ui, &mode);
@@ -10896,6 +11670,48 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_install_update(move || {
+        if let Some(ui) = weak.upgrade() {
+            let url = ui.get_update_download_url().to_string();
+            if url.is_empty() {
+                let _ = open::that(GITHUB_RELEASES_URL);
+                return;
+            }
+            // Show toast on the event loop thread where Rc is accessible.
+            c.borrow_mut().show_toast(&ui, "Downloading update…");
+            let weak2 = weak.clone();
+            std::thread::spawn(move || {
+                match download_and_install_update(&url) {
+                    Ok(()) => {
+                        // Only weak2 (Send) is captured here — no Rc.
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak2.upgrade() {
+                                ui.set_toast_text(ss("Installer launched — Pathfinder will close."));
+                                ui.set_toast_kind(ss("info"));
+                            }
+                            std::thread::spawn(|| {
+                                std::thread::sleep(std::time::Duration::from_millis(1400));
+                                let _ = slint::invoke_from_event_loop(|| {
+                                    let _ = slint::quit_event_loop();
+                                });
+                            });
+                        });
+                    }
+                    Err(e) => {
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak2.upgrade() {
+                                ui.set_toast_text(ss(&format!("Update failed: {e}")));
+                                ui.set_toast_kind(ss("error"));
+                            }
+                        });
+                    }
+                }
+            });
+        }
+    });
+
+    let weak = ui.as_weak();
     ui.on_minimize(move || {
         if let Some(ui) = weak.upgrade() {
             ui.window().set_minimized(true);
@@ -10910,7 +11726,36 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
+    let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_close(move || {
+        // Snapshot geometry before tearing down.
+        if let Some(ui) = weak.upgrade() {
+            use i_slint_backend_winit::WinitWindowAccessor;
+            let mut info: Option<(bool, u32, u32, i32, i32)> = None;
+            ui.window().with_winit_window(|window| {
+                let is_max = window.is_maximized();
+                let size = window.inner_size();
+                let pos = window.outer_position().unwrap_or_default();
+                let scale = window.scale_factor();
+                let lw = (size.width as f64 / scale).round() as u32;
+                let lh = (size.height as f64 / scale).round() as u32;
+                let lx = (pos.x as f64 / scale).round() as i32;
+                let ly = (pos.y as f64 / scale).round() as i32;
+                info = Some((is_max, lw, lh, lx, ly));
+            });
+            if let Some((is_max, lw, lh, lx, ly)) = info {
+                let mut ctrl = c.borrow_mut();
+                ctrl.settings.window_maximized = is_max;
+                if !is_max {
+                    ctrl.settings.window_w = lw;
+                    ctrl.settings.window_h = lh;
+                    ctrl.settings.window_x = lx;
+                    ctrl.settings.window_y = ly;
+                }
+                ctrl.save_settings();
+            }
+        }
         let _ = slint::quit_event_loop();
     });
 
@@ -10928,9 +11773,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let search_ready = controller.borrow().search_ready.clone();
         let pending_search = controller.borrow().pending_search_result.clone();
         let timer = slint::Timer::default();
+        // 100ms tick instead of 350 — when a large directory finishes loading
+        // in the background, the full result is merged into the UI within 100ms
+        // of the worker thread setting the ready flag. Cost is negligible: each
+        // tick is a swap + branch on five atomics with nothing to do most ticks.
         timer.start(
             slint::TimerMode::Repeated,
-            Duration::from_millis(350),
+            Duration::from_millis(100),
             move || {
                 let thumb_fired = ready_flag.swap(false, Ordering::AcqRel);
                 let git_fired = git_ready.swap(false, Ordering::AcqRel);
@@ -11328,14 +12177,45 @@ fn start_native_drag(ui: &MainWindow) {
     }
 }
 
-fn configure_native_window(ui: &MainWindow) {
+fn configure_native_window(ui: &MainWindow, settings: &NativeSettings) {
     use i_slint_backend_winit::WinitWindowAccessor;
-    use i_slint_backend_winit::winit::dpi::LogicalSize;
+    use i_slint_backend_winit::winit::dpi::{LogicalPosition, LogicalSize};
 
     ui.window().with_winit_window(|window| {
         window.set_resizable(true);
         window.set_min_inner_size(Some(LogicalSize::new(900.0, 600.0)));
         window.set_max_inner_size::<LogicalSize<f64>>(None);
+
+        if settings.window_maximized {
+            window.set_maximized(true);
+        } else if settings.window_w > 0 {
+            let _ = window.request_inner_size(LogicalSize::new(
+                settings.window_w as f64,
+                settings.window_h as f64,
+            ));
+            if settings.window_x != i32::MIN {
+                // Clamp y so the title bar is never hidden behind the screen top edge.
+                let safe_y = (settings.window_y as f64).max(30.0);
+                let safe_x = (settings.window_x as f64).max(0.0);
+                window.set_outer_position(LogicalPosition::new(safe_x, safe_y));
+            }
+        } else {
+            // First launch: 80% of the monitor's logical area, centered with top margin.
+            if let Some(monitor) = window.current_monitor() {
+                let scale = monitor.scale_factor();
+                let phys = monitor.size();
+                let log_w = phys.width as f64 / scale;
+                let log_h = phys.height as f64 / scale;
+                let target_w = (log_w * 0.80).max(900.0).min(1600.0);
+                // Reserve ~10% of height for taskbar; clamp to safe range.
+                let target_h = ((log_h - 80.0) * 0.82).max(600.0).min(1000.0);
+                let _ = window.request_inner_size(LogicalSize::new(target_w, target_h));
+                // Center horizontally; push down 40px from top so title bar is always visible.
+                let cx = ((log_w - target_w) / 2.0).max(0.0);
+                let cy = 40.0_f64.max((log_h - target_h) / 2.0 - 40.0);
+                window.set_outer_position(LogicalPosition::new(cx, cy));
+            }
+        }
     });
 }
 
@@ -11667,6 +12547,84 @@ fn install_mouse_nav(ui: &MainWindow) {
 #[cfg(not(target_os = "windows"))]
 fn install_mouse_nav(_ui: &MainWindow) {}
 
+// Determine which folder a drop should land in, based on the screen-space
+// drop point. In dual-pane mode the cursor side picks the pane (primary if
+// the drop is left of the splitter, otherwise secondary). In single-pane
+// mode it always returns the active directory.
+//
+// `screen_x`/`screen_y` are raw screen pixels from IDropTarget::Drop.
+// We convert to client pixels via ScreenToClient, then to Slint logical
+// pixels by dividing by the window's scale factor.
+#[cfg(target_os = "windows")]
+fn pick_drop_destination(
+    ui: &MainWindow,
+    ctrl: &NativeController,
+    hwnd: windows::Win32::Foundation::HWND,
+    screen_x: i32,
+    screen_y: i32,
+) -> String {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+
+    let dual = ui.get_dual_pane();
+    if !dual {
+        return ctrl.current_path.clone();
+    }
+
+    let mut p = POINT { x: screen_x, y: screen_y };
+    unsafe { let _ = ScreenToClient(hwnd, &mut p); }
+    let scale = ui.window().scale_factor().max(0.1);
+    let logical_x = (p.x as f32) / scale;
+
+    // In Slint coords: sidebar is at left, then main content starts at sidebar_w.
+    // primary_pane_w spans sidebar_w..sidebar_w + primary_pane_w.
+    let sidebar_w = ui.get_sidebar_w();
+    let primary_w = ui.get_primary_pane_w();
+    let splitter_w = ui.get_pane_splitter_w();
+    let primary_right_edge = sidebar_w + primary_w + splitter_w / 2.0;
+
+    if logical_x < primary_right_edge {
+        ctrl.current_path.clone()
+    } else if !ctrl.secondary_path.is_empty() {
+        ctrl.secondary_path.clone()
+    } else {
+        ctrl.current_path.clone()
+    }
+}
+
+// Fallback HWND lookup: enumerate all top-level windows owned by the current
+// thread and return the first visible one. Used when `with_winit_window`
+// returns silently (e.g. timing race during deferred IDropTarget registration).
+#[cfg(target_os = "windows")]
+fn find_pathfinder_hwnd() -> Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{EnumThreadWindows, IsWindowVisible};
+    use windows::core::BOOL;
+
+    struct Found(Option<HWND>);
+    let mut found = Found(None);
+
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        unsafe {
+            if IsWindowVisible(hwnd).as_bool() {
+                let found = &mut *(lparam.0 as *mut Found);
+                if found.0.is_none() {
+                    found.0 = Some(hwnd);
+                    return BOOL(0); // stop enumeration
+                }
+            }
+            BOOL(1)
+        }
+    }
+
+    unsafe {
+        let tid = GetCurrentThreadId();
+        let _ = EnumThreadWindows(tid, Some(cb), LPARAM(&mut found as *mut _ as isize));
+    }
+    found.0
+}
+
 pub fn run() {
     // COM must be initialised on the main thread before any shell APIs are used.
     #[cfg(target_os = "windows")]
@@ -11679,8 +12637,9 @@ pub fn run() {
         i_slint_backend_winit::Backend::new().expect("failed to create Slint winit backend"),
     ));
 
+    let initial_settings: NativeSettings = read_native_json("settings.json", NativeSettings::default());
     let ui = MainWindow::new().expect("failed to create Pathfinder window");
-    configure_native_window(&ui);
+    configure_native_window(&ui, &initial_settings);
     let controller = Rc::new(RefCell::new(NativeController::new()));
     controller.borrow_mut().initialize_ui(&ui);
     wire_native_callbacks(&ui, controller.clone());
@@ -11697,8 +12656,151 @@ pub fn run() {
         });
     });
 
+    // Check for updates silently in background 4 seconds after startup
+    let update_checks_enabled = controller.borrow().settings.update_checks_enabled;
+    let weak_ui_upd = ui.as_weak();
+    std::thread::spawn(move || {
+        if !update_checks_enabled {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        if let Ok(result) = check_github_release_now() {
+            if result.available {
+                let ver = SharedString::from(result.latest_version.clone());
+                let dl = SharedString::from(result.download_url.clone());
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak_ui_upd.upgrade() {
+                        ui.set_update_available(true);
+                        ui.set_update_version(ver);
+                        ui.set_update_download_url(dl);
+                    }
+                });
+            }
+        }
+    });
+
     ui.show().expect("failed to show Pathfinder window");
     apply_mica(&ui);
     install_mouse_nav(&ui);
+
+    // Register IDropTarget so files dropped from Explorer land in the current folder.
+    //
+    // We DEFER this via a one-shot Slint Timer because calling `with_winit_window`
+    // synchronously right after `ui.show()` returns silently — the winit Window
+    // object isn't fully reachable through Slint's accessor until the event loop
+    // has pumped at least one tick. The Timer callback runs on the UI thread
+    // (no Send bound), so we can pass our Rc<RefCell<NativeController>> in.
+    #[cfg(target_os = "windows")]
+    {
+        let weak_drop = ui.as_weak();
+        let c_drop = controller.clone();
+        let drop_register_timer = Box::new(slint::Timer::default());
+        drop_register_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(150),
+            move || {
+                use i_slint_backend_winit::WinitWindowAccessor;
+                use i_slint_backend_winit::winit::raw_window_handle::{
+                    HasWindowHandle, RawWindowHandle,
+                };
+                use windows::Win32::Foundation::HWND;
+
+                eprintln!("[file_drag] deferred registration starting");
+                let Some(ui) = weak_drop.upgrade() else {
+                    eprintln!("[file_drag] UI gone before registration");
+                    return;
+                };
+                let weak_inner = ui.as_weak();
+                let c_inner = c_drop.clone();
+                let result = ui.window().with_winit_window(|window| {
+                    let handle = match window.window_handle() {
+                        Ok(h) => h,
+                        Err(e) => {
+                            eprintln!("[file_drag] window_handle err: {:?}", e);
+                            return None;
+                        }
+                    };
+                    let h = match handle.as_raw() {
+                        RawWindowHandle::Win32(h) => h,
+                        other => {
+                            eprintln!("[file_drag] unexpected handle: {:?}", other);
+                            return None;
+                        }
+                    };
+                    let hwnd = HWND(h.hwnd.get() as *mut core::ffi::c_void);
+                    eprintln!("[file_drag] got HWND from winit: {:?}", hwnd.0);
+                    Some(hwnd)
+                });
+                let hwnd_opt = result.flatten().or_else(|| {
+                    eprintln!("[file_drag] with_winit_window failed; using fallback");
+                    find_pathfinder_hwnd()
+                });
+                let Some(hwnd) = hwnd_opt else {
+                    eprintln!("[file_drag] could not find HWND, drop target disabled");
+                    return;
+                };
+                // Highlight the destination pane while dragging — fires every
+                // DragOver tick on the UI thread (IDropTarget runs in our STA).
+                let weak_hover = ui.as_weak();
+                file_drag::register_drag_over_handler(move |is_active, screen_x, screen_y| {
+                    let Some(ui) = weak_hover.upgrade() else { return; };
+                    if !is_active {
+                        ui.set_drag_over_pane(SharedString::from(""));
+                        return;
+                    }
+                    if !ui.get_dual_pane() {
+                        return;
+                    }
+                    use windows::Win32::Foundation::POINT;
+                    use windows::Win32::Graphics::Gdi::ScreenToClient;
+                    let mut p = POINT { x: screen_x, y: screen_y };
+                    unsafe { let _ = ScreenToClient(hwnd, &mut p); }
+                    let scale = ui.window().scale_factor().max(0.1);
+                    let logical_x = (p.x as f32) / scale;
+                    let primary_right_edge = ui.get_sidebar_w()
+                        + ui.get_primary_pane_w()
+                        + ui.get_pane_splitter_w() / 2.0;
+                    let pane = if logical_x < primary_right_edge { "primary" } else { "secondary" };
+                    ui.set_drag_over_pane(SharedString::from(pane));
+                });
+
+                if let Some(dt) = file_drag::register_drop_target(
+                    hwnd,
+                    move |paths, is_move, screen_x, screen_y| {
+                        if let Some(ui) = weak_inner.upgrade() {
+                            ui.set_drag_over_pane(SharedString::from(""));
+                            // Determine destination pane from drop coordinates.
+                            // ScreenToClient gives raw client pixels; Slint uses
+                            // logical (DPI-scaled) units for its pane widths.
+                            let dest_dir = pick_drop_destination(
+                                &ui,
+                                &c_inner.borrow(),
+                                hwnd,
+                                screen_x,
+                                screen_y,
+                            );
+                            eprintln!(
+                                "[file_drag] dropping {} item(s) into '{}' (move={})",
+                                paths.len(),
+                                dest_dir,
+                                is_move
+                            );
+                            c_inner
+                                .borrow_mut()
+                                .drop_files_from_drag(&ui, paths, is_move, dest_dir);
+                        }
+                    },
+                ) {
+                    std::mem::forget(dt);
+                    eprintln!("[file_drag] drop target installed");
+                } else {
+                    eprintln!("[file_drag] register_drop_target returned None");
+                }
+            },
+        );
+        // Leak so the Timer stays alive long enough to fire.
+        Box::leak(drop_register_timer);
+    }
+
     slint::run_event_loop().expect("error while running Slint event loop");
 }

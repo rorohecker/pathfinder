@@ -47,7 +47,7 @@ pub struct PinningResult {
 // ============================================================================
 
 fn win32_clipboard_copy(text: &str) -> Result<(), String> {
-    use windows::Win32::Foundation::{HANDLE, HWND};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
@@ -65,13 +65,13 @@ fn win32_clipboard_copy(text: &str) -> Result<(), String> {
         std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
         let _ = GlobalUnlock(hmem);
 
-        OpenClipboard(HWND(std::ptr::null_mut())).map_err(|e| e.to_string())?;
+        OpenClipboard(None).map_err(|e| e.to_string())?;
         if let Err(e) = EmptyClipboard() {
             let _ = CloseClipboard();
             return Err(e.to_string());
         }
         const CF_UNICODETEXT: u32 = 13;
-        if let Err(e) = SetClipboardData(CF_UNICODETEXT, HANDLE(hmem.0)) {
+        if let Err(e) = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0))) {
             let _ = CloseClipboard();
             return Err(e.to_string());
         }

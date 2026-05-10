@@ -1,4 +1,13 @@
 fn main() {
-    slint_build::compile("ui/main.slint").expect("failed to compile Slint UI");
+    // Embed Press Start 2P (OFL) so the Retro theme can use a true pixel-arcade font
+    // even on machines that don't have an arcade-style font installed.
+    slint_build::compile_with_config(
+        "ui/main.slint",
+        slint_build::CompilerConfiguration::new().embed_resources(
+            slint_build::EmbedResourcesKind::EmbedFiles,
+        ),
+    )
+    .expect("failed to compile Slint UI");
+    println!("cargo:rerun-if-changed=ui/fonts/PressStart2P-Regular.ttf");
     tauri_build::build()
 }

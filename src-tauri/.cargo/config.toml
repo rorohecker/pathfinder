@@ -1,0 +1,5 @@
+# Use rust-lld for linking on Windows. Bundled with rustup, much faster than link.exe
+# (the default MSVC linker), especially for large dependency graphs like this one.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+rustflags = ["-C", "link-arg=/STACK:8388608"]
