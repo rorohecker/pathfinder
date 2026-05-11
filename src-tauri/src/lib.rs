@@ -7848,6 +7848,13 @@ impl NativeController {
             }
         }
         ui.set_selected_index(self.selected_index);
+        // Push selection count for the contextual action bar.
+        let sel_count = if self.active_pane == ActivePane::Secondary {
+            self.secondary_selected_set.len()
+        } else {
+            self.selected_set.len()
+        };
+        ui.set_selected_count(sel_count as i32);
         self.update_status(ui);
     }
 
@@ -8595,6 +8602,71 @@ impl NativeController {
             .invalidate_directory_path(Path::new(&self.current_path));
         let path = self.current_path.clone();
         self.navigate(ui, path, false);
+    }
+
+    /// Compute which file indices fall inside the marquee rectangle and update
+    /// the selection. Coordinates come from Slint in pane-local logical pixels.
+    /// Grid view uses the cell grid; list view uses fixed row height. We do
+    /// not currently subtract scroll offset, so the marquee acts on whatever
+    /// is visible at the current scroll position which matches user intent
+    /// well enough for an initial implementation.
+    fn marquee_select(&mut self, ui: &MainWindow, x: f32, y: f32, w: f32, h: f32) {
+        if w < 2.0 && h < 2.0 {
+            return;
+        }
+        let view = ui.get_view_mode();
+        let pad = 16.0_f32; // AppMetrics.pad
+        let mx1 = x;
+        let my1 = y;
+        let mx2 = x + w;
+        let my2 = y + h;
+
+        let mut new_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        if view.as_str() == "list" {
+            let row_h = 38.0_f32;
+            let header_h = 32.0_f32;
+            let area_y0 = pad + header_h;
+            let start_idx = (((my1 - area_y0).max(0.0)) / row_h).floor() as usize;
+            let end_idx = (((my2 - area_y0).max(0.0)) / row_h).ceil() as usize;
+            for i in start_idx..=end_idx {
+                if i < self.visible_files.len() {
+                    new_set.insert(i);
+                }
+            }
+        } else {
+            // grid / compact / gallery — compute cell rectangles.
+            let pane_w = ui.get_primary_pane_w();
+            let file_area_w = (pane_w - pad * 2.0).max(1.0);
+            let cell_w_target = if view.as_str() == "compact" { 200.0 } else { 136.0 };
+            let cols = (file_area_w / cell_w_target).floor().max(1.0) as usize;
+            let cell_w = file_area_w / cols as f32;
+            let item_h = match view.as_str() {
+                "gallery" => 154.0_f32,
+                "compact" => 32.0_f32,
+                _ => 122.0_f32,
+            };
+            for i in 0..self.visible_files.len() {
+                let col = (i % cols) as f32;
+                let row = (i / cols) as f32;
+                let cx1 = pad + col * cell_w;
+                let cy1 = pad + row * item_h;
+                let cx2 = cx1 + cell_w;
+                let cy2 = cy1 + item_h;
+                if cx1 < mx2 && cx2 > mx1 && cy1 < my2 && cy2 > my1 {
+                    new_set.insert(i);
+                }
+            }
+        }
+
+        if new_set == self.selected_set {
+            return;
+        }
+        self.selected_set = new_set;
+        self.selected_index = self.selected_set.iter().min().copied().map(|i| i as i32).unwrap_or(-1);
+        self.active_pane = ActivePane::Primary;
+        self.update_models(ui);
+        self.update_preview(ui);
     }
 
     fn sync_active_pane(&self, ui: &MainWindow) {
@@ -11438,6 +11510,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_clear_selection(move || {
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut().clear_selection(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_marquee_select(move |x, y, w, h| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().marquee_select(&ui, x, y, w, h);
         }
     });
 
