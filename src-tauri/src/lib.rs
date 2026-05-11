@@ -7357,8 +7357,8 @@ impl NativeController {
                 vec![SessionTab {
                     path: String::new(),
                     view: "grid".to_string(),
-                    sort_by: "name".to_string(),
-                    sort_dir: "asc".to_string(),
+                    sort_by: "modified".to_string(),
+                    sort_dir: "desc".to_string(),
                 }]
             } else {
                 tabs
@@ -7383,8 +7383,8 @@ impl NativeController {
             secondary_path: current_path.clone(),
             secondary_history: vec![current_path.clone()],
             secondary_history_pos: 0,
-            secondary_sort_by: "name".to_string(),
-            secondary_sort_dir: "asc".to_string(),
+            secondary_sort_by: "modified".to_string(),
+            secondary_sort_dir: "desc".to_string(),
             secondary_files: Vec::new(),
             secondary_visible_files: Vec::new(),
             secondary_selected_index: -1,
@@ -7409,8 +7409,11 @@ impl NativeController {
             },
             clipboard: None,
             pending_prompt: None,
-            sort_by: "name".to_string(),
-            sort_dir: "asc".to_string(),
+            // Default sort: most recently modified first. Matches what most
+            // people actually want when they open a folder — see the newest
+            // download / latest screenshot / freshly built artifact.
+            sort_by: "modified".to_string(),
+            sort_dir: "desc".to_string(),
             thumbnail_memory: HashMap::new(),
             thumbnail_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             thumbnail_timer: None,
@@ -7746,6 +7749,14 @@ impl NativeController {
             .filter_map(|i| self.visible_files.get(i))
             .map(|entry| entry.path.clone())
             .collect()
+    }
+
+    fn active_path_is_recycle_bin(&self) -> bool {
+        if self.active_pane == ActivePane::Secondary {
+            self.secondary_path == "recycle://"
+        } else {
+            self.current_path == "recycle://"
+        }
     }
 
     fn apply_sort(&mut self) {
@@ -9670,6 +9681,7 @@ impl NativeController {
                 }
             }
             "rename" => self.prompt_rename(ui),
+            "delete" if self.active_path_is_recycle_bin() => self.purge_from_recycle_bin(ui),
             "delete" => self.prompt_delete(ui),
             "new-folder" => self.prompt_new_folder(ui),
             "new-file" => self.prompt_new_file(ui),
