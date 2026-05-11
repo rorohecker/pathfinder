@@ -32,6 +32,8 @@ mod windows_integration;
 
 #[cfg(target_os = "windows")]
 mod file_drag;
+#[cfg(target_os = "windows")]
+mod file_icons;
 
 slint::include_modules!();
 
@@ -924,6 +926,27 @@ impl AppState {
             }
         }
         id
+    }
+
+    /// Update the running totals on a queue entry so the UI can show a live
+    /// progress bar during long compress / extract runs. Safe to call as
+    /// often as you like — the lock contention is tiny because the queue
+    /// is a short VecDeque and the call is non-blocking on failure.
+    fn queue_progress(&self, id: u64, bytes_done: u64, started: Instant) {
+        if let Ok(mut queue) = self.operation_queue.lock() {
+            if let Some(item) = queue.iter_mut().find(|i| i.id == id) {
+                item.bytes_done = bytes_done;
+                let elapsed = started.elapsed().as_secs_f64();
+                if elapsed > 0.05 {
+                    let bps = bytes_done as f64 / elapsed;
+                    item.speed_bps = bps as u64;
+                    if item.bytes_total > bytes_done && bps > 1.0 {
+                        let remaining = item.bytes_total - bytes_done;
+                        item.eta_secs = Some((remaining as f64 / bps) as u64);
+                    }
+                }
+            }
+        }
     }
 
     fn queue_finish(
@@ -3552,6 +3575,7 @@ fn extract_zip_archive(
         total,
     );
     let started = Instant::now();
+    let mut bytes_done: u64 = 0;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
@@ -3588,7 +3612,18 @@ fn extract_zip_archive(
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
             let mut outfile = File::create(&out).map_err(|e| e.to_string())?;
-            io::copy(&mut entry, &mut outfile).map_err(|e| e.to_string())?;
+            // Stream so the queue progress reflects extraction throughput.
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = match entry.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) => return Err(e.to_string()),
+                };
+                outfile.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+                bytes_done = bytes_done.saturating_add(n as u64);
+                state.queue_progress(op_id, bytes_done, started);
+            }
         }
     }
 
@@ -3687,6 +3722,10 @@ fn create_zip_archive_impl(state: &AppState, paths: &[String], dest: &Path) -> R
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
+    // Track bytes written across all files so the queue progress reflects
+    // the entire archive operation, not just the current file.
+    let mut bytes_done: u64 = 0;
+
     for p in paths {
         let src = PathBuf::from(p);
         let name = src
@@ -3709,20 +3748,49 @@ fn create_zip_archive_impl(state: &AppState, paths: &[String], dest: &Path) -> R
                 } else {
                     zip.start_file(&entry_name, opts)
                         .map_err(|e| e.to_string())?;
-                    let mut f = File::open(entry.path()).map_err(|e| e.to_string())?;
-                    io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
+                    let f = File::open(entry.path()).map_err(|e| e.to_string())?;
+                    let copied = copy_with_progress(f, &mut zip, state, op_id, &mut bytes_done, started)?;
+                    let _ = copied;
                 }
             }
         } else {
             zip.start_file(&name, opts).map_err(|e| e.to_string())?;
-            let mut f = File::open(&src).map_err(|e| e.to_string())?;
-            io::copy(&mut f, &mut zip).map_err(|e| e.to_string())?;
+            let f = File::open(&src).map_err(|e| e.to_string())?;
+            let copied = copy_with_progress(f, &mut zip, state, op_id, &mut bytes_done, started)?;
+            let _ = copied;
         }
     }
     zip.finish().map_err(|e| e.to_string())?;
     state.invalidate_path(dest);
     state.queue_finish(op_id, "done", "Archive created", total, started.elapsed());
     Ok(())
+}
+
+/// Stream bytes from a reader into a writer in 64 KB chunks, pushing live
+/// progress into the operation queue after each chunk. Returns the number
+/// of bytes copied.
+fn copy_with_progress<R: io::Read, W: io::Write>(
+    mut reader: R,
+    writer: &mut W,
+    state: &AppState,
+    op_id: u64,
+    running_total: &mut u64,
+    started: Instant,
+) -> Result<u64, String> {
+    let mut buf = [0u8; 64 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => return Err(e.to_string()),
+        };
+        writer.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        total += n as u64;
+        *running_total += n as u64;
+        state.queue_progress(op_id, *running_total, started);
+    }
+    Ok(total)
 }
 
 fn create_archive_impl(state: &AppState, paths: &[String], dest: &str) -> Result<(), String> {
@@ -3732,6 +3800,50 @@ fn create_archive_impl(state: &AppState, paths: &[String], dest: &str) -> Result
     }
     let ext = archive_format_from_path(&dst);
     if ext == "zip" {
+        // Prefer 7-Zip for ZIP creation when present. It uses SIMD-optimized
+        // deflate and is typically 2 to 3 times faster than the pure-Rust
+        // zip crate on large inputs. Fall back to the internal implementation
+        // when 7-Zip is unavailable so we never block creation.
+        if let Some(seven_zip) = find_7z() {
+            let total = paths
+                .iter()
+                .map(|path| folder_size_quick(Path::new(path), 25_000))
+                .sum();
+            let op_id = state.queue_start("archive", "", Some(&dst.to_string_lossy()), total);
+            let started = Instant::now();
+            let mut command = ProcessCommand::new(seven_zip);
+            command
+                .arg("a")
+                .arg("-tzip")
+                // Mid-tier compression (-mx=5) balances speed and ratio. Use
+                // multi-thread deflate when 7-Zip supports it (-mmt=on).
+                .arg("-mx=5")
+                .arg("-mmt=on")
+                .arg(&dst);
+            for path in paths {
+                command.arg(path);
+            }
+            command.no_window();
+            match command.output() {
+                Ok(output) if output.status.success() => {
+                    state.invalidate_path(&dst);
+                    state.queue_finish(op_id, "done", "Archive created", total, started.elapsed());
+                    return Ok(());
+                }
+                Ok(output) => {
+                    // 7-Zip ran but failed (corrupt input, permission, etc.).
+                    // Surface that error rather than silently falling back.
+                    let error = String::from_utf8_lossy(&output.stderr).to_string();
+                    state.queue_finish(op_id, "failed", error.clone(), 0, started.elapsed());
+                    return Err(error);
+                }
+                Err(_) => {
+                    // 7-Zip binary disappeared between find_7z() and exec.
+                    // Fall through to the internal zip writer below.
+                    state.queue_finish(op_id, "failed", "7-Zip launch failed".to_string(), 0, started.elapsed());
+                }
+            }
+        }
         return create_zip_archive_impl(state, paths, &dst);
     }
 
@@ -4522,6 +4634,13 @@ struct NativeController {
     // extension (desktop.ini, thumbs.ini, etc.) are filtered out of
     // visible_files in apply_filter. Toggled from the UI show-hidden control.
     show_hidden: bool,
+    // Shell-extracted system icons. Per-extension covers the common case
+    // (every .docx shares one icon). Per-path is used for .exe / .lnk /
+    // .ico / .msi where each file may carry its own embedded icon.
+    #[cfg(target_os = "windows")]
+    system_icon_by_ext: HashMap<String, slint::Image>,
+    #[cfg(target_os = "windows")]
+    system_icon_by_path: HashMap<String, slint::Image>,
     tags: HashMap<String, String>,
     tag_labels: HashMap<String, String>,
     notes: HashMap<String, String>,
@@ -7254,6 +7373,10 @@ impl NativeController {
             ),
             folder_views: read_native_json("folder_views.json", HashMap::new()),
             show_hidden: false,
+            #[cfg(target_os = "windows")]
+            system_icon_by_ext: HashMap::new(),
+            #[cfg(target_os = "windows")]
+            system_icon_by_path: HashMap::new(),
             tags: read_native_json("tags.json", HashMap::new()),
             tag_labels: read_native_json("tag_labels.json", HashMap::new()),
             notes: read_native_json("notes.json", HashMap::new()),
@@ -7793,6 +7916,12 @@ impl NativeController {
     }
 
     fn update_models(&mut self, ui: &MainWindow) {
+        // Populate the shell-icon cache for visible entries. Per-extension
+        // entries are cheap (one SHGetFileInfo per extension regardless of
+        // file count). Per-path entries are reserved for .exe / .lnk / .ico
+        // / .msi where the file body carries an embedded icon.
+        #[cfg(target_os = "windows")]
+        self.populate_system_icons(64);
         // Pre-load any thumbnails that are cached on disk but not yet in memory
         if ui.get_view_mode() != "list" {
             for entry in self.visible_files.iter().take(32) {
@@ -7888,6 +8017,57 @@ impl NativeController {
         self.update_status(ui);
     }
 
+    /// Pull system icons for the first `max_entries` visible files. Per-path
+    /// extraction is reserved for executables and shortcuts since those carry
+    /// unique embedded icons. Everything else falls back to a per-extension
+    /// probe (a single SHGetFileInfo call with USEFILEATTRIBUTES is enough
+    /// to get the registered type icon without touching the disk).
+    #[cfg(target_os = "windows")]
+    fn populate_system_icons(&mut self, max_entries: usize) {
+        let mut needed_extensions: Vec<String> = Vec::new();
+        let mut needed_paths: Vec<String> = Vec::new();
+        for entry in self.visible_files.iter().take(max_entries) {
+            if entry.kind == FileKind::Directory {
+                continue;
+            }
+            let ext = entry
+                .extension
+                .as_deref()
+                .map(|e| e.to_ascii_lowercase())
+                .unwrap_or_default();
+            let is_per_path = matches!(ext.as_str(), "exe" | "lnk" | "ico" | "msi");
+            if is_per_path {
+                if !self.system_icon_by_path.contains_key(&entry.path) {
+                    needed_paths.push(entry.path.clone());
+                }
+            } else if !ext.is_empty() && !self.system_icon_by_ext.contains_key(&ext) {
+                if !needed_extensions.iter().any(|e| e == &ext) {
+                    needed_extensions.push(ext);
+                }
+            }
+        }
+        for ext in needed_extensions {
+            // A synthetic name like `_pathfinder_probe.docx` plus
+            // USEFILEATTRIBUTES makes the shell return the registered icon
+            // for that extension without touching the disk.
+            let probe = format!("_pathfinder_probe.{ext}");
+            if let Some(img) = file_icons::extract_icon_rgba(&probe, false) {
+                self.system_icon_by_ext.insert(ext, img);
+            }
+        }
+        for path in needed_paths {
+            if let Some(img) = file_icons::icon_for(&path) {
+                self.system_icon_by_path.insert(path, img);
+            }
+            // Cap path-keyed cache at 512 entries to bound memory.
+            if self.system_icon_by_path.len() > 512 {
+                if let Some(k) = self.system_icon_by_path.keys().next().cloned() {
+                    self.system_icon_by_path.remove(&k);
+                }
+            }
+        }
+    }
+
     fn file_item(&self, entry: &FileEntry, selected: bool) -> FileItem {
         let in_recycle = self.current_path == "recycle://";
         let tag_id = self.tags.get(&entry.path).cloned().unwrap_or_default();
@@ -7897,6 +8077,31 @@ impl NativeController {
             .get(&entry.path)
             .map(|img| (true, img.clone()))
             .unwrap_or((false, slint::Image::default()));
+
+        // System icon: prefer a per-path icon when available (.exe / .lnk /
+        // .ico / .msi), otherwise fall back to a per-extension cache.
+        #[cfg(target_os = "windows")]
+        let (has_system_icon, system_icon) = if entry.kind == FileKind::Directory {
+            (false, slint::Image::default())
+        } else {
+            let path_icon = self.system_icon_by_path.get(&entry.path);
+            if let Some(img) = path_icon {
+                (true, img.clone())
+            } else {
+                let ext_lower = entry
+                    .extension
+                    .as_deref()
+                    .map(|e| e.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if let Some(img) = self.system_icon_by_ext.get(&ext_lower) {
+                    (true, img.clone())
+                } else {
+                    (false, slint::Image::default())
+                }
+            }
+        };
+        #[cfg(not(target_os = "windows"))]
+        let (has_system_icon, system_icon) = (false, slint::Image::default());
         FileItem {
             name: ss(&entry.name),
             file_path: ss(&entry.path),
@@ -7935,6 +8140,8 @@ impl NativeController {
             is_selected: selected,
             has_thumbnail,
             thumbnail,
+            has_system_icon,
+            system_icon,
         }
     }
 
@@ -11889,6 +12096,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let pending_git = controller.borrow().pending_git_status.clone();
         let op_ready = controller.borrow().operation_ready.clone();
         let pending_op = controller.borrow().pending_operation_result.clone();
+        let op_queue_for_progress = controller.borrow().app_state.operation_queue.clone();
         let dir_ready = controller.borrow().directory_ready.clone();
         let pending_dir = controller.borrow().pending_directory_result.clone();
         let search_ready = controller.borrow().search_ready.clone();
@@ -11905,6 +12113,28 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let thumb_fired = ready_flag.swap(false, Ordering::AcqRel);
                 let git_fired = git_ready.swap(false, Ordering::AcqRel);
                 let op_fired = op_ready.swap(false, Ordering::AcqRel);
+
+                // Push live progress for any currently running archive op into
+                // the op drawer. Cheap: at most one entry will be "running" at
+                // a time during a manual compress / extract action.
+                if let Some(ui) = weak.upgrade() {
+                    if ui.get_op_drawer_visible() {
+                        if let Ok(queue) = op_queue_for_progress.lock() {
+                            if let Some(running) = queue.iter().rev().find(|it| {
+                                (it.kind == "archive" || it.kind == "extract")
+                                    && it.status == "running"
+                            }) {
+                                let frac = if running.bytes_total > 0 {
+                                    (running.bytes_done as f64 / running.bytes_total as f64)
+                                        .clamp(0.0, 1.0) as f32
+                                } else {
+                                    -1.0
+                                };
+                                ui.set_op_drawer_progress(frac);
+                            }
+                        }
+                    }
+                }
                 let dir_fired = dir_ready.swap(false, Ordering::AcqRel);
                 let search_fired = search_ready.swap(false, Ordering::AcqRel);
                 if git_fired {

@@ -20,6 +20,12 @@ export struct FileItem {
     is_selected: bool,
     has_thumbnail: bool,
     thumbnail: image,
+    // System-extracted icon (the file's actual shell icon — .exe embedded
+    // icons, .lnk targets, type associations for .docx / .pdf / etc.).
+    // When non-empty (width > 0), NodeVisual draws this instead of the
+    // procedural file glyph so executables and document types look correct.
+    has_system_icon: bool,
+    system_icon: image,
 }
 
 export struct SideItem {
@@ -452,8 +458,21 @@ component NodeVisual {
         Rectangle { x: parent.width*0.34; y: parent.height*0.30; width: parent.width*0.32; height: parent.height*0.40; border-radius: 1px; background: #1a0440; border-width: 1px; border-color: #00fff2; }
     }
 
-    // ── FILE ICON (same for all themes) ──────────────────────────────────
-    if !root.is_dir: Rectangle {
+    // ── SHELL-EXTRACTED ICON (replaces procedural icon when available) ───
+    // Used for .exe (embedded icons), .lnk (target icon), and registered
+    // file types like .docx/.pdf/.xlsx where the shell knows the brand icon.
+    in property <image> system_icon;
+    in property <bool> has_system_icon: false;
+    if !root.is_dir && root.has_system_icon: Image {
+        x: 3px; y: 1px;
+        width: parent.width - 6px;
+        height: parent.height - 2px;
+        source: root.system_icon;
+        image-fit: contain;
+    }
+
+    // ── FILE ICON (same for all themes — used when no shell icon exists) ─
+    if !root.is_dir && !root.has_system_icon: Rectangle {
         x: 7px; y: 3px;
         width: parent.width - 14px;
         height: parent.height - 6px;
@@ -462,14 +481,14 @@ component NodeVisual {
         border-color: rgba(0, 0, 0, 0.08);
         background: #cfd8e8;
     }
-    if !root.is_dir: Rectangle {
+    if !root.is_dir && !root.has_system_icon: Rectangle {
         x: parent.width - 20px; y: 4px;
         width: 13px; height: 13px;
         background: ThemePalette.bg;
         border-width: 1px;
         border-color: rgba(0, 0, 0, 0.08);
     }
-    if !root.is_dir: Rectangle {
+    if !root.is_dir && !root.has_system_icon: Rectangle {
         x: 7px;
         y: parent.height - 18px;
         width: parent.width - 14px;
@@ -490,7 +509,7 @@ component NodeVisual {
     // Type-specific glyph overlay on the file body. Small vector marks that
     // make at-a-glance recognition faster than reading the extension label.
     // EXE / MSI / BAT / CMD: triangle "play" mark (executable)
-    if !root.is_dir && (root.extension == "exe" || root.extension == "msi" || root.extension == "bat" || root.extension == "cmd"): Rectangle {
+    if !root.is_dir && !root.has_system_icon && (root.extension == "exe" || root.extension == "msi" || root.extension == "bat" || root.extension == "cmd"): Rectangle {
         x: parent.width / 2 - 6px;
         y: parent.height / 2 - 9px;
         width: 12px; height: 12px;
@@ -505,7 +524,7 @@ component NodeVisual {
         Rectangle { x: 7px; y: 4px; width: 2px; height: 4px; background: #ffffff; }
     }
     // DLL / SYS: gear-like circle + cross marks (library)
-    if !root.is_dir && (root.extension == "dll" || root.extension == "sys" || root.extension == "drv" || root.extension == "lib"): Rectangle {
+    if !root.is_dir && !root.has_system_icon && (root.extension == "dll" || root.extension == "sys" || root.extension == "drv" || root.extension == "lib"): Rectangle {
         x: parent.width / 2 - 7px;
         y: parent.height / 2 - 9px;
         width: 14px; height: 14px;
@@ -519,7 +538,7 @@ component NodeVisual {
         Rectangle { x: parent.width / 2 + 2px; y: parent.height - 2px; width: 2px; height: 4px; background: #ffffff; }
     }
     // ZIP / 7Z / RAR / TAR / GZ: zipper teeth (archive)
-    if !root.is_dir && (root.extension == "zip" || root.extension == "7z" || root.extension == "rar" || root.extension == "tar" || root.extension == "gz" || root.extension == "xz"): Rectangle {
+    if !root.is_dir && !root.has_system_icon && (root.extension == "zip" || root.extension == "7z" || root.extension == "rar" || root.extension == "tar" || root.extension == "gz" || root.extension == "xz"): Rectangle {
         x: parent.width / 2 - 1px;
         y: parent.height / 2 - 10px;
         width: 2px; height: 16px;
@@ -530,7 +549,7 @@ component NodeVisual {
         Rectangle { x: -3px; y: 13px; width: 8px; height: 2px; background: #ffffff; }
     }
     // PDF: bold red corner badge stays as the colored band — also add a folded corner mark
-    if !root.is_dir && root.extension == "pdf": Rectangle {
+    if !root.is_dir && !root.has_system_icon && root.extension == "pdf": Rectangle {
         x: parent.width / 2 - 6px;
         y: parent.height / 2 - 8px;
         width: 12px; height: 12px;
@@ -547,7 +566,7 @@ component NodeVisual {
         }
     }
     // CODE: angle brackets
-    if !root.is_dir && (root.extension == "rs" || root.extension == "js" || root.extension == "ts" || root.extension == "tsx" || root.extension == "jsx" || root.extension == "py" || root.extension == "c" || root.extension == "cpp" || root.extension == "h" || root.extension == "hpp" || root.extension == "go" || root.extension == "java" || root.extension == "kt" || root.extension == "cs" || root.extension == "rb" || root.extension == "lua" || root.extension == "zig" || root.extension == "html" || root.extension == "css"): Rectangle {
+    if !root.is_dir && !root.has_system_icon && (root.extension == "rs" || root.extension == "js" || root.extension == "ts" || root.extension == "tsx" || root.extension == "jsx" || root.extension == "py" || root.extension == "c" || root.extension == "cpp" || root.extension == "h" || root.extension == "hpp" || root.extension == "go" || root.extension == "java" || root.extension == "kt" || root.extension == "cs" || root.extension == "rb" || root.extension == "lua" || root.extension == "zig" || root.extension == "html" || root.extension == "css"): Rectangle {
         x: parent.width / 2 - 8px;
         y: parent.height / 2 - 7px;
         width: 16px; height: 12px;
@@ -566,7 +585,7 @@ component NodeVisual {
         Rectangle { x: 10px; y: 9px; width: 2px; height: 2px; background: #ffffff; }
     }
     // VIDEO: play triangle
-    if !root.is_dir && (root.extension == "mp4" || root.extension == "mkv" || root.extension == "avi" || root.extension == "mov" || root.extension == "webm"): Rectangle {
+    if !root.is_dir && !root.has_system_icon && (root.extension == "mp4" || root.extension == "mkv" || root.extension == "avi" || root.extension == "mov" || root.extension == "webm"): Rectangle {
         x: parent.width / 2 - 5px;
         y: parent.height / 2 - 7px;
         width: 12px; height: 12px;
@@ -576,7 +595,7 @@ component NodeVisual {
         Rectangle { x: 6px; y: 4px; width: 2px; height: 4px; background: #ffffff; }
     }
     // AUDIO: eighth-note (eighth note simplified)
-    if !root.is_dir && (root.extension == "mp3" || root.extension == "wav" || root.extension == "flac" || root.extension == "ogg" || root.extension == "m4a" || root.extension == "aac"): Rectangle {
+    if !root.is_dir && !root.has_system_icon && (root.extension == "mp3" || root.extension == "wav" || root.extension == "flac" || root.extension == "ogg" || root.extension == "m4a" || root.extension == "aac"): Rectangle {
         x: parent.width / 2 - 6px;
         y: parent.height / 2 - 8px;
         width: 12px; height: 14px;
@@ -585,7 +604,7 @@ component NodeVisual {
         Rectangle { x: 2px; y: 8px; width: 6px; height: 4px; border-radius: 2px; background: #ffffff; }
     }
     // IMAGE: small landscape rectangle with sun
-    if !root.is_dir && (root.extension == "png" || root.extension == "jpg" || root.extension == "jpeg" || root.extension == "gif" || root.extension == "webp" || root.extension == "bmp" || root.extension == "ico" || root.extension == "tiff" || root.extension == "tif"): Rectangle {
+    if !root.is_dir && !root.has_system_icon && (root.extension == "png" || root.extension == "jpg" || root.extension == "jpeg" || root.extension == "gif" || root.extension == "webp" || root.extension == "bmp" || root.extension == "ico" || root.extension == "tiff" || root.extension == "tif"): Rectangle {
         x: parent.width / 2 - 7px;
         y: parent.height / 2 - 7px;
         width: 14px; height: 12px;
@@ -598,7 +617,7 @@ component NodeVisual {
         Rectangle { x: 9px; y: 6px; width: 4px; height: 3px; background: #ffffff; }
     }
     // DOC / DOCX / TXT / MD: text lines
-    if !root.is_dir && (root.extension == "doc" || root.extension == "docx" || root.extension == "txt" || root.extension == "md" || root.extension == "rtf" || root.extension == "odt"): Rectangle {
+    if !root.is_dir && !root.has_system_icon && (root.extension == "doc" || root.extension == "docx" || root.extension == "txt" || root.extension == "md" || root.extension == "rtf" || root.extension == "odt"): Rectangle {
         x: parent.width / 2 - 6px;
         y: parent.height / 2 - 7px;
         width: 12px; height: 12px;
@@ -609,7 +628,7 @@ component NodeVisual {
         Rectangle { x: 0; y: 10px; width: 11px; height: 1px; background: #ffffff; }
     }
     // SPREADSHEET: grid pattern
-    if !root.is_dir && (root.extension == "xls" || root.extension == "xlsx" || root.extension == "csv" || root.extension == "ods"): Rectangle {
+    if !root.is_dir && !root.has_system_icon && (root.extension == "xls" || root.extension == "xlsx" || root.extension == "csv" || root.extension == "ods"): Rectangle {
         x: parent.width / 2 - 6px;
         y: parent.height / 2 - 6px;
         width: 12px; height: 10px;
@@ -671,6 +690,8 @@ component FileRow inherits Rectangle {
             : (ThemePalette.is_dragging && root.item.is_selected ? 32px : 28px);
         is_dir: root.item.is_dir;
         extension: root.item.extension;
+        has_system_icon: root.item.has_system_icon;
+        system_icon: root.item.system_icon;
     }
 
     // List view responsive layout — three breakpoints:
@@ -793,6 +814,8 @@ component FileRow inherits Rectangle {
             : (ThemePalette.is_dragging && root.item.is_selected ? 62px : 54px);
         is_dir: root.item.is_dir;
         extension: root.item.extension;
+        has_system_icon: root.item.has_system_icon;
+        system_icon: root.item.system_icon;
     }
 
     // Grid/gallery: name as text (not renaming)
@@ -863,6 +886,8 @@ component FileRow inherits Rectangle {
         visual_height: 18px;
         is_dir: root.item.is_dir;
         extension: root.item.extension;
+        has_system_icon: root.item.has_system_icon;
+        system_icon: root.item.system_icon;
     }
 
     if root.view_mode == "compact" && !root.is_renaming: Text {
@@ -1256,6 +1281,9 @@ export component MainWindow inherits Window {
     in-out property <string> toast_kind: "info";
     in-out property <bool> op_drawer_visible: false;
     in-out property <string> op_drawer_text: "";
+    // Live progress for compress / extract operations. progress is 0.0 to 1.0;
+    // a negative value means indeterminate (show a pulsing bar instead).
+    in-out property <float> op_drawer_progress: -1;
     in-out property <[FileItem]> secondary_files;
     in-out property <string> secondary_path: "";
     in-out property <string> secondary_sort_by: "name";
@@ -3944,7 +3972,7 @@ export component MainWindow inherits Window {
         x: (parent.width - 420px) / 2;
         y: parent.height - 124px;
         width: 420px;
-        height: 52px;
+        height: 60px;
         border-width: 1px;
         border-color: ThemePalette.border_strong;
         border-radius: AppMetrics.radius;
@@ -3959,7 +3987,7 @@ export component MainWindow inherits Window {
         }
 
         SvgIcon {
-            x: 14px; y: (parent.height - 16px) / 2;
+            x: 14px; y: 12px;
             icon_size: 16px;
             data: "M12 2v4 M12 18v4 M4.93 4.93l2.83 2.83 M16.24 16.24l2.83 2.83 M2 12h4 M18 12h4 M4.93 19.07l2.83-2.83 M16.24 7.76l2.83-2.83";
             tint: ThemePalette.accent;
@@ -3967,8 +3995,9 @@ export component MainWindow inherits Window {
 
         Text {
             x: 38px;
+            y: 8px;
             width: parent.width - 74px;
-            height: parent.height;
+            height: 22px;
             text: root.op_drawer_text;
             color: ThemePalette.text;
             font-size: 12.5px;
@@ -3976,9 +4005,37 @@ export component MainWindow inherits Window {
             overflow: elide;
         }
 
+        // Progress track + fill. Determinate when progress is between 0 and 1,
+        // indeterminate (a moving 30% bar) when negative.
+        Rectangle {
+            x: 38px;
+            y: parent.height - 18px;
+            width: parent.width - 80px;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(127, 127, 127, 0.18);
+            clip: true;
+            if root.op_drawer_progress >= 0: Rectangle {
+                x: 0; y: 0;
+                width: parent.width * Math.clamp(root.op_drawer_progress, 0, 1);
+                height: parent.height;
+                border-radius: 3px;
+                background: ThemePalette.accent;
+                animate width { duration: 120ms; easing: ease-out; }
+            }
+            if root.op_drawer_progress < 0: Rectangle {
+                width: parent.width * 0.30;
+                height: parent.height;
+                border-radius: 3px;
+                background: ThemePalette.accent;
+                x: 0;
+                animate x { duration: 1200ms; easing: ease-in-out; }
+            }
+        }
+
         ToolButton {
             x: parent.width - 34px;
-            y: (parent.height - 26px) / 2;
+            y: 8px;
             button_width: 26px;
             button_height: 26px;
             icon_data: "M18 6L6 18 M6 6l12 12";
