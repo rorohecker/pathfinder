@@ -1523,7 +1523,9 @@ export component MainWindow inherits Window {
             if !root.is_simple: ListView {
                 x: 10px;
                 y: 14px;
-                width: parent.width - 20px;
+                // 14px right reserve so the sidebar scroll bar sits in its
+                // own gutter against the divider, not on top of folder labels.
+                width: parent.width - 20px - 14px;
                 height: parent.height - 28px;
                 for item[index] in root.side_items: SideRow {
                     item: item;
@@ -1535,7 +1537,9 @@ export component MainWindow inherits Window {
             if root.is_simple: ListView {
                 x: 10px;
                 y: 14px;
-                width: parent.width - 20px;
+                // 14px right reserve so the sidebar scroll bar sits in its
+                // own gutter against the divider, not on top of folder labels.
+                width: parent.width - 20px - 14px;
                 height: parent.height - 28px;
                 for item[index] in root.side_items_simple: SideRow {
                     item: item;
@@ -2532,13 +2536,14 @@ export component MainWindow inherits Window {
                     y: 48px;
                     width: parent.width;
                     height: parent.height - 48px;
-                    // Reserve 14px on the right so the scroll bar does not
-                    // overlay preview content. Matches the file area scroll
-                    // reserve elsewhere in the app.
-                    viewport-width: parent.width - 14px;
 
                     VerticalLayout {
-                        width: parent.width;
+                        // Inner content shrinks 14px so the scroll bar gets its
+                        // own gutter on the right. Setting viewport-width here
+                        // caused the renderer to draw a visible divider at the
+                        // viewport edge, so we shrink the layout instead.
+                        x: 0;
+                        width: parent.width - 14px;
                         padding: 0;
                         spacing: 0;
 
@@ -2611,6 +2616,17 @@ export component MainWindow inherits Window {
             }
         }
 
+        // Border line sits just above the status bar in its own Rectangle so
+        // it never shares pixels with the text inside the bar. Earlier this
+        // was a child of the status bar at y=0 and the rendering order meant
+        // the line could pass through glyph ascenders.
+        Rectangle {
+            x: 0;
+            y: parent.height - root.status_h - 1px;
+            width: parent.width;
+            height: 1px;
+            background: ThemePalette.border;
+        }
         // Status (single row, no overlap between left / update badge / right)
         Rectangle {
             x: 0;
@@ -2618,7 +2634,6 @@ export component MainWindow inherits Window {
             width: parent.width;
             height: root.status_h;
             background: ThemePalette.titlebar;
-            Rectangle { width: parent.width; height: 1px; background: ThemePalette.border; }
             HorizontalLayout {
                 x: 0;
                 y: 0;
@@ -3183,9 +3198,6 @@ export component MainWindow inherits Window {
                 y: 112px;
                 width: parent.width - 40px;
                 height: parent.height - 124px;
-                // 14px scroll bar reserve so settings content does not sit
-                // under the handle on tabs that overflow vertically.
-                viewport-width: parent.width - 40px - 14px;
 
                 VerticalLayout {
                     width: parent.width;
@@ -3362,7 +3374,6 @@ export component MainWindow inherits Window {
                 y: 112px;
                 width: parent.width - 40px;
                 height: parent.height - 124px;
-                viewport-width: parent.width - 40px - 14px;
 
                 VerticalLayout {
                     width: parent.width;
@@ -3825,7 +3836,6 @@ export component MainWindow inherits Window {
                 y: 112px;
                 width: parent.width - 40px;
                 height: parent.height - 124px;
-                viewport-width: parent.width - 40px - 14px;
 
                 VerticalLayout {
                     width: parent.width;

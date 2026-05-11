@@ -12803,6 +12803,25 @@ unsafe extern "system" fn mouse_nav_wnd_proc(
         HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_NCHITTEST, WM_XBUTTONDOWN,
     };
 
+    // Custom taskbar hover thumbnail so the user sees our maze logo instead
+    // of the default live window screenshot when they hover the taskbar icon.
+    // We register interest in DWMWA_HAS_ICONIC_BITMAP at startup, then DWM
+    // asks us for the bitmap by sending this message with the requested
+    // max size packed into lparam (HIWORD = width, LOWORD = height).
+    const WM_DWMSENDICONICTHUMBNAIL: u32 = 0x0323;
+    if msg == WM_DWMSENDICONICTHUMBNAIL {
+        let max_w = ((lparam.0 as u32 >> 16) & 0xFFFF) as i32;
+        let max_h = (lparam.0 as u32 & 0xFFFF) as i32;
+        unsafe {
+            if let Some(hbm) = build_taskbar_thumbnail(max_w, max_h) {
+                use windows::Win32::Graphics::Dwm::DwmSetIconicThumbnail;
+                let _ = DwmSetIconicThumbnail(hwnd, hbm, 0);
+                let _ = windows::Win32::Graphics::Gdi::DeleteObject(hbm.into());
+            }
+        }
+        return windows::Win32::Foundation::LRESULT(0);
+    }
+
     if msg == WM_NCHITTEST {
         let x = ((lparam.0 as u32 & 0xffff) as i16) as i32;
         let y = (((lparam.0 as u32 >> 16) & 0xffff) as i16) as i32;
@@ -12878,6 +12897,130 @@ unsafe extern "system" fn mouse_nav_wnd_proc(
     }
 }
 
+/// Bytes of the 256x256 maze icon embedded at compile time so we can produce
+/// a custom iconic thumbnail for the Windows taskbar hover preview without
+/// having to find the .ico file on disk at runtime.
+#[cfg(target_os = "windows")]
+const TASKBAR_THUMB_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
+
+/// Build a premultiplied-alpha 32bpp HBITMAP sized to fit within
+/// (max_w, max_h) while preserving aspect ratio, transparent margin on the
+/// shorter axis. DWM passes ownership semantics to DwmSetIconicThumbnail and
+/// we delete the HBITMAP ourselves after that call.
+#[cfg(target_os = "windows")]
+unsafe fn build_taskbar_thumbnail(
+    max_w: i32,
+    max_h: i32,
+) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{
+        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateDIBSection, DIB_RGB_COLORS, GetDC, ReleaseDC,
+    };
+
+    if max_w <= 0 || max_h <= 0 {
+        return None;
+    }
+    let img = image::load_from_memory(TASKBAR_THUMB_PNG).ok()?;
+    let rgba = img.to_rgba8();
+    let (sw, sh) = (rgba.width() as f32, rgba.height() as f32);
+    // Letterbox into the requested max box while keeping aspect.
+    let scale = (max_w as f32 / sw).min(max_h as f32 / sh).min(1.0);
+    let dw = (sw * scale).round() as u32;
+    let dh = (sh * scale).round() as u32;
+    if dw == 0 || dh == 0 {
+        return None;
+    }
+    let scaled = image::imageops::resize(
+        &rgba,
+        dw,
+        dh,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    // Build a (max_w x max_h) target buffer in BGRA premultiplied alpha so DWM
+    // composites the maze cleanly against the taskbar peek backdrop.
+    let target_w = max_w as u32;
+    let target_h = max_h as u32;
+    let mut buf = vec![0u8; (target_w * target_h * 4) as usize];
+    let off_x = ((target_w - dw) / 2) as i32;
+    let off_y = ((target_h - dh) / 2) as i32;
+    for y in 0..dh {
+        for x in 0..dw {
+            let src = scaled.get_pixel(x, y);
+            let r = src[0] as u32;
+            let g = src[1] as u32;
+            let b = src[2] as u32;
+            let a = src[3] as u32;
+            let pr = ((r * a + 127) / 255) as u8;
+            let pg = ((g * a + 127) / 255) as u8;
+            let pb = ((b * a + 127) / 255) as u8;
+            let dst_x = off_x + x as i32;
+            let dst_y = off_y + y as i32;
+            if dst_x < 0 || dst_y < 0 || dst_x >= target_w as i32 || dst_y >= target_h as i32 {
+                continue;
+            }
+            let di = ((dst_y as u32 * target_w + dst_x as u32) * 4) as usize;
+            buf[di] = pb;
+            buf[di + 1] = pg;
+            buf[di + 2] = pr;
+            buf[di + 3] = a as u8;
+        }
+    }
+
+    let mut bmi = BITMAPINFO::default();
+    bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = target_w as i32;
+    bmi.bmiHeader.biHeight = -(target_h as i32); // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB.0;
+
+    unsafe {
+        let hdc = GetDC(Some(HWND::default()));
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hbm = CreateDIBSection(
+            Some(hdc),
+            &bmi,
+            DIB_RGB_COLORS,
+            &mut bits,
+            None,
+            0,
+        )
+        .ok()?;
+        if !bits.is_null() {
+            std::ptr::copy_nonoverlapping(buf.as_ptr(), bits as *mut u8, buf.len());
+        }
+        let _ = ReleaseDC(Some(HWND::default()), hdc);
+        Some(hbm)
+    }
+}
+
+/// Tell DWM that this window has a custom iconic bitmap and force the iconic
+/// path for taskbar hover previews, so DWM asks us via WM_DWMSENDICONICTHUMBNAIL
+/// instead of showing a live screenshot of the window.
+#[cfg(target_os = "windows")]
+unsafe fn enable_taskbar_iconic_thumbnail(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
+    use windows::core::BOOL;
+    const DWMWA_FORCE_ICONIC_REPRESENTATION: i32 = 7;
+    const DWMWA_HAS_ICONIC_BITMAP: i32 = 10;
+    let enable: BOOL = BOOL(1);
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWINDOWATTRIBUTE(DWMWA_FORCE_ICONIC_REPRESENTATION),
+            &enable as *const _ as *const _,
+            std::mem::size_of::<BOOL>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWINDOWATTRIBUTE(DWMWA_HAS_ICONIC_BITMAP),
+            &enable as *const _ as *const _,
+            std::mem::size_of::<BOOL>() as u32,
+        );
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn install_mouse_nav(ui: &MainWindow) {
     use i_slint_backend_winit::WinitWindowAccessor;
@@ -12900,6 +13043,9 @@ fn install_mouse_nav(ui: &MainWindow) {
             let orig =
                 SetWindowLongPtrW(hwnd, GWLP_WNDPROC, mouse_nav_wnd_proc as *const () as isize);
             MOUSE_NAV_ORIG_PROC.store(orig, Ordering::Release);
+            // Once our WindowProc is in place, opt into the iconic thumbnail
+            // path so DWM will start asking us via WM_DWMSENDICONICTHUMBNAIL.
+            enable_taskbar_iconic_thumbnail(hwnd);
         }
     });
 }
