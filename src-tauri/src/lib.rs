@@ -4518,6 +4518,10 @@ struct NativeController {
     user_pins: Vec<UserPin>,
     recent_locations: Vec<String>,
     folder_views: HashMap<String, String>,
+    // When false, entries starting with `.` and entries with the .ini
+    // extension (desktop.ini, thumbs.ini, etc.) are filtered out of
+    // visible_files in apply_filter. Toggled from the UI show-hidden control.
+    show_hidden: bool,
     tags: HashMap<String, String>,
     tag_labels: HashMap<String, String>,
     notes: HashMap<String, String>,
@@ -7249,6 +7253,7 @@ impl NativeController {
                 12,
             ),
             folder_views: read_native_json("folder_views.json", HashMap::new()),
+            show_hidden: false,
             tags: read_native_json("tags.json", HashMap::new()),
             tag_labels: read_native_json("tag_labels.json", HashMap::new()),
             notes: read_native_json("notes.json", HashMap::new()),
@@ -7638,11 +7643,36 @@ impl NativeController {
             .retain(|e| e.name_lower.contains(&filter));
     }
 
+    /// Returns true if an entry should be hidden from view unless show_hidden
+    /// is enabled. Currently matches: names starting with `.` (Unix dotfiles
+    /// like `.git` and `.DS_Store`) and any file with the `.ini` extension
+    /// (Windows shell metadata files such as `desktop.ini` and `thumbs.ini`).
+    fn is_hidden_entry(entry: &FileEntry) -> bool {
+        if entry.name.starts_with('.') {
+            return true;
+        }
+        if entry
+            .extension
+            .as_deref()
+            .map(|e| e.eq_ignore_ascii_case("ini"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        false
+    }
+
     fn apply_filter(&mut self) {
         let query = self.search_query.trim().to_lowercase();
         self.visible_files.clear();
         if query.is_empty() {
-            self.visible_files.extend_from_slice(&self.files);
+            if self.show_hidden {
+                self.visible_files.extend_from_slice(&self.files);
+            } else {
+                self.visible_files.extend(
+                    self.files.iter().filter(|e| !Self::is_hidden_entry(e)).cloned(),
+                );
+            }
             self.apply_sort();
             self.apply_folder_filter();
             return;
@@ -7669,7 +7699,7 @@ impl NativeController {
                     "git-untracked" => self.git_for_entry(entry) == "untracked",
                     _ => false,
                 };
-                if matched {
+                if matched && (self.show_hidden || !Self::is_hidden_entry(entry)) {
                     self.visible_files.push(entry.clone());
                 }
             }
@@ -7705,7 +7735,7 @@ impl NativeController {
             } else {
                 entry.name_lower.contains(&query) || ext.contains(&query)
             };
-            if matched {
+            if matched && (self.show_hidden || !Self::is_hidden_entry(entry)) {
                 self.visible_files.push(entry.clone());
             }
         }
@@ -11641,9 +11671,18 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_toggle_hidden(move || {
         if let Some(ui) = weak.upgrade() {
-            ui.set_show_hidden(!ui.get_show_hidden());
+            let new_state = !ui.get_show_hidden();
+            ui.set_show_hidden(new_state);
+            // Push the toggle into the controller and refresh so dotfiles
+            // and .ini files appear or disappear immediately.
+            {
+                let mut ctrl = c.borrow_mut();
+                ctrl.show_hidden = new_state;
+            }
+            c.borrow_mut().refresh(&ui);
         }
     });
 
