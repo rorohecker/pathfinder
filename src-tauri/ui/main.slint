@@ -1579,7 +1579,20 @@ export component MainWindow inherits Window {
             width: parent.width - root.sidebar_w;
             height: root.toolbar_h;
             z: 11;
-            background: ThemePalette.accent_soft;
+            // Solid panel background fully covers the toolbar underneath so
+            // nav and search controls do not bleed through. An accent_soft
+            // tint Rectangle sits on top to colour the bar without exposing
+            // the items below.
+            background: ThemePalette.panel_solid;
+            Rectangle {
+                x: 0; y: 0; width: parent.width; height: parent.height;
+                background: ThemePalette.accent_soft;
+            }
+            // Block clicks so the toolbar's TouchAreas underneath cannot fire.
+            TouchArea {
+                width: parent.width; height: parent.height;
+                clicked => {}
+            }
             // Accent left edge marker
             Rectangle { x: 0; y: 0; width: 3px; height: parent.height; background: ThemePalette.accent; }
             Text {
@@ -2019,15 +2032,21 @@ export component MainWindow inherits Window {
                         }
                     }
                     moved => {
-                        if (self.pressed && self.pressed-x != self.mouse-x) {
-                            primary_pane_root.marquee_active = true;
-                            primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, self.mouse-x);
-                            primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, self.mouse-y);
-                            primary_pane_root.marquee_w = abs(self.mouse-x - primary_pane_root.marquee_start_x);
-                            primary_pane_root.marquee_h = abs(self.mouse-y - primary_pane_root.marquee_start_y);
-                            // Live update — let Rust set the selection as the rect grows.
-                            root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
-                                                primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                        if (self.pressed) {
+                            // 4px deadzone keeps a click from accidentally
+                            // triggering a 1px marquee that latches onto the
+                            // top row. Real drags pass this threshold instantly.
+                            if (abs(self.mouse-x - primary_pane_root.marquee_start_x) > 4px ||
+                                abs(self.mouse-y - primary_pane_root.marquee_start_y) > 4px) {
+                                primary_pane_root.marquee_active = true;
+                                primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, self.mouse-x);
+                                primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, self.mouse-y);
+                                primary_pane_root.marquee_w = abs(self.mouse-x - primary_pane_root.marquee_start_x);
+                                primary_pane_root.marquee_h = abs(self.mouse-y - primary_pane_root.marquee_start_y);
+                                // Live update — let Rust set the selection as the rect grows.
+                                root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                    primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                            }
                         }
                     }
                 }

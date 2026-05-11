@@ -9450,6 +9450,11 @@ impl NativeController {
         self.update_selection_in_model(ui, &changed);
         self.update_secondary_selection_in_model(&secondary_changed);
         ui.set_selected_index(-1);
+        // The contextual action bar hides itself when selected_count returns
+        // to zero. Push the new count so the X clear button and any other
+        // path that ends up here drop the bar immediately.
+        ui.set_selected_count(0);
+        self.update_status(ui);
     }
 
     fn update_secondary_models(&mut self, ui: &MainWindow) {
