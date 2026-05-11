@@ -7430,6 +7430,9 @@ impl NativeController {
     }
 
     fn initialize_ui(&mut self, ui: &MainWindow) {
+        // Surface the compiled-in package version so the Settings header can
+        // display it. Single source of truth: Cargo.toml -> CARGO_PKG_VERSION.
+        ui.set_app_version(SharedString::from(env!("CARGO_PKG_VERSION")));
         ui.set_theme_choices(choice_items(&[
             (
                 "mica-dark",

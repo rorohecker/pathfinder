@@ -1237,6 +1237,10 @@ export component MainWindow inherits Window {
     in-out property <bool> show_hidden: false;
     in-out property <bool> settings_visible: false;
     in-out property <string> settings_tab: "appearance";
+    // Application version (pulled from CARGO_PKG_VERSION at startup).
+    // Shown in the settings header as quick at-a-glance reference for
+    // bug reports and update troubleshooting.
+    in-out property <string> app_version: "";
     in-out property <bool> command_visible: false;
     in-out property <bool> context_visible: false;
     in-out property <bool> image_tools_visible: false;
@@ -3153,7 +3157,17 @@ export component MainWindow inherits Window {
             drop-shadow-color: rgba(0, 0, 0, 0.45);
             TouchArea {}
 
-            Text { x: 20px; y: 18px; width: parent.width - 80px; height: 28px; text: "Settings"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            Text { x: 20px; y: 18px; width: 120px; height: 28px; text: "Settings"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            // Version label tucked next to the heading. Reads the value the
+            // controller pushes from env!("CARGO_PKG_VERSION") at startup.
+            Text {
+                x: 110px; y: 22px; width: 200px; height: 22px;
+                text: "v" + root.app_version;
+                color: ThemePalette.text_faint;
+                font-size: 12px;
+                font-family: AppMetrics.mono_font;
+                vertical-alignment: center;
+            }
             ToolButton { x: parent.width - 46px; y: 14px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: "Close settings"; clicked => { root.settings_visible = false; } }
 
             Rectangle {
