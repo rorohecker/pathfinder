@@ -8873,8 +8873,12 @@ impl NativeController {
             }
         } else {
             // grid / compact / gallery — compute cell rectangles.
+            // The 14px reserve here mirrors the same reserve in the Slint
+            // `file_area_w` property so marquee hit testing lines up with
+            // where cells actually render.
             let pane_w = ui.get_primary_pane_w();
-            let file_area_w = (pane_w - pad * 2.0).max(1.0);
+            let scrollbar_reserve = 14.0_f32;
+            let file_area_w = (pane_w - pad * 2.0 - scrollbar_reserve).max(1.0);
             let cell_w_target = if view.as_str() == "compact" { 200.0 } else { 136.0 };
             let cols = (file_area_w / cell_w_target).floor().max(1.0) as usize;
             let cell_w = file_area_w / cols as f32;

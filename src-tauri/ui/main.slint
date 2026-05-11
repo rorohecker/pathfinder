@@ -1405,8 +1405,12 @@ export component MainWindow inherits Window {
     out property <length> pane_splitter_w: root.dual_pane ? 6px : 0px;
     out property <length> primary_pane_w: root.dual_pane ? (root.main_content_w - root.pane_splitter_w) * root.split_ratio : root.main_content_w;
     out property <length> secondary_pane_w: root.dual_pane ? root.main_content_w - root.primary_pane_w - root.pane_splitter_w : 0px;
-    property <length> file_area_w: root.primary_pane_w - AppMetrics.pad * 2;
-    property <length> secondary_file_area_w: root.secondary_pane_w - AppMetrics.pad * 2;
+    // Pane width minus padding on both sides, minus a 14px scroll bar
+    // reserve on the right. Grid and gallery views compute column count and
+    // cell width off this, so reserving here keeps the rightmost cell from
+    // sitting under the scroll bar without needing per-view tweaks.
+    property <length> file_area_w: root.primary_pane_w - AppMetrics.pad * 2 - 14px;
+    property <length> secondary_file_area_w: root.secondary_pane_w - AppMetrics.pad * 2 - 14px;
     property <int> grid_columns: Math.max(1, Math.floor(root.file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
     property <int> secondary_grid_columns: Math.max(1, Math.floor(root.secondary_file_area_w / 200px));
     property <length> grid_cell_w: root.file_area_w / root.grid_columns;
@@ -2385,7 +2389,9 @@ export component MainWindow inherits Window {
                 if root.view_mode == "list": ListHeader {
                     x: AppMetrics.pad;
                     y: 38px;
-                    width: parent.width - AppMetrics.pad * 2;
+                    // Match the ListView width below (which reserves 14px for
+                    // its scroll bar) so the column headers line up with rows.
+                    width: parent.width - AppMetrics.pad * 2 - 14px;
                     sort_by: root.secondary_sort_by;
                     sort_dir: root.secondary_sort_dir;
                     sort_col(col) => { root.secondary_sort_column(col); }
@@ -2421,7 +2427,10 @@ export component MainWindow inherits Window {
                 ListView {
                     x: AppMetrics.pad;
                     y: 38px + (root.view_mode == "list" ? 32px : AppMetrics.pad);
-                    width: parent.width - AppMetrics.pad * 2;
+                    // Reserve 14px on the right for the scroll bar — matches
+                    // the primary pane's list view so the rightmost column
+                    // and tag dot stay clear of the scroll handle.
+                    width: parent.width - AppMetrics.pad * 2 - 14px;
                     height: parent.height - 38px - (root.view_mode == "list" ? 32px : AppMetrics.pad) - AppMetrics.pad;
                     for file[index] in root.secondary_files: FileRow {
                         width: parent.width;
