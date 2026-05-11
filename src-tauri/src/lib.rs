@@ -34,6 +34,7 @@ mod windows_integration;
 mod file_drag;
 #[cfg(target_os = "windows")]
 mod file_icons;
+mod local_ai;
 
 slint::include_modules!();
 
@@ -4511,7 +4512,10 @@ impl Default for NativeSettings {
             index_mode: "low".to_string(),
             index_roots: Vec::new(),
             thumbnail_cache_limit_mb: 50,
-            update_checks_enabled: false,
+            // Auto-update check runs once at startup and lights up the green
+            // status-bar pill if a newer release is available. Default true so
+            // new installs hear about patches without having to dig into Settings.
+            update_checks_enabled: true,
             network_downloads_enabled: false,
             ui_mode: String::new(),
             window_x: i32::MIN,
@@ -4634,6 +4638,9 @@ struct NativeController {
     // extension (desktop.ini, thumbs.ini, etc.) are filtered out of
     // visible_files in apply_filter. Toggled from the UI show-hidden control.
     show_hidden: bool,
+    // Shared progress for the Local AI installer. Background thread writes,
+    // UI polling timer reads and pushes into Slint properties.
+    ai_progress: Arc<local_ai::InstallProgress>,
     // Shell-extracted system icons. Per-extension covers the common case
     // (every .docx shares one icon). Per-path is used for .exe / .lnk /
     // .ico / .msi where each file may carry its own embedded icon.
@@ -7373,6 +7380,12 @@ impl NativeController {
             ),
             folder_views: read_native_json("folder_views.json", HashMap::new()),
             show_hidden: false,
+            ai_progress: {
+                let p = Arc::new(local_ai::InstallProgress::new());
+                let m = local_ai::read_manifest();
+                if let Ok(mut state) = p.state.lock() { *state = m.state; }
+                p
+            },
             #[cfg(target_os = "windows")]
             system_icon_by_ext: HashMap::new(),
             #[cfg(target_os = "windows")]
@@ -11917,6 +11930,29 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
+    // Local AI install/uninstall callbacks. The explainer dialog opens via
+    // an in-UI property change; these handlers run the actual work.
+    let weak = ui.as_weak();
+    let c_ai = controller.clone();
+    ui.on_ai_install_confirm(move || {
+        if let Some(ui) = weak.upgrade() {
+            let progress = c_ai.borrow().ai_progress.clone();
+            local_ai::start_install(progress);
+            ui.set_ai_install_state(SharedString::from("downloading"));
+        }
+    });
+    let weak = ui.as_weak();
+    let c_ai = controller.clone();
+    ui.on_ai_uninstall(move || {
+        if let Some(ui) = weak.upgrade() {
+            let progress = c_ai.borrow().ai_progress.clone();
+            local_ai::uninstall(progress);
+            ui.set_ai_install_state(SharedString::from("not_installed"));
+            ui.set_ai_download_progress(0.0);
+            ui.set_ai_install_message(SharedString::from(""));
+        }
+    });
+
     let weak = ui.as_weak();
     let c = controller.clone();
     ui.on_command(move |command| {
@@ -12121,6 +12157,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let op_ready = controller.borrow().operation_ready.clone();
         let pending_op = controller.borrow().pending_operation_result.clone();
         let op_queue_for_progress = controller.borrow().app_state.operation_queue.clone();
+        let ai_progress_for_ui = controller.borrow().ai_progress.clone();
         let dir_ready = controller.borrow().directory_ready.clone();
         let pending_dir = controller.borrow().pending_directory_result.clone();
         let search_ready = controller.borrow().search_ready.clone();
@@ -12157,6 +12194,30 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                 ui.set_op_drawer_progress(frac);
                             }
                         }
+                    }
+
+                    // Mirror local AI installer state into the Slint
+                    // properties so the AI tab updates live during downloads.
+                    let state = ai_progress_for_ui
+                        .state
+                        .lock()
+                        .map(|s| *s)
+                        .unwrap_or(local_ai::InstallState::NotInstalled);
+                    ui.set_ai_install_state(SharedString::from(state.as_slint_str()));
+                    let downloaded = ai_progress_for_ui
+                        .bytes_downloaded
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let total = ai_progress_for_ui
+                        .bytes_total
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let frac = if total > 0 {
+                        (downloaded as f64 / total as f64).clamp(0.0, 1.0) as f32
+                    } else {
+                        0.0
+                    };
+                    ui.set_ai_download_progress(frac);
+                    if let Ok(msg) = ai_progress_for_ui.message.lock() {
+                        ui.set_ai_install_message(SharedString::from(msg.as_str()));
                     }
                 }
                 let dir_fired = dir_ready.swap(false, Ordering::AcqRel);
@@ -13015,24 +13076,46 @@ unsafe fn build_taskbar_thumbnail(
 /// instead of showing a live screenshot of the window.
 #[cfg(target_os = "windows")]
 unsafe fn enable_taskbar_iconic_thumbnail(hwnd: windows::Win32::Foundation::HWND) {
-    use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
+    use windows::Win32::Graphics::Dwm::{
+        DWMWINDOWATTRIBUTE, DwmInvalidateIconicBitmaps, DwmSetIconicThumbnail,
+        DwmSetWindowAttribute,
+    };
     use windows::core::BOOL;
     const DWMWA_FORCE_ICONIC_REPRESENTATION: i32 = 7;
     const DWMWA_HAS_ICONIC_BITMAP: i32 = 10;
     let enable: BOOL = BOOL(1);
     unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWINDOWATTRIBUTE(DWMWA_FORCE_ICONIC_REPRESENTATION),
-            &enable as *const _ as *const _,
-            std::mem::size_of::<BOOL>() as u32,
-        );
-        let _ = DwmSetWindowAttribute(
+        // Order matters. HAS_ICONIC_BITMAP first tells DWM that the window can
+        // produce a custom iconic bitmap. FORCE_ICONIC_REPRESENTATION then
+        // makes DWM ask for it on hover instead of grabbing a live screenshot.
+        let r1 = DwmSetWindowAttribute(
             hwnd,
             DWMWINDOWATTRIBUTE(DWMWA_HAS_ICONIC_BITMAP),
             &enable as *const _ as *const _,
             std::mem::size_of::<BOOL>() as u32,
         );
+        let r2 = DwmSetWindowAttribute(
+            hwnd,
+            DWMWINDOWATTRIBUTE(DWMWA_FORCE_ICONIC_REPRESENTATION),
+            &enable as *const _ as *const _,
+            std::mem::size_of::<BOOL>() as u32,
+        );
+        eprintln!(
+            "[taskbar] DwmSetWindowAttribute HAS={:?} FORCE={:?}",
+            r1, r2
+        );
+
+        // Seed an initial thumbnail at a sensible size and then invalidate so
+        // DWM requests fresh sizes via WM_DWMSENDICONICTHUMBNAIL on hover.
+        // Without the invalidate, DWM sometimes keeps showing the live-preview
+        // path because it has not yet acknowledged the FORCE flag.
+        if let Some(hbm) = build_taskbar_thumbnail(200, 200) {
+            let r3 = DwmSetIconicThumbnail(hwnd, hbm, 0);
+            let _ = windows::Win32::Graphics::Gdi::DeleteObject(hbm.into());
+            eprintln!("[taskbar] DwmSetIconicThumbnail (seed) -> {:?}", r3);
+        }
+        let r4 = DwmInvalidateIconicBitmaps(hwnd);
+        eprintln!("[taskbar] DwmInvalidateIconicBitmaps -> {:?}", r4);
     }
 }
 

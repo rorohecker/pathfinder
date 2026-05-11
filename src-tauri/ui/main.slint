@@ -257,8 +257,21 @@ component SideRow inherits Rectangle {
     callback rename_activated(string);
 
     height: root.item.is_header ? 24px : 32px;
-    border-radius: AppMetrics.radius_small;
-    background: !root.item.is_header && root.item.active ? ThemePalette.accent_soft : (!root.item.is_header && touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0));
+    // Transparent base — visible highlight is drawn by the inner Rectangle
+    // below so it can stop short of the scroll bar gutter on the right.
+    background: rgba(0, 0, 0, 0);
+
+    // Visual highlight pill. Sits inside the row but pulls 14px in from
+    // the right edge so the sidebar ListView's scroll bar never paints
+    // over the active or hovered pill.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width - 14px;
+        height: parent.height;
+        border-radius: AppMetrics.radius_small;
+        background: !root.item.is_header && root.item.active ? ThemePalette.accent_soft : (!root.item.is_header && touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0));
+    }
 
     Text {
         visible: root.item.is_header;
@@ -1241,6 +1254,17 @@ export component MainWindow inherits Window {
     // Shown in the settings header as quick at-a-glance reference for
     // bug reports and update troubleshooting.
     in-out property <string> app_version: "";
+
+    // ── AI install/uninstall state ────────────────────────────────────────
+    // "not_installed" | "downloading" | "installed" | "error"
+    in-out property <string> ai_install_state: "not_installed";
+    in-out property <float> ai_download_progress: 0;
+    in-out property <string> ai_install_message: "";
+    in-out property <bool> ai_install_explainer_visible: false;
+    in-out property <int> ai_install_size_mb: 110;
+    callback ai_install_request();
+    callback ai_install_confirm();
+    callback ai_uninstall();
     in-out property <bool> command_visible: false;
     in-out property <bool> context_visible: false;
     in-out property <bool> image_tools_visible: false;
@@ -1527,9 +1551,7 @@ export component MainWindow inherits Window {
             if !root.is_simple: ListView {
                 x: 10px;
                 y: 14px;
-                // 14px right reserve so the sidebar scroll bar sits in its
-                // own gutter against the divider, not on top of folder labels.
-                width: parent.width - 20px - 14px;
+                width: parent.width - 20px;
                 height: parent.height - 28px;
                 viewport-width: self.width;
                 viewport-height: Math.max(self.height, root.side_items.length * 32px);
@@ -1543,9 +1565,7 @@ export component MainWindow inherits Window {
             if root.is_simple: ListView {
                 x: 10px;
                 y: 14px;
-                // 14px right reserve so the sidebar scroll bar sits in its
-                // own gutter against the divider, not on top of folder labels.
-                width: parent.width - 20px - 14px;
+                width: parent.width - 20px;
                 height: parent.height - 28px;
                 viewport-width: self.width;
                 viewport-height: Math.max(self.height, root.side_items_simple.length * 32px);
@@ -3921,6 +3941,107 @@ export component MainWindow inherits Window {
                     Text { x: 14px; y: 66px; width: parent.width - 28px; height: 20px; text: "Thumbnails, content search, and image analysis use the best detected device."; color: ThemePalette.text_muted; font-size: 12px; overflow: elide; }
                 }
 
+                // Pathfinder Local AI install / uninstall area.
+                Text { text: "PATHFINDER LOCAL AI"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Rectangle {
+                    height: 124px;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel;
+
+                    // Heading + state badge
+                    Text {
+                        x: 14px; y: 12px;
+                        width: parent.width - 160px; height: 20px;
+                        text: root.ai_install_state == "installed"
+                            ? "Local AI is installed"
+                            : (root.ai_install_state == "downloading"
+                                ? "Downloading models ..."
+                                : "Local AI is not installed");
+                        color: ThemePalette.text;
+                        font-size: 13px;
+                        font-weight: 700;
+                    }
+                    Text {
+                        x: 14px; y: 34px;
+                        width: parent.width - 160px;
+                        height: 36px;
+                        text: root.ai_install_state == "installed"
+                            ? "Semantic search, image classification, and perceptual duplicate detection are ready."
+                            : (root.ai_install_state == "downloading"
+                                ? root.ai_install_message
+                                : "Adds about " + root.ai_install_size_mb + " MB on disk. Models run entirely on your machine.");
+                        color: ThemePalette.text_muted;
+                        font-size: 11.5px;
+                        wrap: word-wrap;
+                    }
+
+                    // Progress bar (only while downloading)
+                    if root.ai_install_state == "downloading": Rectangle {
+                        x: 14px; y: parent.height - 28px;
+                        width: parent.width - 28px;
+                        height: 6px;
+                        border-radius: 3px;
+                        background: rgba(127, 127, 127, 0.18);
+                        clip: true;
+                        Rectangle {
+                            x: 0; y: 0;
+                            width: parent.width * Math.clamp(root.ai_download_progress, 0, 1);
+                            height: parent.height;
+                            border-radius: 3px;
+                            background: ThemePalette.accent;
+                            animate width { duration: 120ms; easing: ease-out; }
+                        }
+                    }
+
+                    // Install / Uninstall button on the right
+                    if root.ai_install_state == "not_installed": Rectangle {
+                        x: parent.width - 140px;
+                        y: (parent.height - 36px) / 2;
+                        width: 126px;
+                        height: 36px;
+                        border-radius: AppMetrics.radius_small;
+                        background: install_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.accent;
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: "Install AI";
+                            color: white;
+                            font-size: 12.5px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        install_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.ai_install_explainer_visible = true; }
+                        }
+                    }
+                    if root.ai_install_state == "installed": Rectangle {
+                        x: parent.width - 140px;
+                        y: (parent.height - 36px) / 2;
+                        width: 126px;
+                        height: 36px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border_strong;
+                        background: uninstall_touch.has-hover ? ThemePalette.panel_alt : transparent;
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: "Uninstall";
+                            color: ThemePalette.text;
+                            font-size: 12.5px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        uninstall_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.ai_uninstall(); }
+                        }
+                    }
+                }
+
                 Text { text: "FEATURES"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Rectangle {
                     height: 58px;
@@ -3928,17 +4049,8 @@ export component MainWindow inherits Window {
                     border-color: ThemePalette.border;
                     border-radius: AppMetrics.radius;
                     background: ThemePalette.panel;
-                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "AI thumbnail generation"; color: ThemePalette.text; font-size: 13px; font-weight: 600; }
-                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: "Generate rich previews for documents and media files"; color: ThemePalette.text_muted; font-size: 11.5px; overflow: elide; }
-                }
-                Rectangle {
-                    height: 58px;
-                    border-width: 1px;
-                    border-color: ThemePalette.border;
-                    border-radius: AppMetrics.radius;
-                    background: ThemePalette.panel;
                     Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Semantic content search"; color: ThemePalette.text; font-size: 13px; font-weight: 600; }
-                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: "Search by meaning, not just filename"; color: ThemePalette.text_muted; font-size: 11.5px; overflow: elide; }
+                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready — search by meaning across indexed files" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
                 }
                 Rectangle {
                     height: 58px;
@@ -3946,8 +4058,74 @@ export component MainWindow inherits Window {
                     border-color: ThemePalette.border;
                     border-radius: AppMetrics.radius;
                     background: ThemePalette.panel;
-                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Image analysis"; color: ThemePalette.text; font-size: 13px; font-weight: 600; }
-                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: "Understand and tag photos automatically"; color: ThemePalette.text_muted; font-size: 11.5px; overflow: elide; }
+                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Image classification"; color: ThemePalette.text; font-size: 13px; font-weight: 600; }
+                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready — auto-suggest tags for photos" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
+                }
+                Rectangle {
+                    height: 58px;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel;
+                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Perceptual duplicate detection"; color: ThemePalette.text; font-size: 13px; font-weight: 600; }
+                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready — find near-duplicate images and resized copies" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
+                }
+            }
+
+            // AI installer explainer dialog. Lists what gets downloaded and
+            // confirms before kicking off the background install.
+            if root.ai_install_explainer_visible: Rectangle {
+                x: 0; y: 0;
+                width: parent.width; height: parent.height;
+                background: rgba(0, 0, 0, 0.5);
+                TouchArea { clicked => { root.ai_install_explainer_visible = false; } }
+                Rectangle {
+                    x: (parent.width - 480px) / 2;
+                    y: (parent.height - 360px) / 2;
+                    width: 480px;
+                    height: 360px;
+                    border-width: 1px;
+                    border-color: ThemePalette.border_strong;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel_solid;
+                    drop-shadow-blur: 20px;
+                    drop-shadow-color: rgba(0, 0, 0, 0.45);
+                    TouchArea {}
+
+                    Text { x: 22px; y: 22px; width: parent.width - 44px; height: 28px; text: "Install Pathfinder Local AI"; color: ThemePalette.text; font-size: 17px; font-weight: 700; }
+                    Text {
+                        x: 22px; y: 58px;
+                        width: parent.width - 44px;
+                        height: 220px;
+                        text: "What you get\n" +
+                              "  Semantic search across your files using a local text embedding model.\n" +
+                              "  Image classification that auto-suggests tags for your photos.\n" +
+                              "  Perceptual duplicate detection that finds near-duplicate and resized copies.\n\n" +
+                              "What gets downloaded\n" +
+                              "  Text embedding model (about 25 MB).\n" +
+                              "  Image classifier (about 10 MB).\n" +
+                              "  ONNX Runtime with DirectML for NPU and GPU acceleration (about 70 MB).\n\n" +
+                              "Everything runs on your machine. No content leaves the device. You can uninstall any time from this same screen.";
+                        color: ThemePalette.text_muted;
+                        font-size: 12.5px;
+                        wrap: word-wrap;
+                    }
+                    DialogButton {
+                        x: parent.width - 240px;
+                        y: parent.height - 50px;
+                        label: "Cancel";
+                        clicked => { root.ai_install_explainer_visible = false; }
+                    }
+                    DialogButton {
+                        x: parent.width - 130px;
+                        y: parent.height - 50px;
+                        label: "Install (~110 MB)";
+                        primary: true;
+                        clicked => {
+                            root.ai_install_explainer_visible = false;
+                            root.ai_install_confirm();
+                        }
+                    }
                 }
             }
         }
