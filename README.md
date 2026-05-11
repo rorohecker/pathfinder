@@ -1,6 +1,18 @@
 # Pathfinder
 
-Pathfinder is a native Windows 11 file manager built in Rust with a Slint UI. It covers the everyday File Explorer experience while adding fast search, tags, notes, themes, batch operations, storage views, git badges, and a command palette. Every shell operation uses direct Win32 API calls rather than spawning external processes, so interactions feel instant.
+Pathfinder is a file manager for Windows 11 that wants to be the version of Explorer you actually like using. It is written end to end in Rust and rendered with Slint, no HTML and no WebView in sight, so the whole app cold starts in well under a second and stays smooth on huge folders.
+
+The whole point is being faster and more efficient than the built in File Explorer while looking like an app you would pick on purpose. A few of the reasons it ends up that way:
+
+- Rust everywhere instead of C++ plus COM glue means tighter code, no garbage collector pauses, and no extra process boundaries on hot paths
+- Slint renders the UI as a native window with a real GPU pipeline, not a packaged browser, so resize and scroll stay at frame rate
+- Directories stream into view in chunks of 2000 entries with metadata fetched in parallel via rayon, so a folder with 50 000 files renders the first page in under a hundred milliseconds
+- Sort uses a natural comparator so file2.txt sorts before file10.txt the way you would expect
+- A SQLite full text index sits behind the search bar, so finding files in folders you have already visited is basically instant
+- A dedicated two thread image pool generates thumbnails at below normal priority, so they never compete with the foreground click you just made
+- Every shell operation goes through Win32 directly rather than spawning PowerShell, which is the biggest single reason Explorer feels sluggish
+
+It is also meant to have a personality. Eleven themes, each with its own folder color and font, including a Retro theme that ships with the Press Start 2P pixel arcade font baked into the binary. Custom folder icons, file type glyphs, drag and drop with a destination pane highlight, a contextual action bar when you select files, tabs, dual pane mode with a draggable splitter, a Recycle Bin browser, a bulk rename template engine, git badges, color tags, per file notes, a Mica window backdrop, a command palette, and a top right NPU detector that reports your AI acceleration tier on startup.
 
 ## Features
 
@@ -115,6 +127,10 @@ Pathfinder is built around the everyday File Explorer workflow, but some Windows
 - Some Properties tabs (Compatibility, vendor-specific tabs) may open in the native Windows Properties dialog.
 - Protected OS files can still be blocked by UAC, TrustedInstaller, Windows Resource Protection, or group policy regardless of what Pathfinder shows.
 - Taskbar and Start pinning use only the verbs that Windows exposes to third-party apps.
+
+## Disclaimer
+
+Pathfinder is provided as is, without warranty of any kind, express or implied. That includes the implied warranties of merchantability, fitness for a particular purpose, and non infringement. The authors and contributors are not liable for any claim, damage, or other liability arising from the use of this software, whether in contract, tort, or otherwise. You are running an early version of a file manager that touches real files on your real disk. Back up anything you care about. Bugs happen, especially around delete, move, and overwrite operations. If you find one, an issue on GitHub is the fastest way to get it fixed.
 
 ## License
 
