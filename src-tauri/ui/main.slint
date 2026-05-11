@@ -2513,6 +2513,10 @@ export component MainWindow inherits Window {
                     y: 48px;
                     width: parent.width;
                     height: parent.height - 48px;
+                    // Reserve 14px on the right so the scroll bar does not
+                    // overlay preview content. Matches the file area scroll
+                    // reserve elsewhere in the app.
+                    viewport-width: parent.width - 14px;
 
                     VerticalLayout {
                         width: parent.width;
@@ -3160,7 +3164,9 @@ export component MainWindow inherits Window {
                 y: 112px;
                 width: parent.width - 40px;
                 height: parent.height - 124px;
-                viewport-width: parent.width - 40px;
+                // 14px scroll bar reserve so settings content does not sit
+                // under the handle on tabs that overflow vertically.
+                viewport-width: parent.width - 40px - 14px;
 
                 VerticalLayout {
                     width: parent.width;
@@ -3337,7 +3343,7 @@ export component MainWindow inherits Window {
                 y: 112px;
                 width: parent.width - 40px;
                 height: parent.height - 124px;
-                viewport-width: parent.width - 40px;
+                viewport-width: parent.width - 40px - 14px;
 
                 VerticalLayout {
                     width: parent.width;
@@ -3800,7 +3806,7 @@ export component MainWindow inherits Window {
                 y: 112px;
                 width: parent.width - 40px;
                 height: parent.height - 124px;
-                viewport-width: parent.width - 40px;
+                viewport-width: parent.width - 40px - 14px;
 
                 VerticalLayout {
                     width: parent.width;
