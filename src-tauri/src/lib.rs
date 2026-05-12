@@ -6030,14 +6030,22 @@ fn pick_release_installer_url(assets: &[serde_json::Value]) -> String {
 }
 
 fn check_github_release_now() -> Result<UpdateCheckResult, String> {
-    let script = r#"
+    // The URL is interpolated directly into the script rather than passed as
+    // an extra positional arg, because PowerShell only forwards positional
+    // args to $args when -File is used or -Command is given a script block
+    // {...}. With a string -Command (which is what we use here), trailing args
+    // are silently ignored and $args is empty, which caused Invoke-RestMethod
+    // to fail with a null Uri across every prior release. Single-quoted so
+    // PowerShell doesn't try to interpolate $ characters inside the URL.
+    let script = format!(
+        r#"
 $ErrorActionPreference = 'Stop'
-$url = $args[0]
-$headers = @{ 'User-Agent' = 'Pathfinder' }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-$release = Invoke-RestMethod -Uri $url -Headers $headers -ErrorAction Stop
+$release = Invoke-RestMethod -Uri '{url}' -Headers @{{ 'User-Agent' = 'Pathfinder' }} -ErrorAction Stop
 ConvertTo-Json -InputObject $release -Depth 8 -Compress
-"#;
+"#,
+        url = GITHUB_LATEST_RELEASE_API
+    );
     let exe = powershell_executable();
     updater_log(&format!("invoking {exe} for {GITHUB_LATEST_RELEASE_API}"));
     let output = ProcessCommand::new(&exe)
@@ -6045,8 +6053,7 @@ ConvertTo-Json -InputObject $release -Depth 8 -Compress
         .arg("-ExecutionPolicy")
         .arg("Bypass")
         .arg("-Command")
-        .arg(script)
-        .arg(GITHUB_LATEST_RELEASE_API)
+        .arg(&script)
         .no_window()
         .output()
         .map_err(|e| {
@@ -6144,7 +6151,7 @@ fn download_and_install_update(url: &str) -> Result<(), String> {
     let dest = installer.to_string_lossy().to_string();
     let _ = fs::remove_file(&installer);
     let script = format!(
-        "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri '{}' -OutFile '{}'",
+        "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13; Invoke-WebRequest -Uri '{}' -OutFile '{}'",
         url.replace('\'', "''"),
         dest.replace('\'', "''")
     );
@@ -12830,6 +12837,12 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             ctrl.save_settings();
             let simple = ctrl.side_items_simple();
             ui.set_side_items_simple(model_from_vec(simple));
+            // Sequence the first-run flow: once the user has chosen Simple or
+            // Normal, immediately show the welcome dialog. If they had already
+            // dismissed the welcome on a previous launch, skip it.
+            if !ctrl.settings.first_run_welcome_dismissed {
+                ui.set_welcome_visible(true);
+            }
         }
     });
 
@@ -14377,11 +14390,11 @@ pub fn run() {
     wire_native_callbacks(&ui, controller.clone());
 
     // First-run welcome: shown until the user clicks "Got it". Save flag in
-    // settings so we never repeat. We deliberately also check on Windows
-    // whether the default folder handler is already registered — if it is,
-    // mark step one as done so the dialog doesn't push the user to redo it.
+    // settings so we never repeat. We pre-populate the dialog state but
+    // intentionally suppress display while the Simple/Normal UI mode prompt is
+    // open, so the two never overlap. If the UI mode prompt is up, the welcome
+    // is opened from on_ui_mode_prompt_choice once the user picks a mode.
     if !controller.borrow().settings.first_run_welcome_dismissed {
-        ui.set_welcome_visible(true);
         #[cfg(target_os = "windows")]
         {
             if is_default_file_manager_registered() {
@@ -14390,6 +14403,9 @@ pub fn run() {
                     "Already registered. Pathfinder is your default folder handler.",
                 ));
             }
+        }
+        if !ui.get_ui_mode_prompt_visible() {
+            ui.set_welcome_visible(true);
         }
     }
 

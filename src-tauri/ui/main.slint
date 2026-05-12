@@ -5002,6 +5002,9 @@ export component MainWindow inherits Window {
         x: 0; y: 0;
         width: parent.width; height: parent.height;
         background: rgba(0, 0, 0, 0.55);
+        // Higher than ui_mode_prompt (120) and all other modal overlays so
+        // the welcome is always on top if both ever flip visible at once.
+        z: 200;
         TouchArea {
             // Block clicks behind the dialog so the underlying UI doesn't
             // react while the welcome is open.
