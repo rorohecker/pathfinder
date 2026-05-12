@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2024"
 
 [lib]
@@ -34,6 +34,8 @@ zip = "2"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 memchr = "2"
 once_cell = "1.19"
+# Updater: HTTPS to GitHub API without shelling to PowerShell (reliable + correct headers).
+ureq = { version = "2.12", default-features = false, features = ["native-tls", "json"] }
 tokenizers = "0.20"
 ndarray = { version = "0.17", default-features = false, features = ["std"] }
 
@@ -50,8 +52,12 @@ ort = { version = "2.0.0-rc.12", default-features = false, features = [
     "directml",
 ] }
 windows = { version = "0.62", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Com",

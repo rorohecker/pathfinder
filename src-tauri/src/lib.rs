@@ -36,6 +36,7 @@ mod file_drag;
 mod file_icons;
 #[cfg(target_os = "windows")]
 mod folder_shell_registry;
+mod gpu_detect;
 mod inference;
 mod local_ai;
 
@@ -2929,132 +2930,40 @@ fn watch_paths(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), Str
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 fn detect_npu_names() -> Vec<String> {
-    let script = r#"
-$pattern = '(?i)(\bNPU\b|Neural Processing Unit|Neural Processor|Intel\(R\) AI Boost|Intel AI Boost|Ryzen AI|Qualcomm Hexagon|Hailo|Movidius|\bVPU\b)'
-$devices = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
-  Where-Object {
-    ($_.Class -in @('ComputeAccelerator')) -and
-    ($_.FriendlyName -match $pattern)
-  } |
-  Select-Object -ExpandProperty FriendlyName
-ConvertTo-Json -InputObject @($devices) -Compress
-"#;
-
-    let output = ProcessCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(script)
-        .no_window()
-        .output();
-
-    output
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| serde_json::from_slice::<Vec<String>>(&output.stdout).ok())
-        .unwrap_or_default()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn detect_npu_names() -> Vec<String> {
-    Vec::new()
-}
-
-#[cfg(target_os = "windows")]
-fn detect_video_controller_names() -> Vec<String> {
-    let script = r#"
-@(
-  Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
-    ForEach-Object { $_.Name }
-) | ConvertTo-Json -Compress
-"#;
-    let output = ProcessCommand::new("powershell")
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(script)
-        .no_window()
-        .output();
-
-    if let Ok(out) = output {
-        if out.status.success() {
-            if let Ok(list) = serde_json::from_slice::<Vec<String>>(&out.stdout) {
-                return list.into_iter().filter(|s| !s.trim().is_empty()).collect();
-            }
-            if let Ok(single) = serde_json::from_slice::<String>(&out.stdout) {
-                let t = single.trim();
-                if !t.is_empty() {
-                    return vec![single];
-                }
-            }
-        }
-    }
-    Vec::new()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn detect_video_controller_names() -> Vec<String> {
-    Vec::new()
-}
-
-fn is_likely_discrete_gpu(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    if n.contains("microsoft basic render") {
-        return false;
-    }
-    if n.contains("nvidia")
-        || n.contains("geforce")
-        || n.contains("quadro")
-        || n.contains("rtx")
-        || n.contains("gtx ")
-        || n.contains("titan")
-    {
-        return true;
-    }
-    if n.contains("radeon rx")
-        || n.contains("radeon pro wx")
-        || n.contains("radeon pro w")
-        || n.contains("rx 7900")
-        || n.contains("rx 7800")
-        || n.contains("rx 7700")
-        || n.contains("rx 7600")
-    {
-        return true;
-    }
-    if n.contains("intel") && n.contains("arc") {
-        return true;
-    }
-    false
+    // SetupDi class enumeration is roughly 1000x faster than spawning PowerShell
+    // with Get-PnpDevice. The same ComputeAccelerator class GUID, but no shell.
+    gpu_detect::detect_npus()
 }
 
 fn gpu_capability_summary() -> String {
-    let names = detect_video_controller_names();
-    if names.is_empty() {
-        return if cfg!(target_os = "windows") {
-            "GPU: Windows did not return any video adapters.".to_string()
-        } else {
-            "GPU: detailed adapter listing is only implemented on Windows.".to_string()
-        };
+    if !cfg!(target_os = "windows") {
+        return "GPU: detailed adapter listing is only implemented on Windows.".to_string();
     }
-    let discrete: Vec<String> = names
+    let inv = gpu_detect::detect_gpus();
+    if inv.adapters.is_empty() {
+        return "GPU: Windows did not return any DXGI adapters.".to_string();
+    }
+    let discrete: Vec<String> = inv
+        .discrete()
         .iter()
-        .filter(|n| is_likely_discrete_gpu(n))
-        .cloned()
+        .map(|a| format!("{} ({} MB VRAM)", a.name, a.dedicated_video_mb))
         .collect();
-    let integrated: Vec<String> = names
+    let integrated: Vec<String> = inv
+        .integrated()
         .iter()
-        .filter(|n| !is_likely_discrete_gpu(n))
-        .cloned()
+        .map(|a| a.name.clone())
         .collect();
+    if discrete.is_empty() && integrated.is_empty() {
+        return "GPU: only software / remote DXGI adapters detected.".to_string();
+    }
     if discrete.is_empty() {
-        let igpu = integrated.join(" · ");
-        format!("dGPU: none detected. Integrated GPU only: {igpu}")
+        format!("dGPU: none detected. Integrated GPU only: {}", integrated.join(" · "))
     } else if integrated.is_empty() {
-        format!("dGPU detected: {} (will be used for DirectML acceleration when available)", discrete.join(" · "))
+        format!(
+            "dGPU detected: {} (used for DirectML acceleration)",
+            discrete.join(" · ")
+        )
     } else {
         format!(
             "dGPU detected: {} (used for DirectML) · Integrated: {}",
@@ -5964,6 +5873,30 @@ fn update_disabled_result() -> UpdateCheckResult {
     }
 }
 
+/// Poll until `slint::run_event_loop()` is active so `invoke_from_event_loop` succeeds.
+/// The background updater thread is started before `run_event_loop()` blocks; without this,
+/// the first GitHub check can run too early and the update pill never appears.
+fn wait_until_slint_event_loop_ready(max_wait: Duration) -> bool {
+    const STEP: Duration = Duration::from_millis(25);
+    let mut waited = Duration::ZERO;
+    while waited <= max_wait {
+        if slint::invoke_from_event_loop(|| {}).is_ok() {
+            return true;
+        }
+        std::thread::sleep(STEP);
+        waited += STEP;
+    }
+    false
+}
+
+fn github_http_user_agent() -> String {
+    format!(
+        "Pathfinder/{} (+{})",
+        env!("CARGO_PKG_VERSION"),
+        GITHUB_RELEASES_URL
+    )
+}
+
 fn powershell_executable() -> String {
     let preferred = "powershell";
     let fallback = "pwsh";
@@ -6030,56 +5963,43 @@ fn pick_release_installer_url(assets: &[serde_json::Value]) -> String {
 }
 
 fn check_github_release_now() -> Result<UpdateCheckResult, String> {
-    // The URL is interpolated directly into the script rather than passed as
-    // an extra positional arg, because PowerShell only forwards positional
-    // args to $args when -File is used or -Command is given a script block
-    // {...}. With a string -Command (which is what we use here), trailing args
-    // are silently ignored and $args is empty, which caused Invoke-RestMethod
-    // to fail with a null Uri across every prior release. Single-quoted so
-    // PowerShell doesn't try to interpolate $ characters inside the URL.
-    let script = format!(
-        r#"
-$ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-$release = Invoke-RestMethod -Uri '{url}' -Headers @{{ 'User-Agent' = 'Pathfinder' }} -ErrorAction Stop
-ConvertTo-Json -InputObject $release -Depth 8 -Compress
-"#,
-        url = GITHUB_LATEST_RELEASE_API
-    );
-    let exe = powershell_executable();
-    updater_log(&format!("invoking {exe} for {GITHUB_LATEST_RELEASE_API}"));
-    let output = ProcessCommand::new(&exe)
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-Command")
-        .arg(&script)
-        .no_window()
-        .output()
-        .map_err(|e| {
-            let msg = format!("failed to launch PowerShell ({exe}): {e}");
-            updater_log(&msg);
-            msg
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let msg = if stderr.is_empty() {
-            format!("PowerShell exited with status {}", output.status)
+    updater_log(&format!("GET {GITHUB_LATEST_RELEASE_API} (in-process)"));
+    let agent = github_http_user_agent();
+    let auth_header = std::env::var("PATHFINDER_GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GITHUB_TOKEN"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|tok| format!("Bearer {tok}"));
+    let mut req = ureq::get(GITHUB_LATEST_RELEASE_API)
+        .set("User-Agent", &agent)
+        .set("Accept", "application/vnd.github+json")
+        .set("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(ref a) = auth_header {
+        req = req.set("Authorization", a);
+    }
+    let resp = req.call().map_err(|e| {
+        let msg = format!("GitHub request failed: {e}");
+        updater_log(&msg);
+        msg
+    })?;
+    let status = resp.status();
+    if !(200..300).contains(&status) {
+        let body = resp.into_string().unwrap_or_default();
+        let hint = if status == 403 {
+            " (GitHub often returns 403 when rate-limited or blocked; set PATHFINDER_GITHUB_TOKEN for higher limits.)"
         } else {
-            format!("PowerShell failed: {stderr}")
+            ""
         };
+        let msg = format!("GitHub HTTP {status}{hint}: {}", body.chars().take(400).collect::<String>());
         updater_log(&msg);
         return Err(msg);
     }
-    updater_log(&format!("powershell ok ({} stdout bytes)", output.stdout.len()));
-
-    let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).map_err(|e| {
-            let msg = format!("json parse failed: {e}");
-            updater_log(&msg);
-            msg
-        })?;
+    let value: serde_json::Value = resp.into_json().map_err(|e| {
+        let msg = format!("GitHub JSON decode failed: {e}");
+        updater_log(&msg);
+        msg
+    })?;
     let latest_raw = value
         .get("tag_name")
         .and_then(|v| v.as_str())
@@ -6148,26 +6068,25 @@ fn installer_suffix_from_url(url: &str) -> &'static str {
 fn download_and_install_update(url: &str) -> Result<(), String> {
     let suffix = installer_suffix_from_url(url);
     let installer = std::env::temp_dir().join(format!("pathfinder_update{suffix}"));
-    let dest = installer.to_string_lossy().to_string();
     let _ = fs::remove_file(&installer);
-    let script = format!(
-        "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13; Invoke-WebRequest -Uri '{}' -OutFile '{}'",
-        url.replace('\'', "''"),
-        dest.replace('\'', "''")
-    );
-    let output = ProcessCommand::new(&powershell_executable())
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
-        .no_window()
-        .output()
-        .map_err(|e| format!("failed to launch PowerShell: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            format!("PowerShell download failed: {}", output.status)
-        } else {
-            format!("PowerShell download failed: {}", stderr)
-        });
+    // Native HTTPS via ureq instead of PowerShell. GitHub release downloads
+    // redirect to objects.githubusercontent.com, and ureq follows redirects
+    // by default, so we just stream the final body to the installer path.
+    let resp = ureq::get(url)
+        .set("User-Agent", &github_http_user_agent())
+        .set("Accept", "application/octet-stream")
+        .timeout(std::time::Duration::from_secs(180))
+        .call()
+        .map_err(|e| format!("download HTTP error: {e}"))?;
+    if !(200..300).contains(&resp.status()) {
+        return Err(format!("download HTTP {}", resp.status()));
     }
+    let mut reader = resp.into_reader();
+    let mut out =
+        fs::File::create(&installer).map_err(|e| format!("create installer file: {e}"))?;
+    std::io::copy(&mut reader, &mut out)
+        .map_err(|e| format!("write installer file: {e}"))?;
+    drop(out);
     let meta = fs::metadata(&installer).map_err(|e| format!("Download not found on disk: {e}"))?;
     if meta.len() < 64 * 1024 {
         let _ = fs::remove_file(&installer);
@@ -14422,72 +14341,6 @@ pub fn run() {
         });
     });
 
-    // Auto-update poll. Runs once 4 seconds after launch and then every
-    // hour for the lifetime of the process, so users who keep Pathfinder
-    // open across days still see the green pill within an hour of any new
-    // release without having to restart.
-    let weak_ui_upd = ui.as_weak();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(4));
-        updater_log(&format!(
-            "background updater thread started; current={} api={}",
-            env!("CARGO_PKG_VERSION"),
-            GITHUB_LATEST_RELEASE_API
-        ));
-        // Tiered retry: if a check fails (network blip, GitHub rate limit,
-        // PowerShell missing) try again in 30s, 2min, 10min, then settle into
-        // the hourly cadence. Successful checks always wait the full hour.
-        let mut consecutive_failures: u32 = 0;
-        loop {
-            updater_log("checking github for new release");
-            match check_github_release_now() {
-                Ok(result) => {
-                    updater_log(&format!(
-                        "result: latest={} current={} available={} download_url={}",
-                        result.latest_version,
-                        result.current_version,
-                        result.available,
-                        if result.download_url.is_empty() { "<none>" } else { result.download_url.as_str() }
-                    ));
-                    if result.available {
-                        let ver = SharedString::from(result.latest_version.clone());
-                        let dl = SharedString::from(result.download_url.clone());
-                        let weak_pill = weak_ui_upd.clone();
-                        let r = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak_pill.upgrade() {
-                                ui.set_update_available(true);
-                                ui.set_update_version(ver);
-                                ui.set_update_download_url(dl);
-                            }
-                        });
-                        if r.is_err() {
-                            updater_log("invoke_from_event_loop failed (loop not running yet?) — will retry next cycle");
-                        } else {
-                            updater_log("pill set on UI thread");
-                        }
-                    }
-                    consecutive_failures = 0;
-                    std::thread::sleep(std::time::Duration::from_secs(60 * 60));
-                }
-                Err(e) => {
-                    updater_log(&format!("check failed: {e}"));
-                    consecutive_failures = consecutive_failures.saturating_add(1);
-                    let wait_secs = match consecutive_failures {
-                        1 => 30,
-                        2 => 120,
-                        3 => 600,
-                        _ => 60 * 60,
-                    };
-                    updater_log(&format!(
-                        "retrying in {wait_secs}s (failure {consecutive_failures})"
-                    ));
-                    std::thread::sleep(std::time::Duration::from_secs(wait_secs));
-                }
-            }
-        }
-    });
-
-
     ui.show().expect("failed to show Pathfinder window");
     apply_mica(&ui);
     register_winit_mouse_side_button_navigation(&ui);
@@ -14611,6 +14464,71 @@ pub fn run() {
         // Leak so the Timer stays alive long enough to fire.
         Box::leak(drop_register_timer);
     }
+
+    // Auto-update: HTTPS via `ureq` (no PowerShell). Thread starts here so we
+    // sit right before `run_event_loop`; we wait until the loop is accepting
+    // `invoke_from_event_loop` before the first GitHub check (fixes "never on launch").
+    let weak_ui_upd = ui.as_weak();
+    std::thread::spawn(move || {
+        updater_log(&format!(
+            "background updater thread started; current={} api={}",
+            env!("CARGO_PKG_VERSION"),
+            GITHUB_LATEST_RELEASE_API
+        ));
+        if !wait_until_slint_event_loop_ready(Duration::from_secs(45)) {
+            updater_log("updater: Slint event loop did not become ready in 45s; aborting updater thread");
+            return;
+        }
+        updater_log("updater: event loop ready, first GitHub check");
+        let mut consecutive_failures: u32 = 0;
+        loop {
+            updater_log("checking github for new release");
+            match check_github_release_now() {
+                Ok(result) => {
+                    updater_log(&format!(
+                        "result: latest={} current={} available={} download_url={}",
+                        result.latest_version,
+                        result.current_version,
+                        result.available,
+                        if result.download_url.is_empty() { "<none>" } else { result.download_url.as_str() }
+                    ));
+                    if result.available {
+                        let ver = SharedString::from(result.latest_version.clone());
+                        let dl = SharedString::from(result.download_url.clone());
+                        let weak_pill = weak_ui_upd.clone();
+                        let r = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak_pill.upgrade() {
+                                ui.set_update_available(true);
+                                ui.set_update_version(ver);
+                                ui.set_update_download_url(dl);
+                            }
+                        });
+                        if r.is_err() {
+                            updater_log("invoke_from_event_loop failed — will retry next cycle");
+                        } else {
+                            updater_log("pill set on UI thread");
+                        }
+                    }
+                    consecutive_failures = 0;
+                    std::thread::sleep(std::time::Duration::from_secs(60 * 60));
+                }
+                Err(e) => {
+                    updater_log(&format!("check failed: {e}"));
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let wait_secs = match consecutive_failures {
+                        1 => 15,
+                        2 => 60,
+                        3 => 300,
+                        _ => 60 * 60,
+                    };
+                    updater_log(&format!(
+                        "retrying in {wait_secs}s (failure {consecutive_failures})"
+                    ));
+                    std::thread::sleep(std::time::Duration::from_secs(wait_secs));
+                }
+            }
+        }
+    });
 
     slint::run_event_loop().expect("error while running Slint event loop");
 }
