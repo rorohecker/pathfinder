@@ -11456,9 +11456,13 @@ impl NativeController {
             }
         }
         if count == 0 && errors == 0 {
-            if skipped_self > 0 {
-                self.show_toast(ui, "Source and destination are the same folder.");
-            }
+            // Pure no-op drop (file dropped onto its own folder). File Explorer
+            // silently ignores this case and we should too — every drag from
+            // outside the app into the current pane's empty space, or from a
+            // pane back onto itself for reorganization, runs through here. The
+            // toast was firing on every such drop and made organising files
+            // feel like a constant battle with an error dialog.
+            let _ = skipped_self;
             return;
         }
         // Refresh BOTH panes so files appear/disappear in primary AND secondary.
