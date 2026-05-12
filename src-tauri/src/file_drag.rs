@@ -17,7 +17,7 @@ use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
 use windows::Win32::System::Ole::{
-    DoDragDrop, OleInitialize, RegisterDragDrop, RevokeDragDrop,
+    DoDragDrop, OleInitialize, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
     DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE,
     IDropSource, IDropSource_Impl, IDropTarget, IDropTarget_Impl,
 };
@@ -115,9 +115,18 @@ unsafe fn clone_hglobal(src: HGLOBAL) -> windows::core::Result<HGLOBAL> {
     unsafe {
         let size = GlobalSize(src);
         let src_ptr = GlobalLock(src);
+        if src_ptr.is_null() {
+            return Err(windows::core::Error::from_hresult(E_FAIL));
+        }
         let dst_hg = GlobalAlloc(GMEM_MOVEABLE, size)?;
         let dst_ptr = GlobalLock(dst_hg);
-        std::ptr::copy_nonoverlapping(src_ptr as *const u8, dst_ptr as *mut u8, size);
+        if dst_ptr.is_null() {
+            let _ = GlobalUnlock(src);
+            return Err(windows::core::Error::from_hresult(E_FAIL));
+        }
+        if size != 0 {
+            std::ptr::copy_nonoverlapping(src_ptr as *const u8, dst_ptr as *mut u8, size);
+        }
         let _ = GlobalUnlock(src);
         let _ = GlobalUnlock(dst_hg);
         Ok(dst_hg)
@@ -125,27 +134,65 @@ unsafe fn clone_hglobal(src: HGLOBAL) -> windows::core::Result<HGLOBAL> {
 }
 
 /// Extract file paths from the DROPFILES memory block in an HGLOBAL.
+///
+/// All reads are bounded by [`GlobalSize`]. Malformed or hostile drag payloads
+/// must not read past the allocation (would crash or worse).
 unsafe fn paths_from_hglobal(hglobal: HGLOBAL) -> Vec<String> {
     unsafe {
+        let total_bytes = GlobalSize(hglobal) as usize;
+        let header_size = std::mem::size_of::<DropFiles>();
+        if total_bytes < header_size {
+            return vec![];
+        }
         let base = GlobalLock(hglobal) as *const u8;
         if base.is_null() {
             return vec![];
         }
-        let hdr = &*(base as *const DropFiles);
+        let hdr = std::ptr::read(base as *const DropFiles);
         let offset = hdr.p_files as usize;
+        if offset > total_bytes || offset.saturating_add(2) > total_bytes {
+            let _ = GlobalUnlock(hglobal);
+            return vec![];
+        }
         let is_wide = hdr.f_wide != 0;
         let mut paths = Vec::new();
+        let end_usize = (base as usize).saturating_add(total_bytes);
+
+        #[inline]
+        fn can_read_u8(p: *const u8, end_usize: usize) -> bool {
+            (p as usize) < end_usize
+        }
+
+        #[inline]
+        fn can_read_u16(p: *const u16, end_usize: usize) -> bool {
+            (p as usize)
+                .checked_add(std::mem::size_of::<u16>())
+                .map_or(false, |hi| hi <= end_usize)
+        }
+
         if is_wide {
             let mut ptr = base.add(offset) as *const u16;
             loop {
+                if !can_read_u16(ptr, end_usize) {
+                    break;
+                }
                 if *ptr == 0 {
                     break;
                 }
+                let str_start = ptr;
                 let mut len = 0usize;
-                while *ptr.add(len) != 0 {
+                loop {
+                    let q = ptr.add(len);
+                    if !can_read_u16(q, end_usize) {
+                        let _ = GlobalUnlock(hglobal);
+                        return paths;
+                    }
+                    if *q == 0 {
+                        break;
+                    }
                     len += 1;
                 }
-                let slice = std::slice::from_raw_parts(ptr, len);
+                let slice = std::slice::from_raw_parts(str_start, len);
                 if let Ok(s) = String::from_utf16(slice) {
                     paths.push(s);
                 }
@@ -155,14 +202,26 @@ unsafe fn paths_from_hglobal(hglobal: HGLOBAL) -> Vec<String> {
             // ANSI fallback (rarely used in modern apps but defensive).
             let mut ptr = base.add(offset);
             loop {
+                if !can_read_u8(ptr, end_usize) {
+                    break;
+                }
                 if *ptr == 0 {
                     break;
                 }
+                let str_start = ptr;
                 let mut len = 0usize;
-                while *ptr.add(len) != 0 {
+                loop {
+                    let q = ptr.add(len);
+                    if !can_read_u8(q, end_usize) {
+                        let _ = GlobalUnlock(hglobal);
+                        return paths;
+                    }
+                    if *q == 0 {
+                        break;
+                    }
                     len += 1;
                 }
-                let slice = std::slice::from_raw_parts(ptr, len);
+                let slice = std::slice::from_raw_parts(str_start, len);
                 if let Ok(s) = std::str::from_utf8(slice) {
                     paths.push(s.to_string());
                 }
@@ -184,7 +243,7 @@ unsafe fn paths_from_data_object(data: &IDataObject) -> Vec<String> {
             lindex: -1,
             tymed: 1, // TYMED_HGLOBAL
         };
-        let medium = match data.GetData(&fmt) {
+        let mut medium = match data.GetData(&fmt) {
             Ok(m) => m,
             Err(e) => {
                 log(&format!("paths_from_data_object: GetData failed: {:?}", e));
@@ -192,7 +251,9 @@ unsafe fn paths_from_data_object(data: &IDataObject) -> Vec<String> {
             }
         };
         let hglobal = medium.u.hGlobal;
-        paths_from_hglobal(hglobal)
+        let paths = paths_from_hglobal(hglobal);
+        ReleaseStgMedium(&mut medium as *mut _);
+        paths
     }
 }
 
@@ -529,3 +590,88 @@ pub fn start(paths: Vec<String>) -> DROPEFFECT {
 // message-filter helpers that need wparam values)
 #[allow(dead_code)]
 fn _wparam_unused(_: WPARAM) {}
+
+#[cfg(all(test, target_os = "windows"))]
+mod paths_from_hglobal_tests {
+    use super::{paths_from_hglobal, DropFiles};
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::GlobalFree;
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+
+    unsafe fn free_hglobal(h: windows::Win32::Foundation::HGLOBAL) {
+        let _ = unsafe { GlobalFree(Some(h)) };
+    }
+
+    #[test]
+    fn oversized_p_files_returns_empty_without_panic() {
+        unsafe {
+            let header_size = std::mem::size_of::<DropFiles>();
+            let total = header_size + 4;
+            let h = GlobalAlloc(GMEM_MOVEABLE, total).unwrap();
+            let base = GlobalLock(h) as *mut u8;
+            let hdr = base as *mut DropFiles;
+            (*hdr).p_files = 0xffff_fff0;
+            (*hdr).pt_x = 0;
+            (*hdr).pt_y = 0;
+            (*hdr).f_nc = 0;
+            (*hdr).f_wide = 1;
+            let _ = GlobalUnlock(h);
+            let paths = paths_from_hglobal(h);
+            assert!(paths.is_empty());
+            free_hglobal(h);
+        }
+    }
+
+    #[test]
+    fn valid_unicode_hdrop_parses_paths() {
+        unsafe {
+            let header_size = std::mem::size_of::<DropFiles>();
+            let path = "C:\\test\\file.txt";
+            let wide: Vec<u16> = OsStr::new(path).encode_wide().chain(Some(0)).collect();
+            let tail_bytes = wide.len() * 2 + 2; // paths + list terminator
+            let total = header_size + tail_bytes;
+            let h = GlobalAlloc(GMEM_MOVEABLE, total).unwrap();
+            let base = GlobalLock(h) as *mut u8;
+            let hdr = base as *mut DropFiles;
+            (*hdr).p_files = header_size as u32;
+            (*hdr).pt_x = 0;
+            (*hdr).pt_y = 0;
+            (*hdr).f_nc = 0;
+            (*hdr).f_wide = 1;
+            let mut dst = base.add(header_size) as *mut u16;
+            for wc in &wide {
+                *dst = *wc;
+                dst = dst.add(1);
+            }
+            *dst = 0u16;
+            let _ = GlobalUnlock(h);
+            let paths = paths_from_hglobal(h);
+            assert_eq!(paths, vec![path.to_string()]);
+            free_hglobal(h);
+        }
+    }
+
+    #[test]
+    fn unterminated_wide_string_returns_partial_paths() {
+        unsafe {
+            let header_size = std::mem::size_of::<DropFiles>();
+            // One wchar 'A' (0x41) with no trailing null within allocation
+            let total = header_size + 2;
+            let h = GlobalAlloc(GMEM_MOVEABLE, total).unwrap();
+            let base = GlobalLock(h) as *mut u8;
+            let hdr = base as *mut DropFiles;
+            (*hdr).p_files = header_size as u32;
+            (*hdr).pt_x = 0;
+            (*hdr).pt_y = 0;
+            (*hdr).f_nc = 0;
+            (*hdr).f_wide = 1;
+            let w = base.add(header_size) as *mut u16;
+            *w = 0x0041;
+            let _ = GlobalUnlock(h);
+            let paths = paths_from_hglobal(h);
+            assert!(paths.is_empty());
+            free_hglobal(h);
+        }
+    }
+}

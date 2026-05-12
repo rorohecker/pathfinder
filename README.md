@@ -2,6 +2,8 @@
 
 Pathfinder is a file manager for Windows 11 that wants to be the version of Explorer you actually like using. It is written end to end in Rust and rendered with Slint, no HTML and no WebView in sight, so the whole app cold starts in well under a second and stays smooth on huge folders.
 
+**Version 0.7.0** adds ONNX Runtime inference (DirectML first, CPU fallback), file-name embeddings in SQLite for semantic ranking in the search bar, optional MobileNet-based tag suggestions, dHash-based duplicate image detection, a `--path` launch argument, and a Windows Settings panel to register Pathfinder as your per-user default folder handler (plus an optional `extras/set-pathfinder-default-folder-handler.reg`).
+
 The whole point is being faster and more efficient than the built in File Explorer while looking like an app you would pick on purpose. A few of the reasons it ends up that way:
 
 - Rust everywhere instead of C++ plus COM glue means tighter code, no garbage collector pauses, and no extra process boundaries on hot paths
@@ -22,7 +24,7 @@ It is also meant to have a personality. Eleven themes, each with its own folder 
 - **Multiple views** - icon grid, details list, gallery view, preview pane, and dual-pane mode
 - **Inline rename** - press F2 or use the context menu to rename in place without a dialog
 - **Fast folders** - directory caching using the Windows FindFirstFileExW cache, background file watching, and a SQLite index of visited directories for instant cross-directory search
-- **Search** - Windows Search integration where available, recursive fallback scan, and prefix filters: `ext:`, `kind:`, `size:`, `name:`, `content:`, `modified:`, `tag:`
+- **Search** - Windows Search integration where available, recursive fallback scan, and prefix filters: `ext:`, `kind:`, `size:`, `name:`, `content:`, `modified:`, `tag:`; optional **semantic mode** (Σ) ranks indexed hits by on-device MiniLM embeddings when Local AI models are installed
 - **Command palette** - Ctrl+P to run any action by name, with results ranked by relevance so exact matches always come first
 - **File tools** - copy, cut, paste, rename, delete to Recycle Bin, new folder, archive actions, checksums, batch rename, duplicate finder, and storage treemap
 - **Smart duplicate detection** - three-phase finder that groups by file size first, then compares a 64 KB partial hash, then reads the full file only for candidates that survived both filters
@@ -37,8 +39,9 @@ It is also meant to have a personality. Eleven themes, each with its own folder 
 - **Bulk rename with templates** - select multiple files and apply a template like IMG_{n:04}.{ext} to renumber them in one go
 - **Conflict resolution** - clear Skip, Replace, and Keep Both buttons when a paste or drop hits an existing file
 - **Settings panel** - tabbed Appearance, View, and AI tabs accessible from the toolbar or Ctrl+,
-- **AI status** - detects NPU, GPU, or CPU acceleration on startup and reports it in the AI settings tab
-- **Windows integration** - shell extensions context menu, VSS Previous Versions, UAC and TrustedInstaller handling, and taskbar and Start menu pinning
+- **AI status** - detects NPU, GPU, or CPU acceleration on startup; ONNX Runtime line is merged into the AI tab explanation once models are loaded
+- **Local AI** - optional model pack (text embedding, tokenizer, MobileNet classifier) with install progress in Settings; embeddings and dHashes are written during background indexing
+- **Windows integration** - shell extensions context menu, VSS Previous Versions, UAC and TrustedInstaller handling, taskbar and Start menu pinning, optional per-user default **folder** handler (`--path "%1"`), and `extras/set-pathfinder-default-folder-handler.reg` for manual registry import
 - **Win32 shell operations** - properties dialog, shortcut creation, run as administrator, and clipboard writes all go through Win32 APIs directly with no PowerShell process overhead
 - **Admin features** - retry operations as administrator, take ownership of TrustedInstaller files, and manage system-protected items
 - **Battery-aware indexing** - background indexing pauses automatically when the device is on battery below 20 percent charge
@@ -53,6 +56,7 @@ Head to the [Releases](../../releases) page and grab the installer.
 |------|-------------|
 | `Pathfinder_x.x.x_x64-setup.exe` | NSIS installer (recommended) |
 | `Pathfinder_x.x.x_x64_en-US.msi` | Windows Installer package |
+| `extras/set-pathfinder-default-folder-handler.reg` | Optional template to set Pathfinder as the default folder handler (edit `CHANGEME_EXE`, then import) |
 
 ## Keyboard Shortcuts
 

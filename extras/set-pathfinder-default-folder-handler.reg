@@ -1,0 +1,14 @@
+Windows Registry Editor Version 5.00
+;
+; Pathfinder — per-user default folder handler (HKCU).
+; 1. Replace CHANGEME_EXE below with your installed pathfinder.exe (keep doubled backslashes).
+; 2. File > Import in Registry Editor, or: reg import set-pathfinder-default-folder-handler.reg
+;
+; This mirrors the in-app "Set as default folder handler" action. It does NOT change
+; how ordinary files (.txt, .pdf, etc.) open — only Folder and Directory shell verbs.
+
+[HKEY_CURRENT_USER\Software\Classes\Folder\shell\open\command]
+@="CHANGEME_EXE --path \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\open\command]
+@="CHANGEME_EXE --path \"%1\""

@@ -1,6 +1,13 @@
 # Rust / Tauri build output
 src-tauri/target/
 
+# Local cargo / udeps artifacts under src-tauri (never commit)
+src-tauri/.cargo/bin/
+src-tauri/.cargo/.crates.toml
+src-tauri/.cargo/.crates2.json
+src-tauri/duplicate-deps.txt
+src-tauri/duplicate-deps-utf8.txt
+
 # OS metadata
 .DS_Store
 Thumbs.db

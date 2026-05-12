@@ -34,6 +34,9 @@ mod windows_integration;
 mod file_drag;
 #[cfg(target_os = "windows")]
 mod file_icons;
+#[cfg(target_os = "windows")]
+mod folder_shell_registry;
+mod inference;
 mod local_ai;
 
 slint::include_modules!();
@@ -1904,7 +1907,7 @@ fn cloud_state_label(path: &str) -> String {
 fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Foundation::{GlobalFree, HANDLE};
         use windows::Win32::System::DataExchange::{
             CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
         };
@@ -1919,19 +1922,25 @@ fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
             let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_count).map_err(|e| e.to_string())?;
             let ptr = GlobalLock(hmem) as *mut u16;
             if ptr.is_null() {
+                let _ = GlobalFree(Some(hmem));
                 return Err("GlobalLock failed".to_string());
             }
             std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
             let _ = GlobalUnlock(hmem);
 
-            OpenClipboard(None).map_err(|e| e.to_string())?;
+            if let Err(e) = OpenClipboard(None) {
+                let _ = GlobalFree(Some(hmem));
+                return Err(e.to_string());
+            }
             if let Err(e) = EmptyClipboard() {
                 let _ = CloseClipboard();
+                let _ = GlobalFree(Some(hmem));
                 return Err(e.to_string());
             }
             const CF_UNICODETEXT: u32 = 13;
             if let Err(e) = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0))) {
                 let _ = CloseClipboard();
+                let _ = GlobalFree(Some(hmem));
                 return Err(e.to_string());
             }
             CloseClipboard().map_err(|e| e.to_string())?;
@@ -2978,6 +2987,8 @@ fn compute_ai_capabilities() -> AiCapabilities {
     } else {
         "No supported NPU was detected. CPU fallback is enabled and stays on-device.".to_string()
     };
+    let ort = crate::inference::ort_runtime_line();
+    let reason = format!("{reason} [{ort}]");
 
     AiCapabilities {
         npu_available: npu_enabled,
@@ -4499,6 +4510,10 @@ struct NativeSettings {
     window_w: u32,
     window_h: u32,
     window_maximized: bool,
+    /// Toolbar: rank indexed hits by on-device text embedding similarity.
+    search_semantic_mode: bool,
+    /// Reserved for optional CLIP model (not bundled in this build).
+    clip_search_enabled: bool,
 }
 
 impl Default for NativeSettings {
@@ -4523,6 +4538,8 @@ impl Default for NativeSettings {
             window_w: 0,
             window_h: 0,
             window_maximized: false,
+            search_semantic_mode: false,
+            clip_search_enabled: false,
         }
     }
 }
@@ -4971,6 +4988,8 @@ fn open_index_connection() -> Result<Connection, String> {
     // Memory-map up to 256 MB; lets OS manage hot pages without read() calls.
     conn.pragma_update(None, "mmap_size", 268435456i64)
         .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "temp_store", "MEMORY")
+        .map_err(|e| e.to_string())?;
     // Checkpoint every 1000 WAL pages to keep WAL file small.
     conn.pragma_update(None, "wal_autocheckpoint", 1000i64)
         .map_err(|e| e.to_string())?;
@@ -5008,6 +5027,19 @@ fn open_index_connection() -> Result<Connection, String> {
             last_accessed INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_thumbnail_accessed ON thumbnail_cache(last_accessed);
+
+        CREATE TABLE IF NOT EXISTS path_embeddings (
+            path TEXT PRIMARY KEY,
+            emb BLOB NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_path_embeddings_prefix ON path_embeddings(path);
+
+        CREATE TABLE IF NOT EXISTS image_dhash (
+            path TEXT PRIMARY KEY,
+            dhash BLOB NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
         ",
     )
     .map_err(|e| e.to_string())?;
@@ -5103,9 +5135,54 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM files_fts WHERE path = ?1", params![path])
             .map_err(|e| e.to_string())?;
+        let _ = tx.execute("DELETE FROM path_embeddings WHERE path = ?1", params![path]);
+        let _ = tx.execute("DELETE FROM image_dhash WHERE path = ?1", params![path]);
     }
 
     tx.commit().map_err(|e| e.to_string())?;
+
+    // Embeddings and dHashes are expensive (ONNX + disk I/O). Run them after the
+    // main FTS transaction commits so readers are not blocked for as long.
+    let mut emb_rows: Vec<(String, Vec<u8>, i64)> = Vec::new();
+    let mut dhash_rows: Vec<(String, Vec<u8>, i64)> = Vec::new();
+    for entry in entries {
+        if entry.kind == FileKind::Directory {
+            continue;
+        }
+        let extension = entry.extension.as_deref().unwrap_or("").to_lowercase();
+        if let Some(vec) = crate::inference::embed_file_label(&entry.name) {
+            let mut blob = Vec::with_capacity(vec.len() * 4);
+            for x in &vec {
+                blob.extend_from_slice(&x.to_le_bytes());
+            }
+            emb_rows.push((entry.path.clone(), blob, now));
+        }
+        if matches!(
+            extension.as_str(),
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
+        ) && let Some(h) = crate::inference::dhash64(Path::new(&entry.path)) {
+            dhash_rows.push((entry.path.clone(), h.to_le_bytes().to_vec(), now));
+        }
+    }
+    if !emb_rows.is_empty() || !dhash_rows.is_empty() {
+        let tx_ai = conn.transaction().map_err(|e| e.to_string())?;
+        for (path, blob, ts) in emb_rows {
+            let _ = tx_ai.execute(
+                "INSERT INTO path_embeddings(path, emb, updated_at) VALUES(?1, ?2, ?3)
+                 ON CONFLICT(path) DO UPDATE SET emb = excluded.emb, updated_at = excluded.updated_at",
+                params![path, blob, ts],
+            );
+        }
+        for (path, dh_blob, ts) in dhash_rows {
+            let _ = tx_ai.execute(
+                "INSERT INTO image_dhash(path, dhash, updated_at) VALUES(?1, ?2, ?3)
+                 ON CONFLICT(path) DO UPDATE SET dhash = excluded.dhash, updated_at = excluded.updated_at",
+                params![path, dh_blob, ts],
+            );
+        }
+        tx_ai.commit().map_err(|e| e.to_string())?;
+    }
+
     let _ = conn.execute_batch("PRAGMA incremental_vacuum(16); PRAGMA optimize;");
     Ok(())
 }
@@ -5115,6 +5192,107 @@ fn like_escape(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+fn embedding_blob_to_vec(blob: &[u8]) -> Option<Vec<f32>> {
+    if blob.len() % 4 != 0 {
+        return None;
+    }
+    let mut v = Vec::with_capacity(blob.len() / 4);
+    for chunk in blob.chunks_exact(4) {
+        v.push(f32::from_le_bytes(chunk.try_into().ok()?));
+    }
+    Some(v)
+}
+
+fn semantic_scores_under_root(root: &str, query_emb: &[f32]) -> HashMap<String, f32> {
+    let Ok(conn) = open_index_connection() else {
+        return HashMap::new();
+    };
+    let root_prefix = format!("{}%", root.trim_end_matches(['\\', '/']));
+    let sql = "SELECT f.path, e.emb FROM files f \
+         INNER JOIN path_embeddings e ON e.path = f.path \
+         WHERE f.path LIKE ?1 ESCAPE '\\' AND f.is_dir = 0 LIMIT 8000";
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return HashMap::new();
+    };
+    let rows = stmt.query_map(params![root_prefix], |row| {
+        let path: String = row.get(0)?;
+        let emb: Vec<u8> = row.get(1)?;
+        Ok((path, emb))
+    });
+    let Ok(rows) = rows else {
+        return HashMap::new();
+    };
+    let rows_vec: Vec<(String, Vec<u8>)> = rows.flatten().collect();
+    let qdim = query_emb.len();
+    rows_vec
+        .into_par_iter()
+        .filter_map(|(path, blob)| {
+            let vec = embedding_blob_to_vec(&blob)?;
+            if vec.len() != qdim {
+                return None;
+            }
+            let s = crate::inference::cosine_similarity(query_emb, &vec);
+            Some((path, s))
+        })
+        .collect()
+}
+
+fn scan_image_duplicates_in_folder(folder: &str) -> String {
+    let Ok(conn) = open_index_connection() else {
+        return "Index database unavailable.".into();
+    };
+    let prefix = format!("{}%", folder.trim_end_matches(['\\', '/']));
+    let sql = "SELECT path, dhash FROM image_dhash WHERE path LIKE ?1 ESCAPE '\\'";
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return "Could not query image hashes.".into();
+    };
+    let rows = stmt.query_map(params![prefix], |row| {
+        let path: String = row.get(0)?;
+        let dh: Vec<u8> = row.get(1)?;
+        Ok((path, dh))
+    });
+    let Ok(rows) = rows else {
+        return "Query failed.".into();
+    };
+    let mut entries: Vec<(String, u64)> = Vec::new();
+    for r in rows {
+        let Ok((path, blob)) = r else { continue };
+        if blob.len() != 8 {
+            continue;
+        }
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(&blob);
+        entries.push((path, u64::from_le_bytes(arr)));
+    }
+    let mut dup_groups = 0usize;
+    let mut seen: HashSet<usize> = HashSet::new();
+    for i in 0..entries.len() {
+        if seen.contains(&i) {
+            continue;
+        }
+        let mut group = vec![i];
+        for j in (i + 1)..entries.len() {
+            if seen.contains(&j) {
+                continue;
+            }
+            if crate::inference::hamming64(entries[i].1, entries[j].1) == 0 {
+                group.push(j);
+            }
+        }
+        if group.len() > 1 {
+            dup_groups += 1;
+            for &idx in &group {
+                seen.insert(idx);
+            }
+        }
+    }
+    if dup_groups == 0 {
+        "No exact duplicate image hashes in this folder (index more images first).".into()
+    } else {
+        format!("Found {dup_groups} group(s) of identical dHash values under this folder.")
+    }
 }
 
 fn upsert_index_entries(entries: &[FileEntry]) -> Result<(), String> {
@@ -5578,6 +5756,46 @@ fn update_disabled_result() -> UpdateCheckResult {
     }
 }
 
+fn powershell_executable() -> String {
+    let preferred = "powershell";
+    let fallback = "pwsh";
+    if ProcessCommand::new(preferred)
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg("exit 0")
+        .output()
+        .is_ok()
+    {
+        preferred.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+/// Prefer a Windows `.exe` NSIS/setup asset, else `.msi`; skip `.zip` / `.7z` so
+/// in-app Install always launches a real installer.
+fn pick_release_installer_url(assets: &[serde_json::Value]) -> String {
+    for ext in [".exe", ".msi"] {
+        for a in assets {
+            let Some(name) = a.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if !name.to_ascii_lowercase().ends_with(ext) {
+                continue;
+            }
+            let Some(url) = a
+                .get("browser_download_url")
+                .and_then(|v| v.as_str())
+                .filter(|u| !u.is_empty())
+            else {
+                continue;
+            };
+            return url.to_string();
+        }
+    }
+    String::new()
+}
+
 fn check_github_release_now() -> Result<UpdateCheckResult, String> {
     let script = r#"
 $ErrorActionPreference = 'Stop'
@@ -5586,7 +5804,7 @@ $headers = @{ 'User-Agent' = 'Pathfinder' }
 $release = Invoke-RestMethod -Uri $url -Headers $headers -ErrorAction Stop
 ConvertTo-Json -InputObject $release -Depth 8 -Compress
 "#;
-    let output = ProcessCommand::new("powershell")
+    let output = ProcessCommand::new(&powershell_executable())
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
@@ -5595,10 +5813,15 @@ ConvertTo-Json -InputObject $release -Depth 8 -Compress
         .arg(GITHUB_LATEST_RELEASE_API)
         .no_window()
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("failed to launch PowerShell: {e}"))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("PowerShell exited with status {}", output.status)
+        } else {
+            format!("PowerShell failed: {}", stderr)
+        });
     }
 
     let value: serde_json::Value =
@@ -5625,18 +5848,11 @@ ConvertTo-Json -InputObject $release -Depth 8 -Compress
     let download_url = value
         .get("assets")
         .and_then(|a| a.as_array())
-        .and_then(|assets| {
-            assets.iter().find(|a| {
-                a.get("name")
-                    .and_then(|n| n.as_str())
-                    .map(|n| n.ends_with(".exe") || n.ends_with(".msi"))
-                    .unwrap_or(false)
-            })
-        })
-        .and_then(|asset| asset.get("browser_download_url"))
-        .and_then(|u| u.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(|assets| pick_release_installer_url(assets))
+        .unwrap_or_default();
+    if download_url.is_empty() {
+        eprintln!("[updater] no .exe or .msi release asset found for in-app install");
+    }
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let available =
         !latest_version.is_empty() && version_is_newer(&latest_version, &current_version);
@@ -5659,25 +5875,73 @@ ConvertTo-Json -InputObject $release -Depth 8 -Compress
     })
 }
 
+/// `.msi` vs `.exe` from the download URL path (GitHub `browser_download_url`).
+fn installer_suffix_from_url(url: &str) -> &'static str {
+    let leaf = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    if leaf.to_ascii_lowercase().ends_with(".msi") {
+        ".msi"
+    } else {
+        ".exe"
+    }
+}
+
 fn download_and_install_update(url: &str) -> Result<(), String> {
-    let installer = std::env::temp_dir().join("pathfinder_update.exe");
+    let suffix = installer_suffix_from_url(url);
+    let installer = std::env::temp_dir().join(format!("pathfinder_update{suffix}"));
     let dest = installer.to_string_lossy().to_string();
+    let _ = fs::remove_file(&installer);
     let script = format!(
-        "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
+        "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri '{}' -OutFile '{}'",
         url.replace('\'', "''"),
         dest.replace('\'', "''")
     );
-    let status = ProcessCommand::new("powershell")
+    let output = ProcessCommand::new(&powershell_executable())
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
         .no_window()
-        .status()
-        .map_err(|e| e.to_string())?;
-    if !status.success() {
-        return Err("Download failed.".to_string());
+        .output()
+        .map_err(|e| format!("failed to launch PowerShell: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("PowerShell download failed: {}", output.status)
+        } else {
+            format!("PowerShell download failed: {}", stderr)
+        });
     }
-    std::process::Command::new(&installer)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    let meta = fs::metadata(&installer).map_err(|e| format!("Download not found on disk: {e}"))?;
+    if meta.len() < 64 * 1024 {
+        let _ = fs::remove_file(&installer);
+        return Err(
+            "Downloaded file is too small to be a valid installer (possible network or GitHub error)."
+                .into(),
+        );
+    }
+
+    #[cfg(windows)]
+    {
+        if suffix == ".msi" {
+            std::process::Command::new("msiexec.exe")
+                .arg("/i")
+                .arg(&installer)
+                .spawn()
+                .map_err(|e| format!("Could not start Windows Installer (msiexec): {e}"))?;
+        } else {
+            std::process::Command::new(&installer)
+                .spawn()
+                .map_err(|e| format!("Could not start installer: {e}"))?;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = installer;
+        return Err("In-app update install is only supported on Windows.".into());
+    }
     Ok(())
 }
 
@@ -6945,27 +7209,37 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
     ui.set_active_density(ss(&settings.density));
 }
 
+fn set_choice_chip_strides(metrics: &AppMetrics, row_h: f32) {
+    // ChoiceChip is 46px tall; keep row spacing at least 52px so chips never overlap.
+    metrics.set_choice_chip_row_stride((row_h + 6.0).max(52.0));
+    metrics.set_index_chip_row_stride((row_h + 16.0).max(52.0));
+}
+
 fn apply_density_metrics(metrics: &AppMetrics, density: &str) {
-    match density {
+    let row_h = match density {
         "compact" => {
             metrics.set_row_h(26.0);
             metrics.set_grid_w(104.0);
             metrics.set_grid_h(94.0);
             metrics.set_pad(8.0);
+            26.0_f32
         }
         "comfortable" => {
             metrics.set_row_h(32.0);
             metrics.set_grid_w(120.0);
             metrics.set_grid_h(108.0);
             metrics.set_pad(12.0);
+            32.0_f32
         }
         _ => {
             metrics.set_row_h(38.0);
             metrics.set_grid_w(136.0);
             metrics.set_grid_h(122.0);
             metrics.set_pad(16.0);
+            38.0_f32
         }
-    }
+    };
+    set_choice_chip_strides(metrics, row_h);
 }
 
 fn apply_custom_theme_to_ui(ui: &MainWindow, def: &ThemeDefinition) {
@@ -7055,9 +7329,11 @@ fn apply_custom_theme_to_ui(ui: &MainWindow, def: &ThemeDefinition) {
 
     let base_row_h = 38.0_f32;
     let size_delta = def.font_size_delta as f32 * 4.0;
-    metrics.set_row_h(base_row_h + size_delta);
+    let row_h = base_row_h + size_delta;
+    metrics.set_row_h(row_h);
     metrics.set_grid_w(136.0 + size_delta * 3.0);
     metrics.set_grid_h(122.0 + size_delta * 3.0);
+    set_choice_chip_strides(&metrics, row_h);
 }
 
 fn sync_editor_state(ui: &MainWindow, def: &ThemeDefinition) {
@@ -7240,6 +7516,18 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Clear Local Caches", "", "clear-local-caches"),
     ("Tools", "Rebuild Search Index", "", "rebuild-index"),
     (
+        "Tools",
+        "AI: Suggested tags for selection",
+        "MobileNet label → tag on selected images",
+        "ai-suggest-tags",
+    ),
+    (
+        "Tools",
+        "Find duplicate images",
+        "Same-folder dHash exact matches in the index",
+        "find-image-duplicates",
+    ),
+    (
         "Settings",
         "Search Performance Settings",
         "",
@@ -7335,21 +7623,70 @@ fn command_items() -> ModelRc<CommandItem> {
     command_items_filtered("")
 }
 
+/// Reads `--path <dir>` or `--path=<dir>` from the process arguments (Windows shell passes `%1`).
+fn parse_cli_startup_folder() -> Option<PathBuf> {
+    let mut args = std::env::args();
+    while let Some(a) = args.next() {
+        if a == "--path" {
+            return args.next().map(PathBuf::from);
+        }
+        if let Some(rest) = a.strip_prefix("--path=") {
+            if !rest.is_empty() {
+                return Some(PathBuf::from(rest));
+            }
+        }
+    }
+    None
+}
+
+fn resolve_cli_folder_to_string(raw: PathBuf) -> Option<String> {
+    let trimmed = raw.to_string_lossy().trim_matches('"').to_string();
+    let p = PathBuf::from(trimmed);
+    if !p.exists() {
+        eprintln!(
+            "[pathfinder] Ignoring --path (does not exist): {}",
+            p.display()
+        );
+        return None;
+    }
+    let folder = if p.is_file() {
+        p.parent()?.to_path_buf()
+    } else if p.is_dir() {
+        p
+    } else {
+        return None;
+    };
+    let canon = folder.canonicalize().unwrap_or(folder);
+    canon.to_str().map(|s| s.to_string())
+}
+
 impl NativeController {
-    fn new() -> Self {
+    fn new(cli_folder: Option<PathBuf>) -> Self {
         let app_state = AppState::default();
         let settings = read_native_json("settings.json", NativeSettings::default());
-        let tabs: Vec<SessionTab> = read_native_json("session.json", Vec::new());
         let known_folders = get_known_folders();
         let home = get_home_directory()
             .ok()
             .or_else(|| known_folders.first().map(|folder| folder.path.clone()))
             .unwrap_or_else(|| ".".to_string());
-        let current_path = tabs
-            .first()
-            .map(|tab| tab.path.clone())
-            .filter(|path| Path::new(path).is_dir())
-            .unwrap_or(home);
+        let mut tabs: Vec<SessionTab> = read_native_json("session.json", Vec::new());
+        if tabs.is_empty() {
+            tabs.push(SessionTab {
+                path: String::new(),
+                view: "grid".to_string(),
+                sort_by: "modified".to_string(),
+                sort_dir: "desc".to_string(),
+            });
+        }
+        let cli_resolved = cli_folder.and_then(resolve_cli_folder_to_string);
+        let session_first = tabs[0].path.clone();
+        let from_session = (!session_first.is_empty() && Path::new(&session_first).is_dir())
+            .then_some(session_first);
+        let current_path = cli_resolved
+            .clone()
+            .or(from_session)
+            .unwrap_or_else(|| home.clone());
+        tabs[0].path = current_path.clone();
 
         Self {
             app_state,
@@ -7365,16 +7702,7 @@ impl NativeController {
             search_all_scope: false,
             history: vec![current_path.clone()],
             history_index: 0,
-            tabs: if tabs.is_empty() {
-                vec![SessionTab {
-                    path: String::new(),
-                    view: "grid".to_string(),
-                    sort_by: "modified".to_string(),
-                    sort_dir: "desc".to_string(),
-                }]
-            } else {
-                tabs
-            },
+            tabs,
             active_tab: 0,
             known_folders,
             drives: get_drives(),
@@ -7561,6 +7889,7 @@ impl NativeController {
             ("max", "Max", "All fixed drives, highest storage", "#d98a24"),
         ]));
         ui.set_command_items(command_items());
+        ui.set_ai_install_size_mb(local_ai::approx_total_install_mb() as i32);
         ui.set_ai_device(ss(&self.ai.reason));
         ui.set_ai_label(ss(ai_status_label(&self.ai)));
         self.sync_performance_status(ui);
@@ -7584,6 +7913,13 @@ impl NativeController {
             ui.set_ui_mode(ss(&self.settings.ui_mode));
         }
         ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
+
+        #[cfg(target_os = "windows")]
+        ui.set_show_windows_integration(true);
+        #[cfg(not(target_os = "windows"))]
+        ui.set_show_windows_integration(false);
+        ui.set_search_semantic_mode(self.settings.search_semantic_mode);
+        ui.set_clip_search_enabled(self.settings.clip_search_enabled);
 
         let path = self.current_path.clone();
         self.navigate(ui, path, false);
@@ -7670,6 +8006,8 @@ impl NativeController {
         } else {
             "Folder".to_string()
         }));
+        ui.set_search_semantic_mode(self.settings.search_semantic_mode);
+        ui.set_clip_search_enabled(self.settings.clip_search_enabled);
     }
 
     fn toggle_search_scope(&mut self, ui: &MainWindow) {
@@ -9271,11 +9609,30 @@ impl NativeController {
         self.files_model = None;
         let trimmed = self.search_query.trim().to_string();
         let search_root = self.search_root();
-        let indexed = if trimmed.starts_with("tag:") || trimmed.starts_with("smart:") {
+        let mut indexed = if trimmed.starts_with("tag:") || trimmed.starts_with("smart:") {
             Vec::new()
         } else {
             index_search(&search_root, &trimmed, SEARCH_INDEX_LIMIT).unwrap_or_default()
         };
+        if self.settings.search_semantic_mode
+            && trimmed.len() >= 2
+            && !indexed.is_empty()
+            && !trimmed.starts_with("tag:")
+            && !trimmed.starts_with("smart:")
+        {
+            if let Some(qemb) = crate::inference::embed_query_text(&trimmed) {
+                let scores = semantic_scores_under_root(&search_root, &qemb);
+                if !scores.is_empty() {
+                    indexed.sort_by(|a, b| {
+                        let sa = scores.get(&a.path).copied().unwrap_or(0.0);
+                        let sb = scores.get(&b.path).copied().unwrap_or(0.0);
+                        sb.partial_cmp(&sa)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                    });
+                }
+            }
+        }
         if trimmed.is_empty() || indexed.is_empty() {
             self.apply_filter();
         } else {
@@ -9931,6 +10288,31 @@ impl NativeController {
                 }
             }
             "breadcrumb-siblings" => self.show_breadcrumb_siblings(ui),
+            "ai-suggest-tags" => {
+                let paths = self.selected_paths();
+                let mut n = 0usize;
+                for p in paths {
+                    let ext = Path::new(&p)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp") {
+                        if let Some(t) = crate::inference::suggest_image_tag(Path::new(&p)) {
+                            self.tags.insert(p, t);
+                            n += 1;
+                        }
+                    }
+                }
+                let _ = write_native_json("tags.json", &self.tags);
+                self.show_toast(ui, format!("Updated AI-suggested tags on {n} image(s)."));
+                self.sync_tag_names(ui);
+                self.update_models(ui);
+            }
+            "find-image-duplicates" => {
+                let msg = scan_image_duplicates_in_folder(&self.current_path);
+                self.show_toast(ui, msg);
+            }
             "performance-debug" => self.show_performance_debug(ui),
             "clear-thumbnail-cache" => match clear_thumbnail_cache() {
                 Ok(bytes) => {
@@ -11987,6 +12369,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             let progress = c_ai.borrow().ai_progress.clone();
             local_ai::uninstall(progress);
+            crate::inference::reset_inference_sessions();
             ui.set_ai_install_state(SharedString::from("not_installed"));
             ui.set_ai_download_progress(0.0);
             ui.set_ai_install_message(SharedString::from(""));
@@ -12099,6 +12482,78 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
 
     let weak = ui.as_weak();
     let c = controller.clone();
+    ui.on_toggle_search_semantic_mode(move || {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.settings.search_semantic_mode = !ctrl.settings.search_semantic_mode;
+            ui.set_search_semantic_mode(ctrl.settings.search_semantic_mode);
+            ctrl.save_settings();
+            let q = ui.get_search_text().to_string();
+            ctrl.search(&ui, q);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_set_clip_search_enabled(move |enabled| {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.settings.clip_search_enabled = enabled;
+            ctrl.save_settings();
+            ui.set_clip_search_enabled(enabled);
+            if enabled {
+                ctrl.show_toast(
+                    &ui,
+                    "CLIP description search is not bundled yet; toggle is reserved for a future model pack.",
+                );
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_windows_set_default_folder_handler(move || {
+        if let Some(ui) = weak.upgrade() {
+            #[cfg(target_os = "windows")]
+            {
+                match set_as_default_file_manager() {
+                    Ok(()) => c.borrow_mut().show_toast(
+                        &ui,
+                        "Pathfinder is set as the default folder handler for your user account.",
+                    ),
+                    Err(e) => c.borrow_mut().show_toast_kind(&ui, e, "error"),
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                c.borrow_mut()
+                    .show_toast(&ui, "Windows integration is only available on Windows.");
+            }
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_windows_restore_folder_handler(move || {
+        if let Some(ui) = weak.upgrade() {
+            #[cfg(target_os = "windows")]
+            {
+                match restore_as_default_file_manager() {
+                    Ok(()) => c
+                        .borrow_mut()
+                        .show_toast(&ui, "Restored Explorer defaults for folder open."),
+                    Err(e) => c.borrow_mut().show_toast_kind(&ui, e, "error"),
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                c.borrow_mut()
+                    .show_toast(&ui, "Windows integration is only available on Windows.");
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_install_update(move || {
         if let Some(ui) = weak.upgrade() {
             let url = ui.get_update_download_url().to_string();
@@ -12112,10 +12567,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             std::thread::spawn(move || {
                 match download_and_install_update(&url) {
                     Ok(()) => {
-                        // Only weak2 (Send) is captured here — no Rc.
+                        let toast = if url.to_ascii_lowercase().contains(".msi") {
+                            "Windows Installer started — follow the MSI wizard, then restart Pathfinder."
+                        } else {
+                            "Installer launched — Pathfinder will close."
+                        };
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak2.upgrade() {
-                                ui.set_toast_text(ss("Installer launched — Pathfinder will close."));
+                                ui.set_toast_text(ss(toast));
                                 ui.set_toast_kind(ss("info"));
                             }
                             std::thread::spawn(|| {
@@ -13269,6 +13728,39 @@ fn find_pathfinder_hwnd() -> Option<windows::Win32::Foundation::HWND> {
     found.0
 }
 
+#[cfg(target_os = "windows")]
+fn set_as_default_file_manager() -> Result<(), String> {
+    folder_shell_registry::set_pathfinder_as_default_folder_handler()
+}
+
+#[cfg(target_os = "windows")]
+fn restore_as_default_file_manager() -> Result<(), String> {
+    folder_shell_registry::restore_windows_default_folder_handler()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_as_default_file_manager() -> Result<(), String> {
+    Err("Windows only".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn restore_as_default_file_manager() -> Result<(), String> {
+    Err("Windows only".into())
+}
+
+#[tauri::command]
+fn set_default_file_manager() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        set_as_default_file_manager()?;
+        Ok("Pathfinder is now set as the default file manager.".to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("This feature is only available on Windows.".to_string())
+    }
+}
+
 pub fn run() {
     // COM must be initialised on the main thread before any shell APIs are used.
     #[cfg(target_os = "windows")]
@@ -13284,7 +13776,8 @@ pub fn run() {
     let initial_settings: NativeSettings = read_native_json("settings.json", NativeSettings::default());
     let ui = MainWindow::new().expect("failed to create Pathfinder window");
     configure_native_window(&ui, &initial_settings);
-    let controller = Rc::new(RefCell::new(NativeController::new()));
+    let cli_folder = parse_cli_startup_folder();
+    let controller = Rc::new(RefCell::new(NativeController::new(cli_folder)));
     controller.borrow_mut().initialize_ui(&ui);
     wire_native_callbacks(&ui, controller.clone());
 

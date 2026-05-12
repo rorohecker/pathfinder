@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "0.6.17"
+version = "0.7.0"
 edition = "2024"
 
 [lib]
@@ -20,7 +20,7 @@ i-slint-backend-winit = "1"
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-dirs = "5"
+dirs = "6"
 open = "5"
 base64 = "0.22"
 trash = "5"
@@ -33,9 +33,22 @@ hex = "0.4"
 zip = "2"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 memchr = "2"
+once_cell = "1.19"
+tokenizers = "0.20"
+ndarray = { version = "0.17", default-features = false, features = ["std"] }
 
+# Windows: ONNX Runtime is not linked into the main binary; the Local AI
+# installer downloads Microsoft.ML.OnnxRuntime.DirectML and we `init_from`
+# the extracted onnxruntime.dll next to the models.
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62"
+ort = { version = "2.0.0-rc.12", default-features = false, features = [
+    "std",
+    "ndarray",
+    "load-dynamic",
+    "api-24",
+    "directml",
+] }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
@@ -56,6 +69,16 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
+] }
+
+# Non-Windows dev/CI: keep compile-time ORT fetch (no separate runtime zip yet).
+[target.'cfg(not(windows))'.dependencies]
+ort = { version = "2.0.0-rc.12", default-features = false, features = [
+    "std",
+    "ndarray",
+    "download-binaries",
+    "copy-dylibs",
+    "api-24",
 ] }
 
 [profile.release]

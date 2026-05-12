@@ -1244,6 +1244,10 @@ export component MainWindow inherits Window {
     in-out property <string> search_text: "";
     in-out property <bool> search_scope_all: false;
     in-out property <string> search_scope_label: "Folder";
+    // When true, ranked by on-device embedding similarity (requires Local AI models).
+    in-out property <bool> search_semantic_mode: false;
+    // Experimental: CLIP-style description search (optional model; may be unavailable).
+    in-out property <bool> clip_search_enabled: false;
     in-out property <string> active_theme: "mica-dark";
     in-out property <string> active_accent: "blue";
     in-out property <string> active_density: "cozy";
@@ -1268,6 +1272,8 @@ export component MainWindow inherits Window {
     // Shown in the settings header as quick at-a-glance reference for
     // bug reports and update troubleshooting.
     in-out property <string> app_version: "";
+    // Windows-only: shell integration (set from Rust at startup).
+    in-out property <bool> show_windows_integration: false;
 
     // ── AI install/uninstall state ────────────────────────────────────────
     // "not_installed" | "downloading" | "installed" | "error"
@@ -1275,7 +1281,7 @@ export component MainWindow inherits Window {
     in-out property <float> ai_download_progress: 0;
     in-out property <string> ai_install_message: "";
     in-out property <bool> ai_install_explainer_visible: false;
-    in-out property <int> ai_install_size_mb: 110;
+    in-out property <int> ai_install_size_mb: 180;
     callback ai_install_request();
     callback ai_install_confirm();
     callback ai_uninstall();
@@ -1362,6 +1368,8 @@ export component MainWindow inherits Window {
     callback search_requested(string);
     callback search_immediate(string);
     callback toggle_search_scope();
+    callback toggle_search_semantic_mode();
+    callback set_clip_search_enabled(bool);
     callback address_changed(string);
     callback set_view(string);
     callback toggle_preview();
@@ -1374,6 +1382,8 @@ export component MainWindow inherits Window {
     callback index_mode_selected(string);
     callback clear_thumbnail_cache();
     callback rebuild_index();
+    callback windows_set_default_folder_handler();
+    callback windows_restore_folder_handler();
     callback minimize();
     callback maximize();
     callback close();
@@ -1441,8 +1451,21 @@ export component MainWindow inherits Window {
     in-out property <string> update_download_url: "";
     callback install_update();
 
-    out property <length> sidebar_w: 238px;
-    property <float> split_ratio: 0.5;
+    // Splitter targets update every frame while dragging; layout reads the
+    // animated properties so panes ease instead of snapping pixel-by-pixel.
+    property <length> sidebar_w_target: 238px;
+    out property <length> sidebar_w: sidebar_w_target;
+    animate sidebar_w {
+        duration: 72ms;
+        easing: ease-out;
+    }
+
+    property <float> split_ratio_target: 0.5;
+    property <float> split_ratio: split_ratio_target;
+    animate split_ratio {
+        duration: 64ms;
+        easing: ease-out;
+    }
     property <length> title_h: 36px;
     property <length> toolbar_h: 44px;
     property <length> filter_bar_h: root.filter_bar_visible ? 36px : 0px;
@@ -1450,7 +1473,12 @@ export component MainWindow inherits Window {
     // User-set preview pane width (drag handle on its left edge writes here).
     // Clamped to a usable range so the preview never shrinks to nothing or
     // crowds the file area off-screen on narrow windows.
-    in-out property <length> preview_w_user: 326px;
+    property <length> preview_w_user_target: 326px;
+    in-out property <length> preview_w_user: preview_w_user_target;
+    animate preview_w_user {
+        duration: 72ms;
+        easing: ease-out;
+    }
     property <length> preview_w: root.preview_visible ? max(220px, min(640px, root.preview_w_user)) : 0px;
     property <length> main_content_w: root.width - root.sidebar_w - root.preview_w;
     out property <length> pane_splitter_w: root.dual_pane ? 6px : 0px;
@@ -1619,7 +1647,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     moved => {
-                        root.sidebar_w = (sw_at_press + self.mouse-x - self.pressed-x).clamp(160px, 380px);
+                        root.sidebar_w_target = (sw_at_press + self.mouse-x - self.pressed-x).clamp(160px, 380px);
                     }
                 }
             }
@@ -1697,9 +1725,9 @@ export component MainWindow inherits Window {
                 x: 167px;
                 y: 6px;
                 width: toolbar.show_toolbar_sort
-                    ? Math.max(80px, parent.width - 852px)
+                    ? Math.max(80px, parent.width - 880px)
                     : (toolbar.show_toolbar_search
-                        ? Math.max(80px, parent.width - 680px)
+                        ? Math.max(80px, parent.width - 708px)
                         : Math.max(80px, parent.width - 492px));
                 height: 31px;
                 border-width: 1px;
@@ -1847,9 +1875,9 @@ export component MainWindow inherits Window {
 
             Rectangle {
                 visible: toolbar.show_toolbar_search;
-                x: toolbar.show_toolbar_sort ? parent.width - 677px : parent.width - 496px;
+                x: toolbar.show_toolbar_sort ? parent.width - 705px : parent.width - 524px;
                 y: 6px;
-                width: 180px;
+                width: 208px;
                 height: 31px;
                 border-width: 1px;
                 border-color: search.has-focus ? ThemePalette.accent : ThemePalette.border;
@@ -1873,10 +1901,32 @@ export component MainWindow inherits Window {
                     y: parent.height + 6px;
                     tip_text: root.search_scope_all ? "Searching entire drive — click to search this folder only" : "Click to search the entire drive";
                 }
-                search := TextInput {
+                Text {
                     x: 30px;
                     y: 0;
-                    width: parent.width - 58px;
+                    width: 22px;
+                    height: parent.height;
+                    text: "Σ";
+                    color: root.search_semantic_mode ? ThemePalette.accent_strong : ThemePalette.text_faint;
+                    font-size: 14px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                sem_touch := TouchArea {
+                    x: 28px; y: 2px; width: 26px; height: 26px;
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle_search_semantic_mode(); }
+                }
+                if sem_touch.has-hover: HoverTip {
+                    x: 0px;
+                    y: parent.height + 6px;
+                    tip_text: root.search_semantic_mode ? "Semantic ranking on (embeddings)" : "Semantic ranking off — click to rank by name embeddings";
+                }
+                search := TextInput {
+                    x: 56px;
+                    y: 0;
+                    width: parent.width - 84px;
                     height: parent.height;
                     text: root.search_text;
                     font-size: 12.5px;
@@ -1900,9 +1950,9 @@ export component MainWindow inherits Window {
                 // bound property are empty AND the field isn't focused. Checking
                 // search.text explicitly prevents a flicker overlap when typing.
                 if root.search_text == "" && search.text == "" && !search.has-focus: Text {
-                    x: 30px;
+                    x: 56px;
                     y: 0;
-                    width: parent.width - 58px;
+                    width: parent.width - 84px;
                     height: parent.height;
                     text: root.search_scope_all ? "Search entire drive" : "Search this folder";
                     color: ThemePalette.text_faint;
@@ -2334,10 +2384,10 @@ export component MainWindow inherits Window {
                         }
                     }
                     moved => {
-                        root.split_ratio = (ratio_at_press + (self.mouse-x - self.pressed-x) / root.main_content_w).clamp(0.15, 0.85);
+                        root.split_ratio_target = (ratio_at_press + (self.mouse-x - self.pressed-x) / root.main_content_w).clamp(0.15, 0.85);
                     }
                     double-clicked => {
-                        root.split_ratio = 0.5;
+                        root.split_ratio_target = 0.5;
                     }
                 }
             }
@@ -2587,11 +2637,11 @@ export component MainWindow inherits Window {
                         }
                         moved => {
                             // Dragging left widens the preview, right narrows it.
-                            root.preview_w_user = w_at_press - (self.mouse-x - self.pressed-x);
+                            root.preview_w_user_target = w_at_press - (self.mouse-x - self.pressed-x);
                         }
                         double-clicked => {
                             // Double click resets to the default width.
-                            root.preview_w_user = 326px;
+                            root.preview_w_user_target = 326px;
                         }
                     }
                 }
@@ -3326,10 +3376,10 @@ export component MainWindow inherits Window {
                     Text { text: "THEME"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
                         width: parent.width;
-                        height: Math.ceil(root.theme_choices.length / 2) * (AppMetrics.row_h + 6px);
+                        height: Math.ceil(root.theme_choices.length / 2) * AppMetrics.choice_chip_row_stride;
                         for theme[i] in root.theme_choices: ChoiceChip {
                             x: Math.mod(i, 2) == 0 ? 0px : (parent.width / 2 + 3px);
-                            y: Math.floor(i / 2) * (AppMetrics.row_h + 6px);
+                            y: Math.floor(i / 2) * AppMetrics.choice_chip_row_stride;
                             width: parent.width / 2 - 3px;
                             item: theme;
                             active: root.active_theme == theme.id;
@@ -3340,10 +3390,10 @@ export component MainWindow inherits Window {
                     Text { text: "ACCENT COLOR"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
                         width: parent.width;
-                        height: Math.ceil(root.accent_choices.length / 3) * (AppMetrics.row_h + 6px);
+                        height: Math.ceil(root.accent_choices.length / 3) * AppMetrics.choice_chip_row_stride;
                         for accent[i] in root.accent_choices: ChoiceChip {
                             x: Math.mod(i, 3) * (parent.width / 3 + 2px);
-                            y: Math.floor(i / 3) * (AppMetrics.row_h + 6px);
+                            y: Math.floor(i / 3) * AppMetrics.choice_chip_row_stride;
                             width: parent.width / 3 - 4px;
                             item: accent;
                             active: root.active_accent == accent.id;
@@ -3354,10 +3404,10 @@ export component MainWindow inherits Window {
                     Text { text: "DENSITY"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
                         width: parent.width;
-                        height: Math.ceil(root.density_choices.length / 3) * (AppMetrics.row_h + 6px);
+                        height: Math.ceil(root.density_choices.length / 3) * AppMetrics.choice_chip_row_stride;
                         for density[i] in root.density_choices: ChoiceChip {
                             x: Math.mod(i, 3) * (parent.width / 3 + 2px);
-                            y: Math.floor(i / 3) * (AppMetrics.row_h + 6px);
+                            y: Math.floor(i / 3) * AppMetrics.choice_chip_row_stride;
                             width: parent.width / 3 - 4px;
                             item: density;
                             active: root.active_density == density.id;
@@ -3484,6 +3534,38 @@ export component MainWindow inherits Window {
                             animate x { duration: 60ms; easing: ease-out; }
                         }
                         TouchArea { mouse-cursor: pointer; clicked => { root.toggle_preview(); } }
+                    }
+                }
+
+                if root.show_windows_integration: VerticalLayout {
+                    spacing: 10px;
+                    Text { text: "WINDOWS INTEGRATION"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text {
+                        text: "Registers Pathfinder for your user account only (HKCU). Double-clicking a folder in Explorer opens it in Pathfinder. This does not replace every Explorer surface on Windows 11.";
+                        color: ThemePalette.text_muted;
+                        font-size: 11.5px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        height: 36px;
+                        DialogButton {
+                            label: "Set default folder handler";
+                            primary: true;
+                            clicked => { root.windows_set_default_folder_handler(); }
+                        }
+                        DialogButton {
+                            label: "Restore Explorer defaults";
+                            clicked => { root.windows_restore_folder_handler(); }
+                        }
+                    }
+                    Text {
+                        text: "Alternative: import extras/set-pathfinder-default-folder-handler.reg and replace CHANGEME_EXE with your pathfinder.exe path.";
+                        color: ThemePalette.text_faint;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
                     }
                 }
             }
@@ -3977,10 +4059,10 @@ export component MainWindow inherits Window {
                     Text { text: "SEARCH PERFORMANCE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
                         width: parent.width;
-                        height: Math.ceil(root.index_choices.length / 2) * (AppMetrics.row_h + 16px);
+                        height: Math.ceil(root.index_choices.length / 2) * AppMetrics.index_chip_row_stride;
                         for mode[i] in root.index_choices: ChoiceChip {
                             x: Math.mod(i, 2) == 0 ? 0px : (parent.width / 2 + 3px);
-                            y: Math.floor(i / 2) * (AppMetrics.row_h + 16px);
+                            y: Math.floor(i / 2) * AppMetrics.index_chip_row_stride;
                             width: parent.width / 2 - 3px;
                             item: mode;
                             active: root.active_index_mode == mode.id;
@@ -4037,6 +4119,38 @@ export component MainWindow inherits Window {
                     Text { x: 14px; y: 14px; width: parent.width - 28px; height: 22px; text: root.ai_label; color: ThemePalette.text; font-size: 14px; font-weight: 700; }
                     Text { x: 14px; y: 40px; width: parent.width - 28px; height: 20px; text: root.ai_device; color: ThemePalette.accent_strong; font-size: 12px; font-family: AppMetrics.mono_font; overflow: elide; }
                     Text { x: 14px; y: 66px; width: parent.width - 28px; height: 20px; text: "Thumbnails, content search, and image analysis use the best detected device."; color: ThemePalette.text_muted; font-size: 12px; overflow: elide; }
+                }
+
+                Text { text: "OPTIONAL SEARCH"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Rectangle {
+                    height: AppMetrics.row_h;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "CLIP description search (optional model)"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Rectangle {
+                        x: parent.width - 52px;
+                        y: (parent.height - 22px) / 2;
+                        width: 40px;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: root.clip_search_enabled ? ThemePalette.accent : ThemePalette.border_strong;
+                        animate background { duration: 60ms; easing: ease-out; }
+                        Rectangle {
+                            x: root.clip_search_enabled ? 20px : 2px;
+                            y: 2px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: white;
+                            animate x { duration: 60ms; easing: ease-out; }
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.set_clip_search_enabled(!root.clip_search_enabled); }
+                        }
+                    }
                 }
 
                 // Pathfinder Local AI install / uninstall area.
@@ -4217,7 +4331,7 @@ export component MainWindow inherits Window {
                     DialogButton {
                         x: parent.width - 130px;
                         y: parent.height - 50px;
-                        label: "Install (~110 MB)";
+                        label: "Install (~" + root.ai_install_size_mb + " MB)";
                         primary: true;
                         clicked => {
                             root.ai_install_explainer_visible = false;
@@ -4588,6 +4702,9 @@ export global AppMetrics {
     in-out property <length> radius: 8px;
     in-out property <length> radius_small: 5px;
     in-out property <length> row_h: 38px;
+    // Vertical stride for ChoiceChip grids (chip height is 46px; stride must not shrink below it).
+    in-out property <length> choice_chip_row_stride: 52px;
+    in-out property <length> index_chip_row_stride: 54px;
     in-out property <length> grid_w: 136px;
     in-out property <length> grid_h: 122px;
     in-out property <length> pad: 16px;

@@ -47,7 +47,7 @@ pub struct PinningResult {
 // ============================================================================
 
 fn win32_clipboard_copy(text: &str) -> Result<(), String> {
-    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
@@ -60,19 +60,25 @@ fn win32_clipboard_copy(text: &str) -> Result<(), String> {
         let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_count).map_err(|e| e.to_string())?;
         let ptr = GlobalLock(hmem) as *mut u16;
         if ptr.is_null() {
+            let _ = GlobalFree(Some(hmem));
             return Err("GlobalLock failed".to_string());
         }
         std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
         let _ = GlobalUnlock(hmem);
 
-        OpenClipboard(None).map_err(|e| e.to_string())?;
+        if let Err(e) = OpenClipboard(None) {
+            let _ = GlobalFree(Some(hmem));
+            return Err(e.to_string());
+        }
         if let Err(e) = EmptyClipboard() {
             let _ = CloseClipboard();
+            let _ = GlobalFree(Some(hmem));
             return Err(e.to_string());
         }
         const CF_UNICODETEXT: u32 = 13;
         if let Err(e) = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0))) {
             let _ = CloseClipboard();
+            let _ = GlobalFree(Some(hmem));
             return Err(e.to_string());
         }
         CloseClipboard().map_err(|e| e.to_string())?;

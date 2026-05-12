@@ -9,16 +9,20 @@
 //! ```text
 //! %APPDATA%\Pathfinder\ai\
 //!   manifest.json            <- install state, model list, sizes
-//!   text-embedding.onnx      <- all-MiniLM-L6-v2, ~25 MB
-//!   text-embedding.tokens    <- tokenizer vocab
-//!   image-classifier.onnx    <- MobileNetV3-small, ~10 MB
+//!   onnxruntime.dll          <- ONNX Runtime (Windows DirectML build), user download
+//!   onnxruntime_providers_*.dll
+//!   text-embedding.onnx        <- all-MiniLM-L6-v2
+//!   tokenizer.json
+//!   image-classifier.onnx    <- MobileNetV3-small
 //! ```
 
-use std::path::PathBuf;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use zip::ZipArchive;
 
 /// State machine for the AI installer. Mirrored to the Slint property
 /// `ai_install_state`.
@@ -96,6 +100,16 @@ struct ModelSource {
 /// The set of model files that make up a complete Local AI install.
 /// Picked for size and Snapdragon X / Intel Core Ultra / AMD XDNA NPU support
 /// via DirectML when `ort` lands in the follow-up release.
+/// ONNX Runtime + DirectML native libraries (same NuGet Microsoft ships).
+/// Version must satisfy `ort` 2.0-rc API (ONNX Runtime 1.24.x).
+#[cfg(windows)]
+const ORT_DIRECTML_NUPKG_VER: &str = "1.24.0";
+#[cfg(windows)]
+const ORT_NUPKG_URL: &str =
+    "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/1.24.0";
+#[cfg(windows)]
+const ORT_NUPKG_APPROX_BYTES: u64 = 72_000_000;
+
 const MODELS: &[ModelSource] = &[
     ModelSource {
         local_name: "text-embedding.onnx",
@@ -118,9 +132,13 @@ const MODELS: &[ModelSource] = &[
 ];
 
 /// Total approximate install size used for the explainer dialog.
-pub fn approx_total_mb() -> u32 {
-    let total: u64 = MODELS.iter().map(|m| m.approx_bytes).sum();
-    (total / 1_000_000) as u32
+pub fn approx_total_install_mb() -> u32 {
+    let mut total: u64 = MODELS.iter().map(|m| m.approx_bytes).sum();
+    #[cfg(windows)]
+    {
+        total = total.saturating_add(ORT_NUPKG_APPROX_BYTES);
+    }
+    ((total.saturating_add(500_000)) / 1_000_000) as u32
 }
 
 pub fn ai_dir() -> PathBuf {
@@ -163,9 +181,12 @@ pub fn start_install(progress: Arc<InstallProgress>) {
     }
     if let Ok(mut s) = progress.state.lock() { *s = InstallState::Downloading; }
     progress.bytes_downloaded.store(0, Ordering::Release);
-    progress
-        .bytes_total
-        .store(MODELS.iter().map(|m| m.approx_bytes).sum(), Ordering::Release);
+    let mut bytes_total: u64 = MODELS.iter().map(|m| m.approx_bytes).sum();
+    #[cfg(windows)]
+    {
+        bytes_total = bytes_total.saturating_add(ORT_NUPKG_APPROX_BYTES);
+    }
+    progress.bytes_total.store(bytes_total, Ordering::Release);
     if let Ok(mut m) = progress.message.lock() { *m = "Preparing download...".to_string(); }
 
     std::thread::spawn(move || {
@@ -178,6 +199,52 @@ pub fn start_install(progress: Arc<InstallProgress>) {
         }
         let mut accumulated: u64 = 0;
         let mut installed: Vec<String> = Vec::new();
+
+        #[cfg(windows)]
+        {
+            if let Ok(mut m) = progress.message.lock() {
+                *m = "Downloading ONNX Runtime (DirectML) ...".to_string();
+            }
+            let ort_zip = dir.join("_Microsoft.ML.OnnxRuntime.DirectML.zip");
+            let _ = std::fs::remove_file(&ort_zip);
+            match download_file_with_progress(
+                ORT_NUPKG_URL,
+                &ort_zip,
+                ORT_NUPKG_APPROX_BYTES,
+                &progress,
+                accumulated,
+            ) {
+                Ok(written) => {
+                    accumulated = accumulated.saturating_add(written);
+                    progress.bytes_downloaded.store(accumulated, Ordering::Release);
+                    if let Err(e) = extract_win64_native_dlls_from_ort_package(&ort_zip, &dir) {
+                        let _ = std::fs::remove_file(&ort_zip);
+                        if let Ok(mut s) = progress.state.lock() {
+                            *s = InstallState::Error;
+                        }
+                        if let Ok(mut m) = progress.message.lock() {
+                            *m = format!("Extract ONNX Runtime failed: {e}");
+                        }
+                        progress.busy.store(false, Ordering::Release);
+                        return;
+                    }
+                    let _ = std::fs::remove_file(&ort_zip);
+                    installed.push("onnxruntime.dll (DirectML bundle)".to_string());
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&ort_zip);
+                    if let Ok(mut s) = progress.state.lock() {
+                        *s = InstallState::Error;
+                    }
+                    if let Ok(mut m) = progress.message.lock() {
+                        *m = format!("ONNX Runtime download failed: {e}");
+                    }
+                    progress.busy.store(false, Ordering::Release);
+                    return;
+                }
+            }
+        }
+
         for model in MODELS {
             if let Ok(mut m) = progress.message.lock() { *m = format!("Downloading {} ...", model.display_name); }
             let dest = dir.join(model.local_name);
@@ -222,6 +289,29 @@ pub fn uninstall(progress: Arc<InstallProgress>) {
     write_manifest(&Manifest::default());
 }
 
+/// Read PowerShell stderr in the background so a verbose error stream cannot
+/// fill the pipe buffer and block the child (classic `stderr` + `wait` deadlock).
+fn drain_stderr_capped(mut stderr: std::process::ChildStderr, out: Arc<Mutex<String>>, cap: usize) {
+    use std::io::Read;
+    let mut kept = Vec::with_capacity(cap.min(4096));
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stderr.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let room = cap.saturating_sub(kept.len());
+                if room > 0 {
+                    kept.extend_from_slice(&chunk[..n.min(room)]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if let Ok(mut g) = out.lock() {
+        *g = String::from_utf8_lossy(&kept).into_owned();
+    }
+}
+
 /// Download a single file with periodic byte-count updates to the shared
 /// progress struct. Uses a streaming PowerShell Invoke-WebRequest because
 /// it works without bundling a TLS stack and respects the user's network
@@ -233,8 +323,6 @@ fn download_file_with_progress(
     progress: &Arc<InstallProgress>,
     accumulated_before: u64,
 ) -> Result<u64, String> {
-    use std::io::Read;
-
     // Use the `ureq` crate would be cleaner, but to avoid adding a TLS
     // dep we shell out to PowerShell which Windows already has. Stream
     // the response to disk in 64 KB chunks and report progress.
@@ -267,6 +355,17 @@ fn download_file_with_progress(
         .spawn()
         .map_err(|e| e.to_string())?;
 
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "failed to pipe stderr".to_string())?;
+    const STDERR_CAP: usize = 64 * 1024;
+    let err_shared = Arc::new(Mutex::new(String::new()));
+    let err_for_thread = Arc::clone(&err_shared);
+    let drain = std::thread::spawn(move || {
+        drain_stderr_capped(stderr, err_for_thread, STDERR_CAP);
+    });
+
     // Poll progress by reading the file size while PowerShell streams.
     while child.try_wait().map_err(|e| e.to_string())?.is_none() {
         if let Ok(meta) = std::fs::metadata(dest) {
@@ -277,11 +376,11 @@ fn download_file_with_progress(
         }
         std::thread::sleep(std::time::Duration::from_millis(120));
     }
-    let mut err_buf = String::new();
-    if let Some(stderr) = child.stderr.as_mut() {
-        let _ = stderr.read_to_string(&mut err_buf);
-    }
+
     let status = child.wait().map_err(|e| e.to_string())?;
+    let _ = drain.join();
+    let err_buf = err_shared.lock().map(|g| g.clone()).unwrap_or_default();
+
     if !status.success() {
         return Err(if err_buf.is_empty() {
             "Download failed".to_string()
@@ -298,4 +397,40 @@ fn now_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Pull `runtimes/win-x64/native/*.dll` from the official DirectML NuGet
+/// (.nupkg is a zip) into `dest` so `onnxruntime.dll` sits next to the models.
+#[cfg(windows)]
+fn extract_win64_native_dlls_from_ort_package(zip_path: &Path, dest: &Path) -> Result<(), String> {
+    let file = File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let prefix = "runtimes/win-x64/native/";
+    let mut found_main = false;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let raw = entry.name().replace('\\', "/");
+        let Some(fname) = raw.strip_prefix(prefix) else {
+            continue;
+        };
+        if fname.contains('/') {
+            continue;
+        }
+        if !fname.to_ascii_lowercase().ends_with(".dll") {
+            continue;
+        }
+        let out_path = dest.join(fname);
+        let mut out = File::create(&out_path).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+        if fname.eq_ignore_ascii_case("onnxruntime.dll") {
+            found_main = true;
+        }
+    }
+    if !found_main {
+        return Err(format!(
+            "onnxruntime.dll not found under {prefix} in Microsoft.ML.OnnxRuntime.DirectML {}",
+            ORT_DIRECTML_NUPKG_VER
+        ));
+    }
+    Ok(())
 }
