@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "0.7.7"
+version = "0.7.8"
 edition = "2024"
 
 [lib]
@@ -34,8 +34,12 @@ zip = "2"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 memchr = "2"
 once_cell = "1.19"
-# Updater: HTTPS to GitHub API without shelling to PowerShell (reliable + correct headers).
-ureq = { version = "2.12", default-features = false, features = ["native-tls", "json"] }
+# Updater: HTTPS to GitHub API without shelling to PowerShell. ureq 2.x default
+# features bundle rustls + rustls-native-certs (system trust store on Windows),
+# which the runtime actually picks up — opting out of defaults and only picking
+# `native-tls` left the binary with no TLS backend wired in. Keep defaults on so
+# HTTPS works out of the box.
+ureq = { version = "2.12", features = ["json"] }
 tokenizers = "0.20"
 ndarray = { version = "0.17", default-features = false, features = ["std"] }
 
