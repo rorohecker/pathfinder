@@ -9083,10 +9083,20 @@ impl NativeController {
             ui.set_preview_body(ss(""));
             ui.set_preview_meta(ss(""));
             ui.set_preview_is_image(false);
+            ui.set_preview_is_html(false);
             return;
         };
 
         ui.set_preview_title(ss(&entry.name));
+        let ext_for_html = entry
+            .extension
+            .as_deref()
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        ui.set_preview_is_html(matches!(
+            ext_for_html.as_str(),
+            "html" | "htm" | "md" | "markdown" | "svg"
+        ));
 
         if let Some(archive) = &self.active_archive {
             ui.set_preview_is_image(false);
@@ -10340,6 +10350,16 @@ impl NativeController {
                 errors += 1;
             }
         }
+        // Deleted files cannot stay "selected". Drop the selection sets first
+        // so the contextual action bar collapses, then refresh the listing.
+        self.selected_set.clear();
+        self.secondary_selected_set.clear();
+        self.selected_index = -1;
+        self.secondary_selected_index = -1;
+        self.select_anchor = -1;
+        self.secondary_select_anchor = -1;
+        ui.set_selected_count(0);
+        ui.set_selected_index(-1);
         self.refresh(ui);
         if errors == 0 {
             let msg = if n == 1 {
@@ -11927,6 +11947,21 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 ctrl.show_hidden = new_state;
             }
             c.borrow_mut().refresh(&ui);
+        }
+    });
+
+    // HTML / Markdown preview: open the selected file in the system default
+    // browser so the user can see the rendered output. The preview pane
+    // itself keeps showing source code so this is the "Output" half of the
+    // Code / Output toggle.
+    let weak = ui.as_weak();
+    let c_browser = controller.clone();
+    ui.on_open_preview_in_browser(move || {
+        if let Some(_ui) = weak.upgrade() {
+            let ctrl = c_browser.borrow();
+            if let Some(entry) = ctrl.selected_entry() {
+                let _ = open::that(&entry.path);
+            }
         }
     });
 
