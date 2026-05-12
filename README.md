@@ -2,7 +2,9 @@
 
 Pathfinder is a file manager for Windows 11 that wants to be the version of Explorer you actually like using. It is written end to end in Rust and rendered with Slint, no HTML and no WebView in sight, so the whole app cold starts in well under a second and stays smooth on huge folders.
 
-**Version 0.7.0** adds ONNX Runtime inference (DirectML first, CPU fallback), file-name embeddings in SQLite for semantic ranking in the search bar, optional MobileNet-based tag suggestions, dHash-based duplicate image detection, a `--path` launch argument, and a Windows Settings panel to register Pathfinder as your per-user default folder handler (plus an optional `extras/set-pathfinder-default-folder-handler.reg`).
+**Version 0.7.1** adds a first-run welcome dialog that registers Pathfinder as the default folder handler in one click and walks the user through pinning Pathfinder and unpinning File Explorer (Windows 11 doesn't let third-party apps pin themselves), redesigns the Retro folder as a pixel-art floppy and the High Fantasy folder as a wooden treasure chest, gives High Fantasy a new emerald and gold palette, adds Gold, Indigo, and Crimson accent colors alongside Black and White, expands the Performance tab with a plain-English explanation and live memory usage from GetProcessMemoryInfo, surfaces detected discrete GPUs in the AI tab, isolates the custom theme editor preview so picking colors no longer recolors the whole app, and tidies up the View tab with a proper ScrollView and explanatory text.
+
+**Version 0.7.0** added ONNX Runtime inference (DirectML first, CPU fallback), file-name embeddings in SQLite for semantic ranking in the search bar, optional MobileNet-based tag suggestions, dHash-based duplicate image detection, a `--path` launch argument, and a Windows Settings panel to register Pathfinder as your per-user default folder handler (plus an optional `extras/set-pathfinder-default-folder-handler.reg`).
 
 The whole point is being faster and more efficient than the built in File Explorer while looking like an app you would pick on purpose. A few of the reasons it ends up that way:
 

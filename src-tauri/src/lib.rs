@@ -188,6 +188,8 @@ pub struct AiCapabilities {
     pub acceleration_kind: String,
     pub runtime_configured: bool,
     pub reason: String,
+    #[serde(default)]
+    pub gpu_summary: String,
 }
 
 #[derive(Clone)]
@@ -2961,6 +2963,139 @@ fn detect_npu_names() -> Vec<String> {
     Vec::new()
 }
 
+#[cfg(target_os = "windows")]
+fn detect_video_controller_names() -> Vec<String> {
+    let script = r#"
+@(
+  Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+    ForEach-Object { $_.Name }
+) | ConvertTo-Json -Compress
+"#;
+    let output = ProcessCommand::new("powershell")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(script)
+        .no_window()
+        .output();
+
+    if let Ok(out) = output {
+        if out.status.success() {
+            if let Ok(list) = serde_json::from_slice::<Vec<String>>(&out.stdout) {
+                return list.into_iter().filter(|s| !s.trim().is_empty()).collect();
+            }
+            if let Ok(single) = serde_json::from_slice::<String>(&out.stdout) {
+                let t = single.trim();
+                if !t.is_empty() {
+                    return vec![single];
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn detect_video_controller_names() -> Vec<String> {
+    Vec::new()
+}
+
+fn is_likely_discrete_gpu(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    if n.contains("microsoft basic render") {
+        return false;
+    }
+    if n.contains("nvidia")
+        || n.contains("geforce")
+        || n.contains("quadro")
+        || n.contains("rtx")
+        || n.contains("gtx ")
+        || n.contains("titan")
+    {
+        return true;
+    }
+    if n.contains("radeon rx")
+        || n.contains("radeon pro wx")
+        || n.contains("radeon pro w")
+        || n.contains("rx 7900")
+        || n.contains("rx 7800")
+        || n.contains("rx 7700")
+        || n.contains("rx 7600")
+    {
+        return true;
+    }
+    if n.contains("intel") && n.contains("arc") {
+        return true;
+    }
+    false
+}
+
+fn gpu_capability_summary() -> String {
+    let names = detect_video_controller_names();
+    if names.is_empty() {
+        return if cfg!(target_os = "windows") {
+            "GPU: Windows did not return any video adapters.".to_string()
+        } else {
+            "GPU: detailed adapter listing is only implemented on Windows.".to_string()
+        };
+    }
+    let discrete: Vec<String> = names
+        .iter()
+        .filter(|n| is_likely_discrete_gpu(n))
+        .cloned()
+        .collect();
+    let integrated: Vec<String> = names
+        .iter()
+        .filter(|n| !is_likely_discrete_gpu(n))
+        .cloned()
+        .collect();
+    if discrete.is_empty() {
+        let igpu = integrated.join(" · ");
+        format!("dGPU: none detected. Integrated GPU only: {igpu}")
+    } else if integrated.is_empty() {
+        format!("dGPU detected: {} (will be used for DirectML acceleration when available)", discrete.join(" · "))
+    } else {
+        format!(
+            "dGPU detected: {} (used for DirectML) · Integrated: {}",
+            discrete.join(" · "),
+            integrated.join(" · ")
+        )
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn process_memory_stats() -> Option<(u64, u64)> {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    unsafe {
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size).is_ok() {
+            let working_set_mb = counters.WorkingSetSize as u64 / (1024 * 1024);
+            let private_mb = counters.PagefileUsage as u64 / (1024 * 1024);
+            Some((working_set_mb, private_mb))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn process_working_set_mb() -> Option<u64> {
+    process_memory_stats().map(|(ws, _)| ws)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_working_set_mb() -> Option<u64> {
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_memory_stats() -> Option<(u64, u64)> {
+    None
+}
+
 fn compute_ai_capabilities() -> AiCapabilities {
     let devices = detect_npu_names();
     let npu_hardware_found = !devices.is_empty();
@@ -2974,21 +3109,22 @@ fn compute_ai_capabilities() -> AiCapabilities {
         "CPU Fallback".to_string()
     };
     let acceleration_kind = if npu_enabled { "NPU" } else { "CPU" }.to_string();
+    let ort = crate::inference::ort_runtime_line();
     let reason = if npu_enabled {
         format!(
-            "NPU acceleration enabled: {}. Local AI features stay on-device.",
-            device_name
+            "NPU acceleration: {}. Local AI stays on-device. [{}]",
+            device_name, ort
         )
     } else if npu_hardware_found {
         format!(
-            "NPU candidate detected ({}) but no PATHFINDER_LOCAL_AI_RUNTIME is configured. CPU fallback is enabled and stays on-device.",
-            devices.join(", ")
+            "NPU candidate ({}) without PATHFINDER_LOCAL_AI_RUNTIME — CPU fallback on-device. [{}]",
+            devices.join(", "),
+            ort
         )
     } else {
-        "No supported NPU was detected. CPU fallback is enabled and stays on-device.".to_string()
+        format!("No supported NPU detected — CPU fallback on-device. [{}]", ort)
     };
-    let ort = crate::inference::ort_runtime_line();
-    let reason = format!("{reason} [{ort}]");
+    let gpu_summary = gpu_capability_summary();
 
     AiCapabilities {
         npu_available: npu_enabled,
@@ -3000,6 +3136,7 @@ fn compute_ai_capabilities() -> AiCapabilities {
         acceleration_kind,
         runtime_configured,
         reason,
+        gpu_summary,
     }
 }
 
@@ -4514,6 +4651,9 @@ struct NativeSettings {
     search_semantic_mode: bool,
     /// Reserved for optional CLIP model (not bundled in this build).
     clip_search_enabled: bool,
+    /// Suppress the first-run welcome dialog after the user dismisses it once.
+    #[serde(default)]
+    first_run_welcome_dismissed: bool,
 }
 
 impl Default for NativeSettings {
@@ -4540,6 +4680,7 @@ impl Default for NativeSettings {
             window_maximized: false,
             search_semantic_mode: false,
             clip_search_enabled: false,
+            first_run_welcome_dismissed: false,
         }
     }
 }
@@ -4566,6 +4707,8 @@ struct ThemeDefinition {
     mono_font: String,
     font_size_delta: i32,
     icon_folder_hex: String,
+    #[serde(default)]
+    gradient_background: bool,
 }
 
 impl Default for ThemeDefinition {
@@ -4591,6 +4734,7 @@ impl Default for ThemeDefinition {
             mono_font: "Cascadia Mono".to_string(),
             font_size_delta: 0,
             icon_folder_hex: "#e2a934".to_string(),
+            gradient_background: false,
         }
     }
 }
@@ -4807,13 +4951,13 @@ fn icon_folder_colors(id: &str) -> (Color, Color) {
     // tab using icon_folder_1 directly.
     match id {
         "terminal" => (color("#9cffd8"), color("#45c97a")),
-        "retro" => (color("#ffe46a"), color("#ffc800")),
+        "retro" => (color("#ffee8a"), color("#c02890")),
         "cyberpunk" => (color("#ff6ae0"), color("#d000a0")),
         "sunset" => (color("#ffb87a"), color("#d8421c")),
         "frost" => (color("#cfe6ff"), color("#5ea0d8")),
         "warm" => (color("#e0a070"), color("#9c5818")),
         "paper" => (color("#e6d4a4"), color("#b6915c")),
-        "fantasy" => (color("#d8a440"), color("#8a4818")),
+        "fantasy" => (color("#e8c478"), color("#3a2a14")),
         "flat" => (color("#cfd5dc"), color("#7c8a9c")),
         _ => (color("#ffd86a"), color("#e2a934")),
     }
@@ -5195,7 +5339,7 @@ fn like_escape(value: &str) -> String {
 }
 
 fn embedding_blob_to_vec(blob: &[u8]) -> Option<Vec<f32>> {
-    if blob.len() % 4 != 0 {
+    if !blob.len().is_multiple_of(4) {
         return None;
     }
     let mut v = Vec::with_capacity(blob.len() / 4);
@@ -6885,6 +7029,36 @@ fn accent_override(id: &str) -> (Color, Color, Color) {
             rgba_u8(26, 166, 166, 0.17),
             color("#31caca"),
         ),
+        "black" => (
+            color("#0b0d10"),
+            rgba_u8(11, 13, 16, 0.22),
+            color("#1c2128"),
+        ),
+        "white" => (
+            color("#e8ecf2"),
+            rgba_u8(232, 236, 242, 0.18),
+            color("#ffffff"),
+        ),
+        "copper" => (
+            color("#c46f34"),
+            rgba_u8(196, 111, 52, 0.18),
+            color("#e89255"),
+        ),
+        "gold" => (
+            color("#d4a83a"),
+            rgba_u8(212, 168, 58, 0.18),
+            color("#f0c75a"),
+        ),
+        "indigo" => (
+            color("#3b4cb8"),
+            rgba_u8(59, 76, 184, 0.18),
+            color("#5e72d6"),
+        ),
+        "crimson" => (
+            color("#c0312f"),
+            rgba_u8(192, 49, 47, 0.18),
+            color("#e25754"),
+        ),
         _ => (
             color("#4f9cff"),
             rgba_u8(79, 156, 255, 0.16),
@@ -7060,28 +7234,29 @@ fn theme_palette(id: &str) -> PaletteSpec {
             outer_border: 0.0,
         },
         "fantasy" => PaletteSpec {
-            // Aged parchment, brass-on-leather quest-board feel
-            bg: color("#cdb47a"),
-            bg_soft: color("#e8d49a"),
-            panel: rgba_u8(240, 218, 160, 0.92),
-            panel_solid: color("#edd9a8"),
-            panel_alt: color("#b89350"),
-            titlebar: color("#b88946"),
-            sidebar: color("#cca860"),
-            border: rgba_u8(80, 50, 22, 0.28),
-            border_strong: rgba_u8(80, 50, 22, 0.48),
-            text: color("#2f2113"),
-            text_muted: color("#604323"),
-            text_faint: color("#876b3c"),
-            accent: color("#9b6716"),
-            accent_soft: rgba_u8(155, 103, 22, 0.16),
-            accent_strong: color("#74450e"),
-            radius: 6.0,
-            radius_small: 5.0,
-            // Old-style serif with classical proportions for high-fantasy quest-board feel.
-            ui_font: "Book Antiqua",
-            mono_font: "Garamond",
-            light_controls: true,
+            // Enchanted forest at dusk — deep moss greens with antique gold trim
+            // and burnished bronze highlights. Clearly distinct from sunset warm,
+            // mica blues, and retro neon.
+            bg: color("#0d1a14"),
+            bg_soft: color("#142a20"),
+            panel: rgba_u8(24, 52, 38, 0.92),
+            panel_solid: color("#1a3a2a"),
+            panel_alt: color("#234a36"),
+            titlebar: rgba_u8(7, 14, 11, 0.96),
+            sidebar: rgba_u8(15, 28, 22, 0.95),
+            border: rgba_u8(196, 158, 78, 0.28),
+            border_strong: rgba_u8(232, 196, 120, 0.46),
+            text: color("#f3e7c8"),
+            text_muted: color("#c9b785"),
+            text_faint: color("#8a7c54"),
+            accent: color("#e8c478"),
+            accent_soft: rgba_u8(232, 196, 120, 0.18),
+            accent_strong: color("#f5dca0"),
+            radius: 10.0,
+            radius_small: 6.0,
+            ui_font: "Cambria",
+            mono_font: "Consolas",
+            light_controls: false,
             outer_border: 0.0,
         },
         "sunset" => PaletteSpec {
@@ -7170,6 +7345,7 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
     palette.accent_strong = accent_strong;
 
     let global = ui.global::<ThemePalette>();
+    global.set_bg_gradient_enabled(false);
     global.set_bg(palette.bg);
     global.set_bg_soft(palette.bg_soft);
     global.set_panel(palette.panel);
@@ -7334,6 +7510,10 @@ fn apply_custom_theme_to_ui(ui: &MainWindow, def: &ThemeDefinition) {
     metrics.set_grid_w(136.0 + size_delta * 3.0);
     metrics.set_grid_h(122.0 + size_delta * 3.0);
     set_choice_chip_strides(&metrics, row_h);
+
+    global.set_active_theme(ss("custom"));
+    global.set_bg_gradient_enabled(def.gradient_background);
+    global.set_folder_icon_image(slint::Image::default());
 }
 
 fn sync_editor_state(ui: &MainWindow, def: &ThemeDefinition) {
@@ -7345,6 +7525,7 @@ fn sync_editor_state(ui: &MainWindow, def: &ThemeDefinition) {
     ui.set_ce_mono_font(ss(&def.mono_font));
     ui.set_ce_font_size_delta(def.font_size_delta);
     ui.set_ce_icon_folder_hex(ss(&def.icon_folder_hex));
+    ui.set_ce_gradient_background(def.gradient_background);
     ui.set_ce_icon_set(ss(""));
     ui.set_ce_selected_token(-1);
     ui.set_ce_token_hex(ss(""));
@@ -7394,6 +7575,7 @@ fn editor_def_from_ui(ui: &MainWindow) -> ThemeDefinition {
         mono_font: ui.get_ce_mono_font().to_string(),
         font_size_delta: ui.get_ce_font_size_delta(),
         icon_folder_hex: ui.get_ce_icon_folder_hex().to_string(),
+        gradient_background: ui.get_ce_gradient_background(),
     }
 }
 
@@ -7752,6 +7934,7 @@ impl NativeController {
                 acceleration_kind: "CPU".to_string(),
                 runtime_configured: false,
                 reason: "Detecting...".to_string(),
+                gpu_summary: "Detecting GPUs…".to_string(),
             },
             clipboard: None,
             pending_prompt: None,
@@ -7834,8 +8017,8 @@ impl NativeController {
             (
                 "fantasy",
                 "High Fantasy",
-                "Quest board — aged parchment and brass",
-                "#cdb47a",
+                "Moonlit archive — ink glass, aurora teal, arcane violet",
+                "#5ee0c8",
             ),
             (
                 "sunset",
@@ -7851,6 +8034,12 @@ impl NativeController {
             ("violet", "Violet", "Soft violet accents", "#8b6cff"),
             ("rose", "Rose", "Pink-red highlight", "#e45578"),
             ("teal", "Teal", "Cool teal accent", "#1aa6a6"),
+            ("copper", "Copper", "Warm metallic accent", "#c46f34"),
+            ("gold", "Gold", "Rich antique gold", "#d4a83a"),
+            ("indigo", "Indigo", "Deep ink blue", "#3b4cb8"),
+            ("crimson", "Crimson", "Vivid stage red", "#c0312f"),
+            ("black", "Black", "Ink neutral chrome", "#0b0d10"),
+            ("white", "White", "Bright frost chrome", "#e8ecf2"),
         ]));
         ui.set_density_choices(choice_items(&[
             ("cozy", "Cozy", "38px rows and larger icons", "#4f9cff"),
@@ -7891,6 +8080,7 @@ impl NativeController {
         ui.set_command_items(command_items());
         ui.set_ai_install_size_mb(local_ai::approx_total_install_mb() as i32);
         ui.set_ai_device(ss(&self.ai.reason));
+        ui.set_ai_gpu_status(ss(&self.ai.gpu_summary));
         ui.set_ai_label(ss(ai_status_label(&self.ai)));
         self.sync_performance_status(ui);
         apply_theme(ui, &self.settings);
@@ -7958,7 +8148,7 @@ impl NativeController {
         let status = index_status_for_settings(&self.settings);
         ui.set_active_index_mode(ss(&self.settings.index_mode));
         ui.set_index_status(ss(format!(
-            "{} indexed | index {} | thumbnails {} of {} | {}",
+            "{} files indexed · {} on disk · thumbnails {} of {} cap · {}",
             status.indexed_files,
             format_size_short(status.index_bytes),
             format_size_short(status.thumbnail_bytes),
@@ -7969,6 +8159,32 @@ impl NativeController {
             "Thumbnail cache is capped at {} and old thumbnails are removed automatically.",
             format_size_short(status.thumbnail_limit)
         )));
+
+        let intro = concat!(
+            "Pathfinder keeps a small local database of the files in folders you visit so the search bar can return matches instantly without rescanning your disk every time. ",
+            "Indexing modes change how aggressively that database is grown in the background:\n",
+            "\u{2022} Low — only the folders you actually open get added. Lightest on disk and CPU.\n",
+            "\u{2022} Balanced — same as Low but also walks Documents, Pictures, Desktop, and Downloads on startup.\n",
+            "\u{2022} High — adds every fixed drive root. Best search coverage, uses the most disk while it catches up.\n",
+            "Thumbnails are stored separately and the cache is automatically pruned when it hits the budget below, so previews never quietly fill your drive."
+        );
+        ui.set_performance_intro(ss(intro));
+
+        let ram_line = match process_memory_stats() {
+            Some((ws, private_mb)) => format!(
+                "Memory in use right now: {ws} MB working set ({private_mb} MB private)"
+            ),
+            None => "Memory in use: not available on this platform".to_string(),
+        };
+        let footprint = format!(
+            "{ram_line}\nIndex database: {} on disk\nThumbnail cache: {} of {} budget\n\nLocations:\n  {}\n  {}",
+            format_size_short(status.index_bytes),
+            format_size_short(status.thumbnail_bytes),
+            format_size_short(status.thumbnail_limit),
+            native_index_file().display(),
+            thumbnail_cache_dir().display(),
+        );
+        ui.set_performance_footprint(ss(footprint));
     }
 
     fn set_index_mode(&mut self, ui: &MainWindow, mode: &str) {
@@ -12554,6 +12770,61 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
 
     let weak = ui.as_weak();
     let c = controller.clone();
+    ui.on_welcome_set_default_handler(move || {
+        if let Some(ui) = weak.upgrade() {
+            #[cfg(target_os = "windows")]
+            {
+                match set_as_default_file_manager() {
+                    Ok(()) => {
+                        ui.set_welcome_default_handler_set(true);
+                        ui.set_welcome_default_status(ss(
+                            "Done. Opening a folder shortcut now launches Pathfinder for your user account.",
+                        ));
+                        c.borrow_mut().show_toast(
+                            &ui,
+                            "Pathfinder is set as the default folder handler.",
+                        );
+                    }
+                    Err(e) => {
+                        ui.set_welcome_default_status(ss(&format!(
+                            "Could not register: {e}. You can try again from Settings → View."
+                        )));
+                        c.borrow_mut().show_toast_kind(&ui, e, "error");
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                ui.set_welcome_default_status(ss(
+                    "Default folder handler registration is only available on Windows.",
+                ));
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_welcome_open_taskbar_settings(move || {
+        if let Some(_ui) = weak.upgrade() {
+            #[cfg(target_os = "windows")]
+            {
+                let _ = open::that("ms-settings:taskbar");
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_welcome_dismiss(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_welcome_visible(false);
+            let mut ctrl = c.borrow_mut();
+            ctrl.settings.first_run_welcome_dismissed = true;
+            ctrl.save_settings();
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_install_update(move || {
         if let Some(ui) = weak.upgrade() {
             let url = ui.get_update_download_url().to_string();
@@ -12960,8 +13231,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 model.set_row_data(i, parsed_color);
             }
             ui.set_ce_token_hex(ss(&h));
-            let def = editor_def_from_ui(&ui);
-            apply_custom_theme_to_ui(&ui, &def);
+            // Preview only — colors flow into ce_token_colors which the editor
+            // preview rectangle reads directly. Don't push to the global palette
+            // until the user explicitly saves.
         }
     });
 
@@ -12969,8 +13241,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_ce_radius_changed(move |val| {
         if let Some(ui) = weak.upgrade() {
             ui.set_ce_radius(val);
-            let def = editor_def_from_ui(&ui);
-            apply_custom_theme_to_ui(&ui, &def);
         }
     });
 
@@ -12985,7 +13255,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_ce_finish_changed(move |finish| {
         if let Some(ui) = weak.upgrade() {
             ui.set_ce_finish(finish.clone());
-            apply_window_finish(&ui, &finish);
+            // Window backdrop is a system level effect — only apply once saved.
         }
     });
 
@@ -12994,8 +13264,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             ui.set_ce_ui_font(ui_font.clone());
             ui.set_ce_mono_font(mono_font.clone());
-            let def = editor_def_from_ui(&ui);
-            apply_custom_theme_to_ui(&ui, &def);
         }
     });
 
@@ -13003,8 +13271,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_ce_font_size_changed(move |delta| {
         if let Some(ui) = weak.upgrade() {
             ui.set_ce_font_size_delta(delta);
-            let def = editor_def_from_ui(&ui);
-            apply_custom_theme_to_ui(&ui, &def);
         }
     });
 
@@ -13018,8 +13284,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 format!("#{}", h)
             };
             ui.set_ce_icon_folder_hex(ss(&h));
-            let def = editor_def_from_ui(&ui);
-            apply_custom_theme_to_ui(&ui, &def);
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_ce_gradient_changed(move |enabled| {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_ce_gradient_background(enabled);
         }
     });
 
@@ -13058,9 +13329,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_ce_load(move |name| {
         if let Some(ui) = weak.upgrade() {
             if let Some(def) = load_custom_theme_def(&name) {
+                sync_editor_state(&ui, &def);
                 apply_custom_theme_to_ui(&ui, &def);
                 apply_window_finish(&ui, &def.finish);
-                sync_editor_state(&ui, &def);
                 let mut ctrl = c.borrow_mut();
                 ctrl.settings.custom_theme = Some(name.to_string());
                 ctrl.save_settings();
@@ -13093,7 +13364,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             let def = ThemeDefinition::default();
             sync_editor_state(&ui, &def);
-            apply_custom_theme_to_ui(&ui, &def);
         }
     });
 }
@@ -13734,6 +14004,11 @@ fn set_as_default_file_manager() -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
+fn is_default_file_manager_registered() -> bool {
+    folder_shell_registry::pathfinder_is_default_folder_handler()
+}
+
+#[cfg(target_os = "windows")]
 fn restore_as_default_file_manager() -> Result<(), String> {
     folder_shell_registry::restore_windows_default_folder_handler()
 }
@@ -13781,6 +14056,23 @@ pub fn run() {
     controller.borrow_mut().initialize_ui(&ui);
     wire_native_callbacks(&ui, controller.clone());
 
+    // First-run welcome: shown until the user clicks "Got it". Save flag in
+    // settings so we never repeat. We deliberately also check on Windows
+    // whether the default folder handler is already registered — if it is,
+    // mark step one as done so the dialog doesn't push the user to redo it.
+    if !controller.borrow().settings.first_run_welcome_dismissed {
+        ui.set_welcome_visible(true);
+        #[cfg(target_os = "windows")]
+        {
+            if is_default_file_manager_registered() {
+                ui.set_welcome_default_handler_set(true);
+                ui.set_welcome_default_status(ss(
+                    "Already registered. Pathfinder is your default folder handler.",
+                ));
+            }
+        }
+    }
+
     // Detect NPU/AI capabilities in background; update UI labels once done
     let weak_ui = ui.as_weak();
     std::thread::spawn(move || {
@@ -13788,6 +14080,7 @@ pub fn run() {
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak_ui.upgrade() {
                 ui.set_ai_device(SharedString::from(&caps.reason));
+                ui.set_ai_gpu_status(SharedString::from(&caps.gpu_summary));
                 ui.set_ai_label(SharedString::from(ai_status_label(&caps)));
             }
         });

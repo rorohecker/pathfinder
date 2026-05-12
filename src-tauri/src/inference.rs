@@ -81,7 +81,7 @@ fn ensure_ort_environment() -> ort::Result<()> {
                 env.commit();
             });
         *guard = Some(mapped.clone());
-        return mapped.map_err(ort::Error::new);
+        mapped.map_err(ort::Error::new)
     }
     #[cfg(not(windows))]
     {
@@ -210,11 +210,11 @@ pub fn embed_query_text(text: &str) -> Option<Vec<f32>> {
             .ok_or_else(|| ort::Error::new("no embedding tensor in model output"))?;
         let (shape, data) = tensor.try_extract_tensor::<f32>()?;
         let vec: Vec<f32> = if shape.len() == 2 && (shape[1] as usize) == EMBED_DIM {
-            data.iter().copied().collect()
+            data.to_vec()
         } else if shape.len() == 3 {
             let seq = shape[1] as usize;
             let dim = shape[2] as usize;
-            let data_vec: Vec<f32> = data.iter().copied().collect();
+            let data_vec: Vec<f32> = data.to_vec();
             let hidden =
                 Array3::from_shape_vec((1, seq, dim), data_vec).map_err(|e| ort::Error::new(e.to_string()))?;
             mean_pool(hidden, mask_arr).to_vec()
@@ -283,7 +283,7 @@ pub fn suggest_image_tag(path: &Path) -> Option<String> {
     let out = session.run(ort::inputs!["input" => input_ref]).ok()?;
     let first = out.iter().next()?;
     let (_shape, data) = first.1.try_extract_tensor::<f32>().ok()?;
-    let flat: Vec<f32> = data.iter().copied().collect();
+    let flat: Vec<f32> = data.to_vec();
     let idx = flat
         .iter()
         .enumerate()

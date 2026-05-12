@@ -6,8 +6,9 @@ use std::os::windows::ffi::OsStrExt;
 
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY_CURRENT_USER,
-    KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, HKEY,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW,
+    RegSetValueExW, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
+    REG_SZ, HKEY,
 };
 use windows::core::PCWSTR;
 
@@ -96,6 +97,51 @@ pub fn set_pathfinder_as_default_folder_handler() -> Result<(), String> {
         r?;
     }
     Ok(())
+}
+
+/// True if the HKCU folder/directory open command points at the current pathfinder.exe.
+/// Used by the first-run welcome dialog so we can mark step 1 as already done.
+pub fn pathfinder_is_default_folder_handler() -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().to_ascii_lowercase(),
+        Err(_) => return false,
+    };
+    let rel = r"Software\Classes\Folder\shell\open\command";
+    let wide_path = to_wide_nul(rel);
+    let mut hkey = HKEY::default();
+    let err = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(wide_path.as_ptr()),
+            None,
+            KEY_READ,
+            &mut hkey,
+        )
+    };
+    if err != ERROR_SUCCESS {
+        return false;
+    }
+    let mut buf = [0u16; 1024];
+    let mut size = (buf.len() * 2) as u32;
+    let q = unsafe {
+        RegQueryValueExW(
+            hkey,
+            PCWSTR::null(),
+            None,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    unsafe {
+        let _ = RegCloseKey(hkey);
+    }
+    if q != ERROR_SUCCESS {
+        return false;
+    }
+    let chars = (size as usize / 2).saturating_sub(1);
+    let value = String::from_utf16_lossy(&buf[..chars]).to_ascii_lowercase();
+    value.contains(&exe)
 }
 
 /// Removes HKCU overrides created by [`set_pathfinder_as_default_folder_handler`].

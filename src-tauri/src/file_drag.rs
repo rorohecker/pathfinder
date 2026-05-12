@@ -167,7 +167,7 @@ unsafe fn paths_from_hglobal(hglobal: HGLOBAL) -> Vec<String> {
         fn can_read_u16(p: *const u16, end_usize: usize) -> bool {
             (p as usize)
                 .checked_add(std::mem::size_of::<u16>())
-                .map_or(false, |hi| hi <= end_usize)
+                .is_some_and(|hi| hi <= end_usize)
         }
 
         if is_wide {

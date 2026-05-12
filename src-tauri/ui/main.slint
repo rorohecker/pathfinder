@@ -80,6 +80,8 @@ export global ThemePalette {
     in-out property <color> icon_folder_1: #ffd86a;
     in-out property <color> icon_folder_2: #e2a934;
     in-out property <string> active_theme: "mica-dark";
+    // Custom themes: soft vertical gradient between bg_soft and bg instead of flat bg.
+    in-out property <bool> bg_gradient_enabled: false;
     // Runtime-loaded folder icon image. Set from Rust by reading
     // %APPDATA%\Pathfinder\theme_icons\{theme}.png. If width is 0px the
     // file wasn't found and NodeVisual falls back to its drawn shape.
@@ -428,7 +430,9 @@ component NodeVisual {
     // folder but matches the theme palette.
     property <bool> uses_standard_folder:
         ThemePalette.active_theme != "terminal" &&
-        ThemePalette.active_theme != "cyberpunk";
+        ThemePalette.active_theme != "cyberpunk" &&
+        ThemePalette.active_theme != "retro" &&
+        ThemePalette.active_theme != "fantasy";
 
     // Tab on top
     if root.is_dir && !root.use_image && root.uses_standard_folder: Rectangle {
@@ -480,6 +484,151 @@ component NodeVisual {
     if root.is_dir && !root.use_image && ThemePalette.active_theme == "cyberpunk": Rectangle {
         x: 0; y: 0; width: parent.width; height: parent.height; border-radius: 2px; background: #080220; border-width: 1px; border-color: #00fff2;
         Rectangle { x: parent.width*0.34; y: parent.height*0.30; width: parent.width*0.32; height: parent.height*0.40; border-radius: 1px; background: #1a0440; border-width: 1px; border-color: #00fff2; }
+    }
+
+    // ── RETRO: chunky pixel-art folder with floppy disk centerpiece ──────
+    // Reads as a folder silhouette but rendered with visible blocky pixels,
+    // a magenta-on-yellow palette, and a tiny 8-bit floppy disk dropped on top.
+    if root.is_dir && !root.use_image && ThemePalette.active_theme == "retro": Rectangle {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        // Folder tab — chunky block on top-left
+        Rectangle {
+            x: parent.width * 0.06;
+            y: parent.height * 0.08;
+            width: parent.width * 0.46;
+            height: parent.height * 0.20;
+            background: ThemePalette.icon_folder_1;
+            border-width: 2px;
+            border-color: #12081c;
+        }
+        // Folder body — main yellow block with thick pixel border
+        Rectangle {
+            x: parent.width * 0.04;
+            y: parent.height * 0.22;
+            width: parent.width * 0.92;
+            height: parent.height * 0.72;
+            background: ThemePalette.icon_folder_2;
+            border-width: 2px;
+            border-color: #12081c;
+            // Top highlight pixel row (lighter)
+            Rectangle {
+                x: 2px; y: 2px;
+                width: parent.width - 4px;
+                height: parent.height * 0.16;
+                background: ThemePalette.icon_folder_1;
+            }
+            // Bottom shadow pixel row (darker)
+            Rectangle {
+                x: 2px;
+                y: parent.height - parent.height * 0.18 - 2px;
+                width: parent.width - 4px;
+                height: parent.height * 0.14;
+                background: #c02890;
+                opacity: 0.55;
+            }
+            // Floppy disk centerpiece
+            Rectangle {
+                x: parent.width * 0.30;
+                y: parent.height * 0.30;
+                width: parent.width * 0.40;
+                height: parent.height * 0.44;
+                background: #2a1840;
+                border-width: 1px;
+                border-color: #12081c;
+                // Disk label
+                Rectangle {
+                    x: parent.width * 0.16;
+                    y: parent.height * 0.18;
+                    width: parent.width * 0.68;
+                    height: parent.height * 0.36;
+                    background: #f8f0d4;
+                }
+                // Metal shutter
+                Rectangle {
+                    x: parent.width * 0.30;
+                    y: parent.height * 0.62;
+                    width: parent.width * 0.40;
+                    height: parent.height * 0.22;
+                    background: #cfd8e8;
+                }
+            }
+        }
+    }
+
+    // ── FANTASY: ornate wooden treasure chest with gold bands ────────────
+    // Clearly distinct from a folder shape: rounded lid on top of trapezoidal
+    // body, two gold horizontal bands, and a small gold lock plate.
+    if root.is_dir && !root.use_image && ThemePalette.active_theme == "fantasy": Rectangle {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        // Lid (rounded top half)
+        Rectangle {
+            x: parent.width * 0.06;
+            y: parent.height * 0.10;
+            width: parent.width * 0.88;
+            height: parent.height * 0.42;
+            border-radius: parent.width * 0.30;
+            background: @linear-gradient(180deg, #6b4520 0%, #4a2c12 100%);
+            border-width: 1px;
+            border-color: #2a1808;
+        }
+        // Cover the bottom half of the lid so it sits flat on the body
+        Rectangle {
+            x: parent.width * 0.06;
+            y: parent.height * 0.40;
+            width: parent.width * 0.88;
+            height: parent.height * 0.14;
+            background: #4a2c12;
+        }
+        // Chest body
+        Rectangle {
+            x: parent.width * 0.04;
+            y: parent.height * 0.48;
+            width: parent.width * 0.92;
+            height: parent.height * 0.48;
+            border-radius: 2px;
+            background: @linear-gradient(180deg, #5a3818 0%, #36200c 100%);
+            border-width: 1px;
+            border-color: #1a0c04;
+        }
+        // Gold band — top of body
+        Rectangle {
+            x: parent.width * 0.04;
+            y: parent.height * 0.50;
+            width: parent.width * 0.92;
+            height: parent.height * 0.07;
+            background: @linear-gradient(180deg, ThemePalette.icon_folder_1 0%, ThemePalette.icon_folder_2 100%);
+            border-width: 1px;
+            border-color: rgba(0, 0, 0, 0.35);
+        }
+        // Gold band — bottom of body
+        Rectangle {
+            x: parent.width * 0.04;
+            y: parent.height * 0.86;
+            width: parent.width * 0.92;
+            height: parent.height * 0.07;
+            background: @linear-gradient(180deg, ThemePalette.icon_folder_1 0%, ThemePalette.icon_folder_2 100%);
+            border-width: 1px;
+            border-color: rgba(0, 0, 0, 0.35);
+        }
+        // Lock plate
+        Rectangle {
+            x: parent.width * 0.42;
+            y: parent.height * 0.56;
+            width: parent.width * 0.16;
+            height: parent.height * 0.24;
+            border-radius: 2px;
+            background: @linear-gradient(180deg, ThemePalette.icon_folder_1 0%, ThemePalette.icon_folder_2 100%);
+            border-width: 1px;
+            border-color: rgba(0, 0, 0, 0.40);
+            // Keyhole dot
+            Rectangle {
+                x: parent.width / 2 - 1.5px;
+                y: parent.height / 2 - 1.5px;
+                width: 3px; height: 3px;
+                border-radius: 1.5px;
+                background: #2a1808;
+            }
+        }
     }
 
     // ── SHELL-EXTRACTED ICON (replaces procedural icon when available) ───
@@ -1226,7 +1375,7 @@ export component MainWindow inherits Window {
     preferred-height: 800px;
     min-width: 900px;
     min-height: 550px;
-    background: ThemePalette.bg;
+    background: ThemePalette.bg_gradient_enabled ? @linear-gradient(165deg, ThemePalette.bg_soft 0%, ThemePalette.bg 55%, ThemePalette.bg 100%) : ThemePalette.bg;
     default-font-family: AppMetrics.ui_font;
     forward-focus: keys;
 
@@ -1254,6 +1403,8 @@ export component MainWindow inherits Window {
     in-out property <string> active_index_mode: "low";
     in-out property <string> index_status: "";
     in-out property <string> thumbnail_status: "";
+    in-out property <string> performance_intro: "";
+    in-out property <string> performance_footprint: "";
     in-out property <string> view_mode: "grid";
     in-out property <bool> preview_visible: true;
     in-out property <bool> dual_pane: false;
@@ -1315,6 +1466,7 @@ export component MainWindow inherits Window {
     in-out property <string> toast_text: "";
     in-out property <string> ai_label: "CPU Fallback";
     in-out property <string> ai_device: "Detecting";
+    in-out property <string> ai_gpu_status: "";
     in-out property <string> prompt_title: "";
     in-out property <string> prompt_value: "";
     // "text" = standard text-input prompt; "conflict" = three-button dialog
@@ -1384,6 +1536,12 @@ export component MainWindow inherits Window {
     callback rebuild_index();
     callback windows_set_default_folder_handler();
     callback windows_restore_folder_handler();
+    callback welcome_set_default_handler();
+    callback welcome_open_taskbar_settings();
+    callback welcome_dismiss();
+    in-out property <bool> welcome_visible: false;
+    in-out property <string> welcome_default_status: "Click Set as default below to register Pathfinder for folder shortcuts in Explorer.";
+    in-out property <bool> welcome_default_handler_set: false;
     callback minimize();
     callback maximize();
     callback close();
@@ -1432,6 +1590,7 @@ export component MainWindow inherits Window {
     in-out property <int> ce_font_size_delta: 0;
     in-out property <string> ce_icon_folder_hex: "#e2a934";
     in-out property <string> ce_icon_set: "";
+    in-out property <bool> ce_gradient_background: false;
 
     callback ce_select_token(int);
     callback ce_color_changed(int, string);
@@ -1441,6 +1600,7 @@ export component MainWindow inherits Window {
     callback ce_font_changed(string, string);
     callback ce_font_size_changed(int);
     callback ce_icon_tint_changed(string);
+    callback ce_gradient_changed(bool);
     callback ce_save(string);
     callback ce_load(string);
     callback ce_delete(string);
@@ -3389,12 +3549,15 @@ export component MainWindow inherits Window {
 
                     Text { text: "ACCENT COLOR"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
+                        property <int> ac_cols: 4;
+                        property <length> ac_gap: 6px;
+                        property <length> ac_cell_w: (parent.width - (ac_cols - 1) * ac_gap) / ac_cols;
                         width: parent.width;
-                        height: Math.ceil(root.accent_choices.length / 3) * AppMetrics.choice_chip_row_stride;
+                        height: Math.ceil(root.accent_choices.length / ac_cols) * AppMetrics.choice_chip_row_stride;
                         for accent[i] in root.accent_choices: ChoiceChip {
-                            x: Math.mod(i, 3) * (parent.width / 3 + 2px);
-                            y: Math.floor(i / 3) * AppMetrics.choice_chip_row_stride;
-                            width: parent.width / 3 - 4px;
+                            x: Math.mod(i, ac_cols) * (ac_cell_w + ac_gap);
+                            y: Math.floor(i / ac_cols) * AppMetrics.choice_chip_row_stride;
+                            width: ac_cell_w;
                             item: accent;
                             active: root.active_accent == accent.id;
                             picked(id) => { root.accent_selected(id); }
@@ -3402,13 +3565,18 @@ export component MainWindow inherits Window {
                     }
 
                     Text { text: "DENSITY"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    // Stacked vertical layout instead of a 3-up grid. Cozy /
+                    // Comfortable / Compact descriptions ran into each other
+                    // at narrow widths because each tile was only ~196 px
+                    // wide. Full-width rows give labels room to breathe and
+                    // the descriptions can elide cleanly when needed.
                     Rectangle {
                         width: parent.width;
-                        height: Math.ceil(root.density_choices.length / 3) * AppMetrics.choice_chip_row_stride;
+                        height: root.density_choices.length * (AppMetrics.row_h + 6px);
                         for density[i] in root.density_choices: ChoiceChip {
-                            x: Math.mod(i, 3) * (parent.width / 3 + 2px);
-                            y: Math.floor(i / 3) * AppMetrics.choice_chip_row_stride;
-                            width: parent.width / 3 - 4px;
+                            x: 0;
+                            y: i * (AppMetrics.row_h + 6px);
+                            width: parent.width;
                             item: density;
                             active: root.active_density == density.id;
                             picked(id) => { root.density_selected(id); }
@@ -3450,17 +3618,27 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.settings_tab == "view": VerticalLayout {
+            if root.settings_tab == "view": ScrollView {
                 x: 20px;
                 y: 112px;
                 width: parent.width - 40px;
                 height: parent.height - 124px;
+
+                VerticalLayout {
+                width: parent.width - 20px;
                 spacing: 12px;
                 padding-bottom: 16px;
 
                 Text { text: "DEFAULT VIEW MODE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Text {
+                    text: "Pathfinder remembers this for every folder you open until you change the view from the toolbar.";
+                    color: ThemePalette.text_muted;
+                    font-size: 11.5px;
+                    wrap: word-wrap;
+                    height: self.preferred-height;
+                }
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: 8px;
                     height: AppMetrics.row_h;
                     for vm_label[vi] in ["Grid", "List", "Gallery"]: Rectangle {
                         property <string> vm_id: vi == 0 ? "grid" : (vi == 1 ? "list" : "gallery");
@@ -3474,6 +3652,7 @@ export component MainWindow inherits Window {
                             text: vm_label;
                             color: root.view_mode == parent.vm_id ? ThemePalette.accent_strong : ThemePalette.text_muted;
                             font-size: 13px;
+                            font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -3568,6 +3747,7 @@ export component MainWindow inherits Window {
                         height: self.preferred-height;
                     }
                 }
+                }
             }
 
             if root.settings_tab == "themes": ScrollView {
@@ -3655,7 +3835,9 @@ export component MainWindow inherits Window {
                         border-radius: Math.max(2px, root.ce_radius * 1px);
                         border-width: 1px;
                         border-color: root.ce_token_colors.length > 4 ? root.ce_token_colors[4] : ThemePalette.border_strong;
-                        background: root.ce_token_colors.length > 0 ? root.ce_token_colors[0] : ThemePalette.bg;
+                        background: root.ce_gradient_background && root.ce_token_colors.length > 1
+                            ? @linear-gradient(165deg, root.ce_token_colors[1] 0%, root.ce_token_colors[0] 100%)
+                            : (root.ce_token_colors.length > 0 ? root.ce_token_colors[0] : ThemePalette.bg);
                         clip: true;
 
                         Rectangle {
@@ -3868,6 +4050,64 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+                    Text { text: "BACKGROUND STYLE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text {
+                        text: "Gradient blends Background and Surface from top to bottom for a soft sky look. Solid uses the Background color edge to edge.";
+                        color: ThemePalette.text_muted;
+                        font-size: 11.5px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                    Rectangle {
+                        height: 42px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        HorizontalLayout {
+                            x: 8px;
+                            y: 6px;
+                            width: parent.width - 16px;
+                            height: parent.height - 12px;
+                            spacing: 8px;
+                            Rectangle {
+                                border-radius: 5px;
+                                border-width: 1px;
+                                border-color: !root.ce_gradient_background ? ThemePalette.accent : ThemePalette.border;
+                                background: !root.ce_gradient_background ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                                horizontal-stretch: 1;
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: "Solid";
+                                    color: !root.ce_gradient_background ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                                    font-size: 12.5px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.ce_gradient_changed(false); } }
+                            }
+                            Rectangle {
+                                border-radius: 5px;
+                                border-width: 1px;
+                                border-color: root.ce_gradient_background ? ThemePalette.accent : ThemePalette.border;
+                                background: root.ce_gradient_background ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                                horizontal-stretch: 1;
+                                Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: "Gradient";
+                                    color: root.ce_gradient_background ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                                    font-size: 12.5px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.ce_gradient_changed(true); } }
+                            }
+                        }
+                    }
 
                     // Finish
                     Text { text: "FINISH"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
@@ -4057,6 +4297,14 @@ export component MainWindow inherits Window {
                     padding-bottom: 16px;
 
                     Text { text: "SEARCH PERFORMANCE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text {
+                        text: root.performance_intro;
+                        color: ThemePalette.text_muted;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        width: parent.width;
+                        height: self.preferred-height;
+                    }
                     Rectangle {
                         width: parent.width;
                         height: Math.ceil(root.index_choices.length / 2) * AppMetrics.index_chip_row_stride;
@@ -4092,6 +4340,26 @@ export component MainWindow inherits Window {
                         DialogButton { x: parent.width - 92px; y: 22px; label: "Clear"; clicked => { root.clear_thumbnail_cache(); } }
                     }
 
+                    Rectangle {
+                        height: footprint_label.preferred-height + footprint_text.preferred-height + 36px;
+                        border-radius: AppMetrics.radius;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        footprint_label := Text { x: 14px; y: 12px; width: parent.width - 28px; height: 20px; text: "Storage and memory footprint"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
+                        footprint_text := Text {
+                            x: 14px;
+                            y: 36px;
+                            width: parent.width - 28px;
+                            text: root.performance_footprint;
+                            color: ThemePalette.text_muted;
+                            font-size: 11.5px;
+                            font-family: AppMetrics.mono_font;
+                            wrap: word-wrap;
+                            height: self.preferred-height;
+                        }
+                    }
+
                     HorizontalLayout {
                         height: 34px;
                         spacing: 8px;
@@ -4111,14 +4379,38 @@ export component MainWindow inherits Window {
 
                 Text { text: "AI CAPABILITIES"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Rectangle {
-                    height: 100px;
+                    height: 168px;
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     border-radius: AppMetrics.radius;
                     background: ThemePalette.panel;
-                    Text { x: 14px; y: 14px; width: parent.width - 28px; height: 22px; text: root.ai_label; color: ThemePalette.text; font-size: 14px; font-weight: 700; }
-                    Text { x: 14px; y: 40px; width: parent.width - 28px; height: 20px; text: root.ai_device; color: ThemePalette.accent_strong; font-size: 12px; font-family: AppMetrics.mono_font; overflow: elide; }
-                    Text { x: 14px; y: 66px; width: parent.width - 28px; height: 20px; text: "Thumbnails, content search, and image analysis use the best detected device."; color: ThemePalette.text_muted; font-size: 12px; overflow: elide; }
+                    VerticalLayout {
+                        x: 14px;
+                        y: 12px;
+                        width: parent.width - 28px;
+                        spacing: 6px;
+                        Text { text: root.ai_label; color: ThemePalette.text; font-size: 14px; font-weight: 700; wrap: word-wrap; }
+                        Text {
+                            text: root.ai_device;
+                            color: ThemePalette.accent_strong;
+                            font-size: 12px;
+                            font-family: AppMetrics.mono_font;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: root.ai_gpu_status;
+                            color: ThemePalette.text_muted;
+                            font-size: 11.5px;
+                            font-family: AppMetrics.mono_font;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: "Thumbnails, content search, and image analysis use the best detected device.";
+                            color: ThemePalette.text_muted;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                    }
                 }
 
                 Text { text: "OPTIONAL SEARCH"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
@@ -4488,6 +4780,139 @@ export component MainWindow inherits Window {
             button_height: 26px;
             icon_data: "M18 6L6 18 M6 6l12 12";
             clicked => { root.op_drawer_visible = false; }
+        }
+    }
+
+    // ── FIRST RUN WELCOME ─────────────────────────────────────────────
+    // Shown the first time Pathfinder launches. Offers to register as the
+    // default folder handler in one click, and explains the manual steps for
+    // pinning Pathfinder to the taskbar / unpinning File Explorer since
+    // Windows 11 does not expose those verbs to third party apps.
+    if root.welcome_visible: Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: parent.height;
+        background: rgba(0, 0, 0, 0.55);
+        TouchArea {
+            // Block clicks behind the dialog so the underlying UI doesn't
+            // react while the welcome is open.
+            mouse-cursor: default;
+        }
+
+        Rectangle {
+            x: (parent.width - 520px) / 2;
+            y: (parent.height - 480px) / 2;
+            width: 520px;
+            height: 480px;
+            border-radius: AppMetrics.radius;
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            background: ThemePalette.panel_solid;
+            drop-shadow-blur: 28px;
+            drop-shadow-color: rgba(0, 0, 0, 0.5);
+            clip: true;
+
+            VerticalLayout {
+                x: 26px;
+                y: 22px;
+                width: parent.width - 52px;
+                spacing: 12px;
+
+                Text {
+                    text: "Welcome to Pathfinder";
+                    color: ThemePalette.text;
+                    font-size: 20px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: "Three quick steps to make Pathfinder feel like your everyday file manager. You can finish them all here, or come back later from Settings.";
+                    color: ThemePalette.text_muted;
+                    font-size: 12.5px;
+                    wrap: word-wrap;
+                    height: self.preferred-height;
+                }
+
+                // Step 1: default folder handler
+                Rectangle {
+                    height: 92px;
+                    border-radius: AppMetrics.radius_small;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    background: ThemePalette.panel;
+                    Text { x: 14px; y: 10px; width: parent.width - 28px; text: "1. Set Pathfinder as your default folder handler"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
+                    Text {
+                        x: 14px;
+                        y: 32px;
+                        width: parent.width - 28px;
+                        text: root.welcome_default_status;
+                        color: ThemePalette.text_muted;
+                        font-size: 11.5px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                    DialogButton {
+                        x: parent.width - 144px;
+                        y: parent.height - 38px;
+                        label: root.welcome_default_handler_set ? "Done" : "Set as default";
+                        primary: !root.welcome_default_handler_set;
+                        clicked => { root.welcome_set_default_handler(); }
+                    }
+                }
+
+                // Step 2: pin to taskbar
+                Rectangle {
+                    height: 96px;
+                    border-radius: AppMetrics.radius_small;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    background: ThemePalette.panel;
+                    Text { x: 14px; y: 10px; width: parent.width - 28px; text: "2. Pin Pathfinder to your taskbar"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
+                    Text {
+                        x: 14px;
+                        y: 32px;
+                        width: parent.width - 28px;
+                        text: "Windows 11 doesn't let apps pin themselves. Open the Start menu, find Pathfinder, right click it, then choose Pin to taskbar.";
+                        color: ThemePalette.text_muted;
+                        font-size: 11.5px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                }
+
+                // Step 3: unpin File Explorer
+                Rectangle {
+                    height: 96px;
+                    border-radius: AppMetrics.radius_small;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    background: ThemePalette.panel;
+                    Text { x: 14px; y: 10px; width: parent.width - 28px; text: "3. Unpin File Explorer (optional)"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
+                    Text {
+                        x: 14px;
+                        y: 32px;
+                        width: parent.width - 28px;
+                        text: "Right click File Explorer on the taskbar and pick Unpin from taskbar so Pathfinder is the one you open by reflex.";
+                        color: ThemePalette.text_muted;
+                        font-size: 11.5px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                }
+
+                HorizontalLayout {
+                    height: 36px;
+                    spacing: 8px;
+                    alignment: end;
+                    DialogButton {
+                        label: "Open Taskbar settings";
+                        clicked => { root.welcome_open_taskbar_settings(); }
+                    }
+                    DialogButton {
+                        label: "Got it";
+                        primary: true;
+                        clicked => { root.welcome_dismiss(); }
+                    }
+                }
+            }
         }
     }
 
