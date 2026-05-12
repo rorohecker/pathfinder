@@ -154,6 +154,23 @@ pub fn manifest_path() -> PathBuf {
     ai_dir().join("manifest.json")
 }
 
+/// DirectML ONNX Runtime DLL next to models (Windows Local AI install).
+#[cfg(windows)]
+pub fn onnx_runtime_installed() -> bool {
+    ai_dir().join("onnxruntime.dll").is_file()
+}
+
+#[cfg(not(windows))]
+pub fn onnx_runtime_installed() -> bool {
+    false
+}
+
+/// Core embedding model files present (semantic search / embeddings).
+pub fn core_models_installed() -> bool {
+    let d = ai_dir();
+    d.join("text-embedding.onnx").is_file() && d.join("tokenizer.json").is_file()
+}
+
 pub fn read_manifest() -> Manifest {
     let p = manifest_path();
     if !p.exists() {
@@ -382,11 +399,14 @@ fn download_file_with_progress(
     let err_buf = err_shared.lock().map(|g| g.clone()).unwrap_or_default();
 
     if !status.success() {
-        return Err(if err_buf.is_empty() {
+        let err_msg = if err_buf.is_empty() {
             "Download failed".to_string()
         } else {
             err_buf.trim().to_string()
-        });
+        };
+        // PowerShell may have created a truncated file; do not leave a corrupt artifact.
+        let _ = std::fs::remove_file(dest);
+        return Err(err_msg);
     }
     let written = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(expected_bytes);
     Ok(written)
@@ -397,6 +417,21 @@ fn now_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Join `dest` with a single zip entry file name. Rejects absolute paths,
+/// `..`, `.`, and multi-segment names (zip-slip) so we only write under `dest`.
+#[cfg(windows)]
+fn safe_join_single_filename(dest: &Path, fname: &str) -> Option<PathBuf> {
+    let p = Path::new(fname);
+    if fname.is_empty() || p.is_absolute() {
+        return None;
+    }
+    let mut it = p.components();
+    match (it.next(), it.next()) {
+        (Some(std::path::Component::Normal(_)), None) => Some(dest.join(fname)),
+        _ => None,
+    }
 }
 
 /// Pull `runtimes/win-x64/native/*.dll` from the official DirectML NuGet
@@ -419,7 +454,9 @@ fn extract_win64_native_dlls_from_ort_package(zip_path: &Path, dest: &Path) -> R
         if !fname.to_ascii_lowercase().ends_with(".dll") {
             continue;
         }
-        let out_path = dest.join(fname);
+        let Some(out_path) = safe_join_single_filename(dest, fname) else {
+            continue;
+        };
         let mut out = File::create(&out_path).map_err(|e| e.to_string())?;
         std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
         if fname.eq_ignore_ascii_case("onnxruntime.dll") {

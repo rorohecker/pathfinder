@@ -236,11 +236,23 @@ pub fn detect_npus() -> Vec<String> {
                     if lower.contains("npu")
                         || lower.contains("neural")
                         || lower.contains("ai boost")
+                        || lower.contains("ai pc")
                         || lower.contains("hexagon")
                         || lower.contains("ryzen ai")
+                        || lower.contains("xdna")
+                        || lower.contains("meteorlake")
+                        || lower.contains("meteor lake")
+                        || lower.contains("lunar lake")
+                        || lower.contains("arrow lake")
+                        || lower.contains("strix")
+                        || lower.contains("qualcomm")
+                        || lower.contains("snapdragon")
+                        || lower.contains("intel ai")
                         || lower.contains("hailo")
                         || lower.contains("movidius")
                         || lower.contains("vpu")
+                        || lower.contains("tpu")
+                        || lower.contains("npu accelerator")
                     {
                         results.push(name);
                     }

@@ -28,6 +28,12 @@ export struct FileItem {
     // procedural file glyph so executables and document types look correct.
     has_system_icon: bool,
     system_icon: image,
+    // Date grouping for the details view when sorted by Date Modified. Mirrors
+    // what File Explorer does: each row carries the bucket it falls into
+    // (Today, Yesterday, This week, etc) and a flag that is true on the first
+    // row of a new bucket so the list view can draw a section divider above it.
+    date_group_text: string,
+    show_date_group_header: bool,
 }
 
 export struct SideItem {
@@ -145,6 +151,9 @@ component ToolButton inherits Rectangle {
     in property <string> tooltip;
     in property <bool> active;
     in property <bool> danger;
+    // In simple mode the main window sets this true so every toolbar button
+    // shows its label under the icon at all times instead of only on hover.
+    in property <bool> show_caption;
     in property <length> button_width: 31px;
     in property <length> button_height: 31px;
     callback clicked();
@@ -159,22 +168,40 @@ component ToolButton inherits Rectangle {
         (root.active ? ThemePalette.accent_soft :
         (touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0))));
 
+    // Icon sits a touch higher when the always-on caption is showing, so the
+    // label has space below it without enlarging the icon itself.
     SvgIcon {
         x: (parent.width - 16px) / 2;
-        y: (parent.height - 16px) / 2;
+        y: root.show_caption ? 4px : (parent.height - 16px) / 2;
         icon_size: 16px;
         data: root.icon_data;
         tint: root.danger && touch.has-hover ? white : (root.active || touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted);
     }
 
+    // Icon-less button: centered glyph or letter.
     Text {
-        visible: root.icon_data == "";
+        visible: root.icon_data == "" && !root.show_caption;
         text: root.text_label;
         color: root.danger && touch.has-hover ? white : (root.active || touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted);
         font-size: 16px;
         font-weight: 600;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+
+    // Always-on caption underneath the icon for simple-mode toolbars.
+    if root.show_caption && root.text_label != "": Text {
+        x: 0;
+        y: 22px;
+        width: parent.width;
+        height: parent.height - 22px;
+        text: root.text_label;
+        color: root.active || touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted;
+        font-size: 9.5px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: top;
+        overflow: elide;
     }
 
     touch := TouchArea {
@@ -396,8 +423,12 @@ component SideRow inherits Rectangle {
 component NodeVisual {
     in property <bool> is_dir;
     in property <string> extension;
-    in property <length> visual_width: root.is_dir ? 54px : 46px;
-    in property <length> visual_height: root.is_dir ? 44px : 54px;
+    // Folders are clearly wider than tall so they read as a folder silhouette
+    // and not a square tile. The previous 54x44 (1.23 ratio) sat too close to
+    // square in the list view; 62x40 (1.55 ratio) gives the classic folder
+    // outline at the same pixel envelope.
+    in property <length> visual_width: root.is_dir ? 62px : 46px;
+    in property <length> visual_height: root.is_dir ? 40px : 54px;
 
     width: root.visual_width;
     height: root.visual_height;
@@ -831,8 +862,39 @@ component FileRow inherits Rectangle {
     property <bool> shift_held: false;
     property <bool> is_renaming: root.rename_index == root.index;
     property <bool> drag_started: false;
+    // Date grouping header sits above the row in the details view only. The
+    // backend sets show_date_group_header=true on the first row of every new
+    // bucket (Today, Yesterday, This week, etc) when sorted by Date modified.
+    property <bool> has_group_header: root.view_mode == "list" && root.item.show_date_group_header;
+    property <length> group_header_h: root.has_group_header ? 26px : 0px;
 
-    height: root.view_mode == "list" ? AppMetrics.row_h : (root.view_mode == "gallery" ? 154px : (root.view_mode == "compact" ? 32px : AppMetrics.grid_h));
+    height: (root.view_mode == "list" ? AppMetrics.row_h : (root.view_mode == "gallery" ? 154px : (root.view_mode == "compact" ? 32px : AppMetrics.grid_h))) + root.group_header_h;
+
+    // Group header at the top of the row, only when this row starts a new bucket.
+    if root.has_group_header: Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: root.group_header_h;
+        Text {
+            x: 6px;
+            y: 0;
+            width: parent.width - 12px;
+            height: parent.height - 4px;
+            text: root.item.date_group_text;
+            color: ThemePalette.text_faint;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            vertical-alignment: bottom;
+            overflow: elide;
+        }
+        Rectangle {
+            x: 6px;
+            y: parent.height - 3px;
+            width: parent.width - 12px;
+            height: 1px;
+            background: ThemePalette.border;
+        }
+    }
     border-radius: AppMetrics.radius;
     border-width: root.item.is_selected ? 1px : 0px;
     border-color: root.item.is_selected ? ThemePalette.accent : rgba(0, 0, 0, 0);
@@ -860,7 +922,7 @@ component FileRow inherits Rectangle {
 
     if root.view_mode == "list": NodeVisual {
         x: 8px;
-        y: (parent.height - self.height) / 2;
+        y: root.group_header_h + (parent.height - root.group_header_h - self.height) / 2;
         visual_width: ThemePalette.is_dragging && root.item.is_selected ? 32px : 28px;
         visual_height: root.item.is_dir
             ? (ThemePalette.is_dragging && root.item.is_selected ? 26px : 22px)
@@ -886,10 +948,10 @@ component FileRow inherits Rectangle {
 
     if root.view_mode == "list" && !root.is_renaming: Text {
         x: 44px;
-        y: 0;
+        y: root.group_header_h;
         // Name always gets at least 80px; right column slides in when the row gets wider.
         width: max(80px, parent.width - 44px - root.list_right_zone - 16px);
-        height: parent.height;
+        height: parent.height - root.group_header_h;
         text: root.item.name;
         color: root.item.is_selected ? ThemePalette.text : ThemePalette.text_muted;
         font-size: 12.5px;
@@ -900,9 +962,9 @@ component FileRow inherits Rectangle {
     // List view: inline rename input
     if root.view_mode == "list" && root.is_renaming: rename_list := LineEdit {
         x: 44px;
-        y: 4px;
+        y: root.group_header_h + 4px;
         width: max(80px, parent.width - 48px - root.list_right_zone - 16px);
-        height: parent.height - 8px;
+        height: parent.height - root.group_header_h - 8px;
         text: root.item.name;
         font-size: 12.5px;
         accepted(val) => { root.rename_commit(root.index, val); }
@@ -915,8 +977,9 @@ component FileRow inherits Rectangle {
     // SIZE column - right-aligned, monospaced
     if root.view_mode == "list" && root.show_list_size: Text {
         x: parent.width - root.list_right_zone;
+        y: root.group_header_h;
         width: 80px;
-        height: parent.height;
+        height: parent.height - root.group_header_h;
         text: root.item.size_text;
         color: ThemePalette.text_faint;
         font-family: AppMetrics.mono_font;
@@ -929,8 +992,9 @@ component FileRow inherits Rectangle {
     // MODIFIED column
     if root.view_mode == "list" && root.show_list_modified: Text {
         x: parent.width - root.list_right_zone + (root.show_list_size ? 88px : 0px);
+        y: root.group_header_h;
         width: 130px;
-        height: parent.height;
+        height: parent.height - root.group_header_h;
         text: root.item.modified_text;
         color: ThemePalette.text_faint;
         font-family: AppMetrics.mono_font;
@@ -942,8 +1006,9 @@ component FileRow inherits Rectangle {
     // TYPE column
     if root.view_mode == "list" && root.show_list_type: Text {
         x: parent.width - root.list_right_zone + (root.show_list_size ? 88px : 0px) + 138px;
+        y: root.group_header_h;
         width: 80px;
-        height: parent.height;
+        height: parent.height - root.group_header_h;
         text: root.item.type_text;
         color: ThemePalette.text_faint;
         font-size: 11.5px;
@@ -956,7 +1021,7 @@ component FileRow inherits Rectangle {
         // Pull the dot 28px in from the right edge so it does not get hidden
         // by the ListView's scroll bar (~14px wide on a Mica window).
         x: parent.width - 28px;
-        y: (parent.height - 9px) / 2;
+        y: root.group_header_h + (parent.height - root.group_header_h - 9px) / 2;
         width: 9px;
         height: 9px;
         border-radius: 5px;
@@ -1653,7 +1718,11 @@ export component MainWindow inherits Window {
         easing: ease-out;
     }
     property <length> title_h: 36px;
-    property <length> toolbar_h: 44px;
+    // Simple mode bumps the toolbar to two visual rows: icon row on top, caption
+    // row beneath, plus a separator strip between the navigation cluster and the
+    // view cluster. The labels stay visible at all times in this mode so users
+    // who don't recognize the glyphs can read what each button does.
+    property <length> toolbar_h: root.is_simple ? 68px : 44px;
     property <length> filter_bar_h: root.filter_bar_visible ? 36px : 0px;
     property <length> status_h: 26px;
     // User-set preview pane width (drag handle on its left edge writes here).
@@ -1875,18 +1944,18 @@ export component MainWindow inherits Window {
                 vertical-alignment: center;
             }
             // Action buttons aligned to the right
-            ToolButton { x: parent.width - 392px; y: 6px; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
-            ToolButton { x: parent.width - 358px; y: 6px; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
-            ToolButton { x: parent.width - 324px; y: 6px; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
+            ToolButton { x: parent.width - 392px; y: 6px; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
+            ToolButton { x: parent.width - 358px; y: 6px; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
+            ToolButton { x: parent.width - 324px; y: 6px; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
             Rectangle { x: parent.width - 290px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 278px; y: 6px; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; tooltip: "Rename (F2)"; clicked => { root.rename_index = root.selected_index; } }
-            ToolButton { x: parent.width - 244px; y: 6px; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
+            ToolButton { x: parent.width - 278px; y: 6px; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.rename_index = root.selected_index; } }
+            ToolButton { x: parent.width - 244px; y: 6px; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
             Rectangle { x: parent.width - 210px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 198px; y: 6px; icon_data: "M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8 M16 6l-4-4-4 4 M12 2v13"; tooltip: "Open With"; clicked => { root.command("open-with"); } }
-            ToolButton { x: parent.width - 164px; y: 6px; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; tooltip: "Properties"; clicked => { root.command("properties"); } }
-            ToolButton { x: parent.width - 130px; y: 6px; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
+            ToolButton { x: parent.width - 198px; y: 6px; icon_data: "M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8 M16 6l-4-4-4 4 M12 2v13"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
+            ToolButton { x: parent.width - 164px; y: 6px; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
+            ToolButton { x: parent.width - 130px; y: 6px; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
             // Clear selection button on the right edge
-            ToolButton { x: parent.width - 44px; y: 6px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
+            ToolButton { x: parent.width - 44px; y: 6px; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
         }
 
         // Toolbar - z:10 so tooltip pop-overs render above the file area below
@@ -1900,10 +1969,10 @@ export component MainWindow inherits Window {
             property <bool> show_toolbar_search: self.width >= 850px;
             property <bool> show_toolbar_sort: self.width >= 1025px;
 
-            ToolButton { x: 10px; y: 6px; icon_data: "M15 18l-6-6 6-6"; clicked => { root.go_back(); } }
-            ToolButton { x: 45px; y: 6px; icon_data: "M9 18l6-6-6-6"; clicked => { root.go_forward(); } }
-            ToolButton { x: 80px; y: 6px; icon_data: "M12 19V5 M5 12l7-7 7 7"; clicked => { root.go_up(); } }
-            ToolButton { x: 115px; y: 6px; icon_data: "M3 12a9 9 0 0 1 15-6.7L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15 6.7L3 16 M3 21v-5h5"; clicked => { root.refresh(); } }
+            ToolButton { x: 10px; y: 6px; icon_data: "M15 18l-6-6 6-6"; text_label: "Back"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Back"; clicked => { root.go_back(); } }
+            ToolButton { x: 45px; y: 6px; icon_data: "M9 18l6-6-6-6"; text_label: "Forward"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Forward"; clicked => { root.go_forward(); } }
+            ToolButton { x: 80px; y: 6px; icon_data: "M12 19V5 M5 12l7-7 7 7"; text_label: "Up"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Up one level"; clicked => { root.go_up(); } }
+            ToolButton { x: 115px; y: 6px; icon_data: "M3 12a9 9 0 0 1 15-6.7L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15 6.7L3 16 M3 21v-5h5"; text_label: "Refresh"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Refresh"; clicked => { root.refresh(); } }
 
             Rectangle { x: 156px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
 
@@ -2216,11 +2285,11 @@ export component MainWindow inherits Window {
             }
 
             Rectangle { x: parent.width - 317px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 306px; y: 6px; icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z"; tooltip: "Icon view"; active: root.view_mode == "grid"; clicked => { root.set_view("grid"); } }
-            ToolButton { x: parent.width - 272px; y: 6px; icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12"; tooltip: "Compact view"; active: root.view_mode == "compact"; clicked => { root.set_view("compact"); } }
-            ToolButton { x: parent.width - 238px; y: 6px; icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01"; tooltip: "Details view"; active: root.view_mode == "list"; clicked => { root.set_view("list"); } }
-            ToolButton { x: parent.width - 204px; y: 6px; icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01"; tooltip: "Gallery view"; active: root.view_mode == "gallery"; clicked => { root.set_view("gallery"); } }
-            ToolButton { x: parent.width - 170px; y: 6px; icon_data: "M3 4h18v16H3z M14 4v16"; tooltip: "Preview pane"; active: root.preview_visible; clicked => { root.toggle_preview(); } }
+            ToolButton { x: parent.width - 306px; y: 6px; icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z"; text_label: "Icons"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Icon view"; active: root.view_mode == "grid"; clicked => { root.set_view("grid"); } }
+            ToolButton { x: parent.width - 272px; y: 6px; icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12"; text_label: "Compact"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Compact view"; active: root.view_mode == "compact"; clicked => { root.set_view("compact"); } }
+            ToolButton { x: parent.width - 238px; y: 6px; icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01"; text_label: "Details"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Details view"; active: root.view_mode == "list"; clicked => { root.set_view("list"); } }
+            ToolButton { x: parent.width - 204px; y: 6px; icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01"; text_label: "Gallery"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Gallery view"; active: root.view_mode == "gallery"; clicked => { root.set_view("gallery"); } }
+            ToolButton { x: parent.width - 170px; y: 6px; icon_data: "M3 4h18v16H3z M14 4v16"; text_label: "Preview"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Preview pane"; active: root.preview_visible; clicked => { root.toggle_preview(); } }
             ToolButton { visible: !root.is_simple; x: parent.width - 136px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
             // Clear-sort button - appears in the gap between Dual Pane and Command Palette
             // when any non-default sort is active. Resets to Name ↑ (natural order).
@@ -2234,7 +2303,7 @@ export component MainWindow inherits Window {
                 tooltip: "Clear sort (reset to Name ↑)";
                 clicked => { root.sort_column("reset"); }
             }
-            ToolButton { x: parent.width - 68px; y: 6px; icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"; tooltip: "Command palette"; clicked => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; } }
+            ToolButton { x: parent.width - 68px; y: 6px; icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"; text_label: "Actions"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Command palette"; clicked => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; } }
 
             Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
         }
@@ -2606,10 +2675,8 @@ export component MainWindow inherits Window {
                 border-radius: AppMetrics.radius;
             }
 
-            // Drag-over indicator: thicker, brighter ring on the pane the cursor
-            // is currently over during a drag-drop. Updates every DragOver tick
-            // from Rust via `set_drag_over_pane`. Cleared on DragLeave/Drop.
-            if root.dual_pane && root.drag_over_pane == "primary": Rectangle {
+            // Drag-over indicator during OLE drag-drop (Explorer → Pathfinder).
+            if root.drag_over_pane == "primary": Rectangle {
                 x: 0; y: 0;
                 width: root.primary_pane_w;
                 height: parent.height;
@@ -4626,7 +4693,7 @@ export component MainWindow inherits Window {
                     background: ThemePalette.panel;
                     border-width: 1px;
                     border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "CLIP description search (optional model)"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; overflow: elide; }
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Image tags in search (Local AI classifier)"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; overflow: elide; }
                     Rectangle {
                         x: parent.width - 52px;
                         y: (parent.height - 22px) / 2;

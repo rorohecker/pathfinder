@@ -12,7 +12,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Write};
@@ -3008,11 +3008,18 @@ fn process_memory_stats() -> Option<(u64, u64)> {
 fn compute_ai_capabilities() -> AiCapabilities {
     let devices = detect_npu_names();
     let npu_hardware_found = !devices.is_empty();
-    let runtime_configured = std::env::var("PATHFINDER_LOCAL_AI_RUNTIME")
+    let env_runtime = std::env::var("PATHFINDER_LOCAL_AI_RUNTIME")
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
-    let npu_enabled = npu_hardware_found && runtime_configured;
-    let device_name = if npu_enabled {
+    let onnx_installed = local_ai::onnx_runtime_installed();
+    let models_ready = local_ai::core_models_installed();
+    let manifest_installed =
+        matches!(local_ai::read_manifest().state, local_ai::InstallState::Installed);
+    // ORT DLL beside models, explicit env override, or completed installer manifest.
+    let runtime_configured = onnx_installed || env_runtime || manifest_installed;
+    // NPU is "available" for inference only when hardware + runtime + models line up.
+    let npu_enabled = npu_hardware_found && runtime_configured && models_ready;
+    let device_name = if npu_hardware_found {
         devices.join(", ")
     } else {
         "CPU Fallback".to_string()
@@ -3021,17 +3028,23 @@ fn compute_ai_capabilities() -> AiCapabilities {
     let ort = crate::inference::ort_runtime_line();
     let reason = if npu_enabled {
         format!(
-            "NPU acceleration: {}. Local AI stays on-device. [{}]",
+            "NPU acceleration: {}. Local AI on-device (DirectML EP). [{}]",
             device_name, ort
         )
-    } else if npu_hardware_found {
+    } else if npu_hardware_found && runtime_configured && !models_ready {
         format!(
-            "NPU candidate ({}) without PATHFINDER_LOCAL_AI_RUNTIME - CPU fallback on-device. [{}]",
-            devices.join(", "),
+            "NPU detected ({}). Install embedding models from Settings → Local AI to enable acceleration. [{}]",
+            device_name,
+            ort
+        )
+    } else if npu_hardware_found && !runtime_configured {
+        format!(
+            "NPU detected ({}). Install Local AI (ONNX Runtime + models) from Settings to enable. [{}]",
+            device_name,
             ort
         )
     } else {
-        format!("No supported NPU detected - CPU fallback on-device. [{}]", ort)
+        format!("No NPU detected — CPU inference on-device. [{}]", ort)
     };
     let gpu_summary = gpu_capability_summary();
 
@@ -5157,6 +5170,13 @@ fn open_index_connection() -> Result<Connection, String> {
             dhash BLOB NOT NULL,
             updated_at INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS image_desc_embeddings (
+            path TEXT PRIMARY KEY,
+            emb BLOB NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_image_desc_embeddings_prefix ON image_desc_embeddings(path);
         ",
     )
     .map_err(|e| e.to_string())?;
@@ -5254,6 +5274,10 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
             .map_err(|e| e.to_string())?;
         let _ = tx.execute("DELETE FROM path_embeddings WHERE path = ?1", params![path]);
         let _ = tx.execute("DELETE FROM image_dhash WHERE path = ?1", params![path]);
+        let _ = tx.execute(
+            "DELETE FROM image_desc_embeddings WHERE path = ?1",
+            params![path],
+        );
     }
 
     tx.commit().map_err(|e| e.to_string())?;
@@ -5262,6 +5286,10 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
     // main FTS transaction commits so readers are not blocked for as long.
     let mut emb_rows: Vec<(String, Vec<u8>, i64)> = Vec::new();
     let mut dhash_rows: Vec<(String, Vec<u8>, i64)> = Vec::new();
+    let index_image_desc = crate::local_ai::core_models_installed()
+        && crate::inference::image_classifier_available();
+    let mut img_desc_label_pairs: Vec<(String, String)> = Vec::new();
+    let mut img_desc_clear_paths: Vec<String> = Vec::new();
     for entry in entries {
         if entry.kind == FileKind::Directory {
             continue;
@@ -5280,8 +5308,44 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
         ) && let Some(h) = crate::inference::dhash64(Path::new(&entry.path)) {
             dhash_rows.push((entry.path.clone(), h.to_le_bytes().to_vec(), now));
         }
+        if index_image_desc
+            && matches!(
+                extension.as_str(),
+                "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
+            )
+        {
+            let p = Path::new(&entry.path);
+            if let Some(labels) = crate::inference::image_search_label_text(p) {
+                img_desc_label_pairs.push((entry.path.clone(), labels));
+            } else {
+                img_desc_clear_paths.push(entry.path.clone());
+            }
+        }
     }
-    if !emb_rows.is_empty() || !dhash_rows.is_empty() {
+    let mut img_desc_rows: Vec<(String, Vec<u8>, i64)> = Vec::new();
+    if index_image_desc && !img_desc_label_pairs.is_empty() {
+        let label_refs: Vec<&str> = img_desc_label_pairs
+            .iter()
+            .map(|(_, s)| s.as_str())
+            .collect();
+        let batch_emb = crate::inference::embed_file_labels_batch(&label_refs);
+        for ((path, _), emb_opt) in img_desc_label_pairs.iter().zip(batch_emb) {
+            if let Some(vec) = emb_opt {
+                let mut blob = Vec::with_capacity(vec.len() * 4);
+                for x in &vec {
+                    blob.extend_from_slice(&x.to_le_bytes());
+                }
+                img_desc_rows.push((path.clone(), blob, now));
+            } else {
+                img_desc_clear_paths.push(path.clone());
+            }
+        }
+    }
+    if !emb_rows.is_empty()
+        || !dhash_rows.is_empty()
+        || !img_desc_rows.is_empty()
+        || (index_image_desc && !img_desc_clear_paths.is_empty())
+    {
         let tx_ai = conn.transaction().map_err(|e| e.to_string())?;
         for (path, blob, ts) in emb_rows {
             let _ = tx_ai.execute(
@@ -5296,6 +5360,21 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
                  ON CONFLICT(path) DO UPDATE SET dhash = excluded.dhash, updated_at = excluded.updated_at",
                 params![path, dh_blob, ts],
             );
+        }
+        for (path, blob, ts) in img_desc_rows {
+            let _ = tx_ai.execute(
+                "INSERT INTO image_desc_embeddings(path, emb, updated_at) VALUES(?1, ?2, ?3)
+                 ON CONFLICT(path) DO UPDATE SET emb = excluded.emb, updated_at = excluded.updated_at",
+                params![path, blob, ts],
+            );
+        }
+        if index_image_desc {
+            for path in img_desc_clear_paths {
+                let _ = tx_ai.execute(
+                    "DELETE FROM image_desc_embeddings WHERE path = ?1",
+                    params![path],
+                );
+            }
         }
         tx_ai.commit().map_err(|e| e.to_string())?;
     }
@@ -5354,6 +5433,98 @@ fn semantic_scores_under_root(root: &str, query_emb: &[f32]) -> HashMap<String, 
             Some((path, s))
         })
         .collect()
+}
+
+fn image_desc_scores_under_root(root: &str, query_emb: &[f32]) -> HashMap<String, f32> {
+    let Ok(conn) = open_index_connection() else {
+        return HashMap::new();
+    };
+    let root_prefix = format!("{}%", root.trim_end_matches(['\\', '/']));
+    let sql = "SELECT f.path, e.emb FROM files f \
+         INNER JOIN image_desc_embeddings e ON e.path = f.path \
+         WHERE f.path LIKE ?1 ESCAPE '\\' AND f.is_dir = 0 LIMIT 8000";
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return HashMap::new();
+    };
+    let rows = stmt.query_map(params![root_prefix], |row| {
+        let path: String = row.get(0)?;
+        let emb: Vec<u8> = row.get(1)?;
+        Ok((path, emb))
+    });
+    let Ok(rows) = rows else {
+        return HashMap::new();
+    };
+    let rows_vec: Vec<(String, Vec<u8>)> = rows.flatten().collect();
+    let qdim = query_emb.len();
+    rows_vec
+        .into_par_iter()
+        .filter_map(|(path, blob)| {
+            let vec = embedding_blob_to_vec(&blob)?;
+            if vec.len() != qdim {
+                return None;
+            }
+            let s = crate::inference::cosine_similarity(query_emb, &vec);
+            Some((path, s))
+        })
+        .collect()
+}
+
+/// Re-rank indexed search hits using filename embeddings, image-tag embeddings, or both.
+fn apply_semantic_search_ranking_entries(
+    root: &str,
+    query: &str,
+    search_semantic_mode: bool,
+    clip_search_enabled: bool,
+    entries: &mut [FileEntry],
+) {
+    let trimmed = query.trim();
+    if trimmed.len() < 2
+        || trimmed.starts_with("tag:")
+        || trimmed.starts_with("smart:")
+        || entries.is_empty()
+    {
+        return;
+    }
+    if !search_semantic_mode && !clip_search_enabled {
+        return;
+    }
+    let Some(qemb) = crate::inference::embed_query_text(trimmed) else {
+        return;
+    };
+    let text_scores = if search_semantic_mode {
+        semantic_scores_under_root(root, &qemb)
+    } else {
+        HashMap::new()
+    };
+    let img_scores = if clip_search_enabled {
+        image_desc_scores_under_root(root, &qemb)
+    } else {
+        HashMap::new()
+    };
+    if text_scores.is_empty() && img_scores.is_empty() {
+        return;
+    }
+    entries.sort_by(|a, b| {
+        let ta = text_scores.get(&a.path).copied().unwrap_or(0.0);
+        let tb = text_scores.get(&b.path).copied().unwrap_or(0.0);
+        let ia = img_scores.get(&a.path).copied().unwrap_or(0.0);
+        let ib = img_scores.get(&b.path).copied().unwrap_or(0.0);
+        let sa = match (search_semantic_mode, clip_search_enabled) {
+            (true, true) => ta.max(ia),
+            (true, false) => ta,
+            (false, true) => ia,
+            (false, false) => 0.0,
+        };
+        let sb = match (search_semantic_mode, clip_search_enabled) {
+            (true, true) => tb.max(ib),
+            (true, false) => tb,
+            (false, true) => ib,
+            (false, false) => 0.0,
+        };
+        sb.partial_cmp(&sa)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| natural_cmp(&a.name_lower, &b.name_lower))
+    });
 }
 
 fn scan_image_duplicates_in_folder(folder: &str) -> String {
@@ -6935,6 +7106,43 @@ fn format_size_short(bytes: u64) -> String {
     }
 }
 
+/// Bucket a modified timestamp into a coarse Explorer-style label. Used by the
+/// details view to draw section headers above each new bucket (Today, Yesterday,
+/// This week, Last week, Earlier this month, Earlier this year, Older). The
+/// boundaries use 24-hour windows from now rather than wall-clock midnight,
+/// which is simpler and still matches the user's mental model close enough.
+fn date_group_label(secs: u64) -> &'static str {
+    if secs == 0 {
+        return "Unknown date";
+    }
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let diff = now.saturating_sub(secs);
+    // If somehow modified is in the future (clock skew / unsynced file), still
+    // bucket it as Today so it doesn't end up at the very bottom under "Older".
+    if secs > now {
+        return "Today";
+    }
+    const DAY: u64 = 86_400;
+    if diff < DAY {
+        "Today"
+    } else if diff < 2 * DAY {
+        "Yesterday"
+    } else if diff < 7 * DAY {
+        "This week"
+    } else if diff < 14 * DAY {
+        "Last week"
+    } else if diff < 30 * DAY {
+        "Earlier this month"
+    } else if diff < 365 * DAY {
+        "Earlier this year"
+    } else {
+        "Older"
+    }
+}
+
 fn format_modified(secs: u64) -> String {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -7905,6 +8113,20 @@ fn resolve_cli_folder_to_string(raw: PathBuf) -> Option<String> {
     canon.to_str().map(|s| s.to_string())
 }
 
+/// True when `a` and `b` refer to the same on-disk object (used to skip no-op drops).
+fn same_inode_or_canonical_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.exists(), b.exists()) {
+        (true, true) => match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(ca), Ok(cb)) => ca == cb,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 impl NativeController {
     fn new(cli_folder: Option<PathBuf>) -> Self {
         let app_state = AppState::default();
@@ -8623,11 +8845,22 @@ impl NativeController {
 
         ui.set_sort_by(ss(&self.sort_by));
         ui.set_sort_dir(ss(&self.sort_dir));
+        let show_date_groups = self.sort_by == "modified";
+        let mut last_group: &'static str = "";
         let items: Vec<FileItem> = self
             .visible_files
             .iter()
             .enumerate()
-            .map(|(i, entry)| self.file_item(entry, self.selected_set.contains(&i)))
+            .map(|(i, entry)| {
+                let mut item = self.file_item(entry, self.selected_set.contains(&i));
+                if show_date_groups {
+                    let group = date_group_label(entry.modified);
+                    item.show_date_group_header = group != last_group;
+                    item.date_group_text = SharedString::from(group);
+                    last_group = group;
+                }
+                item
+            })
             .collect();
         let model = model_from_vec(items);
         ui.set_files(model.clone());
@@ -8798,6 +9031,12 @@ impl NativeController {
             thumbnail,
             has_system_icon,
             system_icon,
+            // Group fields are filled in after the items are zipped with the
+            // computed group order in apply_visible_files. Defaults here so the
+            // rest of file_item callers (single-row updates) don't have to know
+            // about grouping.
+            date_group_text: SharedString::new(),
+            show_date_group_header: false,
         }
     }
 
@@ -9166,9 +9405,27 @@ impl NativeController {
                     condense_recent_locations(self.recent_locations.clone(), 12);
                 let _ = write_native_json("recent_locations.json", &self.recent_locations);
 
-                // Restore view+sort for the new folder
+                // Restore view+sort for the new folder. First time visiting a
+                // folder picks a sensible default based on what's likely in it:
+                // Pictures, Videos, and Camera Roll folders open in Gallery view
+                // (large thumbnails make sense for media). Everything else opens
+                // in Details (list) so columns and metadata are visible.
                 if let Some(view) = self.folder_views.get(&format!("{path}:view")).cloned() {
                     ui.set_view_mode(ss(&view));
+                } else {
+                    let lower = path.to_ascii_lowercase();
+                    let is_media_folder = lower.contains("\\pictures")
+                        || lower.contains("/pictures")
+                        || lower.contains("\\videos")
+                        || lower.contains("/videos")
+                        || lower.contains("\\camera roll")
+                        || lower.contains("/camera roll")
+                        || lower.contains("\\screenshots")
+                        || lower.contains("/screenshots");
+                    let default_view = if is_media_folder { "gallery" } else { "list" };
+                    ui.set_view_mode(ss(default_view));
+                    self.folder_views
+                        .insert(format!("{path}:view"), default_view.to_string());
                 }
                 if let Some(sb) = self.folder_views.get(&format!("{path}:sort_by")).cloned() {
                     self.sort_by = sb;
@@ -9902,24 +10159,19 @@ impl NativeController {
         } else {
             index_search(&search_root, &trimmed, SEARCH_INDEX_LIMIT).unwrap_or_default()
         };
-        if self.settings.search_semantic_mode
+        if (self.settings.search_semantic_mode || self.settings.clip_search_enabled)
             && trimmed.len() >= 2
             && !indexed.is_empty()
             && !trimmed.starts_with("tag:")
             && !trimmed.starts_with("smart:")
         {
-            if let Some(qemb) = crate::inference::embed_query_text(&trimmed) {
-                let scores = semantic_scores_under_root(&search_root, &qemb);
-                if !scores.is_empty() {
-                    indexed.sort_by(|a, b| {
-                        let sa = scores.get(&a.path).copied().unwrap_or(0.0);
-                        let sb = scores.get(&b.path).copied().unwrap_or(0.0);
-                        sb.partial_cmp(&sa)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-                    });
-                }
-            }
+            apply_semantic_search_ranking_entries(
+                &search_root,
+                &trimmed,
+                self.settings.search_semantic_mode,
+                self.settings.clip_search_enabled,
+                &mut indexed,
+            );
         }
         if trimmed.is_empty() || indexed.is_empty() {
             self.apply_filter();
@@ -9950,12 +10202,15 @@ impl NativeController {
         } else {
             format!("{path}  |  searching...")
         }));
+        let semantic = self.settings.search_semantic_mode;
+        let clip = self.settings.clip_search_enabled;
         std::thread::spawn(move || {
-            let (entries, source) =
+            let (mut entries, source) =
                 hybrid_search_background(&state, &path, &query, SEARCH_LIVE_SCAN_LIMIT, token);
             if state.search_generation.load(Ordering::SeqCst) != token {
                 return;
             }
+            apply_semantic_search_ranking_entries(&path, &query, semantic, clip, &mut entries);
             if let Ok(mut lock) = pending.lock() {
                 *lock = Some(NativeSearchResult {
                     path,
@@ -11173,12 +11428,13 @@ impl NativeController {
         for src_str in &paths {
             let src = Path::new(src_str);
             let Some(name) = src.file_name() else { continue; };
-            // Skip self-drop (source already lives in destination directory).
-            if src.parent() == Some(Path::new(&dest_dir)) {
+            let dest = PathBuf::from(&dest_dir).join(name);
+            // Skip only a true no-op (same file path). Same-folder drops onto a
+            // subfolder row use `dest_dir` from hit-testing and are not skipped here.
+            if same_inode_or_canonical_path(src, &dest) {
                 skipped_self += 1;
                 continue;
             }
-            let dest = PathBuf::from(&dest_dir).join(name);
             let result = if is_move {
                 native_move(&self.app_state, src_str, &dest.to_string_lossy())
             } else {
@@ -12667,6 +12923,17 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             let progress = c_ai.borrow().ai_progress.clone();
             local_ai::uninstall(progress);
             crate::inference::reset_inference_sessions();
+            {
+                let mut b = c_ai.borrow_mut();
+                if let Ok(mut cap) = b.app_state.ai_capabilities.lock() {
+                    *cap = None;
+                }
+                let caps = compute_ai_capabilities();
+                b.ai = caps.clone();
+                ui.set_ai_device(ss(&caps.reason));
+                ui.set_ai_gpu_status(ss(&caps.gpu_summary));
+                ui.set_ai_label(ss(ai_status_label(&caps)));
+            }
             ui.set_ai_install_state(SharedString::from("not_installed"));
             ui.set_ai_download_progress(0.0);
             ui.set_ai_install_message(SharedString::from(""));
@@ -12825,12 +13092,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             ctrl.settings.clip_search_enabled = enabled;
             ctrl.save_settings();
             ui.set_clip_search_enabled(enabled);
-            if enabled {
-                ctrl.show_toast(
-                    &ui,
-                    "CLIP description search is not bundled yet; toggle is reserved for a future model pack.",
-                );
-            }
+            let q = ui.get_search_text().to_string();
+            ctrl.search(&ui, q);
         }
     });
 
@@ -13041,6 +13304,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let search_ready = controller.borrow().search_ready.clone();
         let pending_search = controller.borrow().pending_search_result.clone();
         let timer = slint::Timer::default();
+        let prev_ai_install = Rc::new(Cell::new(local_ai::InstallState::NotInstalled));
+        let prev_ai_cell = prev_ai_install.clone();
         // 100ms tick instead of 350 — when a large directory finishes loading
         // in the background, the full result is merged into the UI within 100ms
         // of the worker thread setting the ready flag. Cost is negligible: each
@@ -13097,6 +13362,25 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     if let Ok(msg) = ai_progress_for_ui.message.lock() {
                         ui.set_ai_install_message(SharedString::from(msg.as_str()));
                     }
+                    let prev_st = prev_ai_cell.get();
+                    if state == local_ai::InstallState::Installed && prev_st != local_ai::InstallState::Installed {
+                        {
+                            if let Ok(ctrl) = c.try_borrow_mut() {
+                                if let Ok(mut cap) = ctrl.app_state.ai_capabilities.lock() {
+                                    *cap = None;
+                                }
+                            }
+                        }
+                        crate::inference::reset_inference_sessions();
+                        let caps = compute_ai_capabilities();
+                        if let Ok(mut ctrl) = c.try_borrow_mut() {
+                            ctrl.ai = caps.clone();
+                            ui.set_ai_device(ss(&caps.reason));
+                            ui.set_ai_gpu_status(ss(&caps.gpu_summary));
+                            ui.set_ai_label(ss(ai_status_label(&caps)));
+                        }
+                    }
+                    prev_ai_cell.set(state);
                 }
                 let dir_fired = dir_ready.swap(false, Ordering::AcqRel);
                 let search_fired = search_ready.swap(false, Ordering::AcqRel);
@@ -13853,24 +14137,13 @@ unsafe extern "system" fn mouse_nav_wnd_proc(
         HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_NCHITTEST, WM_NCXBUTTONDOWN,
     };
 
-    // Custom taskbar hover thumbnail so the user sees our maze logo instead
-    // of the default live window screenshot when they hover the taskbar icon.
-    // We register interest in DWMWA_HAS_ICONIC_BITMAP at startup, then DWM
-    // asks us for the bitmap by sending this message with the requested
-    // max size packed into lparam (HIWORD = width, LOWORD = height).
-    const WM_DWMSENDICONICTHUMBNAIL: u32 = 0x0323;
-    if msg == WM_DWMSENDICONICTHUMBNAIL {
-        let max_w = ((lparam.0 as u32 >> 16) & 0xFFFF) as i32;
-        let max_h = (lparam.0 as u32 & 0xFFFF) as i32;
-        unsafe {
-            if let Some(hbm) = build_taskbar_thumbnail(max_w, max_h) {
-                use windows::Win32::Graphics::Dwm::DwmSetIconicThumbnail;
-                let _ = DwmSetIconicThumbnail(hwnd, hbm, 0);
-                let _ = windows::Win32::Graphics::Gdi::DeleteObject(hbm.into());
-            }
-        }
-        return windows::Win32::Foundation::LRESULT(0);
-    }
+    // DWM iconic-thumbnail path used to live here. Windows 11 doesn't reliably
+    // honor DWMWA_FORCE_ICONIC_REPRESENTATION for non-tabbed apps and our
+    // DwmSetIconicThumbnail seed call kept returning E_INVALIDARG (0x80070057),
+    // so DWM fell back to a static app-icon thumbnail with no corner icon
+    // overlay. Removing the WM_DWMSENDICONICTHUMBNAIL handler (plus the
+    // attribute setup in enable_taskbar_iconic_thumbnail below) lets DWM
+    // generate its standard live-preview thumbnail of the actual window.
 
     if msg == WM_NCHITTEST {
         let x = ((lparam.0 as u32 & 0xffff) as i16) as i32;
@@ -13964,149 +14237,36 @@ unsafe extern "system" fn mouse_nav_wnd_proc(
     }
 }
 
-/// Bytes of the 256x256 maze icon embedded at compile time so we can produce
-/// a custom iconic thumbnail for the Windows taskbar hover preview without
-/// having to find the .ico file on disk at runtime.
-#[cfg(target_os = "windows")]
-const TASKBAR_THUMB_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
-
-/// Build a premultiplied-alpha 32bpp HBITMAP sized to fit within
-/// (max_w, max_h) while preserving aspect ratio, transparent margin on the
-/// shorter axis. DWM passes ownership semantics to DwmSetIconicThumbnail and
-/// we delete the HBITMAP ourselves after that call.
-#[cfg(target_os = "windows")]
-unsafe fn build_taskbar_thumbnail(
-    max_w: i32,
-    max_h: i32,
-) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Gdi::{
-        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateDIBSection, DIB_RGB_COLORS, GetDC, ReleaseDC,
-    };
-
-    if max_w <= 0 || max_h <= 0 {
-        return None;
-    }
-    let img = image::load_from_memory(TASKBAR_THUMB_PNG).ok()?;
-    let rgba = img.to_rgba8();
-    let (sw, sh) = (rgba.width() as f32, rgba.height() as f32);
-    // Letterbox into the requested max box while keeping aspect.
-    let scale = (max_w as f32 / sw).min(max_h as f32 / sh).min(1.0);
-    let dw = (sw * scale).round() as u32;
-    let dh = (sh * scale).round() as u32;
-    if dw == 0 || dh == 0 {
-        return None;
-    }
-    let scaled = image::imageops::resize(
-        &rgba,
-        dw,
-        dh,
-        image::imageops::FilterType::Lanczos3,
-    );
-
-    // Build a (max_w x max_h) target buffer in BGRA premultiplied alpha so DWM
-    // composites the maze cleanly against the taskbar peek backdrop.
-    let target_w = max_w as u32;
-    let target_h = max_h as u32;
-    let mut buf = vec![0u8; (target_w * target_h * 4) as usize];
-    let off_x = ((target_w - dw) / 2) as i32;
-    let off_y = ((target_h - dh) / 2) as i32;
-    for y in 0..dh {
-        for x in 0..dw {
-            let src = scaled.get_pixel(x, y);
-            let r = src[0] as u32;
-            let g = src[1] as u32;
-            let b = src[2] as u32;
-            let a = src[3] as u32;
-            let pr = ((r * a + 127) / 255) as u8;
-            let pg = ((g * a + 127) / 255) as u8;
-            let pb = ((b * a + 127) / 255) as u8;
-            let dst_x = off_x + x as i32;
-            let dst_y = off_y + y as i32;
-            if dst_x < 0 || dst_y < 0 || dst_x >= target_w as i32 || dst_y >= target_h as i32 {
-                continue;
-            }
-            let di = ((dst_y as u32 * target_w + dst_x as u32) * 4) as usize;
-            buf[di] = pb;
-            buf[di + 1] = pg;
-            buf[di + 2] = pr;
-            buf[di + 3] = a as u8;
-        }
-    }
-
-    let mut bmi = BITMAPINFO::default();
-    bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-    bmi.bmiHeader.biWidth = target_w as i32;
-    bmi.bmiHeader.biHeight = -(target_h as i32); // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB.0;
-
-    unsafe {
-        let hdc = GetDC(Some(HWND::default()));
-        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let hbm = CreateDIBSection(
-            Some(hdc),
-            &bmi,
-            DIB_RGB_COLORS,
-            &mut bits,
-            None,
-            0,
-        )
-        .ok()?;
-        if !bits.is_null() {
-            std::ptr::copy_nonoverlapping(buf.as_ptr(), bits as *mut u8, buf.len());
-        }
-        let _ = ReleaseDC(Some(HWND::default()), hdc);
-        Some(hbm)
-    }
-}
-
-/// Tell DWM that this window has a custom iconic bitmap and force the iconic
-/// path for taskbar hover previews, so DWM asks us via WM_DWMSENDICONICTHUMBNAIL
-/// instead of showing a live screenshot of the window.
+/// Explicitly clear the iconic-thumbnail attributes so DWM returns to the
+/// standard live-preview taskbar thumbnail. Earlier versions tried to provide
+/// a custom maze-logo bitmap via DwmSetIconicThumbnail, but the seed call
+/// returned E_INVALIDARG on Windows 11 and DWM ended up showing a static app
+/// icon with no corner overlay. With these flags cleared, DWM uses its own
+/// composition cache to produce a real thumbnail of the window contents.
 #[cfg(target_os = "windows")]
 unsafe fn enable_taskbar_iconic_thumbnail(hwnd: windows::Win32::Foundation::HWND) {
-    use windows::Win32::Graphics::Dwm::{
-        DWMWINDOWATTRIBUTE, DwmInvalidateIconicBitmaps, DwmSetIconicThumbnail,
-        DwmSetWindowAttribute,
-    };
+    use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
     use windows::core::BOOL;
     const DWMWA_FORCE_ICONIC_REPRESENTATION: i32 = 7;
     const DWMWA_HAS_ICONIC_BITMAP: i32 = 10;
-    let enable: BOOL = BOOL(1);
+    let disable: BOOL = BOOL(0);
     unsafe {
-        // Order matters. HAS_ICONIC_BITMAP first tells DWM that the window can
-        // produce a custom iconic bitmap. FORCE_ICONIC_REPRESENTATION then
-        // makes DWM ask for it on hover instead of grabbing a live screenshot.
         let r1 = DwmSetWindowAttribute(
             hwnd,
             DWMWINDOWATTRIBUTE(DWMWA_HAS_ICONIC_BITMAP),
-            &enable as *const _ as *const _,
+            &disable as *const _ as *const _,
             std::mem::size_of::<BOOL>() as u32,
         );
         let r2 = DwmSetWindowAttribute(
             hwnd,
             DWMWINDOWATTRIBUTE(DWMWA_FORCE_ICONIC_REPRESENTATION),
-            &enable as *const _ as *const _,
+            &disable as *const _ as *const _,
             std::mem::size_of::<BOOL>() as u32,
         );
         eprintln!(
-            "[taskbar] DwmSetWindowAttribute HAS={:?} FORCE={:?}",
+            "[taskbar] cleared iconic attributes HAS={:?} FORCE={:?} (live preview enabled)",
             r1, r2
         );
-
-        // Seed an initial thumbnail at a sensible size and then invalidate so
-        // DWM requests fresh sizes via WM_DWMSENDICONICTHUMBNAIL on hover.
-        // Without the invalidate, DWM sometimes keeps showing the live-preview
-        // path because it has not yet acknowledged the FORCE flag.
-        if let Some(hbm) = build_taskbar_thumbnail(200, 200) {
-            let r3 = DwmSetIconicThumbnail(hwnd, hbm, 0);
-            let _ = windows::Win32::Graphics::Gdi::DeleteObject(hbm.into());
-            eprintln!("[taskbar] DwmSetIconicThumbnail (seed) -> {:?}", r3);
-        }
-        let r4 = DwmInvalidateIconicBitmaps(hwnd);
-        eprintln!("[taskbar] DwmInvalidateIconicBitmaps -> {:?}", r4);
     }
 }
 
@@ -14181,6 +14341,42 @@ fn install_mouse_nav(_ui: &MainWindow) {}
 // We convert to client pixels via ScreenToClient, then to Slint logical
 // pixels by dividing by the window's scale factor.
 #[cfg(target_os = "windows")]
+fn hit_test_list_folder_drop(
+    ui: &MainWindow,
+    files: &[FileEntry],
+    pane_left: f32,
+    pane_w: f32,
+    lx: f32,
+    ly: f32,
+    list_top: f32,
+) -> Option<String> {
+    if ui.get_view_mode().as_str() != "list" || files.is_empty() {
+        return None;
+    }
+    const PAD: f32 = 16.0;
+    const ROW_H: f32 = 38.0;
+    const SCROLLBAR: f32 = 14.0;
+    let left = pane_left + PAD;
+    let right = pane_left + pane_w - PAD - SCROLLBAR;
+    if lx < left || lx > right || ly < list_top {
+        return None;
+    }
+    let row = ((ly - list_top) / ROW_H).floor() as isize;
+    if row < 0 {
+        return None;
+    }
+    let idx = row as usize;
+    let entry = files.get(idx)?;
+    if entry.kind != FileKind::Directory {
+        return None;
+    }
+    if entry.path.is_empty() {
+        return None;
+    }
+    Some(entry.path.clone())
+}
+
+#[cfg(target_os = "windows")]
 fn pick_drop_destination(
     ui: &MainWindow,
     ctrl: &NativeController,
@@ -14191,30 +14387,73 @@ fn pick_drop_destination(
     use windows::Win32::Foundation::POINT;
     use windows::Win32::Graphics::Gdi::ScreenToClient;
 
-    let dual = ui.get_dual_pane();
-    if !dual {
-        return ctrl.current_path.clone();
-    }
-
     let mut p = POINT { x: screen_x, y: screen_y };
     unsafe { let _ = ScreenToClient(hwnd, &mut p); }
     let scale = ui.window().scale_factor().max(0.1);
-    let logical_x = (p.x as f32) / scale;
+    let lx = (p.x as f32) / scale;
+    let ly = (p.y as f32) / scale;
 
-    // In Slint coords: sidebar is at left, then main content starts at sidebar_w.
-    // primary_pane_w spans sidebar_w..sidebar_w + primary_pane_w.
     let sidebar_w = ui.get_sidebar_w();
     let primary_w = ui.get_primary_pane_w();
     let splitter_w = ui.get_pane_splitter_w();
-    let primary_right_edge = sidebar_w + primary_w + splitter_w / 2.0;
+    // Top of the main file area (below title + toolbar), in logical px.
+    let content_top = 36.0 + 44.0;
+    let main_left = sidebar_w;
 
-    if logical_x < primary_right_edge {
-        ctrl.current_path.clone()
-    } else if !ctrl.secondary_path.is_empty() {
-        ctrl.secondary_path.clone()
+    let (
+        base_dir,
+        pane_left,
+        pane_w,
+        files,
+        list_top,
+    ): (String, f32, f32, &[FileEntry], f32) = if ui.get_dual_pane() {
+        let primary_right_edge = sidebar_w + primary_w + splitter_w / 2.0;
+        if lx < primary_right_edge {
+            let list_top = content_top + 16.0 + 32.0;
+            (
+                ctrl.current_path.clone(),
+                main_left,
+                primary_w,
+                &ctrl.visible_files[..],
+                list_top,
+            )
+        } else if !ctrl.secondary_path.is_empty() {
+            let sec_left = sidebar_w + primary_w + splitter_w;
+            let sec_w = ui.get_secondary_pane_w();
+            // Secondary list: 38px chrome header + 32px list header (matches main.slint).
+            let list_top = content_top + 38.0 + 32.0;
+            (
+                ctrl.secondary_path.clone(),
+                sec_left,
+                sec_w,
+                &ctrl.secondary_visible_files[..],
+                list_top,
+            )
+        } else {
+            let list_top = content_top + 16.0 + 32.0;
+            (
+                ctrl.current_path.clone(),
+                main_left,
+                primary_w,
+                &ctrl.visible_files[..],
+                list_top,
+            )
+        }
     } else {
-        ctrl.current_path.clone()
+        let list_top = content_top + 16.0 + 32.0;
+        (
+            ctrl.current_path.clone(),
+            main_left,
+            primary_w,
+            &ctrl.visible_files[..],
+            list_top,
+        )
+    };
+
+    if let Some(sub) = hit_test_list_folder_drop(ui, files, pane_left, pane_w, lx, ly, list_top) {
+        return sub;
     }
+    base_dir
 }
 
 // Fallback HWND lookup: enumerate all top-level windows owned by the current
@@ -14411,15 +14650,21 @@ pub fn run() {
                         ui.set_drag_over_pane(SharedString::from(""));
                         return;
                     }
-                    if !ui.get_dual_pane() {
-                        return;
-                    }
                     use windows::Win32::Foundation::POINT;
                     use windows::Win32::Graphics::Gdi::ScreenToClient;
                     let mut p = POINT { x: screen_x, y: screen_y };
                     unsafe { let _ = ScreenToClient(hwnd, &mut p); }
                     let scale = ui.window().scale_factor().max(0.1);
                     let logical_x = (p.x as f32) / scale;
+                    if !ui.get_dual_pane() {
+                        let sw = ui.get_sidebar_w();
+                        if logical_x >= sw {
+                            ui.set_drag_over_pane(SharedString::from("primary"));
+                        } else {
+                            ui.set_drag_over_pane(SharedString::from(""));
+                        }
+                        return;
+                    }
                     let primary_right_edge = ui.get_sidebar_w()
                         + ui.get_primary_pane_w()
                         + ui.get_pane_splitter_w() / 2.0;

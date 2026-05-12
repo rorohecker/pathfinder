@@ -18,6 +18,7 @@
 //!   instead of a 4-deep nested loop, so 224*224*3 = 150,528 element writes happen
 //!   through a single contiguous fill.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -475,8 +476,13 @@ fn mobilenet_session() -> ort::Result<std::sync::MutexGuard<'static, Option<Sess
     Ok(g)
 }
 
-/// Returns a short human label (ImageNet class index mapped to a coarse tag) if the model runs.
-pub fn suggest_image_tag(path: &Path) -> Option<String> {
+/// True when `image-classifier.onnx` is present next to other Local AI models.
+pub fn image_classifier_available() -> bool {
+    model_dir().join("image-classifier.onnx").is_file()
+}
+
+/// ImageNet logits from the bundled MobileNet classifier, if the model loads and the image decodes.
+fn mobilenet_logits(path: &Path) -> Option<Vec<f32>> {
     let img = image::open(path).ok()?.into_rgb8();
     let dyn_img = DynamicImage::ImageRgb8(img);
     // Triangle (linear) filter is a good speed / quality trade for a 224x224 input
@@ -512,7 +518,41 @@ pub fn suggest_image_tag(path: &Path) -> Option<String> {
     let out = session.run(ort::inputs!["input" => input_ref]).ok()?;
     let first = out.iter().next()?;
     let (_shape, data) = first.1.try_extract_tensor::<f32>().ok()?;
-    let flat: Vec<f32> = data.to_vec();
+    Some(data.to_vec())
+}
+
+/// Comma-separated coarse tags from the top ImageNet logits, for text embedding / search indexing.
+pub fn image_search_label_text(path: &Path) -> Option<String> {
+    let flat = mobilenet_logits(path)?;
+    if flat.is_empty() {
+        return None;
+    }
+    let mut ranked: Vec<(usize, f32)> = flat.iter().copied().enumerate().collect();
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let mut tags: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    for (idx, _) in ranked.iter().take(32) {
+        let t = imagenet_coarse_tag(*idx);
+        if seen.insert(t.clone()) {
+            tags.push(t);
+        }
+        if tags.len() >= 5 {
+            break;
+        }
+    }
+    if tags.is_empty() {
+        return None;
+    }
+    Some(tags.join(", "))
+}
+
+/// Returns a short human label (ImageNet class index mapped to a coarse tag) if the model runs.
+pub fn suggest_image_tag(path: &Path) -> Option<String> {
+    let flat = mobilenet_logits(path)?;
     let idx = flat
         .iter()
         .enumerate()
