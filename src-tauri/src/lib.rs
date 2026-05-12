@@ -5916,6 +5916,31 @@ fn powershell_executable() -> String {
     }
 }
 
+/// Append a timestamped line to %APPDATA%\Pathfinder\updater.log so users
+/// (and we) can answer "is the auto-update check running?" without attaching
+/// a debugger or rebuilding with a console subsystem. Best effort — failures
+/// are swallowed because the updater must keep running even if disk is full.
+fn updater_log(msg: &str) {
+    let path = native_data_file("updater.log");
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("[{now}] {msg}\n");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = f.write_all(line.as_bytes());
+    }
+    eprintln!("[updater] {msg}");
+}
+
 /// Prefer a Windows `.exe` NSIS/setup asset, else `.msi`; skip `.zip` / `.7z` so
 /// in-app Install always launches a real installer.
 fn pick_release_installer_url(assets: &[serde_json::Value]) -> String {
@@ -5945,10 +5970,13 @@ fn check_github_release_now() -> Result<UpdateCheckResult, String> {
 $ErrorActionPreference = 'Stop'
 $url = $args[0]
 $headers = @{ 'User-Agent' = 'Pathfinder' }
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 $release = Invoke-RestMethod -Uri $url -Headers $headers -ErrorAction Stop
 ConvertTo-Json -InputObject $release -Depth 8 -Compress
 "#;
-    let output = ProcessCommand::new(&powershell_executable())
+    let exe = powershell_executable();
+    updater_log(&format!("invoking {exe} for {GITHUB_LATEST_RELEASE_API}"));
+    let output = ProcessCommand::new(&exe)
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
@@ -5957,19 +5985,30 @@ ConvertTo-Json -InputObject $release -Depth 8 -Compress
         .arg(GITHUB_LATEST_RELEASE_API)
         .no_window()
         .output()
-        .map_err(|e| format!("failed to launch PowerShell: {e}"))?;
+        .map_err(|e| {
+            let msg = format!("failed to launch PowerShell ({exe}): {e}");
+            updater_log(&msg);
+            msg
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
+        let msg = if stderr.is_empty() {
             format!("PowerShell exited with status {}", output.status)
         } else {
-            format!("PowerShell failed: {}", stderr)
-        });
+            format!("PowerShell failed: {stderr}")
+        };
+        updater_log(&msg);
+        return Err(msg);
     }
+    updater_log(&format!("powershell ok ({} stdout bytes)", output.stdout.len()));
 
     let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+        serde_json::from_slice(&output.stdout).map_err(|e| {
+            let msg = format!("json parse failed: {e}");
+            updater_log(&msg);
+            msg
+        })?;
     let latest_raw = value
         .get("tag_name")
         .and_then(|v| v.as_str())
@@ -14093,33 +14132,61 @@ pub fn run() {
     let weak_ui_upd = ui.as_weak();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(4));
+        updater_log(&format!(
+            "background updater thread started; current={} api={}",
+            env!("CARGO_PKG_VERSION"),
+            GITHUB_LATEST_RELEASE_API
+        ));
+        // Tiered retry: if a check fails (network blip, GitHub rate limit,
+        // PowerShell missing) try again in 30s, 2min, 10min, then settle into
+        // the hourly cadence. Successful checks always wait the full hour.
+        let mut consecutive_failures: u32 = 0;
         loop {
+            updater_log("checking github for new release");
             match check_github_release_now() {
                 Ok(result) => {
-                    eprintln!(
-                        "[updater] latest={} current={} available={}",
-                        result.latest_version, result.current_version, result.available
-                    );
+                    updater_log(&format!(
+                        "result: latest={} current={} available={} download_url={}",
+                        result.latest_version,
+                        result.current_version,
+                        result.available,
+                        if result.download_url.is_empty() { "<none>" } else { result.download_url.as_str() }
+                    ));
                     if result.available {
                         let ver = SharedString::from(result.latest_version.clone());
                         let dl = SharedString::from(result.download_url.clone());
                         let weak_pill = weak_ui_upd.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
+                        let r = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak_pill.upgrade() {
                                 ui.set_update_available(true);
                                 ui.set_update_version(ver);
                                 ui.set_update_download_url(dl);
                             }
                         });
+                        if r.is_err() {
+                            updater_log("invoke_from_event_loop failed (loop not running yet?) — will retry next cycle");
+                        } else {
+                            updater_log("pill set on UI thread");
+                        }
                     }
+                    consecutive_failures = 0;
+                    std::thread::sleep(std::time::Duration::from_secs(60 * 60));
                 }
                 Err(e) => {
-                    eprintln!("[updater] check failed: {}", e);
+                    updater_log(&format!("check failed: {e}"));
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let wait_secs = match consecutive_failures {
+                        1 => 30,
+                        2 => 120,
+                        3 => 600,
+                        _ => 60 * 60,
+                    };
+                    updater_log(&format!(
+                        "retrying in {wait_secs}s (failure {consecutive_failures})"
+                    ));
+                    std::thread::sleep(std::time::Duration::from_secs(wait_secs));
                 }
             }
-            // Re-check every hour. If the network blip prevented the first
-            // call from succeeding, the next hour gets another shot.
-            std::thread::sleep(std::time::Duration::from_secs(60 * 60));
         }
     });
 

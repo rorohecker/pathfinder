@@ -1,8 +1,10 @@
 import { LineEdit, ListView, ScrollView, Slider } from "std-widgets.slint";
 
-// Bundled pixel-arcade font (OFL) used by the Retro theme. Slint registers
-// the family name from the file's metadata: "Press Start 2P".
+// Bundled OFL fonts (embedded via build.rs). Family names come from font metadata.
 import "fonts/PressStart2P-Regular.ttf";
+import "fonts/NotoSans-Regular.ttf";
+import "fonts/NotoSansMono-Regular.ttf";
+import "fonts/JetBrainsMono-Variable.ttf";
 
 export struct FileItem {
     name: string,
@@ -82,6 +84,8 @@ export global ThemePalette {
     in-out property <string> active_theme: "mica-dark";
     // Custom themes: soft vertical gradient between bg_soft and bg instead of flat bg.
     in-out property <bool> bg_gradient_enabled: false;
+    // When true, window background gradient blends toward accent at the bottom.
+    in-out property <bool> bg_gradient_accent_tip: false;
     // Runtime-loaded folder icon image. Set from Rust by reading
     // %APPDATA%\Pathfinder\theme_icons\{theme}.png. If width is 0px the
     // file wasn't found and NodeVisual falls back to its drawn shape.
@@ -1199,7 +1203,8 @@ component ChoiceChip inherits Rectangle {
     in property <bool> active;
     callback picked(string);
 
-    height: 46px;
+    property <bool> no_desc: root.item.description == "";
+    height: root.no_desc ? 34px : 46px;
     border-radius: AppMetrics.radius_small;
     border-width: 1px;
     border-color: root.active ? ThemePalette.accent : ThemePalette.border;
@@ -1207,7 +1212,7 @@ component ChoiceChip inherits Rectangle {
 
     Rectangle {
         x: 10px;
-        y: 11px;
+        y: (parent.height - 24px) / 2;
         width: 24px;
         height: 24px;
         border-radius: 12px;
@@ -1221,17 +1226,19 @@ component ChoiceChip inherits Rectangle {
         // 14 px gap so the label can never lean on the icon, even with
         // long localized strings or wide-glyph theme fonts.
         x: 48px;
-        y: 6px;
+        y: root.no_desc ? 8px : 6px;
         width: parent.width - 58px;
-        height: 18px;
+        height: root.no_desc ? 20px : 18px;
         text: root.item.label;
         color: ThemePalette.text;
-        font-size: 13px;
+        font-size: root.no_desc ? 12.5px : 13px;
         font-weight: 700;
+        vertical-alignment: root.no_desc ? center : top;
         overflow: elide;
     }
 
     Text {
+        visible: !root.no_desc;
         x: 48px;
         y: 24px;
         width: parent.width - 58px;
@@ -1352,11 +1359,17 @@ component DialogButton inherits Rectangle {
     in property <bool> danger;
     callback clicked();
 
-    width: 76px;
+    // Auto-size to fit the label so long labels like "Set default folder handler"
+    // don't get clipped. Callers can still override `width` explicitly.
+    preferred-width: Math.max(76px, dlg_btn_label.preferred-width + 28px);
+    width: self.preferred-width;
     height: 32px;
     border-radius: AppMetrics.radius_small;
     background: root.primary ? (root.danger ? ThemePalette.danger : ThemePalette.accent) : ThemePalette.panel_alt;
-    Text {
+    dlg_btn_label := Text {
+        x: 14px;
+        width: parent.width - 28px;
+        height: parent.height;
         text: root.label;
         color: root.primary ? white : ThemePalette.text_muted;
         font-size: 12.5px;
@@ -1375,7 +1388,11 @@ export component MainWindow inherits Window {
     preferred-height: 800px;
     min-width: 900px;
     min-height: 550px;
-    background: ThemePalette.bg_gradient_enabled ? @linear-gradient(165deg, ThemePalette.bg_soft 0%, ThemePalette.bg 55%, ThemePalette.bg 100%) : ThemePalette.bg;
+    background: ThemePalette.bg_gradient_enabled
+        ? (ThemePalette.bg_gradient_accent_tip
+            ? @linear-gradient(165deg, ThemePalette.bg_soft 0%, ThemePalette.bg 42%, ThemePalette.accent 100%)
+            : @linear-gradient(165deg, ThemePalette.bg_soft 0%, ThemePalette.bg 55%, ThemePalette.bg 100%))
+        : ThemePalette.bg;
     default-font-family: AppMetrics.ui_font;
     forward-focus: keys;
 
@@ -1585,22 +1602,27 @@ export component MainWindow inherits Window {
     in-out property <float> ce_radius: 8;
     in-out property <float> ce_anim_speed: 1.0;
     in-out property <string> ce_finish: "mica-dark";
-    in-out property <string> ce_ui_font: "Segoe UI";
-    in-out property <string> ce_mono_font: "Cascadia Mono";
+    // Bundled font preset ids (saved in theme JSON). Resolved families below.
+    in-out property <string> ce_ui_font: "noto-sans";
+    in-out property <string> ce_mono_font: "noto-sans-mono";
+    in-out property <string> ce_preview_ui_font: "Noto Sans";
+    in-out property <string> ce_preview_mono_font: "Noto Sans Mono";
     in-out property <int> ce_font_size_delta: 0;
     in-out property <string> ce_icon_folder_hex: "#e2a934";
     in-out property <string> ce_icon_set: "";
     in-out property <bool> ce_gradient_background: false;
+    in-out property <bool> ce_gradient_accent: false;
 
     callback ce_select_token(int);
     callback ce_color_changed(int, string);
     callback ce_radius_changed(float);
     callback ce_anim_changed(float);
     callback ce_finish_changed(string);
-    callback ce_font_changed(string, string);
+    callback ce_font_preset(string, string);
     callback ce_font_size_changed(int);
     callback ce_icon_tint_changed(string);
     callback ce_gradient_changed(bool);
+    callback ce_gradient_accent_changed(bool);
     callback ce_save(string);
     callback ce_load(string);
     callback ce_delete(string);
@@ -3727,10 +3749,11 @@ export component MainWindow inherits Window {
                         height: self.preferred-height;
                     }
                     HorizontalLayout {
-                        spacing: 8px;
+                        spacing: 10px;
                         height: 36px;
+                        alignment: start;
                         DialogButton {
-                            label: "Set default folder handler";
+                            label: "Set as default folder handler";
                             primary: true;
                             clicked => { root.windows_set_default_folder_handler(); }
                         }
@@ -3767,7 +3790,7 @@ export component MainWindow inherits Window {
                     // Quick orientation so users do not confuse this tab
                     // with the built-in theme picker on the Appearance tab.
                     Text {
-                        text: "Custom theme editor. Pick a color token below, change its hex, and the live preview updates instantly. Save the result and it appears on the Appearance tab. To switch between built-in themes, use the Appearance tab.";
+                        text: "Build a theme here, then Save. It appears on Appearance as Custom. Pick a color token, adjust hex or swatches, and watch the mini window below (it uses only your token colors, not the rest of Settings).";
                         color: ThemePalette.text_faint;
                         font-size: 11.5px;
                         wrap: word-wrap;
@@ -3836,7 +3859,9 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: root.ce_token_colors.length > 4 ? root.ce_token_colors[4] : ThemePalette.border_strong;
                         background: root.ce_gradient_background && root.ce_token_colors.length > 1
-                            ? @linear-gradient(165deg, root.ce_token_colors[1] 0%, root.ce_token_colors[0] 100%)
+                            ? (root.ce_gradient_accent && root.ce_token_colors.length > 8
+                                ? @linear-gradient(165deg, root.ce_token_colors[1] 0%, root.ce_token_colors[0] 42%, root.ce_token_colors[8] 100%)
+                                : @linear-gradient(165deg, root.ce_token_colors[1] 0%, root.ce_token_colors[0] 100%))
                             : (root.ce_token_colors.length > 0 ? root.ce_token_colors[0] : ThemePalette.bg);
                         clip: true;
 
@@ -3863,6 +3888,7 @@ export component MainWindow inherits Window {
                                 height: parent.height;
                                 text: root.ce_name == "" ? "Custom Theme" : root.ce_name;
                                 color: root.ce_token_colors.length > 5 ? root.ce_token_colors[5] : ThemePalette.text;
+                                font-family: root.ce_preview_ui_font;
                                 font-size: 12px;
                                 font-weight: 700;
                                 vertical-alignment: center;
@@ -3885,7 +3911,7 @@ export component MainWindow inherits Window {
                             height: 56px;
                             border-radius: Math.max(2px, root.ce_radius * 1px);
                             background: root.ce_token_colors.length > 1 ? root.ce_token_colors[1] : ThemePalette.bg_soft;
-                            Text { x: 12px; y: 8px; width: parent.width - 24px; height: 18px; text: "Sidebar Item"; color: root.ce_token_colors.length > 6 ? root.ce_token_colors[6] : ThemePalette.text_muted; font-size: 12px; overflow: elide; }
+                            Text { x: 12px; y: 8px; width: parent.width - 24px; height: 18px; text: "Sidebar Item"; color: root.ce_token_colors.length > 6 ? root.ce_token_colors[6] : ThemePalette.text_muted; font-family: root.ce_preview_ui_font; font-size: 12px; overflow: elide; }
                             Rectangle { x: 12px; y: 34px; width: parent.width - 24px; height: 8px; border-radius: 4px; background: root.ce_token_colors.length > 8 ? root.ce_token_colors[8] : ThemePalette.accent; }
                         }
 
@@ -3899,17 +3925,46 @@ export component MainWindow inherits Window {
                             border-color: root.ce_token_colors.length > 3 ? root.ce_token_colors[3] : ThemePalette.border;
                             background: root.ce_token_colors.length > 2 ? root.ce_token_colors[2] : ThemePalette.panel;
                             NodeVisual { x: 12px; y: 10px; visual_width: 34px; visual_height: 28px; is_dir: true; extension: ""; }
-                            Text { x: 56px; y: 8px; width: parent.width - 70px; height: 18px; text: "Long filename preview.txt"; color: root.ce_token_colors.length > 5 ? root.ce_token_colors[5] : ThemePalette.text; font-size: 12px; overflow: elide; }
-                            Text { x: 56px; y: 30px; width: parent.width - 70px; height: 16px; text: "Shows colors, radius, contrast"; color: root.ce_token_colors.length > 7 ? root.ce_token_colors[7] : ThemePalette.text_faint; font-size: 10.5px; overflow: elide; }
+                            Text { x: 56px; y: 8px; width: parent.width - 70px; height: 18px; text: "Long filename preview.txt"; color: root.ce_token_colors.length > 5 ? root.ce_token_colors[5] : ThemePalette.text; font-family: root.ce_preview_ui_font; font-size: 12px; overflow: elide; }
+                            Text { x: 56px; y: 30px; width: parent.width - 70px; height: 16px; text: "12.4 MB · modified today"; color: root.ce_token_colors.length > 7 ? root.ce_token_colors[7] : ThemePalette.text_faint; font-family: root.ce_preview_mono_font; font-size: 10.5px; overflow: elide; }
                         }
                     }
 
                     // Colors
                     Text { text: "COLORS"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Text {
-                        text: "Click a token, then pick a color below. Hex is still available for exact values.";
+                        text: "Jump to a token, then use swatches or hex.";
                         color: ThemePalette.text_faint;
                         font-size: 11px;
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        height: 30px;
+                        Text { text: "Jump:"; color: ThemePalette.text_muted; font-size: 11px; vertical-alignment: center; }
+                        for jump[i] in [
+                            { tok: 0, lab: "Bg" },
+                            { tok: 1, lab: "Surface" },
+                            { tok: 2, lab: "Panel" },
+                            { tok: 8, lab: "Accent" },
+                        ]: Rectangle {
+                            width: jump_lab.preferred-width + 16px;
+                            height: 26px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: root.ce_selected_token == jump.tok ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_selected_token == jump.tok ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            jump_lab := Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: parent.height;
+                                text: jump.lab;
+                                color: root.ce_selected_token == jump.tok ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_select_token(jump.tok); } }
+                        }
                     }
                     HorizontalLayout {
                         height: 44px;
@@ -4799,10 +4854,10 @@ export component MainWindow inherits Window {
         }
 
         Rectangle {
-            x: (parent.width - 520px) / 2;
-            y: (parent.height - 480px) / 2;
-            width: 520px;
-            height: 480px;
+            x: (parent.width - 600px) / 2;
+            y: (parent.height - 580px) / 2;
+            width: 600px;
+            height: 580px;
             border-radius: AppMetrics.radius;
             border-width: 1px;
             border-color: ThemePalette.border_strong;
@@ -4812,36 +4867,38 @@ export component MainWindow inherits Window {
             clip: true;
 
             VerticalLayout {
-                x: 26px;
-                y: 22px;
-                width: parent.width - 52px;
-                spacing: 12px;
+                x: 28px;
+                y: 24px;
+                width: parent.width - 56px;
+                spacing: 14px;
 
                 Text {
                     text: "Welcome to Pathfinder";
                     color: ThemePalette.text;
                     font-size: 20px;
                     font-weight: 700;
+                    height: self.preferred-height;
                 }
                 Text {
                     text: "Three quick steps to make Pathfinder feel like your everyday file manager. You can finish them all here, or come back later from Settings.";
                     color: ThemePalette.text_muted;
                     font-size: 12.5px;
                     wrap: word-wrap;
+                    width: parent.width;
                     height: self.preferred-height;
                 }
 
                 // Step 1: default folder handler
                 Rectangle {
-                    height: 92px;
+                    height: w1_title.preferred-height + w1_body.preferred-height + 68px;
                     border-radius: AppMetrics.radius_small;
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     background: ThemePalette.panel;
-                    Text { x: 14px; y: 10px; width: parent.width - 28px; text: "1. Set Pathfinder as your default folder handler"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
-                    Text {
+                    w1_title := Text { x: 14px; y: 12px; width: parent.width - 28px; text: "1. Set Pathfinder as your default folder handler"; color: ThemePalette.text; font-size: 13px; font-weight: 700; wrap: word-wrap; height: self.preferred-height; }
+                    w1_body := Text {
                         x: 14px;
-                        y: 32px;
+                        y: w1_title.y + w1_title.preferred-height + 4px;
                         width: parent.width - 28px;
                         text: root.welcome_default_status;
                         color: ThemePalette.text_muted;
@@ -4850,8 +4907,8 @@ export component MainWindow inherits Window {
                         height: self.preferred-height;
                     }
                     DialogButton {
-                        x: parent.width - 144px;
-                        y: parent.height - 38px;
+                        x: parent.width - self.preferred-width - 14px;
+                        y: parent.height - 42px;
                         label: root.welcome_default_handler_set ? "Done" : "Set as default";
                         primary: !root.welcome_default_handler_set;
                         clicked => { root.welcome_set_default_handler(); }
@@ -4860,15 +4917,15 @@ export component MainWindow inherits Window {
 
                 // Step 2: pin to taskbar
                 Rectangle {
-                    height: 96px;
+                    height: w2_title.preferred-height + w2_body.preferred-height + 28px;
                     border-radius: AppMetrics.radius_small;
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     background: ThemePalette.panel;
-                    Text { x: 14px; y: 10px; width: parent.width - 28px; text: "2. Pin Pathfinder to your taskbar"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
-                    Text {
+                    w2_title := Text { x: 14px; y: 12px; width: parent.width - 28px; text: "2. Pin Pathfinder to your taskbar"; color: ThemePalette.text; font-size: 13px; font-weight: 700; wrap: word-wrap; height: self.preferred-height; }
+                    w2_body := Text {
                         x: 14px;
-                        y: 32px;
+                        y: w2_title.y + w2_title.preferred-height + 4px;
                         width: parent.width - 28px;
                         text: "Windows 11 doesn't let apps pin themselves. Open the Start menu, find Pathfinder, right click it, then choose Pin to taskbar.";
                         color: ThemePalette.text_muted;
@@ -4880,15 +4937,15 @@ export component MainWindow inherits Window {
 
                 // Step 3: unpin File Explorer
                 Rectangle {
-                    height: 96px;
+                    height: w3_title.preferred-height + w3_body.preferred-height + 28px;
                     border-radius: AppMetrics.radius_small;
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     background: ThemePalette.panel;
-                    Text { x: 14px; y: 10px; width: parent.width - 28px; text: "3. Unpin File Explorer (optional)"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
-                    Text {
+                    w3_title := Text { x: 14px; y: 12px; width: parent.width - 28px; text: "3. Unpin File Explorer (optional)"; color: ThemePalette.text; font-size: 13px; font-weight: 700; wrap: word-wrap; height: self.preferred-height; }
+                    w3_body := Text {
                         x: 14px;
-                        y: 32px;
+                        y: w3_title.y + w3_title.preferred-height + 4px;
                         width: parent.width - 28px;
                         text: "Right click File Explorer on the taskbar and pick Unpin from taskbar so Pathfinder is the one you open by reflex.";
                         color: ThemePalette.text_muted;
@@ -4900,7 +4957,7 @@ export component MainWindow inherits Window {
 
                 HorizontalLayout {
                     height: 36px;
-                    spacing: 8px;
+                    spacing: 10px;
                     alignment: end;
                     DialogButton {
                         label: "Open Taskbar settings";
