@@ -13849,6 +13849,64 @@ static MOUSE_NAV_UI: std::sync::OnceLock<slint::Weak<MainWindow>> = std::sync::O
 #[cfg(target_os = "windows")]
 static MOUSE_NAV_ORIG_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
+/// Map mouse back / forward to the same Slint callbacks as the toolbar.
+/// Registered on the winit event path so navigation works even when a custom
+/// `WNDPROC` subclass is not first in the chain (winit already handles
+/// `WM_XBUTTONDOWN` in the client area and emits `MouseInput`).
+fn register_winit_mouse_side_button_navigation(ui: &MainWindow) {
+    use i_slint_backend_winit::EventResult;
+    use i_slint_backend_winit::WinitWindowAccessor;
+    use i_slint_backend_winit::winit::event::{ElementState, MouseButton, WindowEvent};
+
+    let weak = ui.as_weak();
+    ui.window().on_winit_window_event(move |_win, event| {
+        let WindowEvent::MouseInput {
+            state, button, ..
+        } = event
+        else {
+            return EventResult::Propagate;
+        };
+        if *state != ElementState::Pressed {
+            return EventResult::Propagate;
+        }
+        let go_back = matches!(button, MouseButton::Back);
+        let go_forward = matches!(button, MouseButton::Forward);
+        if !go_back && !go_forward {
+            return EventResult::Propagate;
+        }
+        let w = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = w.upgrade() {
+                if go_back {
+                    ui.invoke_go_back();
+                } else {
+                    ui.invoke_go_forward();
+                }
+            }
+        });
+        EventResult::Propagate
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn mouse_nav_dispatch_side_buttons(wparam: windows::Win32::Foundation::WPARAM) {
+    use windows::Win32::UI::WindowsAndMessaging::XBUTTON1;
+    let button = ((wparam.0 as u32) >> 16) as u16;
+    if let Some(weak) = MOUSE_NAV_UI.get() {
+        let w = weak.clone();
+        let is_back = button == XBUTTON1;
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = w.upgrade() {
+                if is_back {
+                    ui.invoke_go_back();
+                } else {
+                    ui.invoke_go_forward();
+                }
+            }
+        });
+    }
+}
+
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn mouse_nav_wnd_proc(
     hwnd: windows::Win32::Foundation::HWND,
@@ -13860,7 +13918,7 @@ unsafe extern "system" fn mouse_nav_wnd_proc(
     use windows::Win32::Foundation::RECT;
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT,
-        HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_NCHITTEST, WM_XBUTTONDOWN,
+        HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_NCHITTEST, WM_NCXBUTTONDOWN,
     };
 
     // Custom taskbar hover thumbnail so the user sees our maze logo instead
@@ -13924,24 +13982,12 @@ unsafe extern "system" fn mouse_nav_wnd_proc(
         }
     }
 
-    if msg == WM_XBUTTONDOWN {
-        let button = ((wparam.0 as u32) >> 16) as u16;
-        if let Some(weak) = MOUSE_NAV_UI.get() {
-            let w = weak.clone();
-            let is_back = button == windows::Win32::UI::WindowsAndMessaging::XBUTTON1 as u16;
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = w.upgrade() {
-                    if is_back {
-                        ui.invoke_go_back();
-                    } else {
-                        ui.invoke_go_forward();
-                    }
-                }
-            });
-        }
+    // Non-client hits (e.g. caption) use WM_NCXBUTTON*; winit does not emit MouseInput for these.
+    if msg == WM_NCXBUTTONDOWN {
+        mouse_nav_dispatch_side_buttons(wparam);
     }
 
-    // Many mice send browser back/forward as WM_APPCOMMAND; some only as XBUTTON.
+    // Many mice send browser back/forward as WM_APPCOMMAND instead of XBUTTON messages.
     const WM_APPCOMMAND: u32 = 0x0319;
     const FAPPCOMMAND_MASK: u16 = 0xF000;
     const APPCOMMAND_BROWSER_BACKWARD: u16 = 1;
@@ -14134,6 +14180,12 @@ unsafe fn enable_taskbar_iconic_thumbnail(hwnd: windows::Win32::Foundation::HWND
 
 #[cfg(target_os = "windows")]
 fn install_mouse_nav(ui: &MainWindow) {
+    // Defer the WindowProc subclass via a Slint Timer for the same reason the
+    // IDropTarget registration is deferred: calling `with_winit_window` synchronously
+    // right after `ui.show()` returns silently because winit hasn't fully exposed
+    // the HWND through Slint's accessor yet. The timer fires once after the event
+    // loop has pumped a tick, at which point the HWND is real and SetWindowLongPtrW
+    // actually replaces Slint's default proc with ours.
     use i_slint_backend_winit::WinitWindowAccessor;
     use i_slint_backend_winit::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use std::sync::atomic::Ordering;
@@ -14141,24 +14193,48 @@ fn install_mouse_nav(ui: &MainWindow) {
     use windows::Win32::UI::WindowsAndMessaging::{GWLP_WNDPROC, SetWindowLongPtrW};
 
     let _ = MOUSE_NAV_UI.set(ui.as_weak());
-
-    ui.window().with_winit_window(|window| {
-        let Ok(handle) = window.window_handle() else {
-            return;
-        };
-        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-            return;
-        };
-        let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
-        unsafe {
-            let orig =
-                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, mouse_nav_wnd_proc as *const () as isize);
-            MOUSE_NAV_ORIG_PROC.store(orig, Ordering::Release);
-            // Once our WindowProc is in place, opt into the iconic thumbnail
-            // path so DWM will start asking us via WM_DWMSENDICONICTHUMBNAIL.
-            enable_taskbar_iconic_thumbnail(hwnd);
-        }
-    });
+    let weak = ui.as_weak();
+    let timer = Box::new(slint::Timer::default());
+    timer.start(
+        slint::TimerMode::SingleShot,
+        Duration::from_millis(150),
+        move || {
+            eprintln!("[mouse_nav] deferred subclass starting");
+            let Some(ui) = weak.upgrade() else {
+                eprintln!("[mouse_nav] UI gone before subclass");
+                return;
+            };
+            let hwnd_opt = ui
+                .window()
+                .with_winit_window(|window| {
+                    let handle = window.window_handle().ok()?;
+                    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+                        return None;
+                    };
+                    Some(HWND(h.hwnd.get() as *mut core::ffi::c_void))
+                })
+                .flatten()
+                .or_else(|| {
+                    eprintln!("[mouse_nav] with_winit_window failed; using fallback");
+                    find_pathfinder_hwnd()
+                });
+            let Some(hwnd) = hwnd_opt else {
+                eprintln!("[mouse_nav] could not find HWND, side buttons disabled");
+                return;
+            };
+            unsafe {
+                let orig = SetWindowLongPtrW(
+                    hwnd,
+                    GWLP_WNDPROC,
+                    mouse_nav_wnd_proc as *const () as isize,
+                );
+                MOUSE_NAV_ORIG_PROC.store(orig, Ordering::Release);
+                eprintln!("[mouse_nav] subclassed HWND {:?}, orig proc {:#x}", hwnd.0, orig);
+                enable_taskbar_iconic_thumbnail(hwnd);
+            }
+        },
+    );
+    Box::leak(timer);
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -14398,6 +14474,7 @@ pub fn run() {
 
     ui.show().expect("failed to show Pathfinder window");
     apply_mica(&ui);
+    register_winit_mouse_side_button_navigation(&ui);
     install_mouse_nav(&ui);
 
     // Register IDropTarget so files dropped from Explorer land in the current folder.
