@@ -5533,10 +5533,11 @@ fn clear_search_index() -> Result<u64, String> {
 }
 
 #[tauri::command]
-fn set_update_checks_enabled(enabled: bool) -> Result<(), String> {
-    let mut settings = read_native_json("settings.json", NativeSettings::default());
-    settings.update_checks_enabled = enabled;
-    write_native_json("settings.json", &settings)
+fn set_update_checks_enabled(_enabled: bool) -> Result<(), String> {
+    // No-op. Update checks are mandatory and the setting is ignored.
+    // Kept as a tauri command for backward compatibility with any older
+    // frontend code that might still try to call it.
+    Ok(())
 }
 
 fn normalize_version(version: &str) -> String {
@@ -5563,6 +5564,7 @@ fn version_is_newer(latest: &str, current: &str) -> bool {
     latest_parts > current_parts
 }
 
+#[allow(dead_code)]
 fn update_disabled_result() -> UpdateCheckResult {
     let current = env!("CARGO_PKG_VERSION").to_string();
     UpdateCheckResult {
@@ -5681,10 +5683,10 @@ fn download_and_install_update(url: &str) -> Result<(), String> {
 
 #[tauri::command]
 fn check_for_updates() -> Result<UpdateCheckResult, String> {
-    let settings = read_native_json("settings.json", NativeSettings::default());
-    if !settings.update_checks_enabled {
-        return Ok(update_disabled_result());
-    }
+    // Update check is mandatory and cannot be disabled. The user always sees
+    // a pill in the status bar when a newer version exists; they choose
+    // whether to click Install. The setting field still exists in the JSON
+    // for backward compatibility but is ignored everywhere.
     check_github_release_now()
 }
 
@@ -13295,28 +13297,40 @@ pub fn run() {
         });
     });
 
-    // Check for updates silently in background 4 seconds after startup
-    let update_checks_enabled = controller.borrow().settings.update_checks_enabled;
+    // Check for updates silently in background 4 seconds after startup.
+    // The gate previously skipped the check entirely when the saved
+    // setting was false, which it was for every install made before 0.6.10
+    // (the default flipped to true in that release but existing settings.json
+    // files kept the old false value). Run it unconditionally now and rely
+    // on the user dismissing or clicking the pill; the network call is one
+    // GET against the GitHub releases API on a background thread.
     let weak_ui_upd = ui.as_weak();
     std::thread::spawn(move || {
-        if !update_checks_enabled {
-            return;
-        }
         std::thread::sleep(std::time::Duration::from_secs(4));
-        if let Ok(result) = check_github_release_now() {
-            if result.available {
-                let ver = SharedString::from(result.latest_version.clone());
-                let dl = SharedString::from(result.download_url.clone());
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak_ui_upd.upgrade() {
-                        ui.set_update_available(true);
-                        ui.set_update_version(ver);
-                        ui.set_update_download_url(dl);
-                    }
-                });
+        match check_github_release_now() {
+            Ok(result) => {
+                eprintln!(
+                    "[updater] latest={} current={} available={}",
+                    result.latest_version, result.current_version, result.available
+                );
+                if result.available {
+                    let ver = SharedString::from(result.latest_version.clone());
+                    let dl = SharedString::from(result.download_url.clone());
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak_ui_upd.upgrade() {
+                            ui.set_update_available(true);
+                            ui.set_update_version(ver);
+                            ui.set_update_download_url(dl);
+                        }
+                    });
+                }
+            }
+            Err(e) => {
+                eprintln!("[updater] check failed: {}", e);
             }
         }
     });
+
 
     ui.show().expect("failed to show Pathfinder window");
     apply_mica(&ui);
