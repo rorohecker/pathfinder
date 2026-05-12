@@ -3117,12 +3117,12 @@ fn compute_ai_capabilities() -> AiCapabilities {
         )
     } else if npu_hardware_found {
         format!(
-            "NPU candidate ({}) without PATHFINDER_LOCAL_AI_RUNTIME — CPU fallback on-device. [{}]",
+            "NPU candidate ({}) without PATHFINDER_LOCAL_AI_RUNTIME - CPU fallback on-device. [{}]",
             devices.join(", "),
             ort
         )
     } else {
-        format!("No supported NPU detected — CPU fallback on-device. [{}]", ort)
+        format!("No supported NPU detected - CPU fallback on-device. [{}]", ort)
     };
     let gpu_summary = gpu_capability_summary();
 
@@ -4654,6 +4654,10 @@ struct NativeSettings {
     /// Suppress the first-run welcome dialog after the user dismisses it once.
     #[serde(default)]
     first_run_welcome_dismissed: bool,
+    /// Override folder icon color set on the Appearance tab. None means use
+    /// the per-theme defaults from `icon_folder_colors`.
+    #[serde(default)]
+    folder_color: Option<String>,
 }
 
 impl Default for NativeSettings {
@@ -4681,6 +4685,7 @@ impl Default for NativeSettings {
             search_semantic_mode: false,
             clip_search_enabled: false,
             first_run_welcome_dismissed: false,
+            folder_color: None,
         }
     }
 }
@@ -4709,6 +4714,8 @@ struct ThemeDefinition {
     icon_folder_hex: String,
     #[serde(default)]
     gradient_background: bool,
+    #[serde(default)]
+    gradient_accent_tip: bool,
 }
 
 impl Default for ThemeDefinition {
@@ -4730,12 +4737,65 @@ impl Default for ThemeDefinition {
             anim_speed: 1.0,
             border_width: 0.0,
             finish: "mica-dark".to_string(),
-            ui_font: "Segoe UI".to_string(),
-            mono_font: "Cascadia Mono".to_string(),
+            ui_font: "noto-sans".to_string(),
+            mono_font: "noto-sans-mono".to_string(),
             font_size_delta: 0,
             icon_folder_hex: "#e2a934".to_string(),
             gradient_background: false,
+            gradient_accent_tip: false,
         }
+    }
+}
+
+fn normalize_theme_font_presets(def: &mut ThemeDefinition) {
+    def.ui_font = normalize_ui_font_preset(&def.ui_font);
+    def.mono_font = normalize_mono_font_preset(&def.mono_font);
+}
+
+fn normalize_ui_font_preset(raw: &str) -> String {
+    let s = raw.trim().to_ascii_lowercase().replace(" ", "-");
+    if s.contains("press") || s.contains("start2p") || s == "press-start-2p" {
+        return "press-start-2p".to_string();
+    }
+    if s == "noto-sans" || s.is_empty() || s.contains("segoe") || s.contains("arial")
+        || s.contains("inter") || s.contains("system")
+    {
+        return "noto-sans".to_string();
+    }
+    "noto-sans".to_string()
+}
+
+fn normalize_mono_font_preset(raw: &str) -> String {
+    let s = raw.trim().to_ascii_lowercase().replace(" ", "-");
+    if s.contains("press") || s.contains("start2p") || s == "press-start-2p" {
+        return "press-start-2p".to_string();
+    }
+    if s.contains("jetbrains") {
+        return "jetbrains-mono".to_string();
+    }
+    if s == "noto-sans-mono"
+        || s.is_empty()
+        || s.contains("cascadia")
+        || s.contains("consolas")
+        || s.contains("courier")
+    {
+        return "noto-sans-mono".to_string();
+    }
+    "noto-sans-mono".to_string()
+}
+
+fn bundled_ui_family_from_preset(preset: &str) -> &'static str {
+    match preset {
+        "press-start-2p" => "Press Start 2P",
+        _ => "Noto Sans",
+    }
+}
+
+fn bundled_mono_family_from_preset(preset: &str) -> &'static str {
+    match preset {
+        "jetbrains-mono" => "JetBrains Mono",
+        "press-start-2p" => "Press Start 2P",
+        _ => "Noto Sans Mono",
     }
 }
 
@@ -5018,7 +5078,11 @@ fn load_custom_theme_def(name: &str) -> Option<ThemeDefinition> {
     let path = themes_dir().join(format!("{}.json", safe_name.trim()));
     fs::read_to_string(&path)
         .ok()
-        .and_then(|data| serde_json::from_str(&data).ok())
+        .and_then(|data| serde_json::from_str::<ThemeDefinition>(&data).ok())
+        .map(|mut def| {
+            normalize_theme_font_presets(&mut def);
+            def
+        })
 }
 
 fn delete_custom_theme_def(name: &str) -> Result<(), String> {
@@ -7385,6 +7449,7 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
 
     let global = ui.global::<ThemePalette>();
     global.set_bg_gradient_enabled(false);
+    global.set_bg_gradient_accent_tip(false);
     global.set_bg(palette.bg);
     global.set_bg_soft(palette.bg_soft);
     global.set_panel(palette.panel);
@@ -7404,7 +7469,16 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
     global.set_success(color("#37b26c"));
     global.set_warning(color("#e3a524"));
 
-    let (folder_1, folder_2) = icon_folder_colors(&settings.theme);
+    let (folder_1, folder_2) = if let Some(hex) = settings
+        .folder_color
+        .as_deref()
+        .filter(|h| h.len() == 7 && h.starts_with('#'))
+    {
+        let base = color(hex);
+        (lighten_color(base, 0.28), base)
+    } else {
+        icon_folder_colors(&settings.theme)
+    };
     global.set_icon_folder_1(folder_1);
     global.set_icon_folder_2(folder_2);
     global.set_active_theme(ss(&settings.theme));
@@ -7422,6 +7496,19 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
     ui.set_active_theme(ss(&settings.theme));
     ui.set_active_accent(ss(&settings.accent));
     ui.set_active_density(ss(&settings.density));
+    let folder_hex = settings
+        .folder_color
+        .clone()
+        .unwrap_or_else(|| {
+            let (_, folder_2) = icon_folder_colors(&settings.theme);
+            format!(
+                "#{:02x}{:02x}{:02x}",
+                folder_2.red(),
+                folder_2.green(),
+                folder_2.blue()
+            )
+        });
+    ui.set_folder_color_hex(ss(&folder_hex));
 }
 
 fn set_choice_chip_strides(metrics: &AppMetrics, row_h: f32) {
@@ -7538,8 +7625,12 @@ fn apply_custom_theme_to_ui(ui: &MainWindow, def: &ThemeDefinition) {
     metrics.set_radius(def.radius);
     metrics.set_radius_small(def.radius * 0.625);
     metrics.set_outer_border(def.border_width);
-    metrics.set_ui_font(ss(&def.ui_font));
-    metrics.set_mono_font(ss(&def.mono_font));
+    metrics.set_ui_font(ss(bundled_ui_family_from_preset(
+        normalize_ui_font_preset(def.ui_font.as_str()).as_str(),
+    )));
+    metrics.set_mono_font(ss(bundled_mono_family_from_preset(
+        normalize_mono_font_preset(def.mono_font.as_str()).as_str(),
+    )));
     metrics.set_light_controls(is_light);
 
     let base_row_h = 38.0_f32;
@@ -7552,36 +7643,42 @@ fn apply_custom_theme_to_ui(ui: &MainWindow, def: &ThemeDefinition) {
 
     global.set_active_theme(ss("custom"));
     global.set_bg_gradient_enabled(def.gradient_background);
+    global.set_bg_gradient_accent_tip(def.gradient_background && def.gradient_accent_tip);
     global.set_folder_icon_image(slint::Image::default());
 }
 
 fn sync_editor_state(ui: &MainWindow, def: &ThemeDefinition) {
-    ui.set_ce_name(ss(&def.name));
-    ui.set_ce_finish(ss(&def.finish));
-    ui.set_ce_radius(def.radius);
-    ui.set_ce_anim_speed(def.anim_speed);
-    ui.set_ce_ui_font(ss(&def.ui_font));
-    ui.set_ce_mono_font(ss(&def.mono_font));
-    ui.set_ce_font_size_delta(def.font_size_delta);
-    ui.set_ce_icon_folder_hex(ss(&def.icon_folder_hex));
-    ui.set_ce_gradient_background(def.gradient_background);
+    let mut d = def.clone();
+    normalize_theme_font_presets(&mut d);
+    ui.set_ce_name(ss(&d.name));
+    ui.set_ce_finish(ss(&d.finish));
+    ui.set_ce_radius(d.radius);
+    ui.set_ce_anim_speed(d.anim_speed);
+    ui.set_ce_ui_font(ss(&d.ui_font));
+    ui.set_ce_mono_font(ss(&d.mono_font));
+    ui.set_ce_preview_ui_font(ss(bundled_ui_family_from_preset(d.ui_font.as_str())));
+    ui.set_ce_preview_mono_font(ss(bundled_mono_family_from_preset(d.mono_font.as_str())));
+    ui.set_ce_font_size_delta(d.font_size_delta);
+    ui.set_ce_icon_folder_hex(ss(&d.icon_folder_hex));
+    ui.set_ce_gradient_background(d.gradient_background);
+    ui.set_ce_gradient_accent(d.gradient_accent_tip);
     ui.set_ce_icon_set(ss(""));
     ui.set_ce_selected_token(-1);
     ui.set_ce_token_hex(ss(""));
     ui.set_ce_token_label(ss(""));
 
     let tokens = [
-        &def.bg,
-        &def.bg_soft,
-        &def.panel,
-        &def.border,
-        &def.border_strong,
-        &def.text,
-        &def.text_muted,
-        &def.text_faint,
-        &def.accent,
-        &def.danger,
-        &def.success,
+        &d.bg,
+        &d.bg_soft,
+        &d.panel,
+        &d.border,
+        &d.border_strong,
+        &d.text,
+        &d.text_muted,
+        &d.text_faint,
+        &d.accent,
+        &d.danger,
+        &d.success,
     ];
     let colors: Vec<Color> = tokens.iter().map(|h| color(h)).collect();
     let hexes: Vec<SharedString> = tokens.iter().map(|h| ss(*h)).collect();
@@ -7615,6 +7712,7 @@ fn editor_def_from_ui(ui: &MainWindow) -> ThemeDefinition {
         font_size_delta: ui.get_ce_font_size_delta(),
         icon_folder_hex: ui.get_ce_icon_folder_hex().to_string(),
         gradient_background: ui.get_ce_gradient_background(),
+        gradient_accent_tip: ui.get_ce_gradient_accent(),
     }
 }
 
@@ -8008,77 +8106,77 @@ impl NativeController {
             (
                 "mica-dark",
                 "Mica Dark",
-                "Cool graphite Fluent — frosted glass panels",
+                "Cool graphite Fluent - frosted glass panels",
                 "#0c0f13",
             ),
             (
                 "mica-light",
                 "Mica Light",
-                "Icy daylight — blue-tint chrome and white glass",
+                "Icy daylight - blue-tint chrome and white glass",
                 "#e4ecf5",
             ),
             (
                 "warm",
                 "Warm Neutral",
-                "Latte and oak — sepia UI for long sessions",
+                "Latte and oak - sepia UI for long sessions",
                 "#d07920",
             ),
             (
                 "flat",
                 "Flat White",
-                "Swiss studio — flat panels, sharp dividers",
+                "Swiss studio - flat panels, sharp dividers",
                 "#eef0f3",
             ),
             (
                 "terminal",
                 "Terminal",
-                "CRT green — phosphor glow, scanline grid, mono type",
+                "CRT green - phosphor glow, scanline grid, mono type",
                 "#7cff9d",
             ),
             (
                 "paper",
                 "Paper",
-                "Ink and cotton — editorial serif warmth",
+                "Ink and cotton - editorial serif warmth",
                 "#e3d6bc",
             ),
             (
                 "retro",
                 "Retro Arcade",
-                "Neon cab — purple void, gold marquee",
+                "Neon cab - purple void, gold marquee",
                 "#ffcf3f",
             ),
             (
                 "cyberpunk",
                 "Cyberpunk",
-                "Synth district — magenta rail, cyan haze",
+                "Synth district - magenta rail, cyan haze",
                 "#ff39bc",
             ),
             (
                 "fantasy",
                 "High Fantasy",
-                "Moonlit archive — ink glass, aurora teal, arcane violet",
+                "Moonlit archive - ink glass, aurora teal, arcane violet",
                 "#5ee0c8",
             ),
             (
                 "sunset",
                 "Sunset",
-                "Dusk sky — aubergine dark, amber-rose glow",
+                "Dusk sky - aubergine dark, amber-rose glow",
                 "#ff7043",
             ),
         ]));
         ui.set_accent_choices(choice_items(&[
-            ("blue", "Blue", "Default Pathfinder blue", "#4f9cff"),
-            ("amber", "Amber", "Warm amber controls", "#d98a24"),
-            ("green", "Green", "Quiet success green", "#2aa96b"),
-            ("violet", "Violet", "Soft violet accents", "#8b6cff"),
-            ("rose", "Rose", "Pink-red highlight", "#e45578"),
-            ("teal", "Teal", "Cool teal accent", "#1aa6a6"),
-            ("copper", "Copper", "Warm metallic accent", "#c46f34"),
-            ("gold", "Gold", "Rich antique gold", "#d4a83a"),
-            ("indigo", "Indigo", "Deep ink blue", "#3b4cb8"),
-            ("crimson", "Crimson", "Vivid stage red", "#c0312f"),
-            ("black", "Black", "Ink neutral chrome", "#0b0d10"),
-            ("white", "White", "Bright frost chrome", "#e8ecf2"),
+            ("blue", "Blue", "", "#4f9cff"),
+            ("amber", "Amber", "", "#d98a24"),
+            ("green", "Green", "", "#2aa96b"),
+            ("violet", "Violet", "", "#8b6cff"),
+            ("rose", "Rose", "", "#e45578"),
+            ("teal", "Teal", "", "#1aa6a6"),
+            ("copper", "Copper", "", "#c46f34"),
+            ("gold", "Gold", "", "#d4a83a"),
+            ("indigo", "Indigo", "", "#3b4cb8"),
+            ("crimson", "Crimson", "", "#c0312f"),
+            ("black", "Black", "", "#0b0d10"),
+            ("white", "White", "", "#e8ecf2"),
         ]));
         ui.set_density_choices(choice_items(&[
             ("cozy", "Cozy", "38px rows and larger icons", "#4f9cff"),
@@ -8202,9 +8300,9 @@ impl NativeController {
         let intro = concat!(
             "Pathfinder keeps a small local database of the files in folders you visit so the search bar can return matches instantly without rescanning your disk every time. ",
             "Indexing modes change how aggressively that database is grown in the background:\n",
-            "\u{2022} Low — only the folders you actually open get added. Lightest on disk and CPU.\n",
-            "\u{2022} Balanced — same as Low but also walks Documents, Pictures, Desktop, and Downloads on startup.\n",
-            "\u{2022} High — adds every fixed drive root. Best search coverage, uses the most disk while it catches up.\n",
+            "\u{2022} Low - only the folders you actually open get added. Lightest on disk and CPU.\n",
+            "\u{2022} Balanced - same as Low but also walks Documents, Pictures, Desktop, and Downloads on startup.\n",
+            "\u{2022} High - adds every fixed drive root. Best search coverage, uses the most disk while it catches up.\n",
             "Thumbnails are stored separately and the cache is automatically pruned when it hits the budget below, so previews never quietly fill your drive."
         );
         ui.set_performance_intro(ss(intro));
@@ -8540,6 +8638,18 @@ impl NativeController {
         ui.set_status_right(ss(right));
     }
 
+    /// Keep Slint `selected_count` aligned with the active pane's selection sets.
+    /// Call after `update_models` / any path that clears or rebuilds selection
+    /// without going through `update_selection_in_model`.
+    fn sync_selection_count_to_ui(&self, ui: &MainWindow) {
+        let sel_count = if self.active_pane == ActivePane::Secondary {
+            self.secondary_selected_set.len()
+        } else {
+            self.selected_set.len()
+        };
+        ui.set_selected_count(sel_count as i32);
+    }
+
     fn update_models(&mut self, ui: &MainWindow) {
         // Populate the shell-icon cache for visible entries. Per-extension
         // entries are cheap (one SHGetFileInfo per extension regardless of
@@ -8600,6 +8710,7 @@ impl NativeController {
         ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
         ui.set_tabs(model_from_vec(self.tab_items()));
         ui.set_selected_index(self.selected_index);
+        self.sync_selection_count_to_ui(ui);
         self.sync_search_scope(ui);
         self.sync_tag_names(ui);
         let shown_path = self
@@ -8632,13 +8743,7 @@ impl NativeController {
             }
         }
         ui.set_selected_index(self.selected_index);
-        // Push selection count for the contextual action bar.
-        let sel_count = if self.active_pane == ActivePane::Secondary {
-            self.secondary_selected_set.len()
-        } else {
-            self.selected_set.len()
-        };
-        ui.set_selected_count(sel_count as i32);
+        self.sync_selection_count_to_ui(ui);
         self.update_status(ui);
     }
 
@@ -9618,6 +9723,8 @@ impl NativeController {
             self.secondary_select_anchor = 0;
             let changed: Vec<usize> = (0..n).collect();
             self.update_secondary_selection_in_model(&changed);
+            self.sync_selection_count_to_ui(ui);
+            self.update_status(ui);
             return;
         }
 
@@ -10073,6 +10180,13 @@ impl NativeController {
             && self.secondary_selected_index < 0
             && self.secondary_selected_set.is_empty()
         {
+            // Rust has no selection, but `selected_count` can stay stale after
+            // `update_models` until now — resync so the action bar, Esc, and X
+            // behave consistently.
+            self.sync_selection_count_to_ui(ui);
+            ui.set_selected_index(-1);
+            ui.set_selected_name(ss(""));
+            self.update_status(ui);
             return;
         }
         let changed: Vec<usize> = self
@@ -10178,6 +10292,7 @@ impl NativeController {
             }
         }
         self.update_secondary_models(ui);
+        self.sync_selection_count_to_ui(ui);
     }
 
     fn secondary_go_back(&mut self, ui: &MainWindow) {
@@ -10211,7 +10326,7 @@ impl NativeController {
         self.update_models(ui);
     }
 
-    fn secondary_file_selected(&mut self, index: i32, ctrl: bool, shift: bool) {
+    fn secondary_file_selected(&mut self, ui: &MainWindow, index: i32, ctrl: bool, shift: bool) {
         self.active_pane = ActivePane::Secondary;
         let n = self.secondary_visible_files.len();
         let mut changed: Vec<usize> = Vec::new();
@@ -10253,6 +10368,7 @@ impl NativeController {
 
         self.secondary_selected_index = index;
         self.update_secondary_selection_in_model(&changed);
+        self.sync_selection_count_to_ui(ui);
     }
 
     fn secondary_file_opened(&mut self, ui: &MainWindow, index: i32) {
@@ -12490,7 +12606,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let pd = preview_debounce.clone();
     ui.on_secondary_file_selected(move |index, ctrl, shift| {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().secondary_file_selected(index, ctrl, shift);
+            c.borrow_mut().secondary_file_selected(&ui, index, ctrl, shift);
             c.borrow().sync_active_pane(&ui);
         }
         let weak2 = weak.clone();
@@ -12515,7 +12631,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 index >= 0 && !ctrl.secondary_selected_set.contains(&(index as usize))
             };
             if should_select {
-                c.borrow_mut().secondary_file_selected(index, false, false);
+                c.borrow_mut().secondary_file_selected(&ui, index, false, false);
             } else {
                 c.borrow_mut().active_pane = ActivePane::Secondary;
             }
@@ -12658,6 +12774,27 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             controller.settings.accent = accent.to_string();
             apply_theme(&ui, &controller.settings);
             controller.save_settings();
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_folder_color_changed(move |hex_val| {
+        if let Some(ui) = weak.upgrade() {
+            let mut h = hex_val.to_string();
+            if !h.starts_with('#') {
+                h = format!("#{h}");
+            }
+            // Only accept full 7-char hex strings so typing in the LineEdit
+            // doesn't repaint with a half-finished color on every keystroke.
+            if h.len() != 7 {
+                return;
+            }
+            let mut controller = c.borrow_mut();
+            controller.settings.folder_color = Some(h.clone());
+            apply_theme(&ui, &controller.settings);
+            controller.save_settings();
+            ui.set_folder_color_hex(ss(&h));
         }
     });
 
@@ -13270,9 +13407,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 model.set_row_data(i, parsed_color);
             }
             ui.set_ce_token_hex(ss(&h));
-            // Preview only — colors flow into ce_token_colors which the editor
-            // preview rectangle reads directly. Don't push to the global palette
-            // until the user explicitly saves.
+            let def = editor_def_from_ui(&ui);
+            apply_custom_theme_to_ui(&ui, &def);
         }
     });
 
@@ -13280,6 +13416,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_ce_radius_changed(move |val| {
         if let Some(ui) = weak.upgrade() {
             ui.set_ce_radius(val);
+            let def = editor_def_from_ui(&ui);
+            apply_custom_theme_to_ui(&ui, &def);
         }
     });
 
@@ -13294,15 +13432,25 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_ce_finish_changed(move |finish| {
         if let Some(ui) = weak.upgrade() {
             ui.set_ce_finish(finish.clone());
-            // Window backdrop is a system level effect — only apply once saved.
+            apply_window_finish(&ui, &finish);
         }
     });
 
     let weak = ui.as_weak();
-    ui.on_ce_font_changed(move |ui_font, mono_font| {
+    ui.on_ce_font_preset(move |slot, preset| {
         if let Some(ui) = weak.upgrade() {
-            ui.set_ce_ui_font(ui_font.clone());
-            ui.set_ce_mono_font(mono_font.clone());
+            let p = preset.to_string();
+            if slot.as_str() == "ui" {
+                let id = normalize_ui_font_preset(&p);
+                ui.set_ce_ui_font(ss(&id));
+                ui.set_ce_preview_ui_font(ss(bundled_ui_family_from_preset(id.as_str())));
+            } else {
+                let id = normalize_mono_font_preset(&p);
+                ui.set_ce_mono_font(ss(&id));
+                ui.set_ce_preview_mono_font(ss(bundled_mono_family_from_preset(id.as_str())));
+            }
+            let def = editor_def_from_ui(&ui);
+            apply_custom_theme_to_ui(&ui, &def);
         }
     });
 
@@ -13310,6 +13458,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_ce_font_size_changed(move |delta| {
         if let Some(ui) = weak.upgrade() {
             ui.set_ce_font_size_delta(delta);
+            let def = editor_def_from_ui(&ui);
+            apply_custom_theme_to_ui(&ui, &def);
         }
     });
 
@@ -13323,6 +13473,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 format!("#{}", h)
             };
             ui.set_ce_icon_folder_hex(ss(&h));
+            let def = editor_def_from_ui(&ui);
+            apply_custom_theme_to_ui(&ui, &def);
         }
     });
 
@@ -13330,6 +13482,28 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_ce_gradient_changed(move |enabled| {
         if let Some(ui) = weak.upgrade() {
             ui.set_ce_gradient_background(enabled);
+            if !enabled {
+                ui.set_ce_gradient_accent(false);
+            }
+            let def = editor_def_from_ui(&ui);
+            apply_custom_theme_to_ui(&ui, &def);
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_ce_gradient_accent_changed(move |enabled| {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_ce_gradient_accent(enabled);
+            let def = editor_def_from_ui(&ui);
+            apply_custom_theme_to_ui(&ui, &def);
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_ce_apply_preview(move || {
+        if let Some(ui) = weak.upgrade() {
+            let def = editor_def_from_ui(&ui);
+            apply_custom_theme_to_ui(&ui, &def);
         }
     });
 
@@ -13344,6 +13518,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 name.to_string()
             };
             def.name = theme_name.clone();
+            normalize_theme_font_presets(&mut def);
             match save_custom_theme_def(&def) {
                 Ok(()) => {
                     let mut ctrl = c.borrow_mut();
@@ -13403,6 +13578,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             let def = ThemeDefinition::default();
             sync_editor_state(&ui, &def);
+            apply_custom_theme_to_ui(&ui, &def);
         }
     });
 }
@@ -13752,7 +13928,7 @@ unsafe extern "system" fn mouse_nav_wnd_proc(
         let button = ((wparam.0 as u32) >> 16) as u16;
         if let Some(weak) = MOUSE_NAV_UI.get() {
             let w = weak.clone();
-            let is_back = button == 1;
+            let is_back = button == windows::Win32::UI::WindowsAndMessaging::XBUTTON1 as u16;
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
                     if is_back {
@@ -13762,6 +13938,35 @@ unsafe extern "system" fn mouse_nav_wnd_proc(
                     }
                 }
             });
+        }
+    }
+
+    // Many mice send browser back/forward as WM_APPCOMMAND; some only as XBUTTON.
+    const WM_APPCOMMAND: u32 = 0x0319;
+    const FAPPCOMMAND_MASK: u16 = 0xF000;
+    const APPCOMMAND_BROWSER_BACKWARD: u16 = 1;
+    const APPCOMMAND_BROWSER_FORWARD: u16 = 2;
+    if msg == WM_APPCOMMAND {
+        let cmd = (((lparam.0 >> 16) & 0xFFFF) as u16) & !FAPPCOMMAND_MASK;
+        let navigate = match cmd {
+            APPCOMMAND_BROWSER_BACKWARD => Some(true),
+            APPCOMMAND_BROWSER_FORWARD => Some(false),
+            _ => None,
+        };
+        if let Some(is_back) = navigate {
+            if let Some(weak) = MOUSE_NAV_UI.get() {
+                let w = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = w.upgrade() {
+                        if is_back {
+                            ui.invoke_go_back();
+                        } else {
+                            ui.invoke_go_forward();
+                        }
+                    }
+                });
+            }
+            return windows::Win32::Foundation::LRESULT(1);
         }
     }
 

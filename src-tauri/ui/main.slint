@@ -22,7 +22,7 @@ export struct FileItem {
     is_selected: bool,
     has_thumbnail: bool,
     thumbnail: image,
-    // System-extracted icon (the file's actual shell icon — .exe embedded
+    // System-extracted icon (the file's actual shell icon - .exe embedded
     // icons, .lnk targets, type associations for .docx / .pdf / etc.).
     // When non-empty (width > 0), NodeVisual draws this instead of the
     // procedural file glyph so executables and document types look correct.
@@ -90,7 +90,7 @@ export global ThemePalette {
     // %APPDATA%\Pathfinder\theme_icons\{theme}.png. If width is 0px the
     // file wasn't found and NodeVisual falls back to its drawn shape.
     in-out property <image> folder_icon_image;
-    // True while DoDragDrop is blocking the UI thread — selected items show glow
+    // True while DoDragDrop is blocking the UI thread - selected items show glow
     in-out property <bool> is_dragging: false;
     in-out property <int> drag_count: 0;
 }
@@ -268,7 +268,7 @@ component SideRow inherits Rectangle {
     callback rename_activated(string);
 
     height: root.item.is_header ? 24px : 32px;
-    // Transparent base — visible highlight is drawn by the inner Rectangle
+    // Transparent base - visible highlight is drawn by the inner Rectangle
     // below so it can stop short of the scroll bar gutter on the right.
     background: rgba(0, 0, 0, 0);
 
@@ -359,7 +359,7 @@ component SideRow inherits Rectangle {
         overflow: elide;
     }
 
-    // Rename button — shown on hover for tag items; click handled via touch.mouse-x
+    // Rename button - shown on hover for tag items; click handled via touch.mouse-x
     // Positioned inside the highlight pill so the click target is visible
     // when the row is highlighted.
     if !root.item.is_header && root.item.icon == "tag" && touch.has-hover: Rectangle {
@@ -414,7 +414,7 @@ component NodeVisual {
         (root.extension == "exe" || root.extension == "msi" || root.extension == "bat" || root.extension == "cmd" ? #fb923c :
         ThemePalette.accent))))))));
 
-    // True when a per-theme PNG is loaded — shapes below are skipped so transparent
+    // True when a per-theme PNG is loaded - shapes below are skipped so transparent
     // areas of the PNG don't reveal the standard yellow folder underneath.
     property <bool> use_image: ThemePalette.folder_icon_image.width > 0;
 
@@ -427,7 +427,7 @@ component NodeVisual {
         image-fit: contain;
     }
 
-    // Standard folder shape — used by every theme except terminal and
+    // Standard folder shape - used by every theme except terminal and
     // cyberpunk (which have non-folder custom shapes whose black border
     // can't be removed). Each theme provides its own color pair via
     // ThemePalette.icon_folder_1 / icon_folder_2 so the result reads as a
@@ -495,7 +495,7 @@ component NodeVisual {
     // a magenta-on-yellow palette, and a tiny 8-bit floppy disk dropped on top.
     if root.is_dir && !root.use_image && ThemePalette.active_theme == "retro": Rectangle {
         x: 0; y: 0; width: parent.width; height: parent.height;
-        // Folder tab — chunky block on top-left
+        // Folder tab - chunky block on top-left
         Rectangle {
             x: parent.width * 0.06;
             y: parent.height * 0.08;
@@ -505,7 +505,7 @@ component NodeVisual {
             border-width: 2px;
             border-color: #12081c;
         }
-        // Folder body — main yellow block with thick pixel border
+        // Folder body - main yellow block with thick pixel border
         Rectangle {
             x: parent.width * 0.04;
             y: parent.height * 0.22;
@@ -594,7 +594,7 @@ component NodeVisual {
             border-width: 1px;
             border-color: #1a0c04;
         }
-        // Gold band — top of body
+        // Gold band - top of body
         Rectangle {
             x: parent.width * 0.04;
             y: parent.height * 0.50;
@@ -604,7 +604,7 @@ component NodeVisual {
             border-width: 1px;
             border-color: rgba(0, 0, 0, 0.35);
         }
-        // Gold band — bottom of body
+        // Gold band - bottom of body
         Rectangle {
             x: parent.width * 0.04;
             y: parent.height * 0.86;
@@ -648,7 +648,7 @@ component NodeVisual {
         image-fit: contain;
     }
 
-    // ── FILE ICON (same for all themes — used when no shell icon exists) ─
+    // ── FILE ICON (same for all themes - used when no shell icon exists) ─
     if !root.is_dir && !root.has_system_icon: Rectangle {
         x: 7px; y: 3px;
         width: parent.width - 14px;
@@ -725,7 +725,7 @@ component NodeVisual {
         Rectangle { x: -3px; y: 9px; width: 8px; height: 2px; background: #ffffff; }
         Rectangle { x: -3px; y: 13px; width: 8px; height: 2px; background: #ffffff; }
     }
-    // PDF: bold red corner badge stays as the colored band — also add a folded corner mark
+    // PDF: bold red corner badge stays as the colored band - also add a folded corner mark
     if !root.is_dir && !root.has_system_icon && root.extension == "pdf": Rectangle {
         x: parent.width / 2 - 6px;
         y: parent.height / 2 - 8px;
@@ -836,10 +836,10 @@ component FileRow inherits Rectangle {
     border-radius: AppMetrics.radius;
     border-width: root.item.is_selected ? 1px : 0px;
     border-color: root.item.is_selected ? ThemePalette.accent : rgba(0, 0, 0, 0);
-    // Selection background is instant — no animate so clicks feel snappy
+    // Selection background is instant - no animate so clicks feel snappy
     background: root.item.is_selected ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
 
-    // Hover glow — instant on, instant off. File Explorer doesn't fade either.
+    // Hover glow - instant on, instant off. File Explorer doesn't fade either.
     // Wrapped in `if` so non-hovered rows skip rendering this entirely.
     if touch.has-hover && !root.item.is_selected: Rectangle {
         x: 0; y: 0;
@@ -848,7 +848,7 @@ component FileRow inherits Rectangle {
         background: rgba(255, 255, 255, 0.07);
     }
 
-    // Drag glow — shown on selected items while DoDragDrop is active
+    // Drag glow - shown on selected items while DoDragDrop is active
     if ThemePalette.is_dragging && root.item.is_selected: Rectangle {
         x: -3px; y: -3px;
         width: parent.width + 6px; height: parent.height + 6px;
@@ -871,7 +871,7 @@ component FileRow inherits Rectangle {
         system_icon: root.item.system_icon;
     }
 
-    // List view responsive layout — three breakpoints:
+    // List view responsive layout - three breakpoints:
     //   < 360px: name only (size/modified/type all hidden; name fills the row)
     //   < 480px: name + modified
     //   < 600px: name + size + modified
@@ -912,7 +912,7 @@ component FileRow inherits Rectangle {
         }
     }
 
-    // SIZE column — right-aligned, monospaced
+    // SIZE column - right-aligned, monospaced
     if root.view_mode == "list" && root.show_list_size: Text {
         x: parent.width - root.list_right_zone;
         width: 80px;
@@ -1164,7 +1164,7 @@ component ListHeader inherits Rectangle {
         Text { visible: root.sort_by == "name"; x: parent.width - 13px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "↑" : "↓"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
         nh := TouchArea { mouse-cursor: pointer; clicked => { root.sort_col("name"); } }
     }
-    // SIZE — right-aligned to align with file size text
+    // SIZE - right-aligned to align with file size text
     if root.show_size: Rectangle {
         x: parent.width - root.right_zone;
         width: 80px;
@@ -1425,12 +1425,12 @@ export component MainWindow inherits Window {
     in-out property <string> view_mode: "grid";
     in-out property <bool> preview_visible: true;
     in-out property <bool> dual_pane: false;
-    // "primary" or "secondary" — which pane has focus (drives accent borders + paste target).
+    // "primary" or "secondary" - which pane has focus (drives accent borders + paste target).
     in-out property <string> active_pane: "primary";
-    // True when the active pane is showing the virtual `recycle://` bin —
+    // True when the active pane is showing the virtual `recycle://` bin -
     // the file context menu surfaces Restore / Permanently Delete in that mode.
     in-out property <bool> in_recycle_bin: false;
-    // "primary" / "secondary" / "" — pane currently being hovered during a drag-drop;
+    // "primary" / "secondary" / "" - pane currently being hovered during a drag-drop;
     // overlays a thicker glowing border so the user can see where the drop will land.
     in-out property <string> drag_over_pane: "";
     in-out property <bool> show_hidden: false;
@@ -1548,6 +1548,8 @@ export component MainWindow inherits Window {
     callback theme_selected(string);
     callback accent_selected(string);
     callback density_selected(string);
+    callback folder_color_changed(string);
+    in-out property <string> folder_color_hex: "#e2a934";
     callback index_mode_selected(string);
     callback clear_thumbnail_cache();
     callback rebuild_index();
@@ -1624,6 +1626,7 @@ export component MainWindow inherits Window {
     callback ce_icon_tint_changed(string);
     callback ce_gradient_changed(bool);
     callback ce_gradient_accent_changed(bool);
+    callback ce_apply_preview();
     callback ce_save(string);
     callback ce_load(string);
     callback ce_delete(string);
@@ -1836,7 +1839,7 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Selection action bar — replaces the toolbar contents whenever one
+        // Selection action bar - replaces the toolbar contents whenever one
         // or more files are selected. Pinned at toolbar height/position so the
         // page layout below stays exactly the same and there is no jump.
         if root.selected_count > 0: Rectangle {
@@ -1886,7 +1889,7 @@ export component MainWindow inherits Window {
             ToolButton { x: parent.width - 44px; y: 6px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
         }
 
-        // Toolbar — z:10 so tooltip pop-overs render above the file area below
+        // Toolbar - z:10 so tooltip pop-overs render above the file area below
         toolbar := Rectangle {
             x: root.sidebar_w;
             y: root.title_h;
@@ -2082,7 +2085,7 @@ export component MainWindow inherits Window {
                 if scope_touch.has-hover: HoverTip {
                     x: 0px;
                     y: parent.height + 6px;
-                    tip_text: root.search_scope_all ? "Searching entire drive — click to search this folder only" : "Click to search the entire drive";
+                    tip_text: root.search_scope_all ? "Searching entire drive - click to search this folder only" : "Click to search the entire drive";
                 }
                 Text {
                     x: 30px;
@@ -2104,7 +2107,7 @@ export component MainWindow inherits Window {
                 if sem_touch.has-hover: HoverTip {
                     x: 0px;
                     y: parent.height + 6px;
-                    tip_text: root.search_semantic_mode ? "Semantic ranking on (embeddings)" : "Semantic ranking off — click to rank by name embeddings";
+                    tip_text: root.search_semantic_mode ? "Semantic ranking on (embeddings)" : "Semantic ranking off - click to rank by name embeddings";
                 }
                 search := TextInput {
                     x: 56px;
@@ -2129,7 +2132,7 @@ export component MainWindow inherits Window {
                         } else { reject }
                     }
                 }
-                // Placeholder — only when BOTH the underlying TextInput and the
+                // Placeholder - only when BOTH the underlying TextInput and the
                 // bound property are empty AND the field isn't focused. Checking
                 // search.text explicitly prevents a flicker overlap when typing.
                 if root.search_text == "" && search.text == "" && !search.has-focus: Text {
@@ -2219,7 +2222,7 @@ export component MainWindow inherits Window {
             ToolButton { x: parent.width - 204px; y: 6px; icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01"; tooltip: "Gallery view"; active: root.view_mode == "gallery"; clicked => { root.set_view("gallery"); } }
             ToolButton { x: parent.width - 170px; y: 6px; icon_data: "M3 4h18v16H3z M14 4v16"; tooltip: "Preview pane"; active: root.preview_visible; clicked => { root.toggle_preview(); } }
             ToolButton { visible: !root.is_simple; x: parent.width - 136px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
-            // Clear-sort button — appears in the gap between Dual Pane and Command Palette
+            // Clear-sort button - appears in the gap between Dual Pane and Command Palette
             // when any non-default sort is active. Resets to Name ↑ (natural order).
             ToolButton {
                 visible: toolbar.show_toolbar_sort && (root.sort_by != "name" || root.sort_dir != "asc");
@@ -2331,7 +2334,7 @@ export component MainWindow inherits Window {
                                 root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                     primary_pane_root.marquee_w, primary_pane_root.marquee_h);
                             } else {
-                                // No drag — treat as empty-space click.
+                                // No drag - treat as empty-space click.
                                 root.clear_selection();
                             }
                             primary_pane_root.marquee_active = false;
@@ -2351,7 +2354,7 @@ export component MainWindow inherits Window {
                                 primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, self.mouse-y);
                                 primary_pane_root.marquee_w = abs(self.mouse-x - primary_pane_root.marquee_start_x);
                                 primary_pane_root.marquee_h = abs(self.mouse-y - primary_pane_root.marquee_start_y);
-                                // Live update — let Rust set the selection as the rect grows.
+                                // Live update - let Rust set the selection as the rect grows.
                                 root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                     primary_pane_root.marquee_w, primary_pane_root.marquee_h);
                             }
@@ -2513,6 +2516,12 @@ export component MainWindow inherits Window {
                             horizontal-alignment: center;
                         }
                     }
+                    // Covers the whole pane so clicks reach clear_selection even over the message.
+                    TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => { root.clear_selection(); }
+                    }
                 }
             }
 
@@ -2532,7 +2541,7 @@ export component MainWindow inherits Window {
                     background: split_touch.has-hover || split_touch.pressed ? ThemePalette.accent_strong : ThemePalette.border;
                 }
 
-                // Grip dots — three small dots at vertical center, more visible on hover
+                // Grip dots - three small dots at vertical center, more visible on hover
                 Rectangle {
                     x: (parent.width - 2px) / 2;
                     y: parent.height / 2 - 12px;
@@ -2661,7 +2670,7 @@ export component MainWindow inherits Window {
                         clicked => { root.secondary_navigate(root.current_path); }
                     }
 
-                    // Secondary address bar — text when idle, LineEdit when editing
+                    // Secondary address bar - text when idle, LineEdit when editing
                     if !root.secondary_addr_editing: Rectangle {
                         x: 96px;
                         width: parent.width - 104px;
@@ -2674,7 +2683,7 @@ export component MainWindow inherits Window {
                         Text {
                             width: parent.width - 4px;
                             height: parent.height;
-                            text: root.secondary_path == "" ? "—" : root.secondary_path;
+                            text: root.secondary_path == "" ? "-" : root.secondary_path;
                             color: sec_addr_touch.has-hover ? ThemePalette.text : ThemePalette.text_muted;
                             font-size: 11.5px;
                             overflow: elide;
@@ -2754,7 +2763,7 @@ export component MainWindow inherits Window {
                 ListView {
                     x: AppMetrics.pad;
                     y: 38px + (root.view_mode == "list" ? 32px : AppMetrics.pad);
-                    // Reserve 14px on the right for the scroll bar — matches
+                    // Reserve 14px on the right for the scroll bar - matches
                     // the primary pane's list view so the rightmost column
                     // and tag dot stay clear of the scroll handle.
                     width: parent.width - AppMetrics.pad * 2 - 14px;
@@ -2778,16 +2787,25 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if root.secondary_files.length == 0: Text {
+                if root.secondary_files.length == 0: Rectangle {
                     x: 0;
                     y: 38px + (root.view_mode == "list" ? 32px : 0px);
                     width: parent.width;
                     height: parent.height - 38px - (root.view_mode == "list" ? 32px : 0px);
-                    text: root.secondary_path == "" ? "Enable dual pane to browse a second location" : "Empty folder";
-                    color: ThemePalette.text_faint;
-                    font-size: 12px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: root.secondary_path == "" ? "Enable dual pane to browse a second location" : "Empty folder";
+                        color: ThemePalette.text_faint;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => { root.secondary_file_selected(-1, false, false); }
+                    }
                 }
             }
 
@@ -3061,7 +3079,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Context menu — file
+    // Context menu - file
     if root.context_visible && root.context_on_file: Rectangle {
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - (root.is_simple ? 410px : 580px));
@@ -3211,7 +3229,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    // Context menu — empty area
+    // Context menu - empty area
     if root.context_visible && !root.context_on_file: Rectangle {
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - 278px);
@@ -3587,6 +3605,47 @@ export component MainWindow inherits Window {
                         }
                     }
 
+                    Text { text: "FOLDER COLOR"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Rectangle {
+                        width: parent.width;
+                        height: 76px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; y: 10px; width: 130px; height: 30px; text: "Folder color"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        LineEdit {
+                            x: 150px;
+                            y: 10px;
+                            width: 140px;
+                            height: 28px;
+                            text: root.folder_color_hex;
+                            font-family: AppMetrics.mono_font;
+                            font-size: 12px;
+                            placeholder-text: "#e2a934";
+                            edited(val) => { root.folder_color_changed(val); }
+                        }
+                        Rectangle {
+                            x: 300px;
+                            y: 12px;
+                            width: 26px;
+                            height: 26px;
+                            border-radius: 13px;
+                            background: ThemePalette.icon_folder_2;
+                            border-width: 1px;
+                            border-color: ThemePalette.border_strong;
+                        }
+                        Text { x: 14px; y: 44px; width: 90px; height: 22px; text: "Presets"; color: ThemePalette.text_faint; font-size: 11px; vertical-alignment: center; }
+                        Rectangle { x: 104px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #e2a934; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#e2a934"); } } }
+                        Rectangle { x: 134px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #4f9cff; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#4f9cff"); } } }
+                        Rectangle { x: 164px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #2aa96b; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#2aa96b"); } } }
+                        Rectangle { x: 194px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #8b6cff; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#8b6cff"); } } }
+                        Rectangle { x: 224px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #e45578; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#e45578"); } } }
+                        Rectangle { x: 254px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #1aa6a6; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#1aa6a6"); } } }
+                        Rectangle { x: 284px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #c46f34; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#c46f34"); } } }
+                        Rectangle { x: 314px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #cfd5dc; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#cfd5dc"); } } }
+                    }
+
                     Text { text: "DENSITY"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     // Stacked vertical layout instead of a 3-up grid. Cozy /
                     // Comfortable / Compact descriptions ran into each other
@@ -3632,7 +3691,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     Text {
-                        text: root.ui_mode == "simple" ? "Essential features only — hides dual pane, power tools, advanced menu, and AI settings." : "Full access to every feature including dual pane, power tools, and AI.";
+                        text: root.ui_mode == "simple" ? "Essential features only - hides dual pane, power tools, advanced menu, and AI settings." : "Full access to every feature including dual pane, power tools, and AI.";
                         color: ThemePalette.text_faint;
                         font-size: 11.5px;
                         wrap: word-wrap;
@@ -3849,7 +3908,7 @@ export component MainWindow inherits Window {
                         text: root.ce_name;
                         placeholder-text: "My Theme";
                         font-size: 13px;
-                        edited(val) => { root.ce_name = val; }
+                        edited(val) => { root.ce_name = val; root.ce_apply_preview(); }
                     }
 
                     // Live preview
@@ -3927,7 +3986,7 @@ export component MainWindow inherits Window {
                             background: root.ce_token_colors.length > 2 ? root.ce_token_colors[2] : ThemePalette.panel;
                             NodeVisual { x: 12px; y: 10px; visual_width: 34px; visual_height: 28px; is_dir: true; extension: ""; }
                             Text { x: 56px; y: 8px; width: parent.width - 70px; height: 18px; text: "Long filename preview.txt"; color: root.ce_token_colors.length > 5 ? root.ce_token_colors[5] : ThemePalette.text; font-family: root.ce_preview_ui_font; font-size: 12px; overflow: elide; }
-                            Text { x: 56px; y: 30px; width: parent.width - 70px; height: 16px; text: "12.4 MB · modified today"; color: root.ce_token_colors.length > 7 ? root.ce_token_colors[7] : ThemePalette.text_faint; font-family: root.ce_preview_mono_font; font-size: 10.5px; overflow: elide; }
+                            Text { x: 56px; y: 30px; width: parent.width - 70px; height: 16px; text: "12.4 MB - modified today"; color: root.ce_token_colors.length > 7 ? root.ce_token_colors[7] : ThemePalette.text_faint; font-family: root.ce_preview_mono_font; font-size: 10.5px; overflow: elide; }
                         }
                     }
 
@@ -3942,29 +4001,45 @@ export component MainWindow inherits Window {
                         spacing: 6px;
                         height: 30px;
                         Text { text: "Jump:"; color: ThemePalette.text_muted; font-size: 11px; vertical-alignment: center; }
-                        for jump[i] in [
-                            { tok: 0, lab: "Bg" },
-                            { tok: 1, lab: "Surface" },
-                            { tok: 2, lab: "Panel" },
-                            { tok: 8, lab: "Accent" },
-                        ]: Rectangle {
-                            width: jump_lab.preferred-width + 16px;
+                        Rectangle {
+                            width: 44px;
                             height: 26px;
                             border-radius: 4px;
                             border-width: 1px;
-                            border-color: root.ce_selected_token == jump.tok ? ThemePalette.accent : ThemePalette.border;
-                            background: root.ce_selected_token == jump.tok ? ThemePalette.accent_soft : ThemePalette.panel_solid;
-                            jump_lab := Text {
-                                x: 8px;
-                                width: parent.width - 16px;
-                                height: parent.height;
-                                text: jump.lab;
-                                color: root.ce_selected_token == jump.tok ? ThemePalette.accent_strong : ThemePalette.text_muted;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                horizontal-alignment: center;
-                            }
-                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_select_token(jump.tok); } }
+                            border-color: root.ce_selected_token == 0 ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_selected_token == 0 ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            Text { width: parent.width; height: parent.height; text: "Bg"; color: root.ce_selected_token == 0 ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 11px; vertical-alignment: center; horizontal-alignment: center; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_select_token(0); } }
+                        }
+                        Rectangle {
+                            width: 64px;
+                            height: 26px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: root.ce_selected_token == 1 ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_selected_token == 1 ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            Text { width: parent.width; height: parent.height; text: "Surface"; color: root.ce_selected_token == 1 ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 11px; vertical-alignment: center; horizontal-alignment: center; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_select_token(1); } }
+                        }
+                        Rectangle {
+                            width: 52px;
+                            height: 26px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: root.ce_selected_token == 2 ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_selected_token == 2 ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            Text { width: parent.width; height: parent.height; text: "Panel"; color: root.ce_selected_token == 2 ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 11px; vertical-alignment: center; horizontal-alignment: center; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_select_token(2); } }
+                        }
+                        Rectangle {
+                            width: 58px;
+                            height: 26px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: root.ce_selected_token == 8 ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_selected_token == 8 ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            Text { width: parent.width; height: parent.height; text: "Accent"; color: root.ce_selected_token == 8 ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 11px; vertical-alignment: center; horizontal-alignment: center; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_select_token(8); } }
                         }
                     }
                     HorizontalLayout {
@@ -4164,6 +4239,41 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+                    if root.ce_gradient_background: Rectangle {
+                        height: 40px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text {
+                            x: 14px;
+                            y: 0;
+                            width: parent.width - 28px;
+                            height: parent.height;
+                            text: "Blend accent into the background gradient (bottom glow).";
+                            color: ThemePalette.text_muted;
+                            font-size: 11.5px;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        Rectangle {
+                            x: parent.width - 52px;
+                            y: (parent.height - 22px) / 2;
+                            width: 40px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: root.ce_gradient_accent ? ThemePalette.accent : ThemePalette.border_strong;
+                            Rectangle {
+                                x: root.ce_gradient_accent ? 20px : 2px;
+                                y: 2px;
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                background: white;
+                            }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_gradient_accent_changed(!root.ce_gradient_accent); } }
+                        }
+                    }
 
                     // Finish
                     Text { text: "FINISH"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
@@ -4189,42 +4299,68 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // Typography
-                    Text { text: "TYPOGRAPHY"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
-                    Rectangle {
-                        height: 38px;
-                        border-radius: AppMetrics.radius_small;
-                        border-width: 1px;
-                        border-color: ThemePalette.border;
-                        background: ThemePalette.panel;
-                        Text { x: 14px; width: 100px; height: parent.height; text: "UI Font"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
-                        LineEdit {
-                            x: 114px;
-                            y: 6px;
-                            width: parent.width - 128px;
-                            height: 26px;
-                            text: root.ce_ui_font;
-                            font-size: 12px;
-                            placeholder-text: "Segoe UI";
-                            edited(val) => { root.ce_font_changed(val, root.ce_mono_font); }
+                    // Typography (bundled fonts only)
+                    Text { text: "Typography"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text {
+                        text: "Fonts ship inside Pathfinder so the UI always matches your pick (no reliance on Windows font names).";
+                        color: ThemePalette.text_muted;
+                        font-size: 11.5px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                    Text { text: "UI FONT"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        height: 34px;
+                        Rectangle {
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: root.ce_ui_font == "noto-sans" ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_ui_font == "noto-sans" ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            horizontal-stretch: 1;
+                            Text { width: parent.width; height: parent.height; text: "Noto Sans"; color: root.ce_ui_font == "noto-sans" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; font-family: "Noto Sans"; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_font_preset("ui", "noto-sans"); } }
+                        }
+                        Rectangle {
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: root.ce_ui_font == "press-start-2p" ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_ui_font == "press-start-2p" ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            horizontal-stretch: 1;
+                            Text { width: parent.width; height: parent.height; text: "Press Start 2P"; color: root.ce_ui_font == "press-start-2p" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; font-family: "Press Start 2P"; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_font_preset("ui", "press-start-2p"); } }
                         }
                     }
-                    Rectangle {
-                        height: 38px;
-                        border-radius: AppMetrics.radius_small;
-                        border-width: 1px;
-                        border-color: ThemePalette.border;
-                        background: ThemePalette.panel;
-                        Text { x: 14px; width: 100px; height: parent.height; text: "Mono Font"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
-                        LineEdit {
-                            x: 114px;
-                            y: 6px;
-                            width: parent.width - 128px;
-                            height: 26px;
-                            text: root.ce_mono_font;
-                            font-size: 12px;
-                            placeholder-text: "Cascadia Mono";
-                            edited(val) => { root.ce_font_changed(root.ce_ui_font, val); }
+                    Text { text: "MONO FONT"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        height: 34px;
+                        Rectangle {
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: root.ce_mono_font == "noto-sans-mono" ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_mono_font == "noto-sans-mono" ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            horizontal-stretch: 1;
+                            Text { width: parent.width; height: parent.height; text: "Noto Sans Mono"; color: root.ce_mono_font == "noto-sans-mono" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; font-family: "Noto Sans Mono"; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_font_preset("mono", "noto-sans-mono"); } }
+                        }
+                        Rectangle {
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: root.ce_mono_font == "jetbrains-mono" ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_mono_font == "jetbrains-mono" ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            horizontal-stretch: 1;
+                            Text { width: parent.width; height: parent.height; text: "JetBrains Mono"; color: root.ce_mono_font == "jetbrains-mono" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; font-family: "JetBrains Mono"; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_font_preset("mono", "jetbrains-mono"); } }
+                        }
+                        Rectangle {
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: root.ce_mono_font == "press-start-2p" ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_mono_font == "press-start-2p" ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            horizontal-stretch: 1;
+                            Text { width: parent.width; height: parent.height; text: "Press Start 2P"; color: root.ce_mono_font == "press-start-2p" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; font-family: "Press Start 2P"; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_font_preset("mono", "press-start-2p"); } }
                         }
                     }
                     Rectangle {
@@ -4425,28 +4561,39 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.settings_tab == "ai" && !root.is_simple: VerticalLayout {
+            if root.settings_tab == "ai" && !root.is_simple: ScrollView {
                 x: 20px;
                 y: 112px;
                 width: parent.width - 40px;
                 height: parent.height - 124px;
-                spacing: 14px;
-                padding-bottom: 16px;
+
+                VerticalLayout {
+                    width: parent.width - 20px;
+                    spacing: 14px;
+                    padding-bottom: 16px;
 
                 Text { text: "AI CAPABILITIES"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Rectangle {
-                    height: 168px;
+                    width: parent.width;
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     border-radius: AppMetrics.radius;
                     background: ThemePalette.panel;
+                    clip: true;
                     VerticalLayout {
-                        x: 14px;
-                        y: 12px;
-                        width: parent.width - 28px;
-                        spacing: 6px;
-                        Text { text: root.ai_label; color: ThemePalette.text; font-size: 14px; font-weight: 700; wrap: word-wrap; }
+                        padding: 14px;
+                        spacing: 8px;
+                        width: parent.width;
                         Text {
+                            width: parent.width - 28px;
+                            text: root.ai_label;
+                            color: ThemePalette.text;
+                            font-size: 14px;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            width: parent.width - 28px;
                             text: root.ai_device;
                             color: ThemePalette.accent_strong;
                             font-size: 12px;
@@ -4454,6 +4601,7 @@ export component MainWindow inherits Window {
                             wrap: word-wrap;
                         }
                         Text {
+                            width: parent.width - 28px;
                             text: root.ai_gpu_status;
                             color: ThemePalette.text_muted;
                             font-size: 11.5px;
@@ -4461,6 +4609,7 @@ export component MainWindow inherits Window {
                             wrap: word-wrap;
                         }
                         Text {
+                            width: parent.width - 28px;
                             text: "Thumbnails, content search, and image analysis use the best detected device.";
                             color: ThemePalette.text_muted;
                             font-size: 11px;
@@ -4471,12 +4620,13 @@ export component MainWindow inherits Window {
 
                 Text { text: "OPTIONAL SEARCH"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Rectangle {
+                    width: parent.width;
                     height: AppMetrics.row_h;
                     border-radius: AppMetrics.radius;
                     background: ThemePalette.panel;
                     border-width: 1px;
                     border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "CLIP description search (optional model)"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "CLIP description search (optional model)"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; overflow: elide; }
                     Rectangle {
                         x: parent.width - 52px;
                         y: (parent.height - 22px) / 2;
@@ -4504,131 +4654,135 @@ export component MainWindow inherits Window {
                 // Pathfinder Local AI install / uninstall area.
                 Text { text: "PATHFINDER LOCAL AI"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Rectangle {
-                    height: 124px;
+                    width: parent.width;
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     border-radius: AppMetrics.radius;
                     background: ThemePalette.panel;
+                    clip: true;
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 10px;
+                        width: parent.width;
 
-                    // Heading + state badge
-                    Text {
-                        x: 14px; y: 12px;
-                        width: parent.width - 160px; height: 20px;
-                        text: root.ai_install_state == "installed"
-                            ? "Local AI is installed"
-                            : (root.ai_install_state == "downloading"
-                                ? "Downloading models ..."
-                                : "Local AI is not installed");
-                        color: ThemePalette.text;
-                        font-size: 13px;
-                        font-weight: 700;
-                    }
-                    Text {
-                        x: 14px; y: 34px;
-                        width: parent.width - 160px;
-                        height: 36px;
-                        text: root.ai_install_state == "installed"
-                            ? "Semantic search, image classification, and perceptual duplicate detection are ready."
-                            : (root.ai_install_state == "downloading"
-                                ? root.ai_install_message
-                                : "Adds about " + root.ai_install_size_mb + " MB on disk. Models run entirely on your machine.");
-                        color: ThemePalette.text_muted;
-                        font-size: 11.5px;
-                        wrap: word-wrap;
-                    }
-
-                    // Progress bar (only while downloading)
-                    if root.ai_install_state == "downloading": Rectangle {
-                        x: 14px; y: parent.height - 28px;
-                        width: parent.width - 28px;
-                        height: 6px;
-                        border-radius: 3px;
-                        background: rgba(127, 127, 127, 0.18);
-                        clip: true;
-                        Rectangle {
-                            x: 0; y: 0;
-                            width: parent.width * Math.clamp(root.ai_download_progress, 0, 1);
-                            height: parent.height;
-                            border-radius: 3px;
-                            background: ThemePalette.accent;
-                            animate width { duration: 120ms; easing: ease-out; }
-                        }
-                    }
-
-                    // Install / Uninstall button on the right
-                    if root.ai_install_state == "not_installed": Rectangle {
-                        x: parent.width - 140px;
-                        y: (parent.height - 36px) / 2;
-                        width: 126px;
-                        height: 36px;
-                        border-radius: AppMetrics.radius_small;
-                        background: install_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.accent;
                         Text {
-                            width: parent.width; height: parent.height;
-                            text: "Install AI";
-                            color: white;
-                            font-size: 12.5px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        install_touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.ai_install_explainer_visible = true; }
-                        }
-                    }
-                    if root.ai_install_state == "installed": Rectangle {
-                        x: parent.width - 140px;
-                        y: (parent.height - 36px) / 2;
-                        width: 126px;
-                        height: 36px;
-                        border-radius: AppMetrics.radius_small;
-                        border-width: 1px;
-                        border-color: ThemePalette.border_strong;
-                        background: uninstall_touch.has-hover ? ThemePalette.panel_alt : transparent;
-                        Text {
-                            width: parent.width; height: parent.height;
-                            text: "Uninstall";
+                            width: parent.width - 28px;
+                            text: root.ai_install_state == "installed"
+                                ? "Local AI is installed"
+                                : (root.ai_install_state == "downloading"
+                                    ? "Downloading models ..."
+                                    : "Local AI is not installed");
                             color: ThemePalette.text;
-                            font-size: 12.5px;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                            font-size: 13px;
+                            font-weight: 700;
+                            wrap: word-wrap;
                         }
-                        uninstall_touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.ai_uninstall(); }
+                        Text {
+                            width: parent.width - 28px;
+                            text: root.ai_install_state == "installed"
+                                ? "Semantic search, image classification, and perceptual duplicate detection are ready."
+                                : (root.ai_install_state == "downloading"
+                                    ? root.ai_install_message
+                                    : "Adds about " + root.ai_install_size_mb + " MB on disk. Models run entirely on your machine.");
+                            color: ThemePalette.text_muted;
+                            font-size: 11.5px;
+                            wrap: word-wrap;
+                        }
+
+                        if root.ai_install_state == "downloading": Rectangle {
+                            width: parent.width - 28px;
+                            height: 6px;
+                            border-radius: 3px;
+                            background: rgba(127, 127, 127, 0.18);
+                            clip: true;
+                            Rectangle {
+                                x: 0; y: 0;
+                                width: parent.width * Math.clamp(root.ai_download_progress, 0, 1);
+                                height: parent.height;
+                                border-radius: 3px;
+                                background: ThemePalette.accent;
+                                animate width { duration: 120ms; easing: ease-out; }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 0;
+                            if root.ai_install_state == "not_installed": Rectangle {
+                                width: 126px;
+                                height: 36px;
+                                border-radius: AppMetrics.radius_small;
+                                background: install_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.accent;
+                                Text {
+                                    width: parent.width; height: parent.height;
+                                    text: "Install AI";
+                                    color: white;
+                                    font-size: 12.5px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                install_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.ai_install_explainer_visible = true; }
+                                }
+                            }
+                            if root.ai_install_state == "installed": Rectangle {
+                                width: 126px;
+                                height: 36px;
+                                border-radius: AppMetrics.radius_small;
+                                border-width: 1px;
+                                border-color: ThemePalette.border_strong;
+                                background: uninstall_touch.has-hover ? ThemePalette.panel_alt : transparent;
+                                Text {
+                                    width: parent.width; height: parent.height;
+                                    text: "Uninstall";
+                                    color: ThemePalette.text;
+                                    font-size: 12.5px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                uninstall_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.ai_uninstall(); }
+                                }
+                            }
                         }
                     }
                 }
 
                 Text { text: "FEATURES"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Rectangle {
+                    width: parent.width;
                     height: 58px;
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     border-radius: AppMetrics.radius;
                     background: ThemePalette.panel;
-                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Semantic content search"; color: ThemePalette.text; font-size: 13px; font-weight: 600; }
-                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready — search by meaning across indexed files" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
+                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Semantic content search"; color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready - search by meaning across indexed files" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
                 }
                 Rectangle {
+                    width: parent.width;
                     height: 58px;
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     border-radius: AppMetrics.radius;
                     background: ThemePalette.panel;
-                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Image classification"; color: ThemePalette.text; font-size: 13px; font-weight: 600; }
-                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready — auto-suggest tags for photos" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
+                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Image classification"; color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready - auto-suggest tags for photos" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
                 }
                 Rectangle {
+                    width: parent.width;
                     height: 58px;
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     border-radius: AppMetrics.radius;
                     background: ThemePalette.panel;
-                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Perceptual duplicate detection"; color: ThemePalette.text; font-size: 13px; font-weight: 600; }
-                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready — find near-duplicate images and resized copies" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
+                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Perceptual duplicate detection"; color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready - find near-duplicate images and resized copies" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
+                }
                 }
             }
 
@@ -4716,7 +4870,7 @@ export component MainWindow inherits Window {
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
 
-        // Conflict-resolution dialog — three explicit buttons, no text input.
+        // Conflict-resolution dialog - three explicit buttons, no text input.
         if root.prompt_kind == "conflict": Rectangle {
             x: (parent.width - 460px) / 2;
             y: (parent.height - 220px) / 2;
