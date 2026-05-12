@@ -6839,9 +6839,12 @@ fn theme_palette(id: &str) -> PaletteSpec {
             accent_strong: color("#ff9a7a"),
             radius: 10.0,
             radius_small: 6.0,
-            // Soft, hand-drawn feel — Segoe Script gives sunset a casual warmth.
-            ui_font: "Segoe Script",
-            mono_font: "Candara",
+            // Candara has the warm humanist feel without the missing-glyph
+            // problem that Segoe Script ran into on some machines (the
+            // script font has limited Unicode coverage, so labels and
+            // settings copy could render blank).
+            ui_font: "Candara",
+            mono_font: "Cascadia Mono",
             light_controls: false,
             outer_border: 0.0,
         },
@@ -13297,37 +13300,40 @@ pub fn run() {
         });
     });
 
-    // Check for updates silently in background 4 seconds after startup.
-    // The gate previously skipped the check entirely when the saved
-    // setting was false, which it was for every install made before 0.6.10
-    // (the default flipped to true in that release but existing settings.json
-    // files kept the old false value). Run it unconditionally now and rely
-    // on the user dismissing or clicking the pill; the network call is one
-    // GET against the GitHub releases API on a background thread.
+    // Auto-update poll. Runs once 4 seconds after launch and then every
+    // hour for the lifetime of the process, so users who keep Pathfinder
+    // open across days still see the green pill within an hour of any new
+    // release without having to restart.
     let weak_ui_upd = ui.as_weak();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(4));
-        match check_github_release_now() {
-            Ok(result) => {
-                eprintln!(
-                    "[updater] latest={} current={} available={}",
-                    result.latest_version, result.current_version, result.available
-                );
-                if result.available {
-                    let ver = SharedString::from(result.latest_version.clone());
-                    let dl = SharedString::from(result.download_url.clone());
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak_ui_upd.upgrade() {
-                            ui.set_update_available(true);
-                            ui.set_update_version(ver);
-                            ui.set_update_download_url(dl);
-                        }
-                    });
+        loop {
+            match check_github_release_now() {
+                Ok(result) => {
+                    eprintln!(
+                        "[updater] latest={} current={} available={}",
+                        result.latest_version, result.current_version, result.available
+                    );
+                    if result.available {
+                        let ver = SharedString::from(result.latest_version.clone());
+                        let dl = SharedString::from(result.download_url.clone());
+                        let weak_pill = weak_ui_upd.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak_pill.upgrade() {
+                                ui.set_update_available(true);
+                                ui.set_update_version(ver);
+                                ui.set_update_download_url(dl);
+                            }
+                        });
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[updater] check failed: {}", e);
                 }
             }
-            Err(e) => {
-                eprintln!("[updater] check failed: {}", e);
-            }
+            // Re-check every hour. If the network blip prevented the first
+            // call from succeeding, the next hour gets another shot.
+            std::thread::sleep(std::time::Duration::from_secs(60 * 60));
         }
     });
 
