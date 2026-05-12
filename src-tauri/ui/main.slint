@@ -1447,7 +1447,11 @@ export component MainWindow inherits Window {
     property <length> toolbar_h: 44px;
     property <length> filter_bar_h: root.filter_bar_visible ? 36px : 0px;
     property <length> status_h: 26px;
-    property <length> preview_w: root.preview_visible ? 326px : 0px;
+    // User-set preview pane width (drag handle on its left edge writes here).
+    // Clamped to a usable range so the preview never shrinks to nothing or
+    // crowds the file area off-screen on narrow windows.
+    in-out property <length> preview_w_user: 326px;
+    property <length> preview_w: root.preview_visible ? max(220px, min(640px, root.preview_w_user)) : 0px;
     property <length> main_content_w: root.width - root.sidebar_w - root.preview_w;
     out property <length> pane_splitter_w: root.dual_pane ? 6px : 0px;
     out property <length> primary_pane_w: root.dual_pane ? (root.main_content_w - root.pane_splitter_w) * root.split_ratio : root.main_content_w;
@@ -2554,6 +2558,34 @@ export component MainWindow inherits Window {
                 // Left-edge separator removed. The panel background already
                 // contrasts enough with the file area to mark the boundary.
 
+                // Draggable resize handle along the left edge. Wider hit
+                // area than the visible line so it is easy to grab. Cursor
+                // turns into a horizontal resize arrow on hover.
+                Rectangle {
+                    x: -3px; y: 0;
+                    width: 6px; height: parent.height;
+                    background: preview_resize.has-hover || preview_resize.pressed
+                        ? ThemePalette.accent
+                        : transparent;
+                    preview_resize := TouchArea {
+                        mouse-cursor: ew-resize;
+                        property <length> w_at_press: 326px;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) {
+                                w_at_press = root.preview_w;
+                            }
+                        }
+                        moved => {
+                            // Dragging left widens the preview, right narrows it.
+                            root.preview_w_user = w_at_press - (self.mouse-x - self.pressed-x);
+                        }
+                        double-clicked => {
+                            // Double click resets to the default width.
+                            root.preview_w_user = 326px;
+                        }
+                    }
+                }
+
 
                 Rectangle {
                     x: 1px;
@@ -3274,7 +3306,10 @@ export component MainWindow inherits Window {
                 height: parent.height - 124px;
 
                 VerticalLayout {
-                    width: parent.width;
+                    // Inner content stops 20 px short of the ScrollView right
+                    // edge so the scroll bar lives in its own gutter rather
+                    // than painting on top of the theme tile right column.
+                    width: parent.width - 20px;
                     spacing: 18px;
                     padding-bottom: 16px;
 
@@ -3915,7 +3950,7 @@ export component MainWindow inherits Window {
                 height: parent.height - 124px;
 
                 VerticalLayout {
-                    width: parent.width;
+                    width: parent.width - 20px;
                     spacing: 14px;
                     padding-bottom: 16px;
 
