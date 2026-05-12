@@ -44,27 +44,72 @@ fn intra_threads() -> usize {
 }
 
 #[cfg(windows)]
-fn directml_provider() -> ep::DirectML {
+fn build_execution_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
     use ort::ep::directml::{DeviceFilter, PerformancePreference};
-    // Strategy:
-    //   1. If a Compute Accelerator (NPU) is enumerated, use DeviceFilter::Any
-    //      with HighPerformance preference so DirectML can route to the NPU when
-    //      the model fits and fall back to a GPU otherwise. The NPU path bypasses
-    //      DXGI adapter indices because NPUs are exposed through DXCore.
-    //   2. Otherwise, pin DirectML to the discrete GPU's DXGI adapter index. On
-    //      hybrid graphics laptops (Radeon iGPU + GeForce dGPU) the iGPU is
-    //      usually adapter 0, so the default DirectML init ends up on the slower
-    //      device. Pinning the index targets the dGPU explicitly.
+    // EP registration order is fallback order in ORT: if registering an EP fails
+    // (driver missing, DirectML can't see the device, NPU isn't reachable from
+    // user-mode, etc) ORT moves on to the next entry. We deliberately register
+    // every reachable hardware path before CPU so the model never silently lands
+    // on the CPU just because the preferred device hit an init error.
+    //
+    // Priority on Windows:
+    //   1. NPU (DirectML with DeviceFilter::Npu) when a Compute Accelerator is
+    //      enumerated. Fastest for inference workloads on Copilot+ class hardware.
+    //   2. NPU-or-GPU best (DirectML DeviceFilter::Any + HighPerformance) when an
+    //      NPU is present but the model doesn't fit on it.
+    //   3. Discrete GPU pinned by DXGI adapter index. Hybrid graphics laptops
+    //      enumerate the iGPU as adapter 0, so the default DirectML init lands
+    //      on the slower chip without an explicit pin.
+    //   4. Integrated GPU pinned by DXGI adapter index. Last GPU fallback before
+    //      we drop to CPU, so a borked dGPU driver doesn't take inference offline.
+    //   5. CPU. Final fallback, always reachable.
+    let mut eps: Vec<ort::ep::ExecutionProviderDispatch> = Vec::new();
     let has_npu = !crate::gpu_detect::detect_npus().is_empty();
     if has_npu {
-        ep::DirectML::default()
-            .with_device_filter(DeviceFilter::Any)
-            .with_performance_preference(PerformancePreference::HighPerformance)
-    } else if let Some(idx) = crate::gpu_detect::preferred_directml_adapter_index() {
-        ep::DirectML::default().with_device_id(idx as i32)
-    } else {
-        ep::DirectML::default()
+        eps.push(
+            ep::DirectML::default()
+                .with_device_filter(DeviceFilter::Npu)
+                .with_performance_preference(PerformancePreference::HighPerformance)
+                .build(),
+        );
+        eps.push(
+            ep::DirectML::default()
+                .with_device_filter(DeviceFilter::Any)
+                .with_performance_preference(PerformancePreference::HighPerformance)
+                .build(),
+        );
     }
+    let inv = crate::gpu_detect::detect_gpus();
+    // Discrete GPUs first, then integrated, each pinned to its DXGI index.
+    let mut tried_indices: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for (i, adapter) in inv.adapters.iter().enumerate() {
+        if !adapter.is_hardware || !adapter.is_discrete {
+            continue;
+        }
+        let idx = i as u32;
+        if tried_indices.insert(idx) {
+            eps.push(ep::DirectML::default().with_device_id(idx as i32).build());
+        }
+    }
+    for (i, adapter) in inv.adapters.iter().enumerate() {
+        if !adapter.is_hardware || adapter.is_discrete {
+            continue;
+        }
+        let idx = i as u32;
+        if tried_indices.insert(idx) {
+            eps.push(ep::DirectML::default().with_device_id(idx as i32).build());
+        }
+    }
+    // Generic DirectML as a final GPU attempt for the case where DXGI didn't
+    // enumerate any hardware adapter but DXCore can still find one.
+    eps.push(ep::DirectML::default().build());
+    eps.push(ep::CPU::default().build());
+    eps
+}
+
+#[cfg(not(windows))]
+fn build_execution_providers() -> Vec<ort::ep::ExecutionProviderDispatch> {
+    vec![ep::CPU::default().build()]
 }
 
 struct TextEmbedder {
@@ -150,19 +195,8 @@ fn try_build_text_embedder() -> ort::Result<TextEmbedder> {
     }
     let tokenizer = Tokenizer::from_file(tok_path.as_path())
         .map_err(|e| ort::Error::new(format!("tokenizer: {e}")))?;
-    let mut builder = Session::builder()?;
-    #[cfg(windows)]
-    {
-        builder = builder.with_execution_providers([
-            directml_provider().build(),
-            ep::CPU::default().build(),
-        ])?;
-    }
-    #[cfg(not(windows))]
-    {
-        builder = builder.with_execution_providers([ep::CPU::default().build()])?;
-    }
-    let session = builder
+    let session = Session::builder()?
+        .with_execution_providers(build_execution_providers())?
         .with_intra_threads(intra_threads())?
         .commit_from_file(model_path)?;
     if let Ok(mut s) = ORT_STATUS.lock() {
@@ -170,18 +204,22 @@ fn try_build_text_embedder() -> ort::Result<TextEmbedder> {
         #[cfg(windows)]
         let routing = {
             let inv = crate::gpu_detect::detect_gpus();
-            let target = inv.primary_directml_target().map(|a| a.name.clone()).unwrap_or_default();
+            let mut chain: Vec<String> = Vec::new();
             if !crate::gpu_detect::detect_npus().is_empty() {
-                "DirectML on NPU or high performance GPU".to_string()
-            } else if !target.is_empty() {
-                format!("DirectML on {target}")
-            } else {
-                "CPU".to_string()
+                chain.push("NPU".to_string());
             }
+            for a in inv.discrete() {
+                chain.push(format!("dGPU {}", a.name));
+            }
+            for a in inv.integrated() {
+                chain.push(format!("iGPU {}", a.name));
+            }
+            chain.push(format!("CPU ({threads} threads)"));
+            format!("DirectML fallback chain: {}", chain.join(" → "))
         };
         #[cfg(not(windows))]
-        let routing = "CPU".to_string();
-        *s = format!("text-embedding session ready ({routing}, {threads} CPU threads for fallback)");
+        let routing = format!("CPU ({threads} threads)");
+        *s = format!("text-embedding session ready. {routing}");
     }
     Ok(TextEmbedder { session, tokenizer })
 }
@@ -423,19 +461,8 @@ fn try_mobilenet_session() -> ort::Result<Session> {
     if !path.is_file() {
         return Err(ort::Error::new("image-classifier.onnx missing"));
     }
-    let mut builder = Session::builder()?;
-    #[cfg(windows)]
-    {
-        builder = builder.with_execution_providers([
-            directml_provider().build(),
-            ep::CPU::default().build(),
-        ])?;
-    }
-    #[cfg(not(windows))]
-    {
-        builder = builder.with_execution_providers([ep::CPU::default().build()])?;
-    }
-    builder
+    Session::builder()?
+        .with_execution_providers(build_execution_providers())?
         .with_intra_threads(intra_threads())?
         .commit_from_file(path)
 }
