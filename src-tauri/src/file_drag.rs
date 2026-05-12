@@ -46,7 +46,7 @@ fn log_path() -> std::path::PathBuf {
     std::env::temp_dir().join("pathfinder_dragdrop.log")
 }
 
-fn log(msg: &str) {
+pub(crate) fn log(msg: &str) {
     let _ = (|| -> std::io::Result<()> {
         let mut f = std::fs::OpenOptions::new()
             .create(true)

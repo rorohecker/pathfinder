@@ -11421,17 +11421,29 @@ impl NativeController {
         is_move: bool,
         dest_dir: String,
     ) {
+        file_drag::log(&format!(
+            "drop_files_from_drag: dest_dir='{}', is_move={}, paths={:?}",
+            dest_dir, is_move, paths
+        ));
         let mut count = 0usize;
         let mut errors = 0usize;
         let mut skipped_self = 0usize;
         let mut last_error: Option<String> = None;
         for src_str in &paths {
             let src = Path::new(src_str);
-            let Some(name) = src.file_name() else { continue; };
+            let Some(name) = src.file_name() else {
+                file_drag::log(&format!("  '{src_str}' has no file_name component, skipping"));
+                continue;
+            };
             let dest = PathBuf::from(&dest_dir).join(name);
-            // Skip only a true no-op (same file path). Same-folder drops onto a
-            // subfolder row use `dest_dir` from hit-testing and are not skipped here.
-            if same_inode_or_canonical_path(src, &dest) {
+            let same = same_inode_or_canonical_path(src, &dest);
+            file_drag::log(&format!(
+                "  src='{}' -> dest='{}' same={}",
+                src_str,
+                dest.display(),
+                same
+            ));
+            if same {
                 skipped_self += 1;
                 continue;
             }
@@ -11441,27 +11453,27 @@ impl NativeController {
                 native_copy(&self.app_state, src_str, &dest.to_string_lossy())
             };
             match result {
-                Ok(()) => count += 1,
+                Ok(()) => {
+                    file_drag::log(&format!("    {} OK", if is_move { "move" } else { "copy" }));
+                    count += 1;
+                }
                 Err(e) => {
-                    eprintln!(
-                        "[file_drag] {} '{}' -> '{}' FAILED: {}",
+                    file_drag::log(&format!(
+                        "    {} FAILED: {}",
                         if is_move { "move" } else { "copy" },
-                        src_str,
-                        dest.display(),
                         e
-                    );
+                    ));
                     last_error = Some(e);
                     errors += 1;
                 }
             }
         }
+        file_drag::log(&format!(
+            "drop summary: count={}, errors={}, skipped_self={}",
+            count, errors, skipped_self
+        ));
         if count == 0 && errors == 0 {
-            // Pure no-op drop (file dropped onto its own folder). File Explorer
-            // silently ignores this case and we should too — every drag from
-            // outside the app into the current pane's empty space, or from a
-            // pane back onto itself for reorganization, runs through here. The
-            // toast was firing on every such drop and made organising files
-            // feel like a constant battle with an error dialog.
+            // Pure no-op drop (file dropped onto its own folder). Silent, like Explorer.
             let _ = skipped_self;
             return;
         }
@@ -14400,63 +14412,110 @@ fn pick_drop_destination(
     let sidebar_w = ui.get_sidebar_w();
     let primary_w = ui.get_primary_pane_w();
     let splitter_w = ui.get_pane_splitter_w();
-    // Top of the main file area (below title + toolbar), in logical px.
-    let content_top = 36.0 + 44.0;
+    let title_h: f32 = 36.0;
+    // Simple mode bumps the toolbar from 44 to 68 px. Using a hard-coded 44 here
+    // broke drop hit testing in simple mode by 24 px, which mis-routed every
+    // drop that landed near the top of the file list.
+    let toolbar_h: f32 = if ui.get_ui_mode().as_str() == "simple" { 68.0 } else { 44.0 };
+    let content_top = title_h + toolbar_h;
     let main_left = sidebar_w;
 
-    let (
-        base_dir,
-        pane_left,
-        pane_w,
-        files,
-        list_top,
-    ): (String, f32, f32, &[FileEntry], f32) = if ui.get_dual_pane() {
+    // 1. Sidebar drops route by hit-testing rows. Each SideRow is 32 px tall,
+    //    starting 14 px below the title bar (matches main.slint sidebar layout).
+    if lx >= 0.0 && lx < sidebar_w && ly >= title_h {
+        let list_top = title_h + 14.0;
+        if ly >= list_top {
+            let row = ((ly - list_top) / 32.0).floor() as isize;
+            if row >= 0 {
+                let items: Vec<SideItem> = {
+                    use slint::Model;
+                    let model: ModelRc<SideItem> = if ui.get_ui_mode().as_str() == "simple" {
+                        ui.get_side_items_simple()
+                    } else {
+                        ui.get_side_items()
+                    };
+                    model.iter().collect()
+                };
+                if let Some(item) = items.get(row as usize) {
+                    let path = item.path.to_string();
+                    let is_header = item.is_header;
+                    if !is_header && !path.is_empty() && std::path::Path::new(&path).is_dir() {
+                        file_drag::log(&format!(
+                            "pick_drop_destination: SIDEBAR row {} -> '{}'",
+                            row, path
+                        ));
+                        return path;
+                    }
+                }
+            }
+        }
+        // Sidebar hit but not on a usable item — fall through to pane logic below
+        // so the user still gets a sensible destination instead of an empty path.
+    }
+
+    // 2. File-pane drops. Determine which pane the cursor is over (primary or
+    //    secondary in dual mode) and hit-test against folder rows there.
+    let (base_dir, pane_left, pane_w, files, list_top, pane_label): (
+        String,
+        f32,
+        f32,
+        &[FileEntry],
+        f32,
+        &'static str,
+    ) = if ui.get_dual_pane() {
         let primary_right_edge = sidebar_w + primary_w + splitter_w / 2.0;
         if lx < primary_right_edge {
-            let list_top = content_top + 16.0 + 32.0;
             (
                 ctrl.current_path.clone(),
                 main_left,
                 primary_w,
                 &ctrl.visible_files[..],
-                list_top,
+                content_top + 16.0 + 32.0,
+                "primary",
             )
         } else if !ctrl.secondary_path.is_empty() {
             let sec_left = sidebar_w + primary_w + splitter_w;
             let sec_w = ui.get_secondary_pane_w();
-            // Secondary list: 38px chrome header + 32px list header (matches main.slint).
-            let list_top = content_top + 38.0 + 32.0;
             (
                 ctrl.secondary_path.clone(),
                 sec_left,
                 sec_w,
                 &ctrl.secondary_visible_files[..],
-                list_top,
+                content_top + 38.0 + 32.0,
+                "secondary",
             )
         } else {
-            let list_top = content_top + 16.0 + 32.0;
             (
                 ctrl.current_path.clone(),
                 main_left,
                 primary_w,
                 &ctrl.visible_files[..],
-                list_top,
+                content_top + 16.0 + 32.0,
+                "primary",
             )
         }
     } else {
-        let list_top = content_top + 16.0 + 32.0;
         (
             ctrl.current_path.clone(),
             main_left,
             primary_w,
             &ctrl.visible_files[..],
-            list_top,
+            content_top + 16.0 + 32.0,
+            "primary",
         )
     };
 
     if let Some(sub) = hit_test_list_folder_drop(ui, files, pane_left, pane_w, lx, ly, list_top) {
+        file_drag::log(&format!(
+            "pick_drop_destination: pane={} ROW -> '{}'",
+            pane_label, sub
+        ));
         return sub;
     }
+    file_drag::log(&format!(
+        "pick_drop_destination: pane={} BACKGROUND -> '{}'",
+        pane_label, base_dir
+    ));
     base_dir
 }
 
