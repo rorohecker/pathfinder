@@ -162,23 +162,46 @@ pub fn preferred_directml_adapter_index() -> Option<u32> {
     None
 }
 
-/// NPU enumeration. Two-stage probe so we catch every way Windows registers an
-/// NPU:
-///   1. ComputeAccelerator class (Win11 24H2+ device class GUID).
-///   2. ALL present devices (no class filter) with name-pattern matching.
+/// NPU enumeration. Three-stage probe to catch every variant Windows uses:
 ///
-/// AMD Ryzen AI XDNA NPUs in particular often live under the System device
-/// class on builds before 24H2, where the narrow class filter would miss them.
+///   1. ComputeAccelerator class GUID variant A (`...c8a7004be10c`). This is the
+///      GUID actually present on AMD Ryzen AI / XDNA driver installs verified
+///      on a Ryzen 9 7940HS box. The class name in Device Manager is
+///      ComputeAccelerator and the device shows up as "NPU Compute Accelerator
+///      Device".
+///   2. ComputeAccelerator class GUID variant B (`...e8c40d6664c8`). This is
+///      the GUID that some Microsoft documentation lists. We try it second so
+///      future driver releases that use it still resolve.
+///   3. All-classes fallback. If neither class GUID returns anything, we scan
+///      every present device on the system and filter by friendly-name pattern
+///      so we still catch NPUs registered under System or any other class.
+///
+/// Diagnostic logging from the example probe in /examples/probe_npu.rs makes
+/// it easy to find the right GUID when porting to new hardware.
 #[cfg(windows)]
 pub fn detect_npus() -> Vec<String> {
     use windows::core::GUID;
-    let class_guid = GUID::from_values(
+    // Variant A: actual GUID observed on real Ryzen AI hardware (verified via
+    // Get-PnpDevice ClassGuid). Try this first because it's the value drivers
+    // actually use right now.
+    let guid_a = GUID::from_values(
+        0xf01a9d53,
+        0x3ff6,
+        0x48d2,
+        [0x9f, 0x97, 0xc8, 0xa7, 0x00, 0x4b, 0xe1, 0x0c],
+    );
+    // Variant B: GUID that appears in some Microsoft documentation. Kept as a
+    // belt-and-suspenders fallback in case any driver actually uses it.
+    let guid_b = GUID::from_values(
         0xf01a9d53,
         0x3ff6,
         0x48d2,
         [0x9f, 0x97, 0xe8, 0xc4, 0x0d, 0x66, 0x64, 0xc8],
     );
-    let mut results = enumerate_npus_in_class(Some(class_guid));
+    let mut results = enumerate_npus_in_class(Some(guid_a));
+    if results.is_empty() {
+        results = enumerate_npus_in_class(Some(guid_b));
+    }
     if results.is_empty() {
         results = enumerate_npus_in_class(None);
     }
@@ -191,9 +214,11 @@ pub fn detect_npus() -> Vec<String> {
 fn enumerate_npus_in_class(class_guid: Option<windows::core::GUID>) -> Vec<String> {
     use windows::Win32::Devices::DeviceAndDriverInstallation::{
         SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
-        SetupDiGetDevicePropertyW, DIGCF_ALLCLASSES, DIGCF_PRESENT, SP_DEVINFO_DATA,
+        DIGCF_ALLCLASSES, DIGCF_PRESENT, SP_DEVINFO_DATA,
     };
-    use windows::Win32::Devices::Properties::{DEVPKEY_Device_FriendlyName, DEVPROPTYPE};
+    use windows::Win32::Devices::Properties::{
+        DEVPKEY_Device_DeviceDesc, DEVPKEY_Device_FriendlyName,
+    };
 
     let flags = if class_guid.is_some() {
         DIGCF_PRESENT
@@ -217,62 +242,33 @@ fn enumerate_npus_in_class(class_guid: Option<windows::core::GUID>) -> Vec<Strin
             if SetupDiEnumDeviceInfo(h, index, &mut data).is_err() {
                 break;
             }
-            let mut prop_type = DEVPROPTYPE(0);
-            // First call gets required buffer size.
-            let mut needed: u32 = 0;
-            let _ = SetupDiGetDevicePropertyW(
-                h,
-                &data,
-                &DEVPKEY_Device_FriendlyName,
-                &mut prop_type,
-                None,
-                Some(&mut needed),
-                0,
-            );
-            if needed > 0 {
-                let mut buf = vec![0u8; needed as usize];
-                if SetupDiGetDevicePropertyW(
-                    h,
-                    &data,
-                    &DEVPKEY_Device_FriendlyName,
-                    &mut prop_type,
-                    Some(&mut buf),
-                    None,
-                    0,
-                )
-                .is_ok()
-                {
-                    let wide: &[u16] = std::slice::from_raw_parts(
-                        buf.as_ptr() as *const u16,
-                        buf.len() / 2,
-                    );
-                    let len = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
-                    let name = String::from_utf16_lossy(&wide[..len]);
-                    let lower = name.to_ascii_lowercase();
-                    // Match the actual friendly names NPU drivers register on
-                    // real hardware. Generic terms like "qualcomm" or "intel ai"
-                    // are too broad and would match WiFi adapters or other
-                    // unrelated devices, so we use vendor specific NPU tokens.
-                    let positive = lower.contains("npu")
-                        || lower.contains("neural processing")
-                        || lower.contains("neural processor")
-                        || lower.contains(" ai boost")
-                        || lower.contains("(r) ai boost")
-                        || lower.contains("amd ipu")
-                        || lower.contains("ryzen ai")
-                        || lower.contains("xdna")
-                        || lower.contains("hexagon npu")
-                        || lower.contains("hexagon ai")
-                        || lower.contains("hailo")
-                        || lower.contains("movidius");
-                    let negative = lower.contains("audio")
-                        || lower.contains("display adapter")
-                        || lower.contains("wireless")
-                        || lower.contains("bluetooth")
-                        || lower.contains("network adapter");
-                    if positive && !negative {
-                        results.push(name);
-                    }
+            // FriendlyName isn't always set — the AMD Ryzen AI XDNA NPU on a
+            // Ryzen 9 7940HS for example only has DeviceDesc populated. Try
+            // FriendlyName first (more user-facing when present) and fall back
+            // to DeviceDesc otherwise so we don't silently skip the NPU.
+            let name = read_dev_prop(h, &data, &DEVPKEY_Device_FriendlyName)
+                .or_else(|| read_dev_prop(h, &data, &DEVPKEY_Device_DeviceDesc));
+            if let Some(name) = name {
+                let lower = name.to_ascii_lowercase();
+                let positive = lower.contains("npu")
+                    || lower.contains("neural processing")
+                    || lower.contains("neural processor")
+                    || lower.contains(" ai boost")
+                    || lower.contains("(r) ai boost")
+                    || lower.contains("amd ipu")
+                    || lower.contains("ryzen ai")
+                    || lower.contains("xdna")
+                    || lower.contains("hexagon npu")
+                    || lower.contains("hexagon ai")
+                    || lower.contains("hailo")
+                    || lower.contains("movidius");
+                let negative = lower.contains("audio")
+                    || lower.contains("display adapter")
+                    || lower.contains("wireless")
+                    || lower.contains("bluetooth")
+                    || lower.contains("network adapter");
+                if positive && !negative {
+                    results.push(name);
                 }
             }
             index += 1;
@@ -285,6 +281,135 @@ fn enumerate_npus_in_class(class_guid: Option<windows::core::GUID>) -> Vec<Strin
 #[cfg(not(windows))]
 pub fn detect_npus() -> Vec<String> {
     Vec::new()
+}
+
+#[cfg(windows)]
+fn read_dev_prop(
+    h: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
+    data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
+    key: &windows::Win32::Foundation::DEVPROPKEY,
+) -> Option<String> {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiGetDevicePropertyW;
+    use windows::Win32::Devices::Properties::DEVPROPTYPE;
+    unsafe {
+        let mut prop_type = DEVPROPTYPE(0);
+        let mut needed: u32 = 0;
+        let _ = SetupDiGetDevicePropertyW(
+            h, data, key, &mut prop_type, None, Some(&mut needed), 0,
+        );
+        if needed == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; needed as usize];
+        if SetupDiGetDevicePropertyW(
+            h, data, key, &mut prop_type, Some(&mut buf), None, 0,
+        )
+        .is_err()
+        {
+            return None;
+        }
+        let wide: &[u16] = std::slice::from_raw_parts(
+            buf.as_ptr() as *const u16,
+            buf.len() / 2,
+        );
+        let len = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
+        let s = String::from_utf16_lossy(&wide[..len]).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+}
+
+/// Debug helper used by `cargo run --example probe_npu` to enumerate every
+/// device under each class GUID + the all-classes scan and print friendly
+/// names. Lets us see exactly which SetupDi call is returning nothing on a
+/// machine where NPU detection fails.
+#[cfg(windows)]
+pub fn detect_npus_verbose() {
+    use windows::core::GUID;
+    let guid_a = GUID::from_values(
+        0xf01a9d53,
+        0x3ff6,
+        0x48d2,
+        [0x9f, 0x97, 0xc8, 0xa7, 0x00, 0x4b, 0xe1, 0x0c],
+    );
+    let guid_b = GUID::from_values(
+        0xf01a9d53,
+        0x3ff6,
+        0x48d2,
+        [0x9f, 0x97, 0xe8, 0xc4, 0x0d, 0x66, 0x64, 0xc8],
+    );
+    println!("--- ComputeAccelerator variant A ---");
+    dump_class(Some(guid_a));
+    println!("--- ComputeAccelerator variant B ---");
+    dump_class(Some(guid_b));
+    println!("--- All classes (filtered) ---");
+    dump_class(None);
+}
+
+#[cfg(windows)]
+fn dump_class(class_guid: Option<windows::core::GUID>) {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+        DIGCF_ALLCLASSES, DIGCF_PRESENT, SP_DEVINFO_DATA,
+    };
+    use windows::Win32::Devices::Properties::DEVPKEY_Device_FriendlyName;
+
+    let flags = if class_guid.is_some() {
+        DIGCF_PRESENT
+    } else {
+        DIGCF_PRESENT | DIGCF_ALLCLASSES
+    };
+    unsafe {
+        let guid_ptr: Option<*const windows::core::GUID> =
+            class_guid.as_ref().map(|g| g as *const _);
+        let h = match SetupDiGetClassDevsW(guid_ptr, None, None, flags) {
+            Ok(h) => h,
+            Err(e) => {
+                println!("  SetupDiGetClassDevsW failed: {:?}", e);
+                return;
+            }
+        };
+        println!("  handle ok, enumerating");
+        let mut index: u32 = 0;
+        let mut total = 0;
+        let mut npu_like = 0;
+        loop {
+            let mut data = SP_DEVINFO_DATA {
+                cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
+                ..Default::default()
+            };
+            if SetupDiEnumDeviceInfo(h, index, &mut data).is_err() {
+                break;
+            }
+            total += 1;
+            use windows::Win32::Devices::Properties::DEVPKEY_Device_DeviceDesc;
+            let name_fn = read_dev_prop(h, &data, &DEVPKEY_Device_FriendlyName)
+                .or_else(|| read_dev_prop(h, &data, &DEVPKEY_Device_DeviceDesc));
+            if let Some(name) = name_fn {
+                let lower = name.to_ascii_lowercase();
+                if lower.contains("npu")
+                    || lower.contains("neural")
+                    || lower.contains("xdna")
+                    || lower.contains("ipu")
+                    || lower.contains("accelerator")
+                    || lower.contains("ai boost")
+                {
+                    println!("  [{}] {}", index, name);
+                    npu_like += 1;
+                } else if class_guid.is_some() {
+                    println!("  [{}] {} (not NPU-like)", index, name);
+                }
+            } else if class_guid.is_some() {
+                println!("  [{}] <no name>", index);
+            }
+            index += 1;
+        }
+        println!("  total devices: {}, NPU-like: {}", total, npu_like);
+        let _ = SetupDiDestroyDeviceInfoList(h);
+    }
 }
 
 /// Reset caches. Currently only the GPU inventory is memoized; the NPU probe is

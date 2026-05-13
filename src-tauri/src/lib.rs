@@ -37,6 +37,29 @@ mod file_icons;
 #[cfg(target_os = "windows")]
 mod folder_shell_registry;
 mod gpu_detect;
+
+// Detection probe helpers used by /examples/probe_npu.rs to verify NPU and
+// GPU detection on new hardware without launching the full UI. Kept as
+// hidden public functions so the example builds against the lib crate.
+#[doc(hidden)]
+pub fn __test_detect_npus() -> Vec<String> {
+    gpu_detect::detect_npus()
+}
+
+#[doc(hidden)]
+#[cfg(windows)]
+pub fn __test_detect_npus_verbose() {
+    gpu_detect::detect_npus_verbose();
+}
+
+#[doc(hidden)]
+pub fn __test_detect_gpus() -> Vec<(String, u32, u64, bool, bool)> {
+    gpu_detect::detect_gpus()
+        .adapters
+        .into_iter()
+        .map(|a| (a.name, a.vendor_id, a.dedicated_video_mb, a.is_hardware, a.is_discrete))
+        .collect()
+}
 mod inference;
 mod local_ai;
 
