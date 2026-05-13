@@ -4580,6 +4580,10 @@ struct NativeSettings {
     /// the per-theme defaults from `icon_folder_colors`.
     #[serde(default)]
     folder_color: Option<String>,
+    /// User-defined accent hex used when `accent == "custom"`. Stored separately
+    /// from the preset id so the hex survives switching to a preset and back.
+    #[serde(default)]
+    custom_accent_hex: Option<String>,
 }
 
 impl Default for NativeSettings {
@@ -4608,6 +4612,7 @@ impl Default for NativeSettings {
             clip_search_enabled: false,
             first_run_welcome_dismissed: false,
             folder_color: None,
+            custom_accent_hex: None,
         }
     }
 }
@@ -7576,7 +7581,19 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
     }
 
     let mut palette = theme_palette(&settings.theme);
-    let (accent, accent_soft, accent_strong) = accent_override(&settings.accent);
+    let (accent, accent_soft, accent_strong) = if settings.accent == "custom" {
+        let hex = settings
+            .custom_accent_hex
+            .as_deref()
+            .filter(|h| h.len() == 7 && h.starts_with('#'))
+            .unwrap_or("#4f9cff");
+        let base = color(hex);
+        let soft = rgba_u8(base.red(), base.green(), base.blue(), 0.16);
+        let strong = lighten_color(base, 0.20);
+        (base, soft, strong)
+    } else {
+        accent_override(&settings.accent)
+    };
     palette.accent = accent;
     palette.accent_soft = accent_soft;
     palette.accent_strong = accent_strong;
@@ -7643,6 +7660,12 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
             )
         });
     ui.set_folder_color_hex(ss(&folder_hex));
+
+    let accent_hex = settings
+        .custom_accent_hex
+        .clone()
+        .unwrap_or_else(|| "#4f9cff".to_string());
+    ui.set_custom_accent_hex(ss(&accent_hex));
 }
 
 fn set_choice_chip_strides(metrics: &AppMetrics, row_h: f32) {
@@ -11497,22 +11520,42 @@ impl NativeController {
         self.show_toast_kind(ui, msg, kind);
     }
 
-    /// Refresh both primary and secondary panes after a drop, preserving which
-    /// pane is "active" (since drop_files_from_drag may not match active_pane).
+    /// Invalidate directory caches for both panes immediately, and schedule the
+    /// full UI refresh on the next event loop tick. Running both re-navigates
+    /// synchronously inside the Drop callback caused a visible hitch after
+    /// every drop because navigate() does a fresh directory list, fires off a
+    /// background git status thread, and rebuilds the file model. The drop
+    /// completes faster if we let the cursor return first, then refresh.
     fn invalidate_and_refresh_both_panes(&mut self, ui: &MainWindow) {
-        let saved_active = self.active_pane;
-        // Primary
-        self.app_state
-            .invalidate_directory_path(Path::new(&self.current_path));
+        // Invalidate caches synchronously so the deferred navigate() doesn't
+        // re-use stale entries that still contain the moved file in its old
+        // location.
         let primary_path = self.current_path.clone();
-        self.navigate(ui, primary_path, false);
-        // Secondary
-        if !self.secondary_path.is_empty() {
+        let secondary_path = self.secondary_path.clone();
+        self.app_state
+            .invalidate_directory_path(Path::new(&primary_path));
+        if !secondary_path.is_empty() {
             self.app_state
-                .invalidate_directory_path(Path::new(&self.secondary_path));
-            let sec_path = self.secondary_path.clone();
-            self.secondary_navigate(ui, sec_path);
+                .invalidate_directory_path(Path::new(&secondary_path));
         }
+        // Defer the heavy re-navigate to the next event tick. The post-drag UI
+        // returns immediately and the file list redraws on the next frame. The
+        // existing primary refresh callback only refreshes whichever pane is
+        // currently active, so we force-refresh primary (preserving the saved
+        // active pane) and fire secondary_refresh separately.
+        let saved_active = self.active_pane;
+        let weak = ui.as_weak();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                // refresh() routes by active_pane internally; we need both. We
+                // dispatch secondary first, then primary, and let the callback
+                // handlers borrow_mut the controller in turn.
+                if ui.get_dual_pane() {
+                    ui.invoke_secondary_refresh();
+                }
+                ui.invoke_refresh();
+            }
+        });
         self.active_pane = saved_active;
         self.sync_active_pane(ui);
     }
@@ -12668,6 +12711,22 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
+    // Refresh the secondary pane explicitly. Used by the post-drag-drop refresh
+    // path so both panes pick up moved files without depending on which pane is
+    // currently "active".
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_secondary_refresh(move || {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            if !ctrl.secondary_path.is_empty() {
+                let path = ctrl.secondary_path.clone();
+                ctrl.app_state.invalidate_directory_path(Path::new(&path));
+                ctrl.secondary_navigate(&ui, path);
+            }
+        }
+    });
+
     // Debounce: keystroke fires search_requested → 200ms timer → search()
     let search_debounce = Rc::new(slint::Timer::default());
     let weak = ui.as_weak();
@@ -12983,6 +13042,32 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             controller.settings.accent = accent.to_string();
             apply_theme(&ui, &controller.settings);
             controller.save_settings();
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_custom_accent_changed(move |hex_val| {
+        if let Some(ui) = weak.upgrade() {
+            let mut h = hex_val.to_string();
+            if !h.starts_with('#') {
+                h = format!("#{h}");
+            }
+            if h.len() != 7 {
+                return;
+            }
+            // Reject any character that isn't a hex digit so a typo like "#xxxxxx"
+            // doesn't slip through and crash color parsing downstream.
+            if !h[1..].chars().all(|c| c.is_ascii_hexdigit()) {
+                return;
+            }
+            let mut controller = c.borrow_mut();
+            controller.settings.custom_accent_hex = Some(h.clone());
+            controller.settings.accent = "custom".to_string();
+            apply_theme(&ui, &controller.settings);
+            controller.save_settings();
+            ui.set_custom_accent_hex(ss(&h));
+            ui.set_active_accent(ss("custom"));
         }
     });
 
@@ -14413,10 +14498,10 @@ fn pick_drop_destination(
     let primary_w = ui.get_primary_pane_w();
     let splitter_w = ui.get_pane_splitter_w();
     let title_h: f32 = 36.0;
-    // Simple mode bumps the toolbar from 44 to 68 px. Using a hard-coded 44 here
-    // broke drop hit testing in simple mode by 24 px, which mis-routed every
-    // drop that landed near the top of the file list.
-    let toolbar_h: f32 = if ui.get_ui_mode().as_str() == "simple" { 68.0 } else { 44.0 };
+    // Simple mode uses a two-row toolbar that's 88 px tall. Normal mode is 44.
+    // Using the wrong value here mis-routes every drop near the top of the file
+    // list by the difference, so keep this in sync with `toolbar_h` in main.slint.
+    let toolbar_h: f32 = if ui.get_ui_mode().as_str() == "simple" { 88.0 } else { 44.0 };
     let content_top = title_h + toolbar_h;
     let main_left = sidebar_w;
 
@@ -14704,13 +14789,19 @@ pub fn run() {
                     eprintln!("[file_drag] could not find HWND, drop target disabled");
                     return;
                 };
-                // Highlight the destination pane while dragging — fires every
-                // DragOver tick on the UI thread (IDropTarget runs in our STA).
+                // Highlight the destination pane AND the exact target folder
+                // while dragging — fires every DragOver tick on the UI thread.
+                // pick_drop_destination resolves the cursor position to the
+                // folder path that a drop would land in (sidebar entry, subfolder
+                // row, or pane background) and we surface that as drag_target_path
+                // so the slint side can put a glow on the row or sidebar item.
                 let weak_hover = ui.as_weak();
+                let c_hover = controller.clone();
                 file_drag::register_drag_over_handler(move |is_active, screen_x, screen_y| {
                     let Some(ui) = weak_hover.upgrade() else { return; };
                     if !is_active {
                         ui.set_drag_over_pane(SharedString::from(""));
+                        ui.set_drag_target_path(SharedString::from(""));
                         return;
                     }
                     use windows::Win32::Foundation::POINT;
@@ -14719,20 +14810,24 @@ pub fn run() {
                     unsafe { let _ = ScreenToClient(hwnd, &mut p); }
                     let scale = ui.window().scale_factor().max(0.1);
                     let logical_x = (p.x as f32) / scale;
-                    if !ui.get_dual_pane() {
+                    let pane_label = if ui.get_dual_pane() {
+                        let primary_right_edge = ui.get_sidebar_w()
+                            + ui.get_primary_pane_w()
+                            + ui.get_pane_splitter_w() / 2.0;
+                        if logical_x < primary_right_edge { "primary" } else { "secondary" }
+                    } else {
                         let sw = ui.get_sidebar_w();
-                        if logical_x >= sw {
-                            ui.set_drag_over_pane(SharedString::from("primary"));
-                        } else {
-                            ui.set_drag_over_pane(SharedString::from(""));
-                        }
-                        return;
+                        if logical_x >= sw { "primary" } else { "" }
+                    };
+                    ui.set_drag_over_pane(SharedString::from(pane_label));
+                    // Resolve the precise drop destination for the highlight glow.
+                    // borrow() here can fail if a previous mutation is mid-flight;
+                    // skip the row/sidebar glow update in that case rather than
+                    // panic.
+                    if let Ok(ctrl) = c_hover.try_borrow() {
+                        let target = pick_drop_destination(&ui, &ctrl, hwnd, screen_x, screen_y);
+                        ui.set_drag_target_path(SharedString::from(target));
                     }
-                    let primary_right_edge = ui.get_sidebar_w()
-                        + ui.get_primary_pane_w()
-                        + ui.get_pane_splitter_w() / 2.0;
-                    let pane = if logical_x < primary_right_edge { "primary" } else { "secondary" };
-                    ui.set_drag_over_pane(SharedString::from(pane));
                 });
 
                 if let Some(dt) = file_drag::register_drop_target(

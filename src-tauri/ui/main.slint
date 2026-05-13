@@ -168,11 +168,18 @@ component ToolButton inherits Rectangle {
         (root.active ? ThemePalette.accent_soft :
         (touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0))));
 
-    // Icon sits a touch higher when the always-on caption is showing, so the
-    // label has space below it without enlarging the icon itself.
+    // Two captioned layouts:
+    //   - Wide button (width > height + 12 px): icon on the left, label to the
+    //     right. Used by the simple-mode toolbar where each button is 88x38 and
+    //     the caption needs to read like a normal button label.
+    //   - Tall button (default captioned form): icon on top, label beneath.
+    property <bool> caption_inline: root.show_caption && root.width > root.height + 12px;
+
     SvgIcon {
-        x: (parent.width - 16px) / 2;
-        y: root.show_caption ? 4px : (parent.height - 16px) / 2;
+        x: root.caption_inline ? 10px : (parent.width - 16px) / 2;
+        y: root.caption_inline
+            ? (parent.height - 16px) / 2
+            : (root.show_caption ? 4px : (parent.height - 16px) / 2);
         icon_size: 16px;
         data: root.icon_data;
         tint: root.danger && touch.has-hover ? white : (root.active || touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted);
@@ -189,8 +196,25 @@ component ToolButton inherits Rectangle {
         vertical-alignment: center;
     }
 
-    // Always-on caption underneath the icon for simple-mode toolbars.
-    if root.show_caption && root.text_label != "": Text {
+    // Inline caption (icon-left layout) — wider buttons use this form so the
+    // text has breathing room and reads naturally.
+    if root.show_caption && root.text_label != "" && root.caption_inline: Text {
+        x: 32px;
+        y: 0;
+        width: parent.width - 36px;
+        height: parent.height;
+        text: root.text_label;
+        color: root.active || touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: left;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    // Stacked caption (icon-on-top layout) — kept for narrow captioned buttons
+    // where there isn't room for the inline form.
+    if root.show_caption && root.text_label != "" && !root.caption_inline: Text {
         x: 0;
         y: 22px;
         width: parent.width;
@@ -291,24 +315,40 @@ component TabButton inherits Rectangle {
 component SideRow inherits Rectangle {
     in property <SideItem> item;
     in property <int> index;
+    in property <string> drag_target_path;
     callback activated(int);
     callback rename_activated(string);
 
+    property <bool> is_drop_target: !root.item.is_header
+        && root.drag_target_path != ""
+        && root.drag_target_path == root.item.path;
+
     height: root.item.is_header ? 24px : 32px;
-    // Transparent base - visible highlight is drawn by the inner Rectangle
-    // below so it can stop short of the scroll bar gutter on the right.
     background: rgba(0, 0, 0, 0);
 
     // Visual highlight pill. Sits inside the row but pulls a 20 px gutter
     // in from the right edge so the sidebar ListView's scroll bar paints
-    // in its own lane with visible breathing room from the pill.
+    // in its own lane with visible breathing room from the pill. When this
+    // row is the current drop target, a brighter accent_soft fills the pill
+    // and a thin accent border outlines it so the user can tell exactly
+    // where the file will land.
     Rectangle {
         x: 0;
         y: 0;
         width: parent.width - 20px;
         height: parent.height;
         border-radius: AppMetrics.radius_small;
-        background: !root.item.is_header && root.item.active ? ThemePalette.accent_soft : (!root.item.is_header && touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0));
+        border-width: root.is_drop_target ? 2px : 0px;
+        border-color: root.is_drop_target ? ThemePalette.accent_strong : rgba(0, 0, 0, 0);
+        background: root.is_drop_target
+            ? ThemePalette.accent_soft
+            : (!root.item.is_header && root.item.active
+                ? ThemePalette.accent_soft
+                : (!root.item.is_header && touch.has-hover
+                    ? rgba(255, 255, 255, 0.06)
+                    : rgba(0, 0, 0, 0)));
+        animate background { duration: 120ms; easing: ease-out; }
+        animate border-color { duration: 120ms; easing: ease-out; }
     }
 
     Text {
@@ -423,12 +463,12 @@ component SideRow inherits Rectangle {
 component NodeVisual {
     in property <bool> is_dir;
     in property <string> extension;
-    // Folders are clearly wider than tall so they read as a folder silhouette
-    // and not a square tile. The previous 54x44 (1.23 ratio) sat too close to
-    // square in the list view; 62x40 (1.55 ratio) gives the classic folder
-    // outline at the same pixel envelope.
-    in property <length> visual_width: root.is_dir ? 62px : 46px;
-    in property <length> visual_height: root.is_dir ? 40px : 54px;
+    // Folders use a clearly wider-than-tall outline so they read as a folder
+    // silhouette and not a square tile. Iterations: 54x44 (1.23) was near square,
+    // 62x40 (1.55) was wider but still chunky, 68x36 (1.89) is closer to the
+    // proportions of a real manila folder.
+    in property <length> visual_width: root.is_dir ? 68px : 46px;
+    in property <length> visual_height: root.is_dir ? 36px : 54px;
 
     width: root.visual_width;
     height: root.visual_height;
@@ -858,10 +898,18 @@ component FileRow inherits Rectangle {
     callback rename_commit(int, string);
     callback file_drag_requested(int);
 
+    // Drag-target path comes from the MainWindow root and a FileRow renders a
+    // pulsing accent border when its own file_path matches. Drop highlight only
+    // applies to folder rows since dropping onto a file is a no-op.
+    in property <string> drag_target_path;
+
     property <bool> ctrl_held: false;
     property <bool> shift_held: false;
     property <bool> is_renaming: root.rename_index == root.index;
     property <bool> drag_started: false;
+    property <bool> is_drop_target: root.item.is_dir
+        && root.drag_target_path != ""
+        && root.drag_target_path == root.item.file_path;
     // Date grouping header sits above the row in the details view only. The
     // backend sets show_date_group_header=true on the first row of every new
     // bucket (Today, Yesterday, This week, etc) when sorted by Date modified.
@@ -918,6 +966,22 @@ component FileRow inherits Rectangle {
         border-width: 2px;
         border-color: ThemePalette.accent_strong;
         background: ThemePalette.accent_soft;
+    }
+
+    // Drop-target glow - pulses on the folder row the cursor is currently over
+    // during a drag, so the user can tell exactly where the drop will land. The
+    // ScaleEffect-style pulse is approximated with a static accent border for
+    // now since Slint 1.x does not have a built-in keyframe animation property
+    // for repeating glows.
+    if root.is_drop_target: Rectangle {
+        x: -3px; y: root.group_header_h - 3px;
+        width: parent.width + 6px;
+        height: parent.height - root.group_header_h + 6px;
+        border-radius: parent.border-radius + 2px;
+        border-width: 2px;
+        border-color: ThemePalette.accent_strong;
+        background: ThemePalette.accent_soft;
+        animate border-color { duration: 240ms; easing: ease-in-out; }
     }
 
     if root.view_mode == "list": NodeVisual {
@@ -1498,6 +1562,11 @@ export component MainWindow inherits Window {
     // "primary" / "secondary" / "" - pane currently being hovered during a drag-drop;
     // overlays a thicker glowing border so the user can see where the drop will land.
     in-out property <string> drag_over_pane: "";
+    // Exact destination folder path that a drop at the current cursor position
+    // would land in (sidebar entry, subfolder row, or pane background). Set by
+    // the Win32 DragOver handler and consumed by FileRow / SideRow to draw a
+    // glowing border on the target while the drag is in progress.
+    in-out property <string> drag_target_path: "";
     in-out property <bool> show_hidden: false;
     in-out property <bool> settings_visible: false;
     in-out property <string> settings_tab: "appearance";
@@ -1599,6 +1668,7 @@ export component MainWindow inherits Window {
     callback go_forward();
     callback go_up();
     callback refresh();
+    callback secondary_refresh();
     callback search_requested(string);
     callback search_immediate(string);
     callback toggle_search_scope();
@@ -1615,6 +1685,8 @@ export component MainWindow inherits Window {
     callback density_selected(string);
     callback folder_color_changed(string);
     in-out property <string> folder_color_hex: "#e2a934";
+    callback custom_accent_changed(string);
+    in-out property <string> custom_accent_hex: "#4f9cff";
     callback index_mode_selected(string);
     callback clear_thumbnail_cache();
     callback rebuild_index();
@@ -1718,11 +1790,16 @@ export component MainWindow inherits Window {
         easing: ease-out;
     }
     property <length> title_h: 36px;
-    // Simple mode bumps the toolbar to two visual rows: icon row on top, caption
-    // row beneath, plus a separator strip between the navigation cluster and the
-    // view cluster. The labels stay visible at all times in this mode so users
-    // who don't recognize the glyphs can read what each button does.
-    property <length> toolbar_h: root.is_simple ? 68px : 44px;
+    // Simple mode uses a true two-row toolbar: navigation cluster + address bar
+    // on top, view modes + actions underneath, each row a full 38 px tall with
+    // wider buttons that have room for a readable caption next to the icon. The
+    // captions stay visible at all times so users who don't recognise the glyphs
+    // can read what each button does.
+    property <length> toolbar_h: root.is_simple ? 88px : 44px;
+    property <length> simple_row1_y: 4px;
+    property <length> simple_row2_y: 48px;
+    property <length> simple_btn_w: 88px;
+    property <length> simple_btn_h: 38px;
     property <length> filter_bar_h: root.filter_bar_visible ? 36px : 0px;
     property <length> status_h: 26px;
     // User-set preview pane width (drag handle on its left edge writes here).
@@ -1864,6 +1941,7 @@ export component MainWindow inherits Window {
                 for item[index] in root.side_items: SideRow {
                     item: item;
                     index: index;
+                    drag_target_path: root.drag_target_path;
                     activated(i) => { root.side_activated(i); }
                     rename_activated(path) => { root.rename_tag_prompt(path); }
                 }
@@ -1878,6 +1956,7 @@ export component MainWindow inherits Window {
                 for item[index] in root.side_items_simple: SideRow {
                     item: item;
                     index: index;
+                    drag_target_path: root.drag_target_path;
                     activated(i) => { root.side_activated(i); }
                     rename_activated(path) => { root.rename_tag_prompt(path); }
                 }
@@ -1943,19 +2022,24 @@ export component MainWindow inherits Window {
                 font-weight: 600;
                 vertical-alignment: center;
             }
-            // Action buttons aligned to the right
-            ToolButton { x: parent.width - 392px; y: 6px; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
-            ToolButton { x: parent.width - 358px; y: 6px; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
-            ToolButton { x: parent.width - 324px; y: 6px; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
-            Rectangle { x: parent.width - 290px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 278px; y: 6px; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.rename_index = root.selected_index; } }
-            ToolButton { x: parent.width - 244px; y: 6px; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
-            Rectangle { x: parent.width - 210px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 198px; y: 6px; icon_data: "M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8 M16 6l-4-4-4 4 M12 2v13"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
-            ToolButton { x: parent.width - 164px; y: 6px; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
-            ToolButton { x: parent.width - 130px; y: 6px; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
+            // Selection action bar y offset. Normal mode anchors at y:6 inside a
+            // 44 px bar. Simple mode centres the captioned buttons inside the
+            // taller 88 px bar so the row doesn't sit awkwardly at the top.
+            // Captioned buttons render with icon-on-top + label-below in this
+            // bar because each is only 31 px wide.
+            // (sel_y, sel_div_y, btn_h) are inlined into every entry below.
+            ToolButton { x: parent.width - 392px; y: root.is_simple ? 16px : 6px; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
+            ToolButton { x: parent.width - 358px; y: root.is_simple ? 16px : 6px; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
+            ToolButton { x: parent.width - 324px; y: root.is_simple ? 16px : 6px; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
+            Rectangle { x: parent.width - 290px; y: root.is_simple ? 24px : 12px; width: 1px; height: root.is_simple ? 40px : 20px; background: ThemePalette.border; }
+            ToolButton { x: parent.width - 278px; y: root.is_simple ? 16px : 6px; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.rename_index = root.selected_index; } }
+            ToolButton { x: parent.width - 244px; y: root.is_simple ? 16px : 6px; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
+            Rectangle { x: parent.width - 210px; y: root.is_simple ? 24px : 12px; width: 1px; height: root.is_simple ? 40px : 20px; background: ThemePalette.border; }
+            ToolButton { x: parent.width - 198px; y: root.is_simple ? 16px : 6px; icon_data: "M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8 M16 6l-4-4-4 4 M12 2v13"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
+            ToolButton { x: parent.width - 164px; y: root.is_simple ? 16px : 6px; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
+            ToolButton { x: parent.width - 130px; y: root.is_simple ? 16px : 6px; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
             // Clear selection button on the right edge
-            ToolButton { x: parent.width - 44px; y: 6px; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
+            ToolButton { x: parent.width - 44px; y: root.is_simple ? 16px : 6px; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
         }
 
         // Toolbar - z:10 so tooltip pop-overs render above the file area below
@@ -1969,22 +2053,73 @@ export component MainWindow inherits Window {
             property <bool> show_toolbar_search: self.width >= 850px;
             property <bool> show_toolbar_sort: self.width >= 1025px;
 
-            ToolButton { x: 10px; y: 6px; icon_data: "M15 18l-6-6 6-6"; text_label: "Back"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Back"; clicked => { root.go_back(); } }
-            ToolButton { x: 45px; y: 6px; icon_data: "M9 18l6-6-6-6"; text_label: "Forward"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Forward"; clicked => { root.go_forward(); } }
-            ToolButton { x: 80px; y: 6px; icon_data: "M12 19V5 M5 12l7-7 7 7"; text_label: "Up"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Up one level"; clicked => { root.go_up(); } }
-            ToolButton { x: 115px; y: 6px; icon_data: "M3 12a9 9 0 0 1 15-6.7L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15 6.7L3 16 M3 21v-5h5"; text_label: "Refresh"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Refresh"; clicked => { root.refresh(); } }
+            // Navigation cluster. Normal mode: compact 31x31 icons on a 44 px bar.
+            // Simple mode: 88x38 buttons with an inline label, on row 1 of an 88 px bar.
+            ToolButton {
+                x: 10px;
+                y: root.is_simple ? root.simple_row1_y : 6px;
+                icon_data: "M15 18l-6-6 6-6";
+                text_label: "Back";
+                show_caption: root.is_simple;
+                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_height: root.is_simple ? root.simple_btn_h : 31px;
+                tooltip: "Back";
+                clicked => { root.go_back(); }
+            }
+            ToolButton {
+                x: root.is_simple ? 102px : 45px;
+                y: root.is_simple ? root.simple_row1_y : 6px;
+                icon_data: "M9 18l6-6-6-6";
+                text_label: "Forward";
+                show_caption: root.is_simple;
+                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_height: root.is_simple ? root.simple_btn_h : 31px;
+                tooltip: "Forward";
+                clicked => { root.go_forward(); }
+            }
+            ToolButton {
+                x: root.is_simple ? 194px : 80px;
+                y: root.is_simple ? root.simple_row1_y : 6px;
+                icon_data: "M12 19V5 M5 12l7-7 7 7";
+                text_label: "Up";
+                show_caption: root.is_simple;
+                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_height: root.is_simple ? root.simple_btn_h : 31px;
+                tooltip: "Up one level";
+                clicked => { root.go_up(); }
+            }
+            ToolButton {
+                x: root.is_simple ? 286px : 115px;
+                y: root.is_simple ? root.simple_row1_y : 6px;
+                icon_data: "M3 12a9 9 0 0 1 15-6.7L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15 6.7L3 16 M3 21v-5h5";
+                text_label: "Refresh";
+                show_caption: root.is_simple;
+                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_height: root.is_simple ? root.simple_btn_h : 31px;
+                tooltip: "Refresh";
+                clicked => { root.refresh(); }
+            }
 
-            Rectangle { x: 156px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
+            // Subtle divider between the navigation cluster and the address bar.
+            Rectangle {
+                x: root.is_simple ? 380px : 156px;
+                y: root.is_simple ? 8px : 12px;
+                width: 1px;
+                height: root.is_simple ? 30px : 20px;
+                background: ThemePalette.border;
+            }
 
             Rectangle {
-                x: 167px;
-                y: 6px;
-                width: toolbar.show_toolbar_sort
-                    ? Math.max(80px, parent.width - 880px)
-                    : (toolbar.show_toolbar_search
-                        ? Math.max(80px, parent.width - 708px)
-                        : Math.max(80px, parent.width - 492px));
-                height: 31px;
+                x: root.is_simple ? 390px : 167px;
+                y: root.is_simple ? 8px : 6px;
+                width: root.is_simple
+                    ? Math.max(120px, parent.width - 480px)
+                    : (toolbar.show_toolbar_sort
+                        ? Math.max(80px, parent.width - 880px)
+                        : (toolbar.show_toolbar_search
+                            ? Math.max(80px, parent.width - 708px)
+                            : Math.max(80px, parent.width - 492px)));
+                height: root.is_simple ? 30px : 31px;
                 border-width: 1px;
                 border-color: ThemePalette.border;
                 border-radius: AppMetrics.radius_small;
@@ -2129,7 +2264,9 @@ export component MainWindow inherits Window {
             }
 
             Rectangle {
-                visible: toolbar.show_toolbar_search;
+                // Hidden in simple mode because row 2 is dedicated to view modes
+                // and the wider captioned buttons would overlap the search field.
+                visible: toolbar.show_toolbar_search && !root.is_simple;
                 x: toolbar.show_toolbar_sort ? parent.width - 705px : parent.width - 524px;
                 y: 6px;
                 width: 208px;
@@ -2229,7 +2366,9 @@ export component MainWindow inherits Window {
             }
 
             Rectangle {
-                visible: toolbar.show_toolbar_sort;
+                // Hidden in simple mode for the same reason as the search box —
+                // the simple-mode row 2 occupies this region.
+                visible: toolbar.show_toolbar_sort && !root.is_simple;
                 x: parent.width - 489px;
                 y: 6px;
                 width: 168px;
@@ -2285,11 +2424,69 @@ export component MainWindow inherits Window {
             }
 
             Rectangle { x: parent.width - 317px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 306px; y: 6px; icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z"; text_label: "Icons"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Icon view"; active: root.view_mode == "grid"; clicked => { root.set_view("grid"); } }
-            ToolButton { x: parent.width - 272px; y: 6px; icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12"; text_label: "Compact"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Compact view"; active: root.view_mode == "compact"; clicked => { root.set_view("compact"); } }
-            ToolButton { x: parent.width - 238px; y: 6px; icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01"; text_label: "Details"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Details view"; active: root.view_mode == "list"; clicked => { root.set_view("list"); } }
-            ToolButton { x: parent.width - 204px; y: 6px; icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01"; text_label: "Gallery"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Gallery view"; active: root.view_mode == "gallery"; clicked => { root.set_view("gallery"); } }
-            ToolButton { x: parent.width - 170px; y: 6px; icon_data: "M3 4h18v16H3z M14 4v16"; text_label: "Preview"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Preview pane"; active: root.preview_visible; clicked => { root.toggle_preview(); } }
+            // View-mode cluster. Normal mode: compact 31x31 icons right-aligned on
+            // row 1. Simple mode: 88x38 captioned buttons left-aligned on row 2,
+            // forming the second visual bar the user asked for.
+            ToolButton {
+                x: root.is_simple ? 10px : parent.width - 306px;
+                y: root.is_simple ? root.simple_row2_y : 6px;
+                icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z";
+                text_label: "Icons";
+                show_caption: root.is_simple;
+                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_height: root.is_simple ? root.simple_btn_h : 31px;
+                tooltip: "Icon view";
+                active: root.view_mode == "grid";
+                clicked => { root.set_view("grid"); }
+            }
+            ToolButton {
+                x: root.is_simple ? 102px : parent.width - 272px;
+                y: root.is_simple ? root.simple_row2_y : 6px;
+                icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12";
+                text_label: "Compact";
+                show_caption: root.is_simple;
+                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_height: root.is_simple ? root.simple_btn_h : 31px;
+                tooltip: "Compact view";
+                active: root.view_mode == "compact";
+                clicked => { root.set_view("compact"); }
+            }
+            ToolButton {
+                x: root.is_simple ? 194px : parent.width - 238px;
+                y: root.is_simple ? root.simple_row2_y : 6px;
+                icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01";
+                text_label: "Details";
+                show_caption: root.is_simple;
+                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_height: root.is_simple ? root.simple_btn_h : 31px;
+                tooltip: "Details view";
+                active: root.view_mode == "list";
+                clicked => { root.set_view("list"); }
+            }
+            ToolButton {
+                x: root.is_simple ? 286px : parent.width - 204px;
+                y: root.is_simple ? root.simple_row2_y : 6px;
+                icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01";
+                text_label: "Gallery";
+                show_caption: root.is_simple;
+                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_height: root.is_simple ? root.simple_btn_h : 31px;
+                tooltip: "Gallery view";
+                active: root.view_mode == "gallery";
+                clicked => { root.set_view("gallery"); }
+            }
+            ToolButton {
+                x: root.is_simple ? 378px : parent.width - 170px;
+                y: root.is_simple ? root.simple_row2_y : 6px;
+                icon_data: "M3 4h18v16H3z M14 4v16";
+                text_label: "Preview";
+                show_caption: root.is_simple;
+                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_height: root.is_simple ? root.simple_btn_h : 31px;
+                tooltip: "Preview pane";
+                active: root.preview_visible;
+                clicked => { root.toggle_preview(); }
+            }
             ToolButton { visible: !root.is_simple; x: parent.width - 136px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
             // Clear-sort button - appears in the gap between Dual Pane and Command Palette
             // when any non-default sort is active. Resets to Name ↑ (natural order).
@@ -2303,7 +2500,17 @@ export component MainWindow inherits Window {
                 tooltip: "Clear sort (reset to Name ↑)";
                 clicked => { root.sort_column("reset"); }
             }
-            ToolButton { x: parent.width - 68px; y: 6px; icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"; text_label: "Actions"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Command palette"; clicked => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; } }
+            ToolButton {
+                x: root.is_simple ? parent.width - root.simple_btn_w - 10px : parent.width - 68px;
+                y: root.is_simple ? root.simple_row2_y : 6px;
+                icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z";
+                text_label: "Actions";
+                show_caption: root.is_simple;
+                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_height: root.is_simple ? root.simple_btn_h : 31px;
+                tooltip: "Command palette";
+                clicked => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; }
+            }
 
             Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
         }
@@ -2466,6 +2673,7 @@ export component MainWindow inherits Window {
                         index: index;
                         view_mode: root.view_mode;
                         rename_index: root.rename_index;
+                        drag_target_path: root.drag_target_path;
                         selected(i, ctrl, shift) => { root.file_selected(i, ctrl, shift); }
                         opened(i) => { root.file_opened(i); }
                         context(i, cx, cy) => {
@@ -2535,6 +2743,7 @@ export component MainWindow inherits Window {
                         index: index;
                         view_mode: root.view_mode;
                         rename_index: root.rename_index;
+                        drag_target_path: root.drag_target_path;
                         selected(i, ctrl, shift) => { root.file_selected(i, ctrl, shift); }
                         opened(i) => { root.file_opened(i); }
                         context(i, cx, cy) => {
@@ -2841,6 +3050,7 @@ export component MainWindow inherits Window {
                         index: index;
                         view_mode: root.view_mode == "gallery" ? "compact" : root.view_mode;
                         rename_index: -1;
+                        drag_target_path: root.drag_target_path;
                         selected(i, ctrl, shift) => { root.secondary_file_selected(i, ctrl, shift); }
                         opened(i) => { root.secondary_file_opened(i); }
                         context(i, cx, cy) => {
@@ -3669,6 +3879,50 @@ export component MainWindow inherits Window {
                             item: accent;
                             active: root.active_accent == accent.id;
                             picked(id) => { root.accent_selected(id); }
+                        }
+                    }
+
+                    // Custom accent hex input. Typing a valid 7-char hex (#rrggbb)
+                    // here switches the active accent to "custom" and stores the
+                    // exact colour. Invalid or partial entries are ignored, so the
+                    // current accent stays unchanged while the user is typing.
+                    Rectangle {
+                        width: parent.width;
+                        height: 42px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: root.active_accent == "custom" ? ThemePalette.accent : ThemePalette.border;
+                        background: root.active_accent == "custom" ? ThemePalette.accent_soft : ThemePalette.panel;
+                        Text {
+                            x: 14px;
+                            y: 0;
+                            width: 132px;
+                            height: parent.height;
+                            text: "Custom hex";
+                            color: ThemePalette.text;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                        LineEdit {
+                            x: 150px;
+                            y: 7px;
+                            width: 132px;
+                            height: 28px;
+                            text: root.custom_accent_hex;
+                            font-family: AppMetrics.mono_font;
+                            font-size: 12px;
+                            placeholder-text: "#4f9cff";
+                            edited(val) => { root.custom_accent_changed(val); }
+                        }
+                        Rectangle {
+                            x: 292px;
+                            y: 11px;
+                            width: 22px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: root.active_accent == "custom" ? ThemePalette.accent : ThemePalette.border_strong;
+                            border-width: 1px;
+                            border-color: ThemePalette.border_strong;
                         }
                     }
 

@@ -162,31 +162,49 @@ pub fn preferred_directml_adapter_index() -> Option<u32> {
     None
 }
 
-/// NPU enumeration via SetupDi instead of PowerShell + Get-PnpDevice. We pass the
-/// ComputeAccelerator class GUID directly to SetupDiGetClassDevsW and then read
-/// the device's friendly name out of the property store. Same data as Get-PnpDevice,
-/// minus the ~1 second PowerShell process spawn.
+/// NPU enumeration. Two-stage probe so we catch every way Windows registers an
+/// NPU:
+///   1. ComputeAccelerator class (Win11 24H2+ device class GUID).
+///   2. ALL present devices (no class filter) with name-pattern matching.
+///
+/// AMD Ryzen AI XDNA NPUs in particular often live under the System device
+/// class on builds before 24H2, where the narrow class filter would miss them.
 #[cfg(windows)]
 pub fn detect_npus() -> Vec<String> {
-    use windows::Win32::Devices::DeviceAndDriverInstallation::{
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
-        SetupDiGetDevicePropertyW, DIGCF_PRESENT, SP_DEVINFO_DATA,
-    };
-    use windows::Win32::Devices::Properties::{DEVPKEY_Device_FriendlyName, DEVPROPTYPE};
     use windows::core::GUID;
-
-    // ComputeAccelerator class GUID per Microsoft DeviceClasses documentation.
-    // {f01a9d53-3ff6-48d2-9f97-e8c40d6664c8}
     let class_guid = GUID::from_values(
         0xf01a9d53,
         0x3ff6,
         0x48d2,
         [0x9f, 0x97, 0xe8, 0xc4, 0x0d, 0x66, 0x64, 0xc8],
     );
+    let mut results = enumerate_npus_in_class(Some(class_guid));
+    if results.is_empty() {
+        results = enumerate_npus_in_class(None);
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    results.retain(|n| seen.insert(n.clone()));
+    results
+}
 
+#[cfg(windows)]
+fn enumerate_npus_in_class(class_guid: Option<windows::core::GUID>) -> Vec<String> {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+        SetupDiGetDevicePropertyW, DIGCF_ALLCLASSES, DIGCF_PRESENT, SP_DEVINFO_DATA,
+    };
+    use windows::Win32::Devices::Properties::{DEVPKEY_Device_FriendlyName, DEVPROPTYPE};
+
+    let flags = if class_guid.is_some() {
+        DIGCF_PRESENT
+    } else {
+        DIGCF_PRESENT | DIGCF_ALLCLASSES
+    };
     let mut results: Vec<String> = Vec::new();
     unsafe {
-        let h = match SetupDiGetClassDevsW(Some(&class_guid), None, None, DIGCF_PRESENT) {
+        let guid_ptr: Option<*const windows::core::GUID> =
+            class_guid.as_ref().map(|g| g as *const _);
+        let h = match SetupDiGetClassDevsW(guid_ptr, None, None, flags) {
             Ok(h) => h,
             Err(_) => return results,
         };
@@ -231,29 +249,28 @@ pub fn detect_npus() -> Vec<String> {
                     let len = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
                     let name = String::from_utf16_lossy(&wide[..len]);
                     let lower = name.to_ascii_lowercase();
-                    // Filter by name patterns that indicate an NPU rather than some
-                    // other compute accelerator device sharing the class GUID.
-                    if lower.contains("npu")
-                        || lower.contains("neural")
-                        || lower.contains("ai boost")
-                        || lower.contains("ai pc")
-                        || lower.contains("hexagon")
+                    // Match the actual friendly names NPU drivers register on
+                    // real hardware. Generic terms like "qualcomm" or "intel ai"
+                    // are too broad and would match WiFi adapters or other
+                    // unrelated devices, so we use vendor specific NPU tokens.
+                    let positive = lower.contains("npu")
+                        || lower.contains("neural processing")
+                        || lower.contains("neural processor")
+                        || lower.contains(" ai boost")
+                        || lower.contains("(r) ai boost")
+                        || lower.contains("amd ipu")
                         || lower.contains("ryzen ai")
                         || lower.contains("xdna")
-                        || lower.contains("meteorlake")
-                        || lower.contains("meteor lake")
-                        || lower.contains("lunar lake")
-                        || lower.contains("arrow lake")
-                        || lower.contains("strix")
-                        || lower.contains("qualcomm")
-                        || lower.contains("snapdragon")
-                        || lower.contains("intel ai")
+                        || lower.contains("hexagon npu")
+                        || lower.contains("hexagon ai")
                         || lower.contains("hailo")
-                        || lower.contains("movidius")
-                        || lower.contains("vpu")
-                        || lower.contains("tpu")
-                        || lower.contains("npu accelerator")
-                    {
+                        || lower.contains("movidius");
+                    let negative = lower.contains("audio")
+                        || lower.contains("display adapter")
+                        || lower.contains("wireless")
+                        || lower.contains("bluetooth")
+                        || lower.contains("network adapter");
+                    if positive && !negative {
                         results.push(name);
                     }
                 }
