@@ -1267,7 +1267,16 @@ component FileRow inherits Rectangle {
         background: ThemePalette.accent_strong;
     }
 
+    // TouchArea is constrained to the file-content area, NOT the date-group
+    // header strip that sits above it. Without this constraint, clicks on the
+    // "Today" / "Yesterday" / "This week" labels were treated as clicks on the
+    // file below, making the click box appear misaligned from the visual row
+    // when sorted by Date modified.
     touch := TouchArea {
+        x: 0;
+        y: root.group_header_h;
+        width: parent.width;
+        height: parent.height - root.group_header_h;
         mouse-cursor: pointer;
         clicked => { root.selected(root.index, root.ctrl_held, root.shift_held); }
         double-clicked => { root.opened(root.index); }

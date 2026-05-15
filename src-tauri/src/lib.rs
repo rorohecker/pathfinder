@@ -2135,40 +2135,50 @@ fn windows_index_search_impl(
         return Ok(Vec::new());
     }
 
-    let script = r#"
+    // PowerShell `-Command` with a string form does NOT forward trailing args
+    // into `$args`. The previous version of this function tried to read
+    // `$args[0]/[1]/[2]` and the script ran with empty parameters every time,
+    // so Windows Search was effectively offline for every install. We
+    // interpolate the values into the script body the same way the auto
+    // updater does, with single quotes escaped.
+    let scope_path = path.replace('\'', "''");
+    let q_escaped = cleaned
+        .replace('\'', "''")
+        .replace('[', "[[]")
+        .replace('%', "[%]")
+        .replace('_', "[_]");
+    let script = format!(
+        r#"
 $ErrorActionPreference = 'Stop'
-$Query = $args[0]
-$Scope = $args[1]
-$Max = [int]$args[2]
 $connection = New-Object -ComObject ADODB.Connection
 $recordset = New-Object -ComObject ADODB.Recordset
 $connection.Open("Provider=Search.CollatorDSO;Extended Properties='Application=Windows';")
-$scopeItem = Get-Item -LiteralPath $Scope
+$scopeItem = Get-Item -LiteralPath '{scope}'
 $scopeUri = $scopeItem.FullName.Replace('\', '/')
-if ($scopeUri -notmatch '/$') { $scopeUri += '/' }
+if ($scopeUri -notmatch '/$') {{ $scopeUri += '/' }}
 $scopeUri = 'file:///' + $scopeUri
-$like = $Query.Replace("'", "''").Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]")
-$sql = "SELECT TOP $Max System.ItemPathDisplay FROM SYSTEMINDEX WHERE SCOPE='$scopeUri' AND System.ItemNameDisplay LIKE '%$like%'"
+$sql = "SELECT TOP {max} System.ItemPathDisplay FROM SYSTEMINDEX WHERE SCOPE='$scopeUri' AND System.ItemNameDisplay LIKE '%{q}%'"
 $recordset.Open($sql, $connection)
 $paths = New-Object System.Collections.Generic.List[string]
-while (-not $recordset.EOF) {
+while (-not $recordset.EOF) {{
   $value = $recordset.Fields.Item('System.ItemPathDisplay').Value
-  if ($value) { $paths.Add([string]$value) }
+  if ($value) {{ $paths.Add([string]$value) }}
   $recordset.MoveNext()
-}
+}}
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 ConvertTo-Json -InputObject @($paths) -Compress
-"#;
+"#,
+        scope = scope_path,
+        max = max_results,
+        q = q_escaped
+    );
 
     let output = ProcessCommand::new("powershell")
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
         .arg("-Command")
-        .arg(script)
-        .arg(&cleaned)
-        .arg(path)
-        .arg(max_results.to_string())
+        .arg(&script)
         .no_window()
         .output()
         .map_err(|e| e.to_string())?;
@@ -5759,13 +5769,18 @@ fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, S
         (format!("%{}%", like_escape(query)), query.to_lowercase())
     };
 
+    // COLLATE NOCASE on the `name LIKE ?2` clause is critical — SQLite's
+    // default LIKE collation is BINARY which made the index search refuse to
+    // match `appdata` against the column value `AppData`. Path filter stays
+    // BINARY because Windows paths are stored in their actual case and the
+    // root prefix is already supplied in the right case by the caller.
     let mut stmt = conn
         .prepare(
             "
             SELECT path, name, is_dir, size, modified, extension
             FROM files
             WHERE path LIKE ?1 ESCAPE '\\'
-              AND (name LIKE ?2 ESCAPE '\\' OR extension = ?3)
+              AND (name LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR extension = ?3)
             ORDER BY is_dir DESC, name COLLATE NOCASE ASC
             LIMIT ?4
             ",
@@ -10250,9 +10265,23 @@ impl NativeController {
         }));
         let semantic = self.settings.search_semantic_mode;
         let clip = self.settings.clip_search_enabled;
+        // Searching from a drive root (or with the search-all-scope toggle on)
+        // pushes the live-scan ceiling up so a folder anywhere on the disk can
+        // surface. The default 1200-cap covers a single directory subtree but
+        // misses targets buried deep in unrelated trees on a full C drive.
+        let path_for_limit = path.clone();
+        let is_drive_root = std::path::Path::new(&path_for_limit)
+            .components()
+            .count()
+            == 1;
+        let limit = if self.search_all_scope || is_drive_root {
+            10_000
+        } else {
+            SEARCH_LIVE_SCAN_LIMIT
+        };
         std::thread::spawn(move || {
             let (mut entries, source) =
-                hybrid_search_background(&state, &path, &query, SEARCH_LIVE_SCAN_LIMIT, token);
+                hybrid_search_background(&state, &path, &query, limit, token);
             if state.search_generation.load(Ordering::SeqCst) != token {
                 return;
             }
@@ -14465,6 +14494,7 @@ fn install_mouse_nav(_ui: &MainWindow) {}
 // We convert to client pixels via ScreenToClient, then to Slint logical
 // pixels by dividing by the window's scale factor.
 #[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
 fn hit_test_list_folder_drop(
     ui: &MainWindow,
     files: &[FileEntry],
@@ -14473,31 +14503,56 @@ fn hit_test_list_folder_drop(
     lx: f32,
     ly: f32,
     list_top: f32,
+    sort_by: &str,
 ) -> Option<String> {
     if ui.get_view_mode().as_str() != "list" || files.is_empty() {
         return None;
     }
     const PAD: f32 = 16.0;
     const ROW_H: f32 = 38.0;
+    const GROUP_HEADER_H: f32 = 26.0;
     const SCROLLBAR: f32 = 14.0;
     let left = pane_left + PAD;
     let right = pane_left + pane_w - PAD - SCROLLBAR;
     if lx < left || lx > right || ly < list_top {
         return None;
     }
-    let row = ((ly - list_top) / ROW_H).floor() as isize;
-    if row < 0 {
-        return None;
+    // When sorted by Date modified, the details view inserts a section header
+    // (Today, Yesterday, This week, etc) above the first row of each new bucket.
+    // Each header adds 26 px on top of the standard 38 px row height. A uniform
+    // 38 px stride would route every drop after the first header into the wrong
+    // row, so we walk the file list with per-row heights and find the row whose
+    // y-range contains the cursor.
+    let with_groups = sort_by == "modified";
+    let target_y = ly - list_top;
+    let mut cursor = 0.0_f32;
+    let mut last_group: &str = "";
+    for entry in files {
+        let group = if with_groups {
+            date_group_label(entry.modified)
+        } else {
+            ""
+        };
+        let header_h = if with_groups && group != last_group { GROUP_HEADER_H } else { 0.0 };
+        let row_total = header_h + ROW_H;
+        // Skip the header strip — drops on the header aren't on a folder.
+        let row_start = cursor + header_h;
+        let row_end = cursor + row_total;
+        if target_y >= row_start && target_y < row_end {
+            if entry.kind != FileKind::Directory {
+                return None;
+            }
+            if entry.path.is_empty() {
+                return None;
+            }
+            return Some(entry.path.clone());
+        }
+        cursor = row_end;
+        if with_groups {
+            last_group = group;
+        }
     }
-    let idx = row as usize;
-    let entry = files.get(idx)?;
-    if entry.kind != FileKind::Directory {
-        return None;
-    }
-    if entry.path.is_empty() {
-        return None;
-    }
-    Some(entry.path.clone())
+    None
 }
 
 #[cfg(target_os = "windows")]
@@ -14613,7 +14668,7 @@ fn pick_drop_destination(
         )
     };
 
-    if let Some(sub) = hit_test_list_folder_drop(ui, files, pane_left, pane_w, lx, ly, list_top) {
+    if let Some(sub) = hit_test_list_folder_drop(ui, files, pane_left, pane_w, lx, ly, list_top, &ctrl.sort_by) {
         file_drag::log(&format!(
             "pick_drop_destination: pane={} ROW -> '{}'",
             pane_label, sub
