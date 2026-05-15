@@ -11500,6 +11500,38 @@ impl NativeController {
             "drop_files_from_drag: dest_dir='{}', is_move={}, paths={:?}",
             dest_dir, is_move, paths
         ));
+
+        // Dropping onto the Recycle Bin sidebar entry sends every source path
+        // to the OS trash, matching what File Explorer does when you drag onto
+        // its Recycle Bin tile. The recycle:// path is a virtual destination
+        // and never a real folder, so we have to route it here before the
+        // normal move/copy path tries to use it as a parent directory.
+        if dest_dir == "recycle://" {
+            file_drag::log("drop -> Recycle Bin (trash::delete_all)");
+            let count = paths.len();
+            let result: Result<(), trash::Error> = trash::delete_all(&paths);
+            match result {
+                Ok(()) => {
+                    self.invalidate_and_refresh_both_panes(ui);
+                    let kind = "success";
+                    let msg = if count == 1 {
+                        "Moved 1 item to Recycle Bin".to_string()
+                    } else {
+                        format!("Moved {count} items to Recycle Bin")
+                    };
+                    self.show_toast_kind(ui, msg, kind);
+                }
+                Err(e) => {
+                    self.show_toast_kind(
+                        ui,
+                        format!("Failed to send items to Recycle Bin: {e}"),
+                        "error",
+                    );
+                }
+            }
+            return;
+        }
+
         let mut count = 0usize;
         let mut errors = 0usize;
         let mut skipped_self = 0usize;
@@ -11512,13 +11544,25 @@ impl NativeController {
             };
             let dest = PathBuf::from(&dest_dir).join(name);
             let same = same_inode_or_canonical_path(src, &dest);
+            // Catch the "drag folder onto itself or into a descendant of itself"
+            // case before fs::rename returns an OS error that's hard to parse.
+            // Comparing canonicalised paths handles symlinks too.
+            let canonical_src = std::fs::canonicalize(src).ok();
+            let canonical_dest_parent = std::fs::canonicalize(&dest_dir).ok();
+            let is_self_descent = match (canonical_src.as_ref(), canonical_dest_parent.as_ref()) {
+                (Some(c_src), Some(c_dest_parent)) => {
+                    src.is_dir() && c_dest_parent.starts_with(c_src)
+                }
+                _ => false,
+            };
             file_drag::log(&format!(
-                "  src='{}' -> dest='{}' same={}",
+                "  src='{}' -> dest='{}' same={} self_descent={}",
                 src_str,
                 dest.display(),
-                same
+                same,
+                is_self_descent
             ));
-            if same {
+            if same || is_self_descent {
                 skipped_self += 1;
                 continue;
             }
@@ -14505,24 +14549,59 @@ fn hit_test_list_folder_drop(
     list_top: f32,
     sort_by: &str,
 ) -> Option<String> {
-    if ui.get_view_mode().as_str() != "list" || files.is_empty() {
+    if files.is_empty() {
         return None;
     }
     const PAD: f32 = 16.0;
-    const ROW_H: f32 = 38.0;
-    const GROUP_HEADER_H: f32 = 26.0;
     const SCROLLBAR: f32 = 14.0;
+    let view = ui.get_view_mode();
+    let view_str = view.as_str();
     let left = pane_left + PAD;
     let right = pane_left + pane_w - PAD - SCROLLBAR;
     if lx < left || lx > right || ly < list_top {
         return None;
     }
-    // When sorted by Date modified, the details view inserts a section header
-    // (Today, Yesterday, This week, etc) above the first row of each new bucket.
-    // Each header adds 26 px on top of the standard 38 px row height. A uniform
-    // 38 px stride would route every drop after the first header into the wrong
-    // row, so we walk the file list with per-row heights and find the row whose
-    // y-range contains the cursor.
+    match view_str {
+        "list" => hit_test_list_rows(files, left, right, lx, ly, list_top, sort_by),
+        "compact" => hit_test_uniform_rows(files, left, right, lx, ly, list_top, 32.0),
+        "grid" | "gallery" => {
+            // Grid and gallery lay items out in a wrapping flexbox. Cells use
+            // AppMetrics.grid_w / grid_h (or hard-coded 154 px for gallery).
+            let metrics = ui.global::<AppMetrics>();
+            let grid_w = metrics.get_grid_w().max(96.0);
+            let grid_h = if view_str == "gallery" {
+                154.0
+            } else {
+                metrics.get_grid_h().max(96.0)
+            };
+            let cols = ((pane_w - PAD * 2.0 - SCROLLBAR) / grid_w).floor().max(1.0) as usize;
+            let col = ((lx - left) / grid_w).floor() as usize;
+            let row = ((ly - list_top) / grid_h).floor() as usize;
+            if col >= cols {
+                return None;
+            }
+            let idx = row * cols + col;
+            let entry = files.get(idx)?;
+            if entry.kind != FileKind::Directory || entry.path.is_empty() {
+                return None;
+            }
+            Some(entry.path.clone())
+        }
+        _ => None,
+    }
+}
+
+fn hit_test_list_rows(
+    files: &[FileEntry],
+    _left: f32,
+    _right: f32,
+    _lx: f32,
+    ly: f32,
+    list_top: f32,
+    sort_by: &str,
+) -> Option<String> {
+    const ROW_H: f32 = 38.0;
+    const GROUP_HEADER_H: f32 = 26.0;
     let with_groups = sort_by == "modified";
     let target_y = ly - list_top;
     let mut cursor = 0.0_f32;
@@ -14535,14 +14614,10 @@ fn hit_test_list_folder_drop(
         };
         let header_h = if with_groups && group != last_group { GROUP_HEADER_H } else { 0.0 };
         let row_total = header_h + ROW_H;
-        // Skip the header strip — drops on the header aren't on a folder.
         let row_start = cursor + header_h;
         let row_end = cursor + row_total;
         if target_y >= row_start && target_y < row_end {
-            if entry.kind != FileKind::Directory {
-                return None;
-            }
-            if entry.path.is_empty() {
+            if entry.kind != FileKind::Directory || entry.path.is_empty() {
                 return None;
             }
             return Some(entry.path.clone());
@@ -14553,6 +14628,26 @@ fn hit_test_list_folder_drop(
         }
     }
     None
+}
+
+fn hit_test_uniform_rows(
+    files: &[FileEntry],
+    _left: f32,
+    _right: f32,
+    _lx: f32,
+    ly: f32,
+    list_top: f32,
+    row_h: f32,
+) -> Option<String> {
+    let row = ((ly - list_top) / row_h).floor() as isize;
+    if row < 0 {
+        return None;
+    }
+    let entry = files.get(row as usize)?;
+    if entry.kind != FileKind::Directory || entry.path.is_empty() {
+        return None;
+    }
+    Some(entry.path.clone())
 }
 
 #[cfg(target_os = "windows")]
