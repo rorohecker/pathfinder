@@ -593,6 +593,11 @@ pub fn unregister_drop_target(hwnd: HWND) {
 
 /// Start a shell drag operation (blocks until drop or cancel).
 /// Returns the DROPEFFECT that the target performed (NONE = cancelled/rejected).
+///
+/// IDragSourceHelper is attached to the IDataObject before DoDragDrop so the
+/// Windows shell renders a real drag image at the cursor — same mechanism
+/// Explorer uses. This means the drag visual works even though slint may not
+/// repaint our window during DoDragDrop's modal message pump.
 pub fn start(paths: Vec<String>) -> DROPEFFECT {
     log(&format!("start: {} path(s)", paths.len()));
     unsafe {
@@ -613,9 +618,151 @@ pub fn start(paths: Vec<String>) -> DROPEFFECT {
         let src: IDropSource = DropSrc.into();
         let mut effect = DROPEFFECT_NONE;
 
+        // Attach a drag image via IDragSourceHelper so the Windows shell paints
+        // a real preview at the cursor. Failure is non-fatal — DoDragDrop still
+        // runs and the OS falls back to the default cursor change.
+        match attach_drag_image(&data, &paths) {
+            Ok(()) => log("IDragSourceHelper attached"),
+            Err(e) => log(&format!("IDragSourceHelper failed (non-fatal): {e}")),
+        }
+
         let r = DoDragDrop(&data, &src, DROPEFFECT_COPY | DROPEFFECT_MOVE, &mut effect);
         log(&format!("DoDragDrop -> {:?}, effect=0x{:x}", r, effect.0));
         effect
+    }
+}
+
+/// Build a HBITMAP showing the count and first file name, then attach it as the
+/// drag image via IDragSourceHelper. Returns Err on any COM/GDI failure; the
+/// caller treats that as non-fatal because DoDragDrop still works without an
+/// attached image (just falls back to the default cursor change).
+unsafe fn attach_drag_image(
+    data: &IDataObject,
+    paths: &[String],
+) -> Result<(), String> {
+    use windows::Win32::Foundation::{COLORREF, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, CreateDIBSection,
+        DIB_RGB_COLORS, DeleteDC, DrawTextW, GetDC, HBITMAP, HGDIOBJ, ReleaseDC,
+        SelectObject, SetBkMode, SetTextColor, TRANSPARENT, DT_LEFT, DT_NOPREFIX,
+        DT_VCENTER, DT_SINGLELINE, FillRect, CreateSolidBrush, DeleteObject,
+        CreateFontW, FW_BOLD, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+        DEFAULT_PITCH, FF_DONTCARE, FONT_CHARSET,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CLSCTX_INPROC_SERVER,
+    };
+    use windows::Win32::UI::Shell::{
+        CLSID_DragDropHelper, IDragSourceHelper, SHDRAGIMAGE,
+    };
+    use windows::core::PCWSTR;
+    unsafe {
+        // Compose the drag-image label: first file name, optional "+N more".
+        let first_name = std::path::Path::new(&paths[0])
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| paths[0].clone());
+        let label = if paths.len() == 1 {
+            first_name
+        } else {
+            format!("{first_name} +{} more", paths.len() - 1)
+        };
+        let label_wide: Vec<u16> =
+            std::ffi::OsStr::new(&label)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+        // 240 x 36 BGRA bitmap. Big enough for typical labels; longer text
+        // gets ellipsized by DrawText's clip rect.
+        const W: i32 = 240;
+        const H: i32 = 36;
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = W;
+        bmi.bmiHeader.biHeight = -H; // top-down
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB.0;
+
+        let screen_dc = GetDC(None);
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hbm: HBITMAP = CreateDIBSection(
+            Some(screen_dc),
+            &bmi,
+            DIB_RGB_COLORS,
+            &mut bits,
+            None,
+            0,
+        )
+        .map_err(|e| format!("CreateDIBSection: {e}"))?;
+        let memdc = CreateCompatibleDC(Some(screen_dc));
+        if memdc.is_invalid() {
+            let _ = ReleaseDC(None, screen_dc);
+            let _ = DeleteObject(HGDIOBJ::from(hbm));
+            return Err("CreateCompatibleDC failed".into());
+        }
+        let old_obj = SelectObject(memdc, HGDIOBJ::from(hbm));
+
+        // Fill with a translucent dark teal so it reads on any background.
+        let bg = CreateSolidBrush(COLORREF(0x00_30_30_30));
+        let mut rect = RECT { left: 0, top: 0, right: W, bottom: H };
+        FillRect(memdc, &rect, bg);
+        let _ = DeleteObject(HGDIOBJ::from(bg));
+
+        // Bold 12 px font for the label.
+        let face_w: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
+        let font = CreateFontW(
+            14,
+            0,
+            0,
+            0,
+            FW_BOLD.0 as i32,
+            0,
+            0,
+            0,
+            FONT_CHARSET(0),
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY,
+            (FF_DONTCARE.0 as u32) | (DEFAULT_PITCH.0 as u32),
+            PCWSTR(face_w.as_ptr()),
+        );
+        let old_font = SelectObject(memdc, HGDIOBJ::from(font));
+        SetBkMode(memdc, TRANSPARENT);
+        SetTextColor(memdc, COLORREF(0x00_F0_F0_F0));
+        rect.left = 12;
+        rect.right = W - 12;
+        let mut wide_mut = label_wide.clone();
+        let _ = DrawTextW(
+            memdc,
+            &mut wide_mut,
+            &mut rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+
+        // Restore DC objects and delete the font.
+        SelectObject(memdc, old_font);
+        let _ = DeleteObject(HGDIOBJ::from(font));
+        SelectObject(memdc, old_obj);
+        let _ = DeleteDC(memdc);
+        let _ = ReleaseDC(None, screen_dc);
+
+        // Pass HBITMAP to IDragSourceHelper. Windows takes ownership and
+        // releases it once the drag completes.
+        let helper: IDragSourceHelper =
+            CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| format!("CoCreateInstance: {e}"))?;
+        let drag_image = SHDRAGIMAGE {
+            sizeDragImage: windows::Win32::Foundation::SIZE { cx: W, cy: H },
+            ptOffset: POINT { x: 16, y: 18 },
+            hbmpDragImage: hbm,
+            crColorKey: COLORREF(0xFFFFFFFF),
+        };
+        helper
+            .InitializeFromBitmap(&drag_image, data)
+            .map_err(|e| format!("InitializeFromBitmap: {e}"))?;
+        Ok(())
     }
 }
 
