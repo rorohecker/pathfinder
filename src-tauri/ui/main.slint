@@ -1272,6 +1272,17 @@ component FileRow inherits Rectangle {
     // "Today" / "Yesterday" / "This week" labels were treated as clicks on the
     // file below, making the click box appear misaligned from the visual row
     // when sorted by Date modified.
+    //
+    // Drag-start behaviour: SELECTED rows start a file drag-out (DoDragDrop).
+    // UNSELECTED rows fire marquee_started/moved/finished so the parent pane
+    // can rubber-band select from anywhere in the file list, not just the
+    // empty strip above the list header. Absolute coordinates are reported
+    // because the pane subtracts its own absolute position to translate them
+    // into pane-local space for the marquee rect.
+    callback marquee_started(length, length);
+    callback marquee_moved(length, length);
+    callback marquee_finished();
+
     touch := TouchArea {
         x: 0;
         y: root.group_header_h;
@@ -1281,13 +1292,26 @@ component FileRow inherits Rectangle {
         clicked => { root.selected(root.index, root.ctrl_held, root.shift_held); }
         double-clicked => { root.opened(root.index); }
         moved => {
-            if self.pressed && !root.drag_started && (
-                (self.mouse-x - self.pressed-x > 6px) ||
-                (self.pressed-x - self.mouse-x > 6px) ||
-                (self.mouse-y - self.pressed-y > 6px) ||
-                (self.pressed-y - self.mouse-y > 6px)) {
-                root.drag_started = true;
-                root.file_drag_requested(root.index);
+            if (self.pressed) {
+                if (!root.drag_started && (
+                    (self.mouse-x - self.pressed-x > 6px) ||
+                    (self.pressed-x - self.mouse-x > 6px) ||
+                    (self.mouse-y - self.pressed-y > 6px) ||
+                    (self.pressed-y - self.mouse-y > 6px))) {
+                    root.drag_started = true;
+                    if (root.item.is_selected) {
+                        root.file_drag_requested(root.index);
+                    } else {
+                        root.marquee_started(
+                            self.absolute-position.x + self.pressed-x,
+                            self.absolute-position.y + self.pressed-y);
+                    }
+                }
+                if (root.drag_started && !root.item.is_selected) {
+                    root.marquee_moved(
+                        self.absolute-position.x + self.mouse-x,
+                        self.absolute-position.y + self.mouse-y);
+                }
             }
         }
         pointer-event(event) => {
@@ -1297,6 +1321,9 @@ component FileRow inherits Rectangle {
                 root.drag_started = false;
             }
             if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                if (root.drag_started && !root.item.is_selected) {
+                    root.marquee_finished();
+                }
                 root.drag_started = false;
             }
             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
@@ -2731,6 +2758,35 @@ export component MainWindow inherits Window {
                             if (val != "") { root.rename_file(i, val); }
                         }
                         file_drag_requested(i) => { root.start_file_drag(i); }
+                        marquee_started(ax, ay) => {
+                            // Translate absolute window coords into pane-local
+                            // space so the existing marquee logic (which uses
+                            // pane-relative x/y) keeps working without changes.
+                            primary_pane_root.marquee_start_x = ax - primary_pane_root.absolute-position.x;
+                            primary_pane_root.marquee_start_y = ay - primary_pane_root.absolute-position.y;
+                            primary_pane_root.marquee_x = primary_pane_root.marquee_start_x;
+                            primary_pane_root.marquee_y = primary_pane_root.marquee_start_y;
+                            primary_pane_root.marquee_w = 0;
+                            primary_pane_root.marquee_h = 0;
+                            primary_pane_root.marquee_active = true;
+                        }
+                        marquee_moved(ax, ay) => {
+                            primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, ax - primary_pane_root.absolute-position.x);
+                            primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, ay - primary_pane_root.absolute-position.y);
+                            primary_pane_root.marquee_w = abs((ax - primary_pane_root.absolute-position.x) - primary_pane_root.marquee_start_x);
+                            primary_pane_root.marquee_h = abs((ay - primary_pane_root.absolute-position.y) - primary_pane_root.marquee_start_y);
+                            root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                        }
+                        marquee_finished => {
+                            if (primary_pane_root.marquee_active) {
+                                root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                    primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                            }
+                            primary_pane_root.marquee_active = false;
+                            primary_pane_root.marquee_w = 0;
+                            primary_pane_root.marquee_h = 0;
+                        }
                     }
                 }
 
@@ -2801,6 +2857,35 @@ export component MainWindow inherits Window {
                             if (val != "") { root.rename_file(i, val); }
                         }
                         file_drag_requested(i) => { root.start_file_drag(i); }
+                        marquee_started(ax, ay) => {
+                            // Translate absolute window coords into pane-local
+                            // space so the existing marquee logic (which uses
+                            // pane-relative x/y) keeps working without changes.
+                            primary_pane_root.marquee_start_x = ax - primary_pane_root.absolute-position.x;
+                            primary_pane_root.marquee_start_y = ay - primary_pane_root.absolute-position.y;
+                            primary_pane_root.marquee_x = primary_pane_root.marquee_start_x;
+                            primary_pane_root.marquee_y = primary_pane_root.marquee_start_y;
+                            primary_pane_root.marquee_w = 0;
+                            primary_pane_root.marquee_h = 0;
+                            primary_pane_root.marquee_active = true;
+                        }
+                        marquee_moved(ax, ay) => {
+                            primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, ax - primary_pane_root.absolute-position.x);
+                            primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, ay - primary_pane_root.absolute-position.y);
+                            primary_pane_root.marquee_w = abs((ax - primary_pane_root.absolute-position.x) - primary_pane_root.marquee_start_x);
+                            primary_pane_root.marquee_h = abs((ay - primary_pane_root.absolute-position.y) - primary_pane_root.marquee_start_y);
+                            root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                        }
+                        marquee_finished => {
+                            if (primary_pane_root.marquee_active) {
+                                root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                    primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                            }
+                            primary_pane_root.marquee_active = false;
+                            primary_pane_root.marquee_w = 0;
+                            primary_pane_root.marquee_h = 0;
+                        }
                     }
                 }
 

@@ -1,6 +1,6 @@
 {
   "productName": "Pathfinder",
-  "version": "0.7.16",
+  "version": "0.7.17",
   "identifier": "com.fusntuff.pathfinder",
   "build": {
     "frontendDist": null
