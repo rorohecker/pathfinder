@@ -12777,14 +12777,29 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             };
             if !paths.is_empty() {
                 let count = paths.len() as i32;
+                // Compose a short, human-friendly label for the drag ghost.
+                // Single file: "Photo.png". Many: "Photo.png + 4 more".
+                let first_name = std::path::Path::new(&paths[0])
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| paths[0].clone());
+                let label = if paths.len() == 1 {
+                    first_name
+                } else {
+                    format!("{first_name} + {} more", paths.len() - 1)
+                };
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<ThemePalette>().set_drag_count(count);
                     ui.global::<ThemePalette>().set_is_dragging(true);
+                    ui.set_drag_label(SharedString::from(label));
                 }
                 let effect = file_drag::start(paths);
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<ThemePalette>().set_is_dragging(false);
                     ui.global::<ThemePalette>().set_drag_count(0);
+                    ui.set_drag_label(SharedString::from(""));
+                    ui.set_drag_target_path(SharedString::from(""));
+                    ui.set_drag_over_pane(SharedString::from(""));
                     // If an external app moved the files, refresh so they disappear.
                     use windows::Win32::System::Ole::DROPEFFECT_MOVE;
                     if effect == DROPEFFECT_MOVE {
@@ -15076,6 +15091,33 @@ pub fn run() {
                     eprintln!("[file_drag] could not find HWND, drop target disabled");
                     return;
                 };
+                // Seed the ghost-overlay label whenever a drag enters the window
+                // from an external source (Explorer, another app). Internal drags
+                // already set the label in on_start_file_drag because we know the
+                // file names at drag-start without waiting for DragEnter.
+                let weak_label = ui.as_weak();
+                file_drag::register_drag_paths_handler(move |paths| {
+                    let Some(ui) = weak_label.upgrade() else { return; };
+                    if paths.is_empty() {
+                        ui.set_drag_label(SharedString::from(""));
+                        ui.global::<ThemePalette>().set_is_dragging(false);
+                        ui.global::<ThemePalette>().set_drag_count(0);
+                        return;
+                    }
+                    let first_name = std::path::Path::new(&paths[0])
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| paths[0].clone());
+                    let label = if paths.len() == 1 {
+                        first_name
+                    } else {
+                        format!("{first_name} + {} more", paths.len() - 1)
+                    };
+                    ui.set_drag_label(SharedString::from(label));
+                    ui.global::<ThemePalette>().set_drag_count(paths.len() as i32);
+                    ui.global::<ThemePalette>().set_is_dragging(true);
+                });
+
                 // Highlight the destination pane AND the exact target folder
                 // while dragging — fires every DragOver tick on the UI thread.
                 // pick_drop_destination resolves the cursor position to the
@@ -15089,6 +15131,7 @@ pub fn run() {
                     if !is_active {
                         ui.set_drag_over_pane(SharedString::from(""));
                         ui.set_drag_target_path(SharedString::from(""));
+                        ui.set_drag_label(SharedString::from(""));
                         return;
                     }
                     use windows::Win32::Foundation::POINT;
@@ -15097,6 +15140,14 @@ pub fn run() {
                     unsafe { let _ = ScreenToClient(hwnd, &mut p); }
                     let scale = ui.window().scale_factor().max(0.1);
                     let logical_x = (p.x as f32) / scale;
+                    let logical_y = (p.y as f32) / scale;
+                    // Update the ghost-overlay position. The slint overlay is
+                    // gated on is_dragging so this is only painted during real
+                    // drags. Coordinates clamped to the window so the ghost
+                    // doesn't render off-screen when the cursor drifts to an
+                    // edge.
+                    ui.set_drag_cursor_x(logical_x.max(0.0));
+                    ui.set_drag_cursor_y(logical_y.max(0.0));
                     let pane_label = if ui.get_dual_pane() {
                         let primary_right_edge = ui.get_sidebar_w()
                             + ui.get_primary_pane_w()

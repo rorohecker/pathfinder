@@ -265,16 +265,25 @@ component ToolButton inherits Rectangle {
 component TabButton inherits Rectangle {
     in property <TabItem> tab;
     in property <int> index;
+    in property <string> drag_target_path;
     callback activated(int);
     callback closed(int);
+
+    // True when the cursor is hovering this tab during a drag-and-drop. We
+    // light the tab up with an accent border so the user can see exactly
+    // which tab the drop will route into before they release.
+    property <bool> is_drop_target: root.drag_target_path != "" && root.drag_target_path == root.tab.path;
 
     width: Math.min(240px, Math.max(132px, title_text.preferred-width + 50px));
     height: 30px;
     border-radius: 7px;
-    border-width: root.tab.active ? 1px : 0px;
-    border-color: ThemePalette.border;
-    background: root.tab.active ? ThemePalette.panel : (touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0));
+    border-width: root.is_drop_target ? 2px : (root.tab.active ? 1px : 0px);
+    border-color: root.is_drop_target ? ThemePalette.accent_strong : ThemePalette.border;
+    background: root.is_drop_target
+        ? ThemePalette.accent_soft
+        : (root.tab.active ? ThemePalette.panel : (touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0)));
     animate background { duration: 40ms; easing: linear; }
+    animate border-color { duration: 120ms; easing: ease-out; }
 
     title_text := Text {
         x: 10px;
@@ -1653,6 +1662,13 @@ export component MainWindow inherits Window {
     // the Win32 DragOver handler and consumed by FileRow / SideRow to draw a
     // glowing border on the target while the drag is in progress.
     in-out property <string> drag_target_path: "";
+    // Cursor position in logical-pixel client-space, updated by the IDropTarget
+    // DragOver handler so the slint ghost overlay can track the cursor during
+    // a drag. drag_label holds a short description of what is being dragged
+    // (typically the first file's name + a +N marker for multi-file drags).
+    in-out property <length> drag_cursor_x: 0;
+    in-out property <length> drag_cursor_y: 0;
+    in-out property <string> drag_label: "";
     in-out property <bool> show_hidden: false;
     in-out property <bool> settings_visible: false;
     in-out property <string> settings_tab: "appearance";
@@ -1955,6 +1971,7 @@ export component MainWindow inherits Window {
                 for tab[index] in root.tabs: TabButton {
                     tab: tab;
                     index: index;
+                    drag_target_path: root.drag_target_path;
                     activated(i) => { root.tab_activated(i); }
                     closed(i) => { root.tab_closed(i); }
                 }
@@ -2240,16 +2257,26 @@ export component MainWindow inherits Window {
                                 vertical-alignment: center;
                             }
                             crumb_touch := Rectangle {
+                                // Highlight on hover OR when this chip's path is the
+                                // current drag destination. The drag highlight uses a
+                                // brighter fill plus a thin accent border so the user
+                                // can spot it during a drag-and-drop.
+                                property <bool> drop_target: root.drag_target_path != ""
+                                    && root.drag_target_path == crumb.id;
                                 height: parent.height;
                                 width: Math.min(crumb_label.preferred-width + 10px, 160px);
                                 border-radius: 4px;
-                                background: ct.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+                                border-width: drop_target ? 1px : 0px;
+                                border-color: drop_target ? ThemePalette.accent_strong : rgba(0, 0, 0, 0);
+                                background: drop_target
+                                    ? ThemePalette.accent_soft
+                                    : (ct.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0));
                                 crumb_label := Text {
                                     x: 5px;
                                     width: parent.width - 10px;
                                     height: parent.height;
                                     text: crumb.label;
-                                    color: ct.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                                    color: (parent.drop_target || ct.has-hover) ? ThemePalette.accent_strong : ThemePalette.text_muted;
                                     font-size: 12px;
                                     overflow: elide;
                                     vertical-alignment: center;
@@ -5668,6 +5695,61 @@ export component MainWindow inherits Window {
             color: rgba(255, 255, 255, 0.68);
             font-size: 10.5px;
             vertical-alignment: center;
+        }
+    }
+
+    // ── DRAG GHOST OVERLAY ───────────────────────────────────────────
+    // Holographic preview of the dragged file(s) that follows the cursor while
+    // an OLE drag operation is in flight inside the Pathfinder window. The
+    // IDropTarget DragOver handler in lib.rs updates root.drag_cursor_x/y
+    // every tick (screen coords → ScreenToClient → /scale_factor → logical),
+    // and root.drag_label is seeded from the dragged file names on DragEnter.
+    // For drag-outs to another app the OS provides its own preview so this
+    // overlay only shows when the cursor is inside the Pathfinder window.
+    if ThemePalette.is_dragging && root.drag_label != "": Rectangle {
+        // Offset slightly to the right and below the cursor so the ghost
+        // doesn't sit directly under the mouse pointer.
+        x: root.drag_cursor_x + 14px;
+        y: root.drag_cursor_y + 14px;
+        width: Math.min(280px, drag_ghost_label.preferred-width + 56px);
+        height: 44px;
+        border-radius: AppMetrics.radius;
+        border-width: 1px;
+        border-color: ThemePalette.accent_strong;
+        background: ThemePalette.accent_soft;
+        drop-shadow-blur: 22px;
+        drop-shadow-color: rgba(0, 0, 0, 0.45);
+        z: 200;
+        // Pill on the left with the count and a glyph hint.
+        Rectangle {
+            x: 4px;
+            y: 4px;
+            width: 36px;
+            height: parent.height - 8px;
+            border-radius: AppMetrics.radius_small;
+            background: ThemePalette.accent;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: ThemePalette.drag_count <= 1 ? "1" : ThemePalette.drag_count;
+                color: white;
+                font-size: ThemePalette.drag_count > 99 ? 11px : 13px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        drag_ghost_label := Text {
+            x: 46px;
+            y: 0;
+            width: parent.width - 54px;
+            height: parent.height;
+            text: root.drag_label;
+            color: ThemePalette.accent_strong;
+            font-size: 12.5px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
         }
     }
 

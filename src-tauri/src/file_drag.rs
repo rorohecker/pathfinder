@@ -368,6 +368,12 @@ thread_local! {
     // is `is_active` — false on DragLeave to clear the highlight.
     static DRAG_OVER_HANDLER: std::cell::RefCell<Option<Box<dyn Fn(bool, i32, i32)>>> =
         std::cell::RefCell::new(None);
+
+    // Called once on DragEnter with the list of dragged paths so the UI can
+    // seed the ghost-overlay label (e.g. "Photo.png + 4 more"). Cleared on
+    // DragLeave with an empty Vec so the label disappears immediately.
+    static DRAG_PATHS_HANDLER: std::cell::RefCell<Option<Box<dyn Fn(Vec<String>)>>> =
+        std::cell::RefCell::new(None);
 }
 
 #[implement(IDropTarget)]
@@ -404,6 +410,20 @@ impl IDropTarget_Impl for PathfinderDropTarget_Impl {
         } else {
             false
         };
+        // Surface the dragged file names so the slint ghost overlay can
+        // display them while the drag is in flight. We do this once on
+        // DragEnter rather than every DragOver to avoid re-extracting
+        // CF_HDROP per cursor pixel.
+        if accepts {
+            if let Some(ref data) = *pdataobj {
+                let paths = unsafe { paths_from_data_object(data) };
+                DRAG_PATHS_HANDLER.with(|h| {
+                    if let Some(cb) = &*h.borrow() {
+                        cb(paths);
+                    }
+                });
+            }
+        }
         unsafe {
             *pdweffect = if accepts {
                 if (grfkeystate.0 & MK_CONTROL) != 0 { DROPEFFECT_COPY } else { DROPEFFECT_MOVE }
@@ -444,6 +464,11 @@ impl IDropTarget_Impl for PathfinderDropTarget_Impl {
         DRAG_OVER_HANDLER.with(|h| {
             if let Some(cb) = &*h.borrow() {
                 cb(false, 0, 0);
+            }
+        });
+        DRAG_PATHS_HANDLER.with(|h| {
+            if let Some(cb) = &*h.borrow() {
+                cb(Vec::new());
             }
         });
         Ok(())
@@ -549,6 +574,14 @@ pub fn register_drop_target(
 /// after Drop completes.
 pub fn register_drag_over_handler(handler: impl Fn(bool, i32, i32) + 'static) {
     DRAG_OVER_HANDLER.with(|h| *h.borrow_mut() = Some(Box::new(handler)));
+}
+
+/// Install a callback that fires once with the list of dragged paths whenever
+/// a drag enters the window (and again with an empty list on DragLeave). The
+/// UI uses this to seed the ghost-overlay label so the user can see what they
+/// are moving without waiting for the drop.
+pub fn register_drag_paths_handler(handler: impl Fn(Vec<String>) + 'static) {
+    DRAG_PATHS_HANDLER.with(|h| *h.borrow_mut() = Some(Box::new(handler)));
 }
 
 /// Unregister drop target on app shutdown.
