@@ -978,18 +978,33 @@ component FileRow inherits Rectangle {
             background: ThemePalette.border;
         }
     }
-    border-radius: AppMetrics.radius;
-    border-width: root.item.is_selected ? 1px : 0px;
-    border-color: root.item.is_selected ? ThemePalette.accent : rgba(0, 0, 0, 0);
-    // Selection background is instant - no animate so clicks feel snappy
-    background: root.item.is_selected ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+    // The root has no background or border. Selection and hover paint into
+    // inner rectangles that start BELOW the date-group header strip, so the
+    // highlight visually matches the file row rather than spilling over the
+    // "Today" / "Yesterday" / "This week" label above it.
+    border-radius: 0px;
+    border-width: 0px;
+    background: rgba(0, 0, 0, 0);
+
+    if root.item.is_selected: Rectangle {
+        x: 0;
+        y: root.group_header_h;
+        width: parent.width;
+        height: parent.height - root.group_header_h;
+        border-radius: AppMetrics.radius;
+        border-width: 1px;
+        border-color: ThemePalette.accent;
+        background: ThemePalette.accent_soft;
+    }
 
     // Hover glow - instant on, instant off. File Explorer doesn't fade either.
     // Wrapped in `if` so non-hovered rows skip rendering this entirely.
     if touch.has-hover && !root.item.is_selected: Rectangle {
-        x: 0; y: 0;
-        width: parent.width; height: parent.height;
-        border-radius: parent.border-radius;
+        x: 0;
+        y: root.group_header_h;
+        width: parent.width;
+        height: parent.height - root.group_header_h;
+        border-radius: AppMetrics.radius;
         background: rgba(255, 255, 255, 0.07);
     }
 

@@ -6470,6 +6470,50 @@ fn write_native_json<T: Serialize>(name: &str, value: &T) -> Result<(), String> 
     fs::write(path, data).map_err(|e| e.to_string())
 }
 
+/// Background JSON writer queue. Lets navigate(), tag-edit, and other hot
+/// paths return immediately instead of blocking on disk I/O for files like
+/// recent_locations.json that are rewritten on every folder change.
+///
+/// Implementation: a HashMap keyed by file name holds the latest serialised
+/// bytes for each file. A single background thread drains the map every
+/// 250 ms and writes the bytes to disk. Repeated writes to the same file in
+/// the same window coalesce — only the most recent payload hits disk.
+static JSON_WRITE_QUEUE: LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static JSON_WRITER_THREAD: LazyLock<std::thread::JoinHandle<()>> = LazyLock::new(|| {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_millis(250));
+        let drained: Vec<(String, Vec<u8>)> = match JSON_WRITE_QUEUE.lock() {
+            Ok(mut q) => q.drain().collect(),
+            Err(_) => continue,
+        };
+        for (name, bytes) in drained {
+            let path = native_data_file(&name);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, &bytes);
+        }
+    })
+});
+
+/// Fire-and-forget version of write_native_json. Serialises now (fast),
+/// hands off to the background writer (slow disk I/O). Callers that need
+/// the bytes flushed immediately (rare — most settings/tag writes are best
+/// effort) should still use write_native_json directly.
+fn write_native_json_async<T: Serialize>(name: &str, value: &T) {
+    // Ensure the drainer thread is alive on first call. LazyLock initialises
+    // on first access; the side effect of the closure is the spawned thread.
+    let _ = JSON_WRITER_THREAD.thread().id();
+    let Ok(bytes) = serde_json::to_vec_pretty(value) else {
+        return;
+    };
+    if let Ok(mut q) = JSON_WRITE_QUEUE.lock() {
+        q.insert(name.to_string(), bytes);
+    }
+}
+
 fn default_smart_folders(current_path: &str) -> Vec<SmartFolder> {
     let scope = current_path.to_string();
     vec![
@@ -8487,7 +8531,7 @@ impl NativeController {
     }
 
     fn save_settings(&self) {
-        let _ = write_native_json("settings.json", &self.settings);
+        write_native_json_async("settings.json", &self.settings);
     }
 
     fn sync_performance_status(&self, ui: &MainWindow) {
@@ -8550,7 +8594,7 @@ impl NativeController {
     }
 
     fn save_session(&self) {
-        let _ = write_native_json("session.json", &self.tabs);
+        write_native_json_async("session.json", &self.tabs);
     }
 
     fn search_root(&self) -> String {
@@ -9464,7 +9508,7 @@ impl NativeController {
                 self.recent_locations.insert(0, path.clone());
                 self.recent_locations =
                     condense_recent_locations(self.recent_locations.clone(), 12);
-                let _ = write_native_json("recent_locations.json", &self.recent_locations);
+                write_native_json_async("recent_locations.json", &self.recent_locations);
 
                 // Restore view+sort for the new folder. First time visiting a
                 // folder picks a sensible default based on what's likely in it:
@@ -10189,7 +10233,7 @@ impl NativeController {
         self.folder_views.insert(path.clone(), mode.to_string());
         self.folder_views
             .insert(format!("{path}:view"), mode.to_string());
-        let _ = write_native_json("folder_views.json", &self.folder_views);
+        write_native_json_async("folder_views.json", &self.folder_views);
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.view = mode.to_string();
         }
