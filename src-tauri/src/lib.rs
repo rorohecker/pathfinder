@@ -14674,9 +14674,79 @@ fn pick_drop_destination(
     // Simple mode uses a two-row toolbar that's 88 px tall. Normal mode is 44.
     // Using the wrong value here mis-routes every drop near the top of the file
     // list by the difference, so keep this in sync with `toolbar_h` in main.slint.
-    let toolbar_h: f32 = if ui.get_ui_mode().as_str() == "simple" { 88.0 } else { 44.0 };
+    let is_simple = ui.get_ui_mode().as_str() == "simple";
+    let toolbar_h: f32 = if is_simple { 88.0 } else { 44.0 };
     let content_top = title_h + toolbar_h;
     let main_left = sidebar_w;
+
+    // 0a. Tab strip drops route into that tab's folder. Tabs live in the title
+    //     bar at y ∈ [6, 36], starting at x = 10. Each TabButton is a min of
+    //     132 px and a max of 240 px wide based on its title; we approximate
+    //     using char-count since the actual text-rendered width isn't reachable
+    //     from outside slint. Close enough to be useful; users won't notice a
+    //     few pixels of slop on a 200 px tab.
+    if ly >= 6.0 && ly <= title_h {
+        let tabs: Vec<TabItem> = {
+            use slint::Model;
+            ui.get_tabs().iter().collect()
+        };
+        let mut x_cursor = 10.0_f32;
+        const TAB_SPACING: f32 = 2.0;
+        for tab in &tabs {
+            let title = tab.title.to_string();
+            let approx_w = ((title.chars().count() as f32) * 7.0 + 50.0).clamp(132.0, 240.0);
+            let tab_left = x_cursor;
+            let tab_right = x_cursor + approx_w;
+            if lx >= tab_left && lx <= tab_right {
+                let path = tab.path.to_string();
+                if !path.is_empty() && std::path::Path::new(&path).is_dir() {
+                    file_drag::log(&format!(
+                        "pick_drop_destination: TAB '{}' -> '{}'",
+                        title, path
+                    ));
+                    return path;
+                }
+            }
+            x_cursor = tab_right + TAB_SPACING;
+        }
+    }
+
+    // 0b. Breadcrumb drops route into that ancestor folder. The address bar
+    //     sits in the toolbar at y ∈ [title_h + 6, title_h + 37] (normal) or
+    //     y ∈ [title_h + 8, title_h + 38] (simple), starting at x = sidebar_w
+    //     + 167 (normal) or x = sidebar_w + 390 (simple). Each crumb chip is
+    //     roughly char-count * 7 + 18 px wide; we walk them in order summing
+    //     widths to find the cursor's chip.
+    let addr_y_top = if is_simple { title_h + 8.0 } else { title_h + 6.0 };
+    let addr_y_bot = if is_simple { title_h + 38.0 } else { title_h + 37.0 };
+    let addr_x_start = if is_simple { sidebar_w + 390.0 } else { sidebar_w + 167.0 };
+    if ly >= addr_y_top && ly <= addr_y_bot && lx >= addr_x_start {
+        let crumbs: Vec<ChoiceItem> = {
+            use slint::Model;
+            ui.get_breadcrumbs().iter().collect()
+        };
+        // Crumbs are inset 6 px inside the address bar Rectangle. They're
+        // ChoiceItems (id = path, label = display name) built by build_breadcrumbs.
+        let mut x_cursor = addr_x_start + 6.0;
+        const CRUMB_GAP: f32 = 0.0;
+        for crumb in &crumbs {
+            let label = crumb.label.to_string();
+            let chip_w = ((label.chars().count() as f32) * 7.0 + 24.0).max(18.0);
+            let crumb_left = x_cursor;
+            let crumb_right = x_cursor + chip_w;
+            if lx >= crumb_left && lx <= crumb_right {
+                let path = crumb.id.to_string();
+                if !path.is_empty() && std::path::Path::new(&path).is_dir() {
+                    file_drag::log(&format!(
+                        "pick_drop_destination: BREADCRUMB '{}' -> '{}'",
+                        label, path
+                    ));
+                    return path;
+                }
+            }
+            x_cursor = crumb_right + CRUMB_GAP;
+        }
+    }
 
     // 1. Sidebar drops route by hit-testing rows. Each SideRow is 32 px tall,
     //    starting 14 px below the title bar (matches main.slint sidebar layout).
