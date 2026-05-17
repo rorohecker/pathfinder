@@ -8181,18 +8181,62 @@ fn command_items() -> ModelRc<CommandItem> {
     command_items_filtered("")
 }
 
-/// Reads `--path <dir>` or `--path=<dir>` from the process arguments (Windows shell passes `%1`).
+/// Resolves the folder Pathfinder should land on at startup from process args.
+/// Accepts every form Windows / other apps pass when they want to "open a
+/// folder", so the user doesn't see broken openings from third-party callers:
+///
+///   - `--path <dir>` / `--path=<dir>` — what the HKCU shell handler we
+///     register passes (`"%1"`).
+///   - `/select,<file>` or `/select <file>` — the Explorer convention used by
+///     "Show in folder" / "Open file location" in many apps (Chrome, Steam,
+///     Discord, Slack, Notepad, etc). We open the file's parent directory.
+///   - A bare path argument — when an app invokes us as `pathfinder.exe
+///     C:\Users\Foo` without any flag. Treats files like /select (opens the
+///     parent).
+///
+/// The first match wins. Returns None if nothing on the command line resolves
+/// to an existing filesystem path.
 fn parse_cli_startup_folder() -> Option<PathBuf> {
-    let mut args = std::env::args();
-    while let Some(a) = args.next() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
         if a == "--path" {
-            return args.next().map(PathBuf::from);
-        }
-        if let Some(rest) = a.strip_prefix("--path=") {
+            if let Some(next) = args.get(i + 1) {
+                return Some(PathBuf::from(next));
+            }
+        } else if let Some(rest) = a.strip_prefix("--path=") {
             if !rest.is_empty() {
                 return Some(PathBuf::from(rest));
             }
+        } else if let Some(rest) = a.strip_prefix("/select,") {
+            // Explorer-style /select,<file> — open parent and (ideally) select.
+            if !rest.is_empty() {
+                let f = std::path::PathBuf::from(rest);
+                if let Some(parent) = f.parent() {
+                    if parent.exists() {
+                        return Some(parent.to_path_buf());
+                    }
+                }
+            }
+        } else if a == "/select" {
+            if let Some(next) = args.get(i + 1) {
+                let f = std::path::PathBuf::from(next);
+                if let Some(parent) = f.parent() {
+                    if parent.exists() {
+                        return Some(parent.to_path_buf());
+                    }
+                }
+            }
+        } else if !a.starts_with('-') && !a.starts_with('/') {
+            // Bare path argument. Some launchers pass just the path without a
+            // flag; the registry handler still sees `pathfinder.exe "path"`.
+            let p = std::path::PathBuf::from(a);
+            if p.exists() {
+                return Some(p);
+            }
         }
+        i += 1;
     }
     None
 }

@@ -77,18 +77,42 @@ fn set_key_default_string(key: HKEY, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Writes `Folder` and `Directory` open verbs so double-clicking a folder uses Pathfinder.
+/// Registry paths that drive folder navigation in Windows. Setting all of
+/// them at HKCU level routes every Windows-native "open this folder" code
+/// path (folder shortcuts, Chrome's "Show in folder", "Open file location"
+/// in Start menu, double-clicked drives in This PC, anything that calls
+/// ShellExecute on a directory) through Pathfinder.
+///
+///   - `Folder\shell\open\command`     — generic folder class, picked up by
+///     ShellExecute("open", "C:\..."). The Folder class is what most apps
+///     trigger when they want to reveal a directory.
+///   - `Folder\shell\explore\command`  — same class, "explore" verb. Some
+///     Win32 apps explicitly invoke this verb instead of "open".
+///   - `Directory\shell\open\command`  — file-system directory class. Many
+///     apps target this directly because the "Folder" alias can resolve to
+///     virtual shell folders (Control Panel, etc) that we don't want to host.
+///   - `Directory\shell\explore\command` — same as above for "explore".
+///   - `Drive\shell\open\command`      — what double-clicking a drive in
+///     This PC triggers. Without this entry, drives still open in Explorer
+///     even when every folder above opens in Pathfinder.
+///   - `Drive\shell\explore\command`   — same for "explore" verb on drives.
+const FOLDER_HANDLER_PATHS: [&str; 6] = [
+    r"Software\Classes\Folder\shell\open\command",
+    r"Software\Classes\Folder\shell\explore\command",
+    r"Software\Classes\Directory\shell\open\command",
+    r"Software\Classes\Directory\shell\explore\command",
+    r"Software\Classes\Drive\shell\open\command",
+    r"Software\Classes\Drive\shell\explore\command",
+];
+
+/// Writes every folder/directory/drive verb so double-clicking a folder,
+/// drive, or shortcut routes through Pathfinder.
 pub fn set_pathfinder_as_default_folder_handler() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let exe = exe.to_string_lossy().into_owned();
     let cmd = format!("\"{exe}\" --path \"%1\"");
 
-    const PATHS: [&str; 2] = [
-        r"Software\Classes\Folder\shell\open\command",
-        r"Software\Classes\Directory\shell\open\command",
-    ];
-
-    for rel in PATHS {
+    for rel in FOLDER_HANDLER_PATHS {
         let key = hkcu_open_create_leaf(rel)?;
         let r = set_key_default_string(key, &cmd);
         unsafe {
@@ -145,12 +169,9 @@ pub fn pathfinder_is_default_folder_handler() -> bool {
 }
 
 /// Removes HKCU overrides created by [`set_pathfinder_as_default_folder_handler`].
+/// Mirrors FOLDER_HANDLER_PATHS so a Restore goes back to Explorer defaults.
 pub fn restore_windows_default_folder_handler() -> Result<(), String> {
-    const PATHS: [&str; 2] = [
-        r"Software\Classes\Folder\shell\open\command",
-        r"Software\Classes\Directory\shell\open\command",
-    ];
-    for rel in PATHS {
+    for rel in FOLDER_HANDLER_PATHS {
         let wide = to_wide_nul(rel);
         let err = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(wide.as_ptr())) };
         if err != ERROR_SUCCESS && err != ERROR_FILE_NOT_FOUND {
