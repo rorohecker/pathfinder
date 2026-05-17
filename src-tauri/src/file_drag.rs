@@ -632,10 +632,13 @@ pub fn start(paths: Vec<String>) -> DROPEFFECT {
     }
 }
 
-/// Build a HBITMAP showing the count and first file name, then attach it as the
-/// drag image via IDragSourceHelper. Returns Err on any COM/GDI failure; the
-/// caller treats that as non-fatal because DoDragDrop still works without an
-/// attached image (just falls back to the default cursor change).
+/// Build a File-Explorer-style drag image: the actual shell icon of the first
+/// dragged file, a count badge if multi-file, and the file name label. Pinned
+/// to IDataObject via IDragSourceHelper so the Windows shell renders it at the
+/// cursor for the whole drag, regardless of whether our app repaints.
+///
+/// Returns Err on any COM/GDI failure; the caller treats that as non-fatal so
+/// DoDragDrop still runs and the OS falls back to the default cursor change.
 unsafe fn attach_drag_image(
     data: &IDataObject,
     paths: &[String],
@@ -643,40 +646,69 @@ unsafe fn attach_drag_image(
     use windows::Win32::Foundation::{COLORREF, POINT, RECT};
     use windows::Win32::Graphics::Gdi::{
         BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, CreateDIBSection,
-        DIB_RGB_COLORS, DeleteDC, DrawTextW, GetDC, HBITMAP, HGDIOBJ, ReleaseDC,
-        SelectObject, SetBkMode, SetTextColor, TRANSPARENT, DT_LEFT, DT_NOPREFIX,
-        DT_VCENTER, DT_SINGLELINE, FillRect, CreateSolidBrush, DeleteObject,
-        CreateFontW, FW_BOLD, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-        DEFAULT_PITCH, FF_DONTCARE, FONT_CHARSET,
+        CreateFontW, CreateSolidBrush, DEFAULT_PITCH, DEFAULT_QUALITY, DeleteDC,
+        DeleteObject, DIB_RGB_COLORS, DrawTextW, DT_END_ELLIPSIS, DT_LEFT,
+        DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FONT_CHARSET, FW_BOLD,
+        FillRect, FrameRect, GetDC, HBITMAP, HGDIOBJ, OUT_DEFAULT_PRECIS,
+        ReleaseDC, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+        CLIP_DEFAULT_PRECIS,
     };
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CLSCTX_INPROC_SERVER,
-    };
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
     use windows::Win32::UI::Shell::{
-        CLSID_DragDropHelper, IDragSourceHelper, SHDRAGIMAGE,
+        CLSID_DragDropHelper, IDragSourceHelper, SHDRAGIMAGE, SHFILEINFOW,
+        SHGetFileInfoW, SHGFI_ICON, SHGFI_LARGEICON,
     };
+    use windows::Win32::UI::WindowsAndMessaging::{DI_NORMAL, DrawIconEx, DestroyIcon, HICON};
     use windows::core::PCWSTR;
     unsafe {
-        // Compose the drag-image label: first file name, optional "+N more".
+        // Layout: 320 wide x 80 tall. 48 px icon on the left with 12 px padding,
+        // file name + count badge on the right. Large enough that even longer
+        // file names read clearly; ellipsised by DrawText if they overflow.
+        const W: i32 = 320;
+        const H: i32 = 80;
+        const ICON_SIZE: i32 = 48;
+        const ICON_X: i32 = 14;
+        const ICON_Y: i32 = (H - ICON_SIZE) / 2;
+        const TEXT_X: i32 = ICON_X + ICON_SIZE + 14;
+
+        // Compose label.
         let first_name = std::path::Path::new(&paths[0])
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| paths[0].clone());
-        let label = if paths.len() == 1 {
-            first_name
+        let label_wide: Vec<u16> = std::ffi::OsStr::new(&first_name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // Second line: optional file count.
+        let count_text = if paths.len() > 1 {
+            format!("+{} more file{}", paths.len() - 1, if paths.len() == 2 { "" } else { "s" })
         } else {
-            format!("{first_name} +{} more", paths.len() - 1)
+            String::new()
         };
-        let label_wide: Vec<u16> =
-            std::ffi::OsStr::new(&label)
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect();
+        let count_wide: Vec<u16> = std::ffi::OsStr::new(&count_text)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
-        // 240 x 36 BGRA bitmap. Big enough for typical labels; longer text
-        // gets ellipsized by DrawText's clip rect.
-        const W: i32 = 240;
-        const H: i32 = 36;
+        // Pull the actual shell icon for the first file so the drag preview
+        // matches the file type the user is moving. Falls through to a default
+        // generic icon if SHGetFileInfo fails.
+        let path_wide: Vec<u16> = std::ffi::OsStr::new(&paths[0])
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut sfi = SHFILEINFOW::default();
+        let _ = SHGetFileInfoW(
+            PCWSTR(path_wide.as_ptr()),
+            windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut sfi),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        );
+        let hicon: HICON = sfi.hIcon;
+
+        // Build the bitmap.
         let mut bmi = BITMAPINFO::default();
         bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
         bmi.bmiHeader.biWidth = W;
@@ -700,20 +732,53 @@ unsafe fn attach_drag_image(
         if memdc.is_invalid() {
             let _ = ReleaseDC(None, screen_dc);
             let _ = DeleteObject(HGDIOBJ::from(hbm));
+            if !hicon.is_invalid() { let _ = DestroyIcon(hicon); }
             return Err("CreateCompatibleDC failed".into());
         }
         let old_obj = SelectObject(memdc, HGDIOBJ::from(hbm));
 
-        // Fill with a translucent dark teal so it reads on any background.
-        let bg = CreateSolidBrush(COLORREF(0x00_30_30_30));
-        let mut rect = RECT { left: 0, top: 0, right: W, bottom: H };
-        FillRect(memdc, &rect, bg);
-        let _ = DeleteObject(HGDIOBJ::from(bg));
+        // Fill with magenta (color key) — the shell treats this colour as
+        // fully transparent at draw time, so we get a non-rectangular drag
+        // image with a rounded panel behind the icon and text.
+        const KEY_COLORREF: u32 = 0x00_FF_00_FF; // BGR 0xFF00FF == magenta
+        let key_brush = CreateSolidBrush(COLORREF(KEY_COLORREF));
+        let full = RECT { left: 0, top: 0, right: W, bottom: H };
+        FillRect(memdc, &full, key_brush);
+        let _ = DeleteObject(HGDIOBJ::from(key_brush));
 
-        // Bold 12 px font for the label.
+        // Dark translucent panel under the icon + text, rounded corners.
+        let panel = CreateSolidBrush(COLORREF(0x00_30_30_30));
+        let old_panel = SelectObject(memdc, HGDIOBJ::from(panel));
+        let _ = RoundRect(memdc, 0, 0, W, H, 14, 14);
+        SelectObject(memdc, old_panel);
+        let _ = DeleteObject(HGDIOBJ::from(panel));
+
+        // Thin accent frame around the panel for definition.
+        let frame = CreateSolidBrush(COLORREF(0x00_AA_AA_AA));
+        let frame_rect = RECT { left: 0, top: 0, right: W, bottom: H };
+        FrameRect(memdc, &frame_rect, frame);
+        let _ = DeleteObject(HGDIOBJ::from(frame));
+
+        // Draw the shell icon on the left.
+        if !hicon.is_invalid() {
+            let _ = DrawIconEx(
+                memdc,
+                ICON_X,
+                ICON_Y,
+                hicon,
+                ICON_SIZE,
+                ICON_SIZE,
+                0,
+                None,
+                DI_NORMAL,
+            );
+            let _ = DestroyIcon(hicon);
+        }
+
+        // File name label, bold.
         let face_w: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
-        let font = CreateFontW(
-            14,
+        let name_font = CreateFontW(
+            18,
             0,
             0,
             0,
@@ -728,36 +793,80 @@ unsafe fn attach_drag_image(
             (FF_DONTCARE.0 as u32) | (DEFAULT_PITCH.0 as u32),
             PCWSTR(face_w.as_ptr()),
         );
-        let old_font = SelectObject(memdc, HGDIOBJ::from(font));
+        let old_font = SelectObject(memdc, HGDIOBJ::from(name_font));
         SetBkMode(memdc, TRANSPARENT);
-        SetTextColor(memdc, COLORREF(0x00_F0_F0_F0));
-        rect.left = 12;
-        rect.right = W - 12;
-        let mut wide_mut = label_wide.clone();
+        SetTextColor(memdc, COLORREF(0x00_F8_F8_F8));
+        let mut name_rect = RECT {
+            left: TEXT_X,
+            top: if count_text.is_empty() { 0 } else { 14 },
+            right: W - 12,
+            bottom: if count_text.is_empty() { H } else { 44 },
+        };
+        let mut name_mut = label_wide.clone();
         let _ = DrawTextW(
             memdc,
-            &mut wide_mut,
-            &mut rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            &mut name_mut,
+            &mut name_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
 
-        // Restore DC objects and delete the font.
-        SelectObject(memdc, old_font);
-        let _ = DeleteObject(HGDIOBJ::from(font));
+        // Optional count line, smaller, lighter.
+        if !count_text.is_empty() {
+            SelectObject(memdc, old_font);
+            let _ = DeleteObject(HGDIOBJ::from(name_font));
+            let count_font = CreateFontW(
+                14,
+                0,
+                0,
+                0,
+                400,
+                0,
+                0,
+                0,
+                FONT_CHARSET(0),
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY,
+                (FF_DONTCARE.0 as u32) | (DEFAULT_PITCH.0 as u32),
+                PCWSTR(face_w.as_ptr()),
+            );
+            let old_count = SelectObject(memdc, HGDIOBJ::from(count_font));
+            SetTextColor(memdc, COLORREF(0x00_BB_BB_BB));
+            let mut count_rect = RECT {
+                left: TEXT_X,
+                top: 44,
+                right: W - 12,
+                bottom: H - 8,
+            };
+            let mut count_mut = count_wide.clone();
+            let _ = DrawTextW(
+                memdc,
+                &mut count_mut,
+                &mut count_rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+            SelectObject(memdc, old_count);
+            let _ = DeleteObject(HGDIOBJ::from(count_font));
+        } else {
+            SelectObject(memdc, old_font);
+            let _ = DeleteObject(HGDIOBJ::from(name_font));
+        }
+
         SelectObject(memdc, old_obj);
         let _ = DeleteDC(memdc);
         let _ = ReleaseDC(None, screen_dc);
 
         // Pass HBITMAP to IDragSourceHelper. Windows takes ownership and
-        // releases it once the drag completes.
+        // releases it once the drag completes. crColorKey makes magenta
+        // pixels transparent so the rounded panel reads correctly.
         let helper: IDragSourceHelper =
             CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER)
                 .map_err(|e| format!("CoCreateInstance: {e}"))?;
         let drag_image = SHDRAGIMAGE {
             sizeDragImage: windows::Win32::Foundation::SIZE { cx: W, cy: H },
-            ptOffset: POINT { x: 16, y: 18 },
+            ptOffset: POINT { x: ICON_X + ICON_SIZE / 2, y: ICON_Y + ICON_SIZE / 2 },
             hbmpDragImage: hbm,
-            crColorKey: COLORREF(0xFFFFFFFF),
+            crColorKey: COLORREF(KEY_COLORREF),
         };
         helper
             .InitializeFromBitmap(&drag_image, data)
