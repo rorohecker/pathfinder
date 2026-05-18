@@ -8277,15 +8277,45 @@ fn same_inode_or_canonical_path(a: &Path, b: &Path) -> bool {
 }
 
 impl NativeController {
-    fn new(cli_folder: Option<PathBuf>) -> Self {
+    fn new(cli_folder: Option<PathBuf>, settings: NativeSettings) -> Self {
         let app_state = AppState::default();
-        let settings = read_native_json("settings.json", NativeSettings::default());
         let known_folders = get_known_folders();
         let home = get_home_directory()
             .ok()
             .or_else(|| known_folders.first().map(|folder| folder.path.clone()))
             .unwrap_or_else(|| ".".to_string());
-        let mut tabs: Vec<SessionTab> = read_native_json("session.json", Vec::new());
+        // Read all small JSON state files in parallel via rayon. Each file is
+        // a few KB on disk but the sequential I/O latency adds up over 7 reads.
+        // join lets the OS file cache stream them concurrently and cuts the
+        // total startup wall-clock by roughly the number of cores serving I/O.
+        let ((tabs_raw, recent_raw), (folder_views_raw, (tags_raw, (tag_labels_raw, notes_raw)))): (
+            (Vec<SessionTab>, Vec<String>),
+            (HashMap<String, String>, (HashMap<String, String>, (HashMap<String, String>, HashMap<String, String>))),
+        ) = rayon::join(
+            || {
+                rayon::join(
+                    || read_native_json::<Vec<SessionTab>>("session.json", Vec::new()),
+                    || read_native_json::<Vec<String>>("recent_locations.json", Vec::new()),
+                )
+            },
+            || {
+                rayon::join(
+                    || read_native_json::<HashMap<String, String>>("folder_views.json", HashMap::new()),
+                    || {
+                        rayon::join(
+                            || read_native_json::<HashMap<String, String>>("tags.json", HashMap::new()),
+                            || {
+                                rayon::join(
+                                    || read_native_json::<HashMap<String, String>>("tag_labels.json", HashMap::new()),
+                                    || read_native_json::<HashMap<String, String>>("notes.json", HashMap::new()),
+                                )
+                            },
+                        )
+                    },
+                )
+            },
+        );
+        let mut tabs: Vec<SessionTab> = tabs_raw;
         if tabs.is_empty() {
             tabs.push(SessionTab {
                 path: String::new(),
@@ -8323,11 +8353,8 @@ impl NativeController {
             known_folders,
             drives: get_drives(),
             user_pins: native_user_pins(),
-            recent_locations: condense_recent_locations(
-                read_native_json("recent_locations.json", Vec::new()),
-                12,
-            ),
-            folder_views: read_native_json("folder_views.json", HashMap::new()),
+            recent_locations: condense_recent_locations(recent_raw, 12),
+            folder_views: folder_views_raw,
             show_hidden: false,
             ai_progress: {
                 let p = Arc::new(local_ai::InstallProgress::new());
@@ -8339,9 +8366,9 @@ impl NativeController {
             system_icon_by_ext: HashMap::new(),
             #[cfg(target_os = "windows")]
             system_icon_by_path: HashMap::new(),
-            tags: read_native_json("tags.json", HashMap::new()),
-            tag_labels: read_native_json("tag_labels.json", HashMap::new()),
-            notes: read_native_json("notes.json", HashMap::new()),
+            tags: tags_raw,
+            tag_labels: tag_labels_raw,
+            notes: notes_raw,
             secondary_path: current_path.clone(),
             secondary_history: vec![current_path.clone()],
             secondary_history_pos: 0,
@@ -9547,11 +9574,18 @@ impl NativeController {
                 self.current_path = path.clone();
                 // Clear thumbnails from the previous folder to free memory
                 self.thumbnail_memory.retain(|k, _| k.starts_with(&path));
+                // Update recent_locations cheaply: dedup the existing entry,
+                // push the new path to the front, truncate to 12. The previous
+                // implementation rebuilt the list via condense_recent_locations
+                // which stat()s every path on disk for existence — a dozen sync
+                // I/O ops on every folder change. Stale entries are pruned at
+                // startup instead; runtime keeps it allocation-light.
                 self.recent_locations
                     .retain(|p| !same_path_string(p, &path));
                 self.recent_locations.insert(0, path.clone());
-                self.recent_locations =
-                    condense_recent_locations(self.recent_locations.clone(), 12);
+                if self.recent_locations.len() > 12 {
+                    self.recent_locations.truncate(12);
+                }
                 write_native_json_async("recent_locations.json", &self.recent_locations);
 
                 // Restore view+sort for the new folder. First time visiting a
@@ -15037,7 +15071,10 @@ pub fn run() {
     let ui = MainWindow::new().expect("failed to create Pathfinder window");
     configure_native_window(&ui, &initial_settings);
     let cli_folder = parse_cli_startup_folder();
-    let controller = Rc::new(RefCell::new(NativeController::new(cli_folder)));
+    // Pass the already-loaded settings into the controller so it doesn't pay
+    // a second disk read for the same file. The other state files are loaded
+    // in parallel inside NativeController::new via rayon::join.
+    let controller = Rc::new(RefCell::new(NativeController::new(cli_folder, initial_settings)));
     controller.borrow_mut().initialize_ui(&ui);
     wire_native_callbacks(&ui, controller.clone());
 
