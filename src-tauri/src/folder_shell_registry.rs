@@ -215,10 +215,9 @@ pub fn set_pathfinder_as_default_folder_handler() -> Result<(), String> {
 
 /// True if the HKCU folder/directory open command points at the current pathfinder.exe.
 /// Used by the first-run welcome dialog so we can mark step 1 as already done.
+/// Only checks the Folder/open command (not the Explorer App Path redirect) so
+/// plans set up before v0.8 still register as "already done."
 pub fn pathfinder_is_default_folder_handler() -> bool {
-    if !explorer_redirect_points_at_current_exe() {
-        return false;
-    }
     let exe = match std::env::current_exe() {
         Ok(p) => p.to_string_lossy().to_ascii_lowercase(),
         Err(_) => return false,
@@ -278,9 +277,11 @@ pub fn restore_windows_default_folder_handler() -> Result<(), String> {
 /// Returns (properly_configured_count, total_count).
 /// Useful for diagnostics and validation.
 pub fn verify_shell_handler_entries() -> Result<(usize, usize), String> {
+    // 6 folder/directory/drive keys + 1 explorer App Path redirect = 7 entries.
+    let total = FOLDER_HANDLER_PATHS.len() + 1;
     let exe = match std::env::current_exe() {
         Ok(p) => p.to_string_lossy().to_ascii_lowercase(),
-        Err(_) => return Ok((0, FOLDER_HANDLER_PATHS.len())),
+        Err(_) => return Ok((0, total)),
     };
 
     let mut valid_count = 0;
@@ -325,7 +326,6 @@ pub fn verify_shell_handler_entries() -> Result<(usize, usize), String> {
         }
     }
 
-    let total = FOLDER_HANDLER_PATHS.len() + 1;
     if explorer_redirect_points_at_current_exe() {
         valid_count += 1;
     }

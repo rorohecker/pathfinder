@@ -5236,34 +5236,40 @@ fn schedule_index_directory(parent: String, entries: Vec<FileEntry>) {
     });
 }
 
-/// Schedule an index operation with debouncing to avoid excessive indexing
-/// when rapid file system events occur (e.g., after deleting files).
-/// Only indexes if the path hasn't been indexed within the last 300ms.
+/// Schedule an index operation with throttling so rapid file system events
+/// (e.g., recycle bin cascades or batch delete) don't pile up SQLite writes.
+/// Indexes if the path hasn't been indexed within the last 300ms. Also evicts
+/// map entries older than 5s on every call so the bookkeeping doesn't grow
+/// without bound for long-running sessions.
 fn schedule_index_directory_debounced(
     state: &AppState,
     parent: String,
     entries: Vec<FileEntry>,
 ) {
-    // Check if we've recently indexed this path
+    const THROTTLE_MS: u64 = 300;
+    const EVICT_AFTER: Duration = Duration::from_secs(5);
+
     let should_index = {
-        let debounce = state
+        // Single lock: read last-index time, evict stale entries, write new
+        // timestamp, all in one critical section. Avoids a TOCTOU window
+        // where two threads could both decide to index.
+        let mut debounce = state
             .index_debounce
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
-        let last_index = debounce.get(&parent).copied();
-
-        match last_index {
+        debounce.retain(|_, t| now.duration_since(*t) < EVICT_AFTER);
+        let ok = match debounce.get(&parent).copied() {
             None => true,
-            Some(last) => now.duration_since(last) > Duration::from_millis(300),
+            Some(last) => now.duration_since(last) > Duration::from_millis(THROTTLE_MS),
+        };
+        if ok {
+            debounce.insert(parent.clone(), now);
         }
+        ok
     };
 
     if should_index {
-        // Update the timestamp
-        if let Ok(mut debounce) = state.index_debounce.lock() {
-            debounce.insert(parent.clone(), Instant::now());
-        }
         schedule_index_directory(parent, entries);
     }
 }
@@ -15172,15 +15178,19 @@ fn export_registry_file() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
         let content = generate_registry_file()?;
-        let downloads = dirs::download_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let file_path = downloads.join("pathfinder-folder-handler.reg");
+        // Prefer Downloads, fall back to the desktop, then home. CWD for an
+        // installed app is typically C:\Windows\System32 which would silently
+        // bury the file somewhere the user can't find it.
+        let out_dir = dirs::download_dir()
+            .or_else(dirs::desktop_dir)
+            .or_else(dirs::home_dir)
+            .ok_or_else(|| {
+                "Could not locate a writable user folder for the export.".to_string()
+            })?;
+        let file_path = out_dir.join("pathfinder-folder-handler.reg");
         std::fs::write(&file_path, &content)
             .map_err(|e| format!("Failed to write registry file: {e}"))?;
-        Ok(format!(
-            "Registry file exported to: {}",
-            file_path.display()
-        ))
+        Ok(format!("Registry file exported to: {}", file_path.display()))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -15205,10 +15215,9 @@ fn check_handler_registration() -> Result<String, String> {
                 valid, total
             )
         } else {
-            format!(
-                "✗ Not registered. Click 'Set as default' to configure Pathfinder \
-                 as your default file manager."
-            )
+            "✗ Not registered. Click 'Set as default' to configure Pathfinder \
+             as your default file manager."
+                .to_string()
         };
         Ok(status)
     }
@@ -15220,10 +15229,20 @@ fn check_handler_registration() -> Result<String, String> {
 
 /// Installer / uninstaller hooks call these flags so registry logic stays in one place.
 fn handle_shell_handler_cli_flags() -> bool {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Single pass over argv. Any other CLI parsing already happens later in
+    // run(); these flags short-circuit before COM init for headless use.
+    let mut install = false;
+    let mut uninstall = false;
+    for a in std::env::args().skip(1) {
+        if a == "--install-shell-handler" {
+            install = true;
+        } else if a == "--uninstall-shell-handler" {
+            uninstall = true;
+        }
+    }
     #[cfg(target_os = "windows")]
     {
-        if args.iter().any(|a| a == "--install-shell-handler") {
+        if install {
             match folder_shell_registry::set_pathfinder_as_default_folder_handler() {
                 Ok(()) => eprintln!("[pathfinder] Shell handler registered (HKCU)."),
                 Err(e) => {
@@ -15233,7 +15252,7 @@ fn handle_shell_handler_cli_flags() -> bool {
             }
             return true;
         }
-        if args.iter().any(|a| a == "--uninstall-shell-handler") {
+        if uninstall {
             match folder_shell_registry::restore_windows_default_folder_handler() {
                 Ok(()) => eprintln!("[pathfinder] Shell handler removed (HKCU)."),
                 Err(e) => {
@@ -15246,10 +15265,7 @@ fn handle_shell_handler_cli_flags() -> bool {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        if args
-            .iter()
-            .any(|a| a == "--install-shell-handler" || a == "--uninstall-shell-handler")
-        {
+        if install || uninstall {
             eprintln!("[pathfinder] Shell handler flags are Windows-only.");
             std::process::exit(1);
         }
