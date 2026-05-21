@@ -1,14 +1,55 @@
 Windows Registry Editor Version 5.00
 ;
-; Pathfinder — per-user default folder handler (HKCU).
-; 1. Replace CHANGEME_EXE below with your installed pathfinder.exe (keep doubled backslashes).
-; 2. File > Import in Registry Editor, or: reg import set-pathfinder-default-folder-handler.reg
+; Pathfinder — per-user default folder handler registration
 ;
-; This mirrors the in-app "Set as default folder handler" action. It does NOT change
-; how ordinary files (.txt, .pdf, etc.) open — only Folder and Directory shell verbs.
+; SAFE: Only modifies HKEY_CURRENT_USER (per-user), not HKLM (system-wide).
+; Does NOT affect how individual files (.txt, .pdf, .exe, etc.) open — only Folder/Directory/Drive verbs.
+;
+; TO INSTALL:
+;   1. Replace "C:\path\to\pathfinder.exe" below with your actual Pathfinder installation path
+;   2. Keep the double backslashes (\\) — this is required by Windows Registry format
+;   3. Save this file, then double-click it OR use: reg import set-pathfinder-default-folder-handler.reg
+;   4. Click "Yes" when prompted
+;
+; WHAT IT DOES:
+;   - Double-clicking folders → opens in Pathfinder
+;   - Double-clicking drives in "This PC" → opens in Pathfinder
+;   - "Open" and "Explore" context menu verbs → route to Pathfinder
+;   - File Explorer shortcut / Chrome "Show in folder" → opens in Pathfinder
+;     (via per-user App Paths redirect for explorer.exe)
+;   - Steam "Show in folder" → opens in Pathfinder
+;   - Discord/Slack/other apps "Show in folder" → opens in Pathfinder
+;
+; TO UNDO:
+;   Open Registry Editor (regedit) and delete:
+;   HKEY_CURRENT_USER\Software\Classes\Folder
+;   HKEY_CURRENT_USER\Software\Classes\Directory
+;   HKEY_CURRENT_USER\Software\Classes\Drive
+;   HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\App Paths\explorer.exe
+;
+; EXAMPLE PATH (adjust for your installation):
+;   If Pathfinder is at: C:\Users\John\AppData\Local\Programs\Pathfinder\pathfinder.exe
+;   Use the command:     "C:\\Users\\John\\AppData\\Local\\Programs\\Pathfinder\\pathfinder.exe" --path "%1"
+;
 
 [HKEY_CURRENT_USER\Software\Classes\Folder\shell\open\command]
-@="CHANGEME_EXE --path \"%1\""
+@="\"C:\\path\\to\\pathfinder.exe\" --path \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Folder\shell\explore\command]
+@="\"C:\\path\\to\\pathfinder.exe\" --path \"%1\""
 
 [HKEY_CURRENT_USER\Software\Classes\Directory\shell\open\command]
-@="CHANGEME_EXE --path \"%1\""
+@="\"C:\\path\\to\\pathfinder.exe\" --path \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\explore\command]
+@="\"C:\\path\\to\\pathfinder.exe\" --path \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell\open\command]
+@="\"C:\\path\\to\\pathfinder.exe\" --path \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell\explore\command]
+@="\"C:\\path\\to\\pathfinder.exe\" --path \"%1\""
+
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\App Paths\explorer.exe]
+@="C:\\path\\to\\pathfinder.exe"
+"Path"="C:\\path\\to"

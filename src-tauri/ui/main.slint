@@ -1604,6 +1604,33 @@ component DialogButton inherits Rectangle {
     TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
+// Selectable message body — select text and Ctrl+C, or use toast Copy button.
+component CopyableMessageText {
+    in property <string> text;
+    in property <length> content-width;
+    in property <length> font-size: 12.5px;
+    in property <color> text-color: ThemePalette.text_muted;
+    in property <bool> mono: false;
+    in property <length> cap-height: 280px;
+
+    preferred-width: root.content-width;
+    preferred-height: min(body.preferred-height + 4px, root.cap-height);
+    width: root.content-width;
+    height: self.preferred-height;
+
+    body := TextInput {
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        read-only: true;
+        wrap: word-wrap;
+        font-size: root.font-size;
+        color: root.text-color;
+        font-family: root.mono ? AppMetrics.mono_font : AppMetrics.ui_font;
+        vertical-alignment: top;
+    }
+}
+
 export component MainWindow inherits Window {
     no-frame: true;
     resize-border-width: 8px;
@@ -1797,6 +1824,8 @@ export component MainWindow inherits Window {
     callback welcome_set_default_handler();
     callback welcome_open_taskbar_settings();
     callback welcome_dismiss();
+    callback toast_copy();
+    callback toast_dismiss();
     in-out property <bool> welcome_visible: false;
     in-out property <string> welcome_default_status: "Click Set as default below to register Pathfinder for folder shortcuts in Explorer.";
     in-out property <bool> welcome_default_handler_set: false;
@@ -2703,6 +2732,9 @@ export component MainWindow inherits Window {
                     }
                     pointer-event(event) => {
                         if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                            root.context_on_file = false;
+                            root.context_advanced = false;
+                            root.context_tags_expanded = false;
                             root.context_x = (self.absolute-position.x + self.mouse-x).clamp(0px, root.width - 240px);
                             root.context_y = (self.absolute-position.y + self.mouse-y).clamp(0px, root.height - 226px);
                             root.context_visible = true;
@@ -2832,6 +2864,35 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                // Empty list folders: ListView still captures hits when length is 0.
+                if root.view_mode == "list" && root.files.length == 0: Rectangle {
+                    z: 12;
+                    x: AppMetrics.pad;
+                    y: AppMetrics.pad + 32px;
+                    width: parent.width - AppMetrics.pad * 2 - 14px;
+                    height: parent.height - AppMetrics.pad * 2 - 32px;
+                    TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => {
+                            if (!primary_pane_root.marquee_active) {
+                                root.clear_selection();
+                            }
+                        }
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                root.context_on_file = false;
+                                root.context_advanced = false;
+                                root.context_tags_expanded = false;
+                                root.context_x = (self.absolute-position.x + self.mouse-x).clamp(0px, root.width - 240px);
+                                root.context_y = (self.absolute-position.y + self.mouse-y).clamp(0px, root.height - 226px);
+                                root.context_visible = true;
+                                root.file_context(-1);
+                            }
+                        }
+                    }
+                }
+
                 // Click-to-deselect area below list-view rows
                 if root.view_mode == "list": Rectangle {
                     x: AppMetrics.pad;
@@ -2842,6 +2903,9 @@ export component MainWindow inherits Window {
                         clicked => { root.clear_selection(); }
                         pointer-event(event) => {
                             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                root.context_on_file = false;
+                                root.context_advanced = false;
+                                root.context_tags_expanded = false;
                                 root.context_x = (self.absolute-position.x + self.mouse-x).clamp(0px, root.width - 240px);
                                 root.context_y = (self.absolute-position.y + self.mouse-y).clamp(0px, root.height - 278px);
                                 root.context_visible = true;
@@ -2860,7 +2924,7 @@ export component MainWindow inherits Window {
                     viewport-height: Math.max(parent.height - AppMetrics.pad * 2, root.grid_rows * (root.grid_item_h + root.grid_gap));
 
                     // Background click-to-deselect (first = underneath file rows)
-                    Rectangle {
+                    if root.files.length > 0: Rectangle {
                         x: 0; y: 0;
                         width: root.file_area_w;
                         height: Math.max(parent.height - AppMetrics.pad * 2, root.grid_rows * (root.grid_item_h + root.grid_gap));
@@ -2868,6 +2932,29 @@ export component MainWindow inherits Window {
                             clicked => { root.clear_selection(); }
                             pointer-event(event) => {
                                 if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                    root.context_on_file = false;
+                                    root.context_advanced = false;
+                                    root.context_tags_expanded = false;
+                                    root.context_x = (self.absolute-position.x + self.mouse-x).clamp(0px, root.width - 240px);
+                                    root.context_y = (self.absolute-position.y + self.mouse-y).clamp(0px, root.height - 278px);
+                                    root.context_visible = true;
+                                    root.file_context(-1);
+                                }
+                            }
+                        }
+                    }
+                    if root.files.length == 0: Rectangle {
+                        z: 12;
+                        x: 0; y: 0;
+                        width: root.file_area_w;
+                        height: Math.max(parent.height - AppMetrics.pad * 2, root.grid_rows * (root.grid_item_h + root.grid_gap));
+                        TouchArea {
+                            clicked => { root.clear_selection(); }
+                            pointer-event(event) => {
+                                if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                    root.context_on_file = false;
+                                    root.context_advanced = false;
+                                    root.context_tags_expanded = false;
                                     root.context_x = (self.absolute-position.x + self.mouse-x).clamp(0px, root.width - 240px);
                                     root.context_y = (self.absolute-position.y + self.mouse-y).clamp(0px, root.height - 278px);
                                     root.context_visible = true;
@@ -3198,6 +3285,9 @@ export component MainWindow inherits Window {
                         }
                         pointer-event(event) => {
                             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                root.context_on_file = false;
+                                root.context_advanced = false;
+                                root.context_tags_expanded = false;
                                 root.context_x = (self.absolute-position.x + self.mouse-x).clamp(0px, root.width - 240px);
                                 root.context_y = (self.absolute-position.y + self.mouse-y).clamp(0px, root.height - 226px);
                                 root.context_visible = true;
@@ -3253,6 +3343,17 @@ export component MainWindow inherits Window {
                         width: parent.width;
                         height: parent.height;
                         clicked => { root.secondary_file_selected(-1, false, false); }
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+                                root.context_on_file = false;
+                                root.context_advanced = false;
+                                root.context_tags_expanded = false;
+                                root.context_x = (self.absolute-position.x + self.mouse-x).clamp(0px, root.width - 240px);
+                                root.context_y = (self.absolute-position.y + self.mouse-y).clamp(0px, root.height - 226px);
+                                root.context_visible = true;
+                                root.secondary_file_context(-1);
+                            }
+                        }
                     }
                 }
             }
@@ -3394,14 +3495,14 @@ export component MainWindow inherits Window {
                             width: parent.width; height: 8px;
                         }
 
-                        if root.preview_body != "": Text {
+                        if root.preview_body != "": CopyableMessageText {
                             x: 16px;
-                            width: parent.width - 32px;
+                            content-width: parent.width - 32px;
                             text: root.preview_body;
-                            color: ThemePalette.text_muted;
                             font-size: 11.5px;
-                            font-family: AppMetrics.mono_font;
-                            wrap: word-wrap;
+                            text-color: ThemePalette.text_muted;
+                            mono: true;
+                            cap-height: 480px;
                         }
 
                         // Empty state
@@ -3519,6 +3620,7 @@ export component MainWindow inherits Window {
     }
 
     if root.context_visible: Rectangle {
+        z: 90;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0);
@@ -3529,6 +3631,7 @@ export component MainWindow inherits Window {
 
     // Context menu - file
     if root.context_visible && root.context_on_file: Rectangle {
+        z: 100;
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - (root.is_simple ? 410px : 580px));
         width: 226px;
@@ -3679,6 +3782,7 @@ export component MainWindow inherits Window {
 
     // Context menu - empty area
     if root.context_visible && !root.context_on_file: Rectangle {
+        z: 100;
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - 278px);
         width: 226px;
@@ -5169,16 +5273,21 @@ export component MainWindow inherits Window {
                             font-weight: 700;
                             wrap: word-wrap;
                         }
-                        Text {
+                        if root.ai_install_state == "installed" || root.ai_install_state == "not_installed": Text {
                             width: parent.width - 28px;
                             text: root.ai_install_state == "installed"
                                 ? "Semantic search, image classification, and perceptual duplicate detection are ready."
-                                : (root.ai_install_state == "downloading"
-                                    ? root.ai_install_message
-                                    : "Adds about " + root.ai_install_size_mb + " MB on disk. Models run entirely on your machine.");
+                                : "Adds about " + root.ai_install_size_mb + " MB on disk. Models run entirely on your machine.";
                             color: ThemePalette.text_muted;
                             font-size: 11.5px;
                             wrap: word-wrap;
+                        }
+                        if root.ai_install_state == "downloading" || root.ai_install_state == "error": CopyableMessageText {
+                            content-width: parent.width - 28px;
+                            text: root.ai_install_message;
+                            font-size: 11.5px;
+                            text-color: root.ai_install_state == "error" ? ThemePalette.danger : ThemePalette.text_muted;
+                            cap-height: 160px;
                         }
 
                         if root.ai_install_state == "downloading": Rectangle {
@@ -5341,17 +5450,32 @@ export component MainWindow inherits Window {
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
-        Rectangle {
-            x: (parent.width - 420px) / 2;
-            y: (parent.height - 180px) / 2;
-            width: 420px;
-            height: 180px;
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            // Block all mouse events from passing through to elements behind the dialog
+            clicked => { }
+        }
+        confirm_panel := Rectangle {
+            x: (parent.width - 460px) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 460px;
+            height: confirm_body.preferred-height + 120px;
             border-width: 1px;
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
             background: ThemePalette.panel_solid;
-            Text { x: 18px; y: 16px; width: parent.width - 36px; height: 26px; text: "Confirm delete"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
-            Text { x: 18px; y: 58px; width: parent.width - 36px; height: 48px; text: root.confirm_text; color: ThemePalette.text_muted; font-size: 13px; wrap: word-wrap; }
+            clip: true;
+            Text { x: 18px; y: 16px; width: parent.width - 36px; text: "Confirm delete"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            confirm_body := CopyableMessageText {
+                x: 18px;
+                y: 50px;
+                content-width: parent.width - 36px;
+                text: root.confirm_text;
+                font-size: 13px;
+                text-color: ThemePalette.text_muted;
+                cap-height: 220px;
+            }
             DialogButton { x: parent.width - 180px; y: parent.height - 48px; label: "Cancel"; clicked => { root.confirm_visible = false; } }
             DialogButton { x: parent.width - 90px; y: parent.height - 48px; label: "Delete"; primary: true; danger: true; clicked => { root.confirm_visible = false; root.confirm_delete(); } }
         }
@@ -5361,6 +5485,12 @@ export component MainWindow inherits Window {
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            // Block all mouse events from passing through to elements behind the dialog
+            clicked => { }
+        }
 
         // Conflict-resolution dialog - three explicit buttons, no text input.
         if root.prompt_kind == "conflict": Rectangle {
@@ -5373,12 +5503,13 @@ export component MainWindow inherits Window {
             border-radius: AppMetrics.radius;
             background: ThemePalette.panel_solid;
             Text { x: 18px; y: 16px; width: parent.width - 36px; height: 26px; text: root.prompt_title; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
-            Text {
-                x: 18px; y: 50px; width: parent.width - 36px; height: 88px;
+            CopyableMessageText {
+                x: 18px;
+                y: 50px;
+                content-width: parent.width - 36px;
                 text: "A file with the same name already exists.\n\nKeep both: save with a new name like \"file (1).txt\".\nReplace: overwrite the existing file.\nSkip: don't copy this file.";
-                color: ThemePalette.text_muted;
                 font-size: 12.5px;
-                wrap: word-wrap;
+                cap-height: 88px;
             }
             DialogButton { x: 18px; y: parent.height - 48px; label: "Skip"; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("skip"); } }
             DialogButton { x: parent.width - 240px; y: parent.height - 48px; label: "Replace"; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("replace"); } }
@@ -5546,15 +5677,14 @@ export component MainWindow inherits Window {
                     border-color: ThemePalette.border;
                     background: ThemePalette.panel;
                     w1_title := Text { x: 14px; y: 12px; width: parent.width - 28px; text: "1. Set Pathfinder as your default folder handler"; color: ThemePalette.text; font-size: 13px; font-weight: 700; wrap: word-wrap; height: self.preferred-height; }
-                    w1_body := Text {
+                    w1_body := CopyableMessageText {
                         x: 14px;
                         y: w1_title.y + w1_title.preferred-height + 4px;
-                        width: parent.width - 28px;
+                        content-width: parent.width - 28px;
                         text: root.welcome_default_status;
-                        color: ThemePalette.text_muted;
                         font-size: 11.5px;
-                        wrap: word-wrap;
-                        height: self.preferred-height;
+                        text-color: ThemePalette.text_muted;
+                        cap-height: 120px;
                     }
                     DialogButton {
                         x: parent.width - self.preferred-width - 14px;
@@ -5624,30 +5754,61 @@ export component MainWindow inherits Window {
     }
 
     if root.toast_text != "": Rectangle {
-        x: (parent.width - 360px) / 2;
-        y: parent.height - 78px;
-        width: 360px;
-        height: 38px;
-        border-width: 1px;
-        border-color: root.toast_kind == "error" ? ThemePalette.danger :
-                      root.toast_kind == "success" ? ThemePalette.success :
-                      root.toast_kind == "warning" ? ThemePalette.warning :
-                      ThemePalette.border_strong;
-        border-radius: AppMetrics.radius;
-        background: ThemePalette.panel_solid;
-        drop-shadow-blur: 14px;
-        drop-shadow-color: rgba(0, 0, 0, 0.38);
+        z: 150;
+        width: parent.width;
+        height: parent.height;
 
-        Rectangle {
-            x: 0; y: 0; width: 3px; height: parent.height;
+        toast_box := Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: parent.height - self.height - 14px;
+            width: min(560px, parent.width - 28px);
+            height: toast_body.preferred-height + (root.toast_kind == "error" || root.toast_kind == "warning" ? 52px : 36px);
+            border-width: 1px;
+            border-color: root.toast_kind == "error" ? ThemePalette.danger :
+                          root.toast_kind == "success" ? ThemePalette.success :
+                          root.toast_kind == "warning" ? ThemePalette.warning :
+                          ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
-            background: root.toast_kind == "error" ? ThemePalette.danger :
-                        root.toast_kind == "success" ? ThemePalette.success :
-                        root.toast_kind == "warning" ? ThemePalette.warning :
-                        ThemePalette.accent;
-        }
+            background: ThemePalette.panel_solid;
+            drop-shadow-blur: 14px;
+            drop-shadow-color: rgba(0, 0, 0, 0.38);
+            clip: true;
 
-        Text { x: 13px; width: parent.width - 26px; height: parent.height; text: root.toast_text; color: ThemePalette.text; font-size: 12.5px; vertical-alignment: center; overflow: elide; }
+            Rectangle {
+                x: 0; y: 0; width: 3px; height: parent.height;
+                border-radius: AppMetrics.radius;
+                background: root.toast_kind == "error" ? ThemePalette.danger :
+                            root.toast_kind == "success" ? ThemePalette.success :
+                            root.toast_kind == "warning" ? ThemePalette.warning :
+                            ThemePalette.accent;
+            }
+
+            toast_body := CopyableMessageText {
+                x: 13px;
+                y: 10px;
+                content-width: parent.width - 26px;
+                text: root.toast_text;
+                font-size: 12.5px;
+                text-color: ThemePalette.text;
+                cap-height: root.toast_kind == "error" || root.toast_kind == "warning" ? 220px : 140px;
+            }
+
+            if root.toast_kind == "error" || root.toast_kind == "warning": HorizontalLayout {
+                x: parent.width - 148px;
+                y: parent.height - 38px;
+                width: 136px;
+                height: 32px;
+                spacing: 8px;
+                DialogButton {
+                    label: "Copy";
+                    clicked => { root.toast_copy(); }
+                }
+                DialogButton {
+                    label: "Dismiss";
+                    clicked => { root.toast_dismiss(); }
+                }
+            }
+        }
     }
 
     // ── DRAG INDICATOR ───────────────────────────────────────────────

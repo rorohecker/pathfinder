@@ -443,6 +443,9 @@ struct AppState {
     next_operation_id: Arc<AtomicU64>,
     queue_paused: Arc<Mutex<bool>>,
     git_cache: Arc<Mutex<GitCacheMap>>,
+    // Debounce map for file watcher indexing: tracks last index time per path
+    // to avoid excessive indexing when rapid file system events occur.
+    index_debounce: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl Default for AppState {
@@ -458,6 +461,7 @@ impl Default for AppState {
             next_operation_id: Arc::new(AtomicU64::new(1)),
             queue_paused: Arc::new(Mutex::new(false)),
             git_cache: Arc::new(Mutex::new(HashMap::new())),
+            index_debounce: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -2935,7 +2939,9 @@ fn watch_paths(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), Str
                         let parent_string = parent.to_string_lossy().to_string();
                         if let Ok(entries) = list_directory_uncached(&parent) {
                             callback_state.store_directory(&parent_string, entries.clone());
-                            schedule_index_directory(parent_string, entries);
+                            // Use debounced indexing to avoid excessive database operations
+                            // when rapid file system events occur (e.g., after delete/recycle bin).
+                            schedule_index_directory_debounced(&callback_state, parent_string, entries);
                         }
                     }
                 }
@@ -4858,6 +4864,8 @@ struct NativeController {
     thumbnail_timer: Option<slint::Timer>,
     toast_queue: std::collections::VecDeque<(String, String)>,
     toast_showing: bool,
+    toast_current_kind: String,
+    toast_current_message: String,
     toast_last_shown: Option<std::time::Instant>,
     toast_timer: Option<slint::Timer>,
     git_status_ready: Arc<std::sync::atomic::AtomicBool>,
@@ -5226,6 +5234,38 @@ fn schedule_index_directory(parent: String, entries: Vec<FileEntry>) {
     std::thread::spawn(move || {
         let _ = index_directory_entries(&parent, &entries);
     });
+}
+
+/// Schedule an index operation with debouncing to avoid excessive indexing
+/// when rapid file system events occur (e.g., after deleting files).
+/// Only indexes if the path hasn't been indexed within the last 300ms.
+fn schedule_index_directory_debounced(
+    state: &AppState,
+    parent: String,
+    entries: Vec<FileEntry>,
+) {
+    // Check if we've recently indexed this path
+    let should_index = {
+        let debounce = state
+            .index_debounce
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        let last_index = debounce.get(&parent).copied();
+
+        match last_index {
+            None => true,
+            Some(last) => now.duration_since(last) > Duration::from_millis(300),
+        }
+    };
+
+    if should_index {
+        // Update the timestamp
+        if let Ok(mut debounce) = state.index_debounce.lock() {
+            debounce.insert(parent.clone(), Instant::now());
+        }
+        schedule_index_directory(parent, entries);
+    }
 }
 
 fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), String> {
@@ -8409,6 +8449,8 @@ impl NativeController {
             thumbnail_timer: None,
             toast_queue: std::collections::VecDeque::new(),
             toast_showing: false,
+            toast_current_kind: "info".to_string(),
+            toast_current_message: String::new(),
             toast_last_shown: None,
             toast_timer: None,
             git_status_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -8588,16 +8630,39 @@ impl NativeController {
         }
     }
 
+    fn toast_display_duration(kind: &str, message: &str) -> Duration {
+        let base_ms: u64 = match kind {
+            "error" => 20_000,
+            "warning" => 14_000,
+            "success" => 5_000,
+            _ => 4_500,
+        };
+        let extra = (message.len() as u64).saturating_mul(40).min(30_000);
+        Duration::from_millis(base_ms + extra)
+    }
+
+    fn dismiss_toast(&mut self, ui: &MainWindow) {
+        ui.set_toast_text(ss(""));
+        self.toast_showing = false;
+        self.toast_last_shown = None;
+        self.toast_current_message.clear();
+        self.advance_toast_display(ui);
+    }
+
     fn advance_toast_display(&mut self, ui: &MainWindow) {
         if let Some((msg, kind)) = self.toast_queue.pop_front() {
             ui.set_toast_text(ss(&msg));
             ui.set_toast_kind(ss(&kind));
+            self.toast_current_kind = kind;
+            self.toast_current_message = msg;
             self.toast_showing = true;
             self.toast_last_shown = Some(std::time::Instant::now());
         } else {
             ui.set_toast_text(ss(""));
             self.toast_showing = false;
             self.toast_last_shown = None;
+            self.toast_current_kind = "info".to_string();
+            self.toast_current_message.clear();
         }
     }
 
@@ -13802,10 +13867,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let should_advance = {
                     let ctrl = c.borrow();
                     ctrl.toast_showing
-                        && ctrl
-                            .toast_last_shown
-                            .map(|t| t.elapsed() >= Duration::from_millis(3200))
-                            .unwrap_or(false)
+                        && ctrl.toast_last_shown.map(|t| {
+                            t.elapsed()
+                                >= NativeController::toast_display_duration(
+                                    &ctrl.toast_current_kind,
+                                    &ctrl.toast_current_message,
+                                )
+                        }).unwrap_or(false)
                 };
                 if should_advance {
                     if let Some(ui) = weak.upgrade() {
@@ -13821,6 +13889,30 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_drag_window(move || {
         if let Some(ui) = weak.upgrade() {
             start_native_drag(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_toast_copy(move || {
+        if let Some(ui) = weak.upgrade() {
+            let text = ui.get_toast_text().to_string();
+            if text.is_empty() {
+                return;
+            }
+            let mut ctrl = c.borrow_mut();
+            match copy_text_to_clipboard(&text) {
+                Ok(()) => ctrl.show_toast_kind(&ui, "Message copied to clipboard", "success"),
+                Err(e) => ctrl.show_toast_kind(&ui, e, "error"),
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_toast_dismiss(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().dismiss_toast(&ui);
         }
     });
 
@@ -15032,6 +15124,16 @@ fn restore_as_default_file_manager() -> Result<(), String> {
     folder_shell_registry::restore_windows_default_folder_handler()
 }
 
+#[cfg(target_os = "windows")]
+fn generate_registry_file() -> Result<String, String> {
+    folder_shell_registry::generate_registry_file_content()
+}
+
+#[cfg(target_os = "windows")]
+fn get_handler_registration_status() -> Result<(usize, usize), String> {
+    folder_shell_registry::verify_shell_handler_entries()
+}
+
 #[cfg(not(target_os = "windows"))]
 fn set_as_default_file_manager() -> Result<(), String> {
     Err("Windows only".into())
@@ -15039,6 +15141,16 @@ fn set_as_default_file_manager() -> Result<(), String> {
 
 #[cfg(not(target_os = "windows"))]
 fn restore_as_default_file_manager() -> Result<(), String> {
+    Err("Windows only".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn generate_registry_file() -> Result<String, String> {
+    Err("Windows only".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_handler_registration_status() -> Result<(usize, usize), String> {
     Err("Windows only".into())
 }
 
@@ -15055,7 +15167,101 @@ fn set_default_file_manager() -> Result<String, String> {
     }
 }
 
+#[tauri::command]
+fn export_registry_file() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let content = generate_registry_file()?;
+        let downloads = dirs::download_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let file_path = downloads.join("pathfinder-folder-handler.reg");
+        std::fs::write(&file_path, &content)
+            .map_err(|e| format!("Failed to write registry file: {e}"))?;
+        Ok(format!(
+            "Registry file exported to: {}",
+            file_path.display()
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("This feature is only available on Windows.".to_string())
+    }
+}
+
+#[tauri::command]
+fn check_handler_registration() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let (valid, total) = get_handler_registration_status()?;
+        let status = if valid == total {
+            format!(
+                "✓ Pathfinder is properly registered as the default handler ({}/{})",
+                valid, total
+            )
+        } else if valid > 0 {
+            format!(
+                "⚠ Partial registration: {}/{} registry entries configured. \
+                 Click 'Set as default' to complete the registration.",
+                valid, total
+            )
+        } else {
+            format!(
+                "✗ Not registered. Click 'Set as default' to configure Pathfinder \
+                 as your default file manager."
+            )
+        };
+        Ok(status)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("This feature is only available on Windows.".to_string())
+    }
+}
+
+/// Installer / uninstaller hooks call these flags so registry logic stays in one place.
+fn handle_shell_handler_cli_flags() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(target_os = "windows")]
+    {
+        if args.iter().any(|a| a == "--install-shell-handler") {
+            match folder_shell_registry::set_pathfinder_as_default_folder_handler() {
+                Ok(()) => eprintln!("[pathfinder] Shell handler registered (HKCU)."),
+                Err(e) => {
+                    eprintln!("[pathfinder] Shell handler registration failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return true;
+        }
+        if args.iter().any(|a| a == "--uninstall-shell-handler") {
+            match folder_shell_registry::restore_windows_default_folder_handler() {
+                Ok(()) => eprintln!("[pathfinder] Shell handler removed (HKCU)."),
+                Err(e) => {
+                    eprintln!("[pathfinder] Shell handler removal failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return true;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if args
+            .iter()
+            .any(|a| a == "--install-shell-handler" || a == "--uninstall-shell-handler")
+        {
+            eprintln!("[pathfinder] Shell handler flags are Windows-only.");
+            std::process::exit(1);
+        }
+    }
+    false
+}
+
 pub fn run() {
+    if handle_shell_handler_cli_flags() {
+        return;
+    }
+
     // COM must be initialised on the main thread before any shell APIs are used.
     #[cfg(target_os = "windows")]
     unsafe {
@@ -15123,6 +15329,7 @@ pub fn run() {
     // object isn't fully reachable through Slint's accessor until the event loop
     // has pumped at least one tick. The Timer callback runs on the UI thread
     // (no Send bound), so we can pass our Rc<RefCell<NativeController>> in.
+    // Reduced from 150ms to 50ms for faster startup on modern systems.
     #[cfg(target_os = "windows")]
     {
         let weak_drop = ui.as_weak();
@@ -15130,7 +15337,7 @@ pub fn run() {
         let drop_register_timer = Box::new(slint::Timer::default());
         drop_register_timer.start(
             slint::TimerMode::SingleShot,
-            Duration::from_millis(150),
+            Duration::from_millis(50),
             move || {
                 use i_slint_backend_winit::WinitWindowAccessor;
                 use i_slint_backend_winit::winit::raw_window_handle::{
