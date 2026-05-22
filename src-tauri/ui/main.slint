@@ -2865,6 +2865,8 @@ export component MainWindow inherits Window {
                 }
 
                 // Empty list folders: ListView still captures hits when length is 0.
+                // Also supports starting a marquee even though no rows exist, so a
+                // future "deselect by drag" feels consistent with non-empty folders.
                 if root.view_mode == "list" && root.files.length == 0: Rectangle {
                     z: 12;
                     x: AppMetrics.pad;
@@ -2880,6 +2882,24 @@ export component MainWindow inherits Window {
                             }
                         }
                         pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                primary_pane_root.marquee_start_x = parent.x + self.mouse-x;
+                                primary_pane_root.marquee_start_y = parent.y + self.mouse-y;
+                                primary_pane_root.marquee_x = primary_pane_root.marquee_start_x;
+                                primary_pane_root.marquee_y = primary_pane_root.marquee_start_y;
+                                primary_pane_root.marquee_w = 0;
+                                primary_pane_root.marquee_h = 0;
+                                primary_pane_root.marquee_active = false;
+                            }
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                                if (primary_pane_root.marquee_active) {
+                                    root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                        primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                                }
+                                primary_pane_root.marquee_active = false;
+                                primary_pane_root.marquee_w = 0;
+                                primary_pane_root.marquee_h = 0;
+                            }
                             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                                 root.context_on_file = false;
                                 root.context_advanced = false;
@@ -2890,18 +2910,60 @@ export component MainWindow inherits Window {
                                 root.file_context(-1);
                             }
                         }
+                        moved => {
+                            if (self.pressed) {
+                                // 4px deadzone matches empty_context behavior so a
+                                // simple click stays a click instead of a 1px marquee.
+                                if (abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x) > 4px ||
+                                    abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y) > 4px) {
+                                    primary_pane_root.marquee_active = true;
+                                    primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, parent.x + self.mouse-x);
+                                    primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, parent.y + self.mouse-y);
+                                    primary_pane_root.marquee_w = abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x);
+                                    primary_pane_root.marquee_h = abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y);
+                                    root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                        primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                                }
+                            }
+                        }
                     }
                 }
 
-                // Click-to-deselect area below list-view rows
+                // Marquee-and-deselect area covering all space below the last row.
+                // Previously only handled click-to-deselect, which left users unable
+                // to start a marquee from the bottom half of a sparsely populated
+                // folder. Now mirrors empty_context so the rubber-band selection
+                // works from any empty space in the file pane.
                 if root.view_mode == "list": Rectangle {
                     x: AppMetrics.pad;
                     y: AppMetrics.pad + 32px + root.files.length * AppMetrics.row_h;
                     width: parent.width - AppMetrics.pad * 2;
                     height: parent.height - AppMetrics.pad - 32px - root.files.length * AppMetrics.row_h;
                     TouchArea {
-                        clicked => { root.clear_selection(); }
+                        clicked => {
+                            if (!primary_pane_root.marquee_active) {
+                                root.clear_selection();
+                            }
+                        }
                         pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                primary_pane_root.marquee_start_x = parent.x + self.mouse-x;
+                                primary_pane_root.marquee_start_y = parent.y + self.mouse-y;
+                                primary_pane_root.marquee_x = primary_pane_root.marquee_start_x;
+                                primary_pane_root.marquee_y = primary_pane_root.marquee_start_y;
+                                primary_pane_root.marquee_w = 0;
+                                primary_pane_root.marquee_h = 0;
+                                primary_pane_root.marquee_active = false;
+                            }
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                                if (primary_pane_root.marquee_active) {
+                                    root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                        primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                                }
+                                primary_pane_root.marquee_active = false;
+                                primary_pane_root.marquee_w = 0;
+                                primary_pane_root.marquee_h = 0;
+                            }
                             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                                 root.context_on_file = false;
                                 root.context_advanced = false;
@@ -2910,6 +2972,20 @@ export component MainWindow inherits Window {
                                 root.context_y = (self.absolute-position.y + self.mouse-y).clamp(0px, root.height - 278px);
                                 root.context_visible = true;
                                 root.file_context(-1);
+                            }
+                        }
+                        moved => {
+                            if (self.pressed) {
+                                if (abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x) > 4px ||
+                                    abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y) > 4px) {
+                                    primary_pane_root.marquee_active = true;
+                                    primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, parent.x + self.mouse-x);
+                                    primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, parent.y + self.mouse-y);
+                                    primary_pane_root.marquee_w = abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x);
+                                    primary_pane_root.marquee_h = abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y);
+                                    root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                        primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                                }
                             }
                         }
                     }
@@ -2923,14 +2999,39 @@ export component MainWindow inherits Window {
                     viewport-width: parent.width - AppMetrics.pad * 2;
                     viewport-height: Math.max(parent.height - AppMetrics.pad * 2, root.grid_rows * (root.grid_item_h + root.grid_gap));
 
-                    // Background click-to-deselect (first = underneath file rows)
+                    // Background marquee + click-to-deselect underneath grid/gallery
+                    // rows. Same drag-rectangle behavior as the list view; marquee
+                    // coordinates are stored in pane-local space using each TouchArea's
+                    // absolute position so scroll offset is implicit.
                     if root.files.length > 0: Rectangle {
                         x: 0; y: 0;
                         width: root.file_area_w;
                         height: Math.max(parent.height - AppMetrics.pad * 2, root.grid_rows * (root.grid_item_h + root.grid_gap));
                         TouchArea {
-                            clicked => { root.clear_selection(); }
+                            clicked => {
+                                if (!primary_pane_root.marquee_active) {
+                                    root.clear_selection();
+                                }
+                            }
                             pointer-event(event) => {
+                                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                    primary_pane_root.marquee_start_x = self.absolute-position.x - primary_pane_root.absolute-position.x + self.mouse-x;
+                                    primary_pane_root.marquee_start_y = self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y;
+                                    primary_pane_root.marquee_x = primary_pane_root.marquee_start_x;
+                                    primary_pane_root.marquee_y = primary_pane_root.marquee_start_y;
+                                    primary_pane_root.marquee_w = 0;
+                                    primary_pane_root.marquee_h = 0;
+                                    primary_pane_root.marquee_active = false;
+                                }
+                                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                                    if (primary_pane_root.marquee_active) {
+                                        root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                            primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                                    }
+                                    primary_pane_root.marquee_active = false;
+                                    primary_pane_root.marquee_w = 0;
+                                    primary_pane_root.marquee_h = 0;
+                                }
                                 if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                                     root.context_on_file = false;
                                     root.context_advanced = false;
@@ -2939,6 +3040,20 @@ export component MainWindow inherits Window {
                                     root.context_y = (self.absolute-position.y + self.mouse-y).clamp(0px, root.height - 278px);
                                     root.context_visible = true;
                                     root.file_context(-1);
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    if (abs((self.absolute-position.x - primary_pane_root.absolute-position.x + self.mouse-x) - primary_pane_root.marquee_start_x) > 4px ||
+                                        abs((self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y) - primary_pane_root.marquee_start_y) > 4px) {
+                                        primary_pane_root.marquee_active = true;
+                                        primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, self.absolute-position.x - primary_pane_root.absolute-position.x + self.mouse-x);
+                                        primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y);
+                                        primary_pane_root.marquee_w = abs((self.absolute-position.x - primary_pane_root.absolute-position.x + self.mouse-x) - primary_pane_root.marquee_start_x);
+                                        primary_pane_root.marquee_h = abs((self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y) - primary_pane_root.marquee_start_y);
+                                        root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                            primary_pane_root.marquee_w, primary_pane_root.marquee_h);
+                                    }
                                 }
                             }
                         }
