@@ -1824,159 +1824,307 @@ component StorageView inherits Rectangle {
     in property <string> subtitle;
     in property <[StorageBucketUi]> buckets;
     in property <[StorageEntryUi]> top_items;
+    in property <[StorageEntryUi]> drives;
     in property <bool> show_all;
+    in property <string> selected_bucket;
+    in property <int> progress_files;
+    in property <string> progress_bytes_text;
+    in property <float> progress_percent;
     callback rescan();
     callback open_path(string);
     callback toggle_show_all();
+    callback select_bucket(string);
+    callback clear_bucket();
+    callback switch_root(string);
     background: ThemePalette.bg;
 
-    // Header row: title + totals + rescan button.
-    Rectangle {
+
+    // Whole storage view uses VerticalLayout so sections flow top-to-bottom
+    // without absolute positioning. Avoids the v0.9.0 overlap bug entirely.
+    // Each section sets a preferred-height; the list section takes whatever
+    // remains via vertical-stretch:1.
+    VerticalLayout {
         x: 0; y: 0;
         width: parent.width;
-        height: 84px;
-        background: ThemePalette.panel;
-        border-width: 0;
+        height: parent.height;
+        spacing: 0;
+        alignment: start;
+
+        // ── Header strip ──────────────────────────────────────────────────
+        // Drive title + total + rescan button on one row. Subtitle below it.
+        // Fixed preferred-height; the strip itself never collapses or grows.
         Rectangle {
-            x: 0; y: parent.height - 1px;
-            width: parent.width; height: 1px;
-            background: ThemePalette.border;
-        }
-        Text {
-            x: 24px; y: 16px;
-            width: parent.width - 200px; height: 22px;
-            text: "Storage on " + root.root_label;
-            color: ThemePalette.text;
-            font-size: 18px;
-            font-weight: 700;
-        }
-        Text {
-            x: 24px; y: 44px;
-            width: parent.width - 200px; height: 16px;
-            text: root.total_text;
-            color: ThemePalette.text_muted;
-            font-size: 12px;
-        }
-        Text {
-            x: 24px; y: 62px;
-            width: parent.width - 200px; height: 14px;
-            text: root.subtitle;
-            color: ThemePalette.text_faint;
-            font-size: 10.5px;
-            overflow: elide;
-        }
-        // Rescan button on the right side.
-        Rectangle {
-            x: parent.width - 116px;
-            y: 24px;
-            width: 92px;
-            height: 32px;
-            border-radius: AppMetrics.radius_small;
-            border-width: 1px;
-            border-color: ThemePalette.border;
-            background: rescan_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
-            animate background { duration: 80ms; easing: ease-out; }
+            preferred-height: 86px;
+            min-height: 86px;
+            max-height: 86px;
+            vertical-stretch: 0;
+            background: ThemePalette.panel;
+            // Bottom separator.
+            Rectangle {
+                x: 0; y: parent.height - 1px;
+                width: parent.width; height: 1px;
+                background: ThemePalette.border;
+            }
             Text {
-                width: parent.width;
-                height: parent.height;
-                text: root.scanning ? "Scanning…" : "Rescan";
+                x: 24px; y: 16px;
+                width: parent.width - 156px; height: 24px;
+                text: "Storage on " + root.root_label;
                 color: ThemePalette.text;
+                font-size: 18px;
+                font-weight: 700;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                x: 24px; y: 44px;
+                width: parent.width - 156px; height: 18px;
+                text: root.total_text;
+                color: ThemePalette.text_muted;
                 font-size: 12px;
-                font-weight: 600;
-                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Text {
+                x: 24px; y: 64px;
+                width: parent.width - 156px; height: 14px;
+                text: root.subtitle;
+                color: ThemePalette.text_faint;
+                font-size: 10.5px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            // Rescan button (right side).
+            Rectangle {
+                x: parent.width - 116px;
+                y: 24px;
+                width: 92px;
+                height: 32px;
+                border-radius: AppMetrics.radius_small;
+                border-width: 1px;
+                border-color: ThemePalette.border;
+                background: rescan_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
+                animate background { duration: 80ms; easing: ease-out; }
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: root.scanning ? "Scanning…" : "Rescan";
+                    color: ThemePalette.text;
+                    font-size: 12px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                rescan_touch := TouchArea {
+                    enabled: !root.scanning;
+                    mouse-cursor: pointer;
+                    clicked => { root.rescan(); }
+                }
+            }
+        }
+
+        // ── Drive picker row ──────────────────────────────────────────────
+        if root.drives.length > 1: Rectangle {
+            preferred-height: 44px;
+            min-height: 44px;
+            max-height: 44px;
+            vertical-stretch: 0;
+            background: ThemePalette.panel;
+            HorizontalLayout {
+                x: 16px; y: 8px;
+                width: parent.width - 32px;
+                height: 28px;
+                spacing: 6px;
+                alignment: start;
+                for drv[i] in root.drives: Rectangle {
+                    property <bool> is-active: drv.path == root.root_label;
+                    width: max(72px, drvname.preferred-width + 24px);
+                    height: 26px;
+                    border-radius: 13px;
+                    border-width: 1px;
+                    border-color: self.is-active ? ThemePalette.accent : ThemePalette.border;
+                    background: drvtouch.has-hover ? ThemePalette.accent_soft :
+                        (self.is-active ? ThemePalette.accent_soft : ThemePalette.panel);
+                    animate background { duration: 80ms; easing: ease-out; }
+                    drvname := Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        height: parent.height;
+                        text: drv.name;
+                        color: ThemePalette.text;
+                        font-size: 11px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    drvtouch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.switch_root(drv.path); }
+                    }
+                }
+            }
+            // Bottom separator under the drive picker.
+            Rectangle {
+                x: 0; y: parent.height - 1px;
+                width: parent.width; height: 1px;
+                background: ThemePalette.border;
+            }
+        }
+
+        // ── Progress bar (only when scanning) ─────────────────────────────
+        if root.scanning: Rectangle {
+            preferred-height: 50px;
+            min-height: 50px;
+            max-height: 50px;
+            vertical-stretch: 0;
+            background: ThemePalette.panel;
+            Text {
+                x: 24px; y: 10px;
+                width: parent.width - 48px; height: 16px;
+                text: "Scanning " + root.progress_files + " files · " + root.progress_bytes_text;
+                color: ThemePalette.text_muted;
+                font-size: 12px;
                 vertical-alignment: center;
             }
-            rescan_touch := TouchArea {
-                enabled: !root.scanning;
-                mouse-cursor: pointer;
-                clicked => { root.rescan(); }
+            Rectangle {
+                x: 24px; y: 32px;
+                width: parent.width - 48px;
+                height: 6px;
+                border-radius: 3px;
+                background: ThemePalette.panel_alt;
+                Rectangle {
+                    x: 0; y: 0;
+                    width: max(6px, parent.width * root.progress_percent / 100);
+                    height: parent.height;
+                    border-radius: 3px;
+                    background: ThemePalette.accent;
+                    animate width { duration: 220ms; easing: ease-out; }
+                }
+            }
+            Rectangle {
+                x: 0; y: parent.height - 1px;
+                width: parent.width; height: 1px;
+                background: ThemePalette.border;
             }
         }
-    }
 
-    // Empty / scanning state.
-    if root.scanning && root.buckets.length == 0: Text {
-        x: 24px; y: 110px;
-        width: parent.width - 48px; height: 24px;
-        text: "Scanning the whole drive… this typically takes 15-90 seconds on first run.";
-        color: ThemePalette.text_muted;
-        font-size: 13px;
-    }
-
-    // Bucket grid. Three columns on wide windows, fewer when the pane is narrow.
-    if root.buckets.length > 0 && !root.show_all: Rectangle {
-        x: 16px;
-        y: 100px;
-        width: parent.width - 32px;
-        height: 280px;
-        property <int> cols: max(1, min(3, floor(self.width / 260px)));
-        property <length> card_w: (self.width - (self.cols - 1) * 12px) / self.cols;
-        property <length> card_h: 78px;
-        for bucket[index] in root.buckets: StorageBucketCard {
-            x: mod(index, parent.cols) * (parent.card_w + 12px);
-            y: floor(index / parent.cols) * (parent.card_h + 12px);
-            width: parent.card_w;
-            height: parent.card_h;
-            bucket: bucket;
-            clicked => {
-                // Clicking a bucket toggles the "show all" mode pre-filtered
-                // to that bucket. v1 just flips to all-items view.
-                root.toggle_show_all();
-            }
-        }
-    }
-
-    // List header for the "largest items" section.
-    if root.top_items.length > 0: Rectangle {
-        x: 24px;
-        y: root.show_all ? 100px : 392px;
-        width: parent.width - 48px;
-        height: 32px;
-        Text {
-            x: 0; y: 0;
-            width: 220px; height: parent.height;
-            text: root.show_all ? "All items ranked by size" : "Largest items";
-            color: ThemePalette.text;
-            font-size: 13px;
-            font-weight: 600;
-            vertical-alignment: center;
-        }
-        // Toggle: switch between bucket-grid view and full ranked list.
-        Rectangle {
-            x: parent.width - 130px;
-            y: 4px;
-            width: 124px;
-            height: 24px;
-            border-radius: AppMetrics.radius_small;
-            border-width: 1px;
-            border-color: ThemePalette.border;
-            background: toggle_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
-            animate background { duration: 80ms; easing: ease-out; }
+        // ── Bucket grid (only when NOT in show-all mode) ──────────────────
+        // Lives in a ScrollView so the grid can grow tall on big windows
+        // without colliding with the list below.
+        if !root.show_all: Rectangle {
+            // Auto-sized: enough rows for all bucket cards.
+            property <int> cols: max(1, min(4, floor((self.width - 32px) / 260px)));
+            property <int> rows: ceil(root.buckets.length / self.cols);
+            property <length> card_w: (self.width - 32px - (self.cols - 1) * 12px) / self.cols;
+            property <length> card_h: 80px;
+            preferred-height: self.rows * (self.card_h + 12px) + 28px;
+            min-height: 100px;
+            vertical-stretch: 0;
+            background: ThemePalette.bg;
             Text {
-                width: parent.width; height: parent.height;
-                text: root.show_all ? "Show buckets" : "Show all";
-                color: ThemePalette.text;
+                x: 24px; y: 14px;
+                width: parent.width - 48px; height: 18px;
+                text: "Categories — click any card to see what's inside";
+                color: ThemePalette.text_muted;
                 font-size: 11px;
                 font-weight: 600;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+                letter-spacing: 0.4px;
             }
-            toggle_touch := TouchArea {
-                mouse-cursor: pointer;
-                clicked => { root.toggle_show_all(); }
+            for bucket[index] in root.buckets: StorageBucketCard {
+                x: 16px + mod(index, parent.cols) * (parent.card_w + 12px);
+                y: 36px + floor(index / parent.cols) * (parent.card_h + 12px);
+                width: parent.card_w;
+                height: parent.card_h;
+                bucket: bucket;
+                highlighted: bucket.id == root.selected_bucket;
+                clicked => { root.select_bucket(bucket.id); }
             }
         }
-    }
 
-    // Items list. Uses a ListView for native scrolling on long results.
-    if root.top_items.length > 0: ListView {
-        x: 24px;
-        y: root.show_all ? 140px : 432px;
-        width: parent.width - 48px;
-        height: parent.height - (root.show_all ? 156px : 448px);
-        for entry[idx] in root.top_items: StorageEntryRow {
-            entry: entry;
-            open => { root.open_path(entry.path); }
+        // ── List header strip ─────────────────────────────────────────────
+        if root.top_items.length > 0: Rectangle {
+            preferred-height: 44px;
+            min-height: 44px;
+            max-height: 44px;
+            vertical-stretch: 0;
+            background: ThemePalette.panel;
+            // Top separator.
+            Rectangle {
+                x: 0; y: 0;
+                width: parent.width; height: 1px;
+                background: ThemePalette.border;
+            }
+            Text {
+                x: 24px; y: 0;
+                width: parent.width - 296px; height: parent.height;
+                text: root.selected_bucket != ""
+                    ? "Showing largest items in this category"
+                    : (root.show_all ? "All items ranked by size" : "Largest items overall");
+                color: ThemePalette.text;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            if root.selected_bucket != "": Rectangle {
+                x: parent.width - 264px;
+                y: 10px;
+                width: 130px;
+                height: 24px;
+                border-radius: AppMetrics.radius_small;
+                border-width: 1px;
+                border-color: ThemePalette.border;
+                background: clr_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: "← All categories";
+                    color: ThemePalette.text;
+                    font-size: 11px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                clr_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.clear_bucket(); }
+                }
+            }
+            Rectangle {
+                x: parent.width - 130px;
+                y: 10px;
+                width: 116px;
+                height: 24px;
+                border-radius: AppMetrics.radius_small;
+                border-width: 1px;
+                border-color: ThemePalette.border;
+                background: toggle_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: root.show_all ? "Show buckets" : "Show all";
+                    color: ThemePalette.text;
+                    font-size: 11px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                toggle_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.toggle_show_all(); }
+                }
+            }
+        }
+
+        // ── List itself (takes remaining vertical space) ──────────────────
+        if root.top_items.length > 0: Rectangle {
+            vertical-stretch: 1;
+            background: ThemePalette.bg;
+            ListView {
+                x: 16px; y: 8px;
+                width: parent.width - 32px;
+                height: parent.height - 16px;
+                for entry[idx] in root.top_items: StorageEntryRow {
+                    entry: entry;
+                    open => { root.open_path(entry.path); }
+                }
+            }
         }
     }
 }
@@ -2056,10 +2204,18 @@ export component MainWindow inherits Window {
     in-out property <string> storage_subtitle: "";
     in-out property <[StorageBucketUi]> storage_buckets;
     in-out property <[StorageEntryUi]> storage_top_items;
+    in-out property <[StorageEntryUi]> storage_drives;
     in-out property <bool> storage_show_all: false;
+    in-out property <string> storage_selected_bucket: "";
+    in-out property <int> storage_progress_files: 0;
+    in-out property <string> storage_progress_bytes_text: "";
+    in-out property <float> storage_progress_percent: 0;
     callback storage_rescan();
     callback storage_open_path(string);
     callback storage_toggle_show_all();
+    callback storage_select_bucket(string);
+    callback storage_clear_bucket();
+    callback storage_switch_root(string);
     // Per-folder scroll memory. Rust saves the leaving folder's viewport-y and
     // restores the arriving folder's saved value on every navigate so back / up
     // / re-entering a folder land on the row the user was looking at, not the top.
@@ -2367,12 +2523,47 @@ export component MainWindow inherits Window {
                     activated(i) => { root.tab_activated(i); }
                     closed(i) => { root.tab_closed(i); }
                 }
-                ToolButton {
-                    button_width: 24px;
-                    button_height: 24px;
-                    icon_data: "M12 5v14 M5 12h14";
-                    tooltip: "New tab";
-                    clicked => { root.new_tab(); }
+                // + new-tab button. Built from raw primitives (no ToolButton
+                // wrapper, no separate inner component) to keep the click path
+                // as short as possible. Previous bug attempts: window-drag
+                // TouchArea shadowing the area (fixed in v0.8.3/0.8.6), then
+                // drag_right strip mis-positioned via preferred-width (fixed in
+                // v0.8.8). v0.9.1 simplifies the chain itself.
+                Rectangle {
+                    width: 28px;
+                    height: 26px;
+                    border-radius: 6px;
+                    background: plus_touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
+                    animate background { duration: 60ms; easing: ease-out; }
+                    // Plus glyph drawn from two thin rects so the icon stays
+                    // crisp at any DPI without an SVG path.
+                    Rectangle {
+                        x: (parent.width - 12px) / 2;
+                        y: (parent.height - 2px) / 2;
+                        width: 12px;
+                        height: 2px;
+                        border-radius: 1px;
+                        background: ThemePalette.text;
+                    }
+                    Rectangle {
+                        x: (parent.width - 2px) / 2;
+                        y: (parent.height - 12px) / 2;
+                        width: 2px;
+                        height: 12px;
+                        border-radius: 1px;
+                        background: ThemePalette.text;
+                    }
+                    plus_touch := TouchArea {
+                        // Cover the FULL button explicitly. Default sizing is
+                        // parent.width × parent.height, but being explicit removes
+                        // any layout-induced ambiguity about the hit area.
+                        x: 0;
+                        y: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        mouse-cursor: pointer;
+                        clicked => { root.new_tab(); }
+                    }
                 }
             }
 
@@ -3634,10 +3825,18 @@ export component MainWindow inherits Window {
                     subtitle: root.storage_subtitle;
                     buckets: root.storage_buckets;
                     top_items: root.storage_top_items;
+                    drives: root.storage_drives;
                     show_all: root.storage_show_all;
+                    selected_bucket: root.storage_selected_bucket;
+                    progress_files: root.storage_progress_files;
+                    progress_bytes_text: root.storage_progress_bytes_text;
+                    progress_percent: root.storage_progress_percent;
                     rescan => { root.storage_rescan(); }
                     open_path(p) => { root.storage_open_path(p); }
                     toggle_show_all => { root.storage_toggle_show_all(); }
+                    select_bucket(b) => { root.storage_select_bucket(b); }
+                    clear_bucket => { root.storage_clear_bucket(); }
+                    switch_root(r) => { root.storage_switch_root(r); }
                 }
             }
 
