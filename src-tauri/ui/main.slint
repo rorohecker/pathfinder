@@ -2008,22 +2008,31 @@ component StorageView inherits Rectangle {
         }
 
         // ── Bucket grid (only when NOT in show-all mode) ──────────────────
-        // Lives in a ScrollView so the grid can grow tall on big windows
-        // without colliding with the list below.
+        // Fixed preferred-height computed against an ASSUMED 3 columns so the
+        // value resolves correctly without needing self.width to be known
+        // ahead of layout. Previous version (`preferred-height: rows *
+        // (card_h + 12px) + 28px` where rows depended on self.width) made
+        // the section collapse to 28px when first rendered because width was
+        // 0 at the time the formula evaluated. Actual card positions still
+        // use self.width (computed by render time) so wider windows can show
+        // 4 columns even though the height budget assumes 3.
         if !root.show_all: Rectangle {
-            // Auto-sized: enough rows for all bucket cards.
+            // Card geometry uses real width at render time.
             property <int> cols: max(1, min(4, floor((self.width - 32px) / 260px)));
-            property <int> rows: ceil(root.buckets.length / self.cols);
             property <length> card_w: (self.width - 32px - (self.cols - 1) * 12px) / self.cols;
-            property <length> card_h: 80px;
-            preferred-height: self.rows * (self.card_h + 12px) + 28px;
-            min-height: 100px;
+            property <length> card_h: 88px;
+            // Height budget: assume 3 columns (worst case for most windows).
+            // ceil(N / 3) rows; if real cols >= 3, some rows render fewer
+            // cards but unused height is harmless.
+            property <int> assumed_rows: max(1, floor((root.buckets.length + 2) / 3));
+            preferred-height: 36px + self.assumed_rows * (self.card_h + 12px);
+            min-height: 200px;
             vertical-stretch: 0;
             background: ThemePalette.bg;
             Text {
-                x: 24px; y: 14px;
+                x: 24px; y: 10px;
                 width: parent.width - 48px; height: 18px;
-                text: "Categories — click any card to see what's inside";
+                text: "Categories — click any card to drill into that bucket's largest items";
                 color: ThemePalette.text_muted;
                 font-size: 11px;
                 font-weight: 600;
@@ -2037,6 +2046,17 @@ component StorageView inherits Rectangle {
                 bucket: bucket;
                 highlighted: bucket.id == root.selected_bucket;
                 clicked => { root.select_bucket(bucket.id); }
+            }
+            // Hint shown while the scan is still in flight (buckets list is
+            // empty during scan, so the grid area would otherwise be blank).
+            if root.buckets.length == 0: Text {
+                x: 24px; y: 60px;
+                width: parent.width - 48px; height: 32px;
+                text: root.scanning
+                    ? "Scanning the drive… buckets and the biggest items will appear here."
+                    : "No data yet. Click Rescan to start.";
+                color: ThemePalette.text_faint;
+                font-size: 12px;
             }
         }
 
@@ -2527,14 +2547,60 @@ export component MainWindow inherits Window {
             background: ThemePalette.titlebar;
             border-width: 0px;
 
-            // Tab row goes FIRST in source so the drag strips below are above it in
-            // z-order. Tab buttons and the + new-tab button still receive clicks
-            // because the drag strips below are physically separate (they don't
-            // overlap the y:6-36 band that the layout occupies).
+            // ── TITLEBAR REWRITE (v0.9.3) ─────────────────────────────────
+            // Hard-learned approach: every interactive element gets an
+            // EXPLICIT z value and an absolute position. No HorizontalLayout
+            // wrapping the + button (the layout's preferred-width semantics
+            // kept breaking the click area). No drag-strip splitting (left
+            // users with too little drag area).
+            //
+            // Layer stack, bottom to top:
+            //   z:0   drag_bg     — full title bar minus the Settings/min/max
+            //                        buttons on the right. Handles window-drag.
+            //   z:50  tabrow_layout — tabs. Inside the layout, each TabButton
+            //                        has its own TouchArea so clicks always
+            //                        win the hit-test even with z:50 vs z:0
+            //                        drag below.
+            //   z:100 plus_btn    — + new tab button. Fixed position at far
+            //                        left, OUTSIDE any layout, so position
+            //                        never depends on tab count or layout
+            //                        algorithm quirks.
+
+            // Drag area at z:0. 4px motion deadzone before invoking native
+            // window drag so a click on a button doesn't immediately hand
+            // mouse capture to the OS.
+            drag_bg := TouchArea {
+                z: 0;
+                x: 0; y: 0;
+                width: parent.width - 184px;
+                height: parent.height;
+                mouse-cursor: move;
+                property <length> px: 0;
+                property <length> py: 0;
+                property <bool> dragging: false;
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                        self.px = self.mouse-x; self.py = self.mouse-y; self.dragging = false;
+                    }
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                        self.dragging = false;
+                    }
+                }
+                moved => {
+                    if (self.pressed && !self.dragging
+                        && (abs(self.mouse-x - self.px) > 4px || abs(self.mouse-y - self.py) > 4px)) {
+                        self.dragging = true;
+                        root.drag_window();
+                    }
+                }
+            }
+
+            // Tab row, OFFSET past the + button so they never overlap.
             tabrow_layout := HorizontalLayout {
-                x: 10px;
+                z: 50;
+                x: 46px;
                 y: 6px;
-                width: parent.width - 10px - 184px;
+                width: parent.width - 46px - 184px;
                 height: 30px;
                 spacing: 2px;
                 alignment: start;
@@ -2545,129 +2611,52 @@ export component MainWindow inherits Window {
                     activated(i) => { root.tab_activated(i); }
                     closed(i) => { root.tab_closed(i); }
                 }
-                // + new-tab button. Locked to a fixed 28×28 with all stretch
-                // disabled so HorizontalLayout can't widen the click area past
-                // the visible glyph (previous version had width=28 but no
-                // explicit horizontal-stretch, so the layout could stretch it
-                // wider and the clickable area drifted right of the visible +).
-                Rectangle {
-                    // Lock to 28x28 via min/max only. Slint rejects setting both
-                    // `width` and `min-width`/`max-width` on the same element;
-                    // min == max gives the same effective fixed size and lets the
-                    // layout know not to stretch it.
-                    min-width: 28px;
-                    max-width: 28px;
-                    min-height: 28px;
-                    max-height: 28px;
-                    horizontal-stretch: 0;
-                    vertical-stretch: 0;
-                    border-radius: 6px;
-                    border-width: 1px;
-                    // Subtle outline always visible so the user can see exactly
-                    // where to click. Brightens on hover.
-                    border-color: plus_touch.has-hover
-                        ? ThemePalette.accent
-                        : ThemePalette.border;
-                    background: plus_touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
-                    animate background { duration: 60ms; easing: ease-out; }
-                    animate border-color { duration: 60ms; easing: ease-out; }
-                    // Plus glyph drawn from two thin rects so the icon stays
-                    // crisp at any DPI without an SVG path. Centered in the 28×28.
-                    Rectangle {
-                        x: (parent.width - 12px) / 2;
-                        y: (parent.height - 2px) / 2;
-                        width: 12px;
-                        height: 2px;
-                        border-radius: 1px;
-                        background: ThemePalette.text;
-                    }
-                    Rectangle {
-                        x: (parent.width - 2px) / 2;
-                        y: (parent.height - 12px) / 2;
-                        width: 2px;
-                        height: 12px;
-                        border-radius: 1px;
-                        background: ThemePalette.text;
-                    }
-                    plus_touch := TouchArea {
-                        x: 0;
-                        y: 0;
-                        width: parent.width;
-                        height: parent.height;
-                        mouse-cursor: pointer;
-                        clicked => { root.new_tab(); }
-                    }
-                }
             }
 
-            // Drag strips. Each one occupies an area that does NOT overlap the tab
-            // row (y:6-36). The previous design used one wide TouchArea behind the
-            // layout, which made the + new-tab button unclickable because the drag
-            // area's mouse-capture handler stole the click. With strips, clicks on
-            // any tab or the + button can't be hijacked by the drag handler — the
-            // drag area is physically elsewhere.
-            //
-            // Each strip uses a 4px motion threshold before invoking the native
-            // window drag, so a small jitter on a click doesn't immediately hand
-            // mouse capture to the OS.
-            drag_top := TouchArea {
-                x: 0; y: 0;
-                width: parent.width - 184px;
-                height: 6px;
-                mouse-cursor: move;
-                property <length> px: 0;
-                property <length> py: 0;
-                property <bool> dragging: false;
-                pointer-event(event) => {
-                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                        self.px = self.mouse-x; self.py = self.mouse-y; self.dragging = false;
-                    }
-                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
-                        self.dragging = false;
-                    }
+            // + NEW TAB BUTTON — FIXED position at far left of titlebar.
+            // Lives OUTSIDE any layout so its bounds + position are 100%
+            // deterministic. z:100 so it always wins hit-tests over the drag
+            // background.
+            Rectangle {
+                z: 100;
+                x: 10px;
+                y: 4px;
+                width: 28px;
+                height: 28px;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: plus_touch.has-hover
+                    ? ThemePalette.accent
+                    : ThemePalette.border;
+                background: plus_touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel;
+                animate background { duration: 60ms; easing: ease-out; }
+                animate border-color { duration: 60ms; easing: ease-out; }
+                // Plus glyph drawn from two rectangles. Always-on-text colour
+                // so the user can see exactly where the button is.
+                Rectangle {
+                    x: (parent.width - 12px) / 2;
+                    y: (parent.height - 2px) / 2;
+                    width: 12px;
+                    height: 2px;
+                    border-radius: 1px;
+                    background: ThemePalette.text;
                 }
-                moved => {
-                    if (self.pressed && !self.dragging
-                        && (abs(self.mouse-x - self.px) > 4px || abs(self.mouse-y - self.py) > 4px)) {
-                        self.dragging = true;
-                        root.drag_window();
-                    }
+                Rectangle {
+                    x: (parent.width - 2px) / 2;
+                    y: (parent.height - 12px) / 2;
+                    width: 2px;
+                    height: 12px;
+                    border-radius: 1px;
+                    background: ThemePalette.text;
                 }
-            }
-            drag_left := TouchArea {
-                x: 0; y: 6px;
-                width: 10px;
-                height: 30px;
-                mouse-cursor: move;
-                property <length> px: 0;
-                property <length> py: 0;
-                property <bool> dragging: false;
-                pointer-event(event) => {
-                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                        self.px = self.mouse-x; self.py = self.mouse-y; self.dragging = false;
-                    }
-                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
-                        self.dragging = false;
-                    }
-                }
-                moved => {
-                    if (self.pressed && !self.dragging
-                        && (abs(self.mouse-x - self.px) > 4px || abs(self.mouse-y - self.py) > 4px)) {
-                        self.dragging = true;
-                        root.drag_window();
-                    }
+                plus_touch := TouchArea {
+                    x: 0; y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    mouse-cursor: pointer;
+                    clicked => { root.new_tab(); }
                 }
             }
-            // drag_right was removed in v0.8.8. The previous implementation
-            // positioned itself based on tabrow_layout.preferred-width, which in
-            // Slint can return the layout's declared width rather than the
-            // children's natural packed extent. The result was a TouchArea that
-            // covered the same y-band as the tab row and shadowed the + new-tab
-            // button (declared earlier in source, lower z). Removing it loses a
-            // bit of window-drag area on the right side of the tab row but
-            // guarantees the + button (and tabs) always receive clicks. Users
-            // can still drag the window from drag_top, drag_left, or any empty
-            // area of the title bar to the right of the Settings button row.
 
             ToolButton {
                 x: parent.width - 184px;

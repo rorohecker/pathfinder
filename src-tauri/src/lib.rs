@@ -13940,15 +13940,33 @@ impl NativeController {
     /// Renders either the global top-N or the per-bucket top-N depending on
     /// which mode the UI is in. Called whenever cache, selected bucket, or
     /// show-all toggle changes.
+    ///
+    /// Fallback ordering when a bucket is selected:
+    ///   1. Per-bucket top-N (populated by the scanner's bounded min-heaps)
+    ///   2. If empty, filter the global top_items list by bucket id
+    ///   3. If still empty, the UI shows the empty-state message
+    /// Step 2 catches the case where the per-bucket heap didn't accumulate
+    /// (e.g. scan finished but heaps were unlucky) but the global top-N
+    /// still has entries for that bucket.
     fn push_storage_top_items(&self, ui: &MainWindow, result: &StorageScanResult) {
         let entries_src: Vec<StorageEntry> = if self.storage_selected_bucket.is_empty() {
             result.top_items.clone()
         } else {
-            result
+            let primary: Vec<StorageEntry> = result
                 .bucket_items
                 .get(&self.storage_selected_bucket)
                 .cloned()
-                .unwrap_or_default()
+                .unwrap_or_default();
+            if !primary.is_empty() {
+                primary
+            } else {
+                result
+                    .top_items
+                    .iter()
+                    .filter(|e| e.bucket == self.storage_selected_bucket)
+                    .cloned()
+                    .collect()
+            }
         };
         let largest = entries_src.first().map(|e| e.bytes).unwrap_or(0).max(1);
         let entries: Vec<StorageEntryUi> = entries_src
