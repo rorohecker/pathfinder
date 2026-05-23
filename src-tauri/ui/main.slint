@@ -3801,7 +3801,26 @@ export component MainWindow inherits Window {
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
+                    // Click anywhere on the banner OPENS the releases page.
+                    // Declared BEFORE the Install button so it sits at lower z;
+                    // also shrinks its width when the Install pill is shown so
+                    // there's a generous gap that can't be misrouted.
+                    TouchArea {
+                        x: 0;
+                        y: 0;
+                        width: root.update_download_url != "" ? parent.width - 60px : parent.width;
+                        height: parent.height;
+                        mouse-cursor: pointer;
+                        clicked => { root.command("open-releases"); }
+                    }
+                    // Install pill — declared AFTER the banner TouchArea so it
+                    // wins z-order for clicks on its area. z is set explicitly
+                    // too as belt-and-suspenders against any Slint hit-test
+                    // ordering quirk. The TouchArea inside also extends a 4px
+                    // grace area to the left of the visible pill so clicks
+                    // near the button's left edge still land on Install.
                     if root.update_download_url != "": Rectangle {
+                        z: 100;
                         x: parent.width - 52px; y: 1px;
                         width: 50px; height: parent.height - 2px;
                         border-radius: 8px;
@@ -3816,14 +3835,15 @@ export component MainWindow inherits Window {
                             vertical-alignment: center;
                         }
                         TouchArea {
+                            // Extend slightly outside the visible pill so the
+                            // hit area is a few pixels larger than the paint.
+                            x: -4px;
+                            y: -2px;
+                            width: parent.width + 8px;
+                            height: parent.height + 4px;
                             mouse-cursor: pointer;
                             clicked => { root.install_update(); }
                         }
-                    }
-                    TouchArea {
-                        width: root.update_download_url != "" ? parent.width - 54px : parent.width;
-                        mouse-cursor: pointer;
-                        clicked => { root.command("open-releases"); }
                     }
                 }
                 Text {

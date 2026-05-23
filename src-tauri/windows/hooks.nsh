@@ -1,15 +1,22 @@
-; Pathfinder NSIS hooks — register per-user shell integration after install.
-; Uses the same Rust registry code as Settings → "Set as default folder handler".
+; Pathfinder NSIS hooks.
+;
+; Auto-registration of the default folder handler was removed in v0.8.7.
+; The previous postinstall step invoked `--install-shell-handler`, which
+; writes 7 HKCU keys under Software\Classes\Folder\shell\open\command and
+; the App Paths\explorer.exe redirect. From an unsigned binary, that exact
+; pattern triggers Windows Defender's "Trojan:Win32/Bearfoos.A!ml" heuristic
+; even though the writes are entirely legitimate and per-user only.
+;
+; Users who want Pathfinder as their default folder handler can opt in any
+; time via Settings -> Windows -> "Set as default folder handler." The CLI
+; flags --install-shell-handler / --uninstall-shell-handler still exist for
+; scripted deployments and remain unchanged.
+;
+; Uninstall still attempts to clean up any HKCU keys the user may have set
+; via Settings, so an uninstall fully reverts the system state.
 
 !macro NSIS_HOOK_POSTINSTALL
-  DetailPrint "Registering Pathfinder as default folder handler (HKCU)..."
-  ; /CURRENTUSER matches Tauri's default per-user install mode.
-  nsExec::ExecToLog '"$INSTDIR\${MAINBINARYNAME}.exe" --install-shell-handler'
-  Pop $0
-  ${If} $0 != 0
-    MessageBox MB_ICONEXCLAMATION|MB_OK \
-      "Pathfinder installed, but default folder handler registration failed (code $0).$\n$\nYou can register later from Settings → Windows → Set as default."
-  ${EndIf}
+  ; Intentionally empty. See header comment above.
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
