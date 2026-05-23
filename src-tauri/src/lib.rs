@@ -602,7 +602,7 @@ fn ascii_byte_eq_ci(a: u8, b: u8) -> bool {
     a == b
         || (a.is_ascii_alphabetic()
             && b.is_ascii_alphabetic()
-            && a.to_ascii_lowercase() == b.to_ascii_lowercase())
+            && (a | 0x20) == (b | 0x20))
 }
 
 fn bytes_prefix_eq_ci(haystack: &[u8], prefix: &[u8]) -> bool {
@@ -16157,7 +16157,7 @@ unsafe extern "system" fn mouse_nav_wnd_proc(
             let scale = MOUSE_NAV_UI
                 .get()
                 .and_then(|weak| weak.upgrade())
-                .map(|ui| ui.window().scale_factor() as f32)
+                .map(|ui| ui.window().scale_factor())
                 .filter(|s| *s > 0.0)
                 .unwrap_or(1.0);
             let lx = local_x as f32 / scale;
@@ -16173,13 +16173,13 @@ unsafe extern "system" fn mouse_nav_wnd_proc(
             const TAB_Y: f32 = 6.0;
             const TAB_H: f32 = 30.0;
 
-            let in_titlebar = ly >= 0.0 && ly < TITLE_H;
+            let in_titlebar = (0.0..TITLE_H).contains(&ly);
             let in_window_buttons = lx >= width_logical - WIN_BTNS_W;
             let in_plus =
-                lx >= PLUS_X && lx < PLUS_X + PLUS_W && ly >= PLUS_Y && ly < PLUS_Y + PLUS_H;
+                (PLUS_X..PLUS_X + PLUS_W).contains(&lx) && (PLUS_Y..PLUS_Y + PLUS_H).contains(&ly);
             let tabs_right =
                 f32::from_bits(TITLEBAR_TABS_RIGHT_LOGICAL.load(Ordering::Acquire));
-            let in_tabs = lx >= 46.0 && lx < tabs_right && ly >= TAB_Y && ly < TAB_Y + TAB_H;
+            let in_tabs = (46.0..tabs_right).contains(&lx) && (TAB_Y..TAB_Y + TAB_H).contains(&ly);
             let in_drag_strip = in_titlebar
                 && !in_window_buttons
                 && !in_plus
@@ -16399,10 +16399,12 @@ fn hit_test_list_folder_drop(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn rects_intersect(ax1: f32, ay1: f32, ax2: f32, ay2: f32, bx1: f32, by1: f32, bx2: f32, by2: f32) -> bool {
     ax1 < bx2 && ax2 > bx1 && ay1 < by2 && ay2 > by1
 }
 
+#[allow(clippy::too_many_arguments)]
 fn marquee_selection_list(
     files: &[FileEntry],
     sort_by: &str,
@@ -16446,6 +16448,7 @@ fn marquee_selection_list(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn marquee_selection_grid(
     count: usize,
     cols: usize,
@@ -16470,7 +16473,7 @@ fn marquee_selection_grid(
     let cell_w = grid_cell_w - grid_gap;
 
     let min_row = (cy1 / row_stride).floor().max(0.0) as usize;
-    let max_row = ((cy2 / row_stride).ceil() as usize).min((count + cols - 1) / cols);
+    let max_row = ((cy2 / row_stride).ceil() as usize).min(count.div_ceil(cols));
     let min_col = ((cx1 - grid_gap / 2.0) / grid_cell_w).floor().max(0.0) as usize;
     let max_col = (((cx2 - grid_gap / 2.0) / grid_cell_w).ceil() as usize).min(cols.saturating_sub(1));
 
