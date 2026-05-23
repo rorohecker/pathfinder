@@ -2079,34 +2079,16 @@ export component MainWindow inherits Window {
                     }
                 }
             }
-            // Right portion: empty space between the end of the tab row and the
-            // Settings button on the right. Width is computed from the tab row's
-            // intrinsic width so the strip shrinks when many tabs are open.
-            drag_right := TouchArea {
-                x: 10px + min(parent.width - 10px - 184px, tabrow_layout.preferred-width);
-                y: 6px;
-                width: max(0px, (parent.width - 184px) - self.x);
-                height: 30px;
-                mouse-cursor: move;
-                property <length> px: 0;
-                property <length> py: 0;
-                property <bool> dragging: false;
-                pointer-event(event) => {
-                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                        self.px = self.mouse-x; self.py = self.mouse-y; self.dragging = false;
-                    }
-                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
-                        self.dragging = false;
-                    }
-                }
-                moved => {
-                    if (self.pressed && !self.dragging
-                        && (abs(self.mouse-x - self.px) > 4px || abs(self.mouse-y - self.py) > 4px)) {
-                        self.dragging = true;
-                        root.drag_window();
-                    }
-                }
-            }
+            // drag_right was removed in v0.8.8. The previous implementation
+            // positioned itself based on tabrow_layout.preferred-width, which in
+            // Slint can return the layout's declared width rather than the
+            // children's natural packed extent. The result was a TouchArea that
+            // covered the same y-band as the tab row and shadowed the + new-tab
+            // button (declared earlier in source, lower z). Removing it loses a
+            // bit of window-drag area on the right side of the tab row but
+            // guarantees the + button (and tabs) always receive clicks. Users
+            // can still drag the window from drag_top, drag_left, or any empty
+            // area of the title bar to the right of the Settings button row.
 
             ToolButton {
                 x: parent.width - 184px;
