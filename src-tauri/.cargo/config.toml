@@ -1,3 +1,11 @@
+# Disable incremental compilation. Trade-off: slightly slower iterative rebuilds,
+# no more multi-GB ghost cache. Cargo never garbage-collects old per-build-hash
+# directories under target/debug/incremental/, so they accumulate forever — a
+# clean checkout here had 354 stale snapshots totaling 70 GB. Most large Rust
+# projects (including Tauri's release docs) recommend turning this off.
+[build]
+incremental = false
+
 # Use rust-lld for linking on Windows. Bundled with rustup, much faster than link.exe
 # (the default MSVC linker), especially for large dependency graphs like this one.
 [target.x86_64-pc-windows-msvc]

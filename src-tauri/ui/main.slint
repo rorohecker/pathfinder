@@ -3033,11 +3033,19 @@ export component MainWindow inherits Window {
                 // to start a marquee from the bottom half of a sparsely populated
                 // folder. Now mirrors empty_context so the rubber-band selection
                 // works from any empty space in the file pane.
+                // Use the worst-case per-row height (row_h + 26px date-group
+                // header) so this overlay never shadows actual rows when sorted
+                // by Date modified. The previous formula (row_h only) caused the
+                // overlay to start a few rows above the real content end whenever
+                // group headers were present, which ate hover and right-clicks
+                // on the bottom rows. Slight gap of unclickable empty area below
+                // the last row is acceptable; rows always win for hits now.
                 if root.view_mode == "list": Rectangle {
+                    property <length> est-content-end: AppMetrics.pad + 32px + root.files.length * (AppMetrics.row_h + 26px);
                     x: AppMetrics.pad;
-                    y: AppMetrics.pad + 32px + root.files.length * AppMetrics.row_h;
+                    y: min(parent.height - AppMetrics.pad, est-content-end);
                     width: parent.width - AppMetrics.pad * 2;
-                    height: parent.height - AppMetrics.pad - 32px - root.files.length * AppMetrics.row_h;
+                    height: max(0px, parent.height - AppMetrics.pad - self.y);
                     TouchArea {
                         clicked => {
                             if (!primary_pane_root.marquee_active) {
