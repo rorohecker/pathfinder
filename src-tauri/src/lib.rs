@@ -657,12 +657,17 @@ fn folder_size_quick(path: &Path, max_entries: usize) -> u64 {
     if path.is_file() {
         return fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     }
+    // Cap AFTER filtering for files. The previous implementation took the first
+    // `max_entries` of the raw WalkDir iterator (which yields directories first
+    // for nested structures), so a folder with > 25k subdirectories before any
+    // file in walk order would report a total of 0 even though its files were
+    // many GB. Now the cap applies to *files only*, so we always see real bytes.
     WalkDir::new(path)
         .into_iter()
         .filter_map(Result::ok)
-        .take(max_entries)
         .filter_map(|entry| entry.metadata().ok())
         .filter(|m| m.is_file())
+        .take(max_entries)
         .map(|m| m.len())
         .sum()
 }
@@ -5192,6 +5197,10 @@ struct NativeController {
     search_all_scope: bool,
     history: Vec<String>,
     history_index: usize,
+    // Per-folder scroll memory keyed by absolute path. Updated whenever we
+    // navigate away from a folder; consulted whenever we navigate into one so
+    // Back / Up / re-entering a folder restores the row the user was looking at.
+    path_scroll: HashMap<String, f32>,
     tabs: Vec<SessionTab>,
     active_tab: usize,
     known_folders: Vec<KnownFolder>,
@@ -8772,6 +8781,7 @@ impl NativeController {
             search_all_scope: false,
             history: vec![current_path.clone()],
             history_index: 0,
+            path_scroll: HashMap::new(),
             tabs,
             active_tab: 0,
             known_folders,
@@ -10005,8 +10015,14 @@ impl NativeController {
                 let partial = page.partial;
                 let files = page.entries;
 
-                // Save view+sort for the folder we are leaving
+                // Save scroll position of the folder we are leaving so back/up
+                // returns to the same row instead of the top.
                 let prev_path = self.current_path.clone();
+                if !prev_path.is_empty() {
+                    let y = ui.get_primary_list_scroll_y();
+                    self.path_scroll.insert(prev_path.clone(), y);
+                }
+                // Save view+sort for the folder we are leaving
                 if !prev_path.is_empty() {
                     let view_key = format!("{}|{}|{}", prev_path, ui.get_view_mode(), "");
                     let sort_key = format!("{}|sort_by|{}", prev_path, self.sort_by);
@@ -10115,6 +10131,13 @@ impl NativeController {
                 self.update_models(ui);
                 self.update_preview(ui);
                 self.save_session();
+
+                // Restore scroll position for this folder. New folders default
+                // to 0; re-visited folders (back / up / re-navigation) get the
+                // y we captured on leave. Slint clamps automatically if the
+                // saved value exceeds the new content height.
+                let restore_y = self.path_scroll.get(&path).copied().unwrap_or(0.0);
+                ui.set_primary_list_scroll_y(restore_y);
 
                 if partial {
                     self.schedule_full_directory_load(path.clone());
@@ -10913,10 +10936,23 @@ impl NativeController {
 
     fn activate_tab(&mut self, ui: &MainWindow, index: i32) {
         let idx = index as usize;
+        // Skip the work if the user clicks the tab they are already on. Without
+        // this guard, rapid double-clicks (or a click on the active tab) trigger
+        // a full re-navigate and re-list of the same folder, which is the cause
+        // of the visible stutter when switching back and forth between two tabs.
+        if idx == self.active_tab {
+            return;
+        }
         if let Some(tab) = self.tabs.get(idx).cloned() {
+            // Only re-navigate when the target tab points at a different folder
+            // than the one we are already viewing. Same-folder tab switches just
+            // update active_tab + view_mode and skip the directory re-list.
+            let same_path = tab.path == self.current_path;
             self.active_tab = idx;
             ui.set_view_mode(ss(&tab.view));
-            self.navigate(ui, tab.path, false);
+            if !same_path {
+                self.navigate(ui, tab.path, false);
+            }
         }
     }
 
@@ -10939,7 +10975,15 @@ impl NativeController {
             .insert(format!("{path}:sort_by"), self.sort_by.clone());
         self.folder_views
             .insert(format!("{path}:sort_dir"), self.sort_dir.clone());
-        self.apply_filter();
+        // While a search is active, deep-search results live only in
+        // visible_files (not in self.files), so calling apply_filter() would
+        // wipe them and replace with the current folder's local-name matches.
+        // Just re-sort the existing visible_files instead.
+        if self.search_query.trim().is_empty() {
+            self.apply_filter();
+        } else {
+            self.apply_sort();
+        }
         self.update_models(ui);
         self.apply_secondary_sort();
         self.update_secondary_models(ui);

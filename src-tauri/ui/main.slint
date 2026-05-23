@@ -452,7 +452,17 @@ component SideRow inherits Rectangle {
         }
     }
 
+    // Match the highlight pill's width (which reserves 20px on the right for
+    // the sidebar scrollbar). Previously this TouchArea covered the full row,
+    // so hovering the rightmost 20px registered hover but the pill rendered
+    // only over the first parent.width-20 — the highlight looked broken in
+    // that lane. Shrinking the hit area keeps hover and visual highlight
+    // exactly aligned across the full clickable region.
     touch := TouchArea {
+        x: 0;
+        y: 0;
+        width: parent.width - 20px;
+        height: parent.height;
         enabled: !root.item.is_header;
         mouse-cursor: pointer;
         clicked => {
@@ -1695,6 +1705,10 @@ export component MainWindow inherits Window {
     // (typically the first file's name + a +N marker for multi-file drags).
     in-out property <length> drag_cursor_x: 0;
     in-out property <length> drag_cursor_y: 0;
+    // Per-folder scroll memory. Rust saves the leaving folder's viewport-y and
+    // restores the arriving folder's saved value on every navigate so back / up
+    // / re-entering a folder land on the row the user was looking at, not the top.
+    in-out property <length> primary_list_scroll_y: 0;
     in-out property <string> drag_label: "";
     in-out property <bool> show_hidden: false;
     in-out property <bool> settings_visible: false;
@@ -2893,6 +2907,10 @@ export component MainWindow inherits Window {
                     // text and the tag dot never sit under it.
                     width: parent.width - AppMetrics.pad * 2 - 14px;
                     height: parent.height - AppMetrics.pad * 2 - 32px;
+                    // Two-way binding so Rust can save/restore the scroll
+                    // position per folder. Lets Back / Up land where the user
+                    // was, not at the top of the new folder.
+                    viewport-y <=> root.primary_list_scroll_y;
                     for file[index] in root.files: FileRow {
                         width: parent.width;
                         item: file;
