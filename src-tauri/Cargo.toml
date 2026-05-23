@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "0.8.3"
+version = "0.8.4"
 edition = "2024"
 
 [lib]
@@ -59,6 +59,7 @@ windows = { version = "0.62", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_Properties",
     "Win32_Foundation",
+    "Win32_NetworkManagement_WNet",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",

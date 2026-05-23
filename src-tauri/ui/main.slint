@@ -1980,45 +1980,11 @@ export component MainWindow inherits Window {
             background: ThemePalette.titlebar;
             border-width: 0px;
 
-            // Window-drag TouchArea sits BEHIND the tab/button row. The move handler
-            // requires >4px of motion before invoking the native drag so a plain click
-            // on the new-tab + button (or a tab) doesn't immediately yield mouse capture
-            // to the OS and lose the click. Both the layout and the drag TouchArea also
-            // carry explicit z so the layout's button hit-tests reliably win over the
-            // drag area regardless of Slint's layout-vs-sibling ordering.
-            titlebar_drag := TouchArea {
-                z: 0;
-                x: 0;
-                y: 0;
-                width: parent.width - 184px;
-                height: parent.height;
-                mouse-cursor: move;
-                property <length> press-x: 0;
-                property <length> press-y: 0;
-                property <bool> dragging: false;
-                pointer-event(event) => {
-                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                        self.press-x = self.mouse-x;
-                        self.press-y = self.mouse-y;
-                        self.dragging = false;
-                    }
-                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
-                        self.dragging = false;
-                    }
-                }
-                moved => {
-                    if (self.pressed && !self.dragging) {
-                        if (abs(self.mouse-x - self.press-x) > 4px ||
-                            abs(self.mouse-y - self.press-y) > 4px) {
-                            self.dragging = true;
-                            root.drag_window();
-                        }
-                    }
-                }
-            }
-
-            HorizontalLayout {
-                z: 1;
+            // Tab row goes FIRST in source so the drag strips below are above it in
+            // z-order. Tab buttons and the + new-tab button still receive clicks
+            // because the drag strips below are physically separate (they don't
+            // overlap the y:6-36 band that the layout occupies).
+            tabrow_layout := HorizontalLayout {
                 x: 10px;
                 y: 6px;
                 width: parent.width - 10px - 184px;
@@ -2038,6 +2004,93 @@ export component MainWindow inherits Window {
                     icon_data: "M12 5v14 M5 12h14";
                     tooltip: "New tab";
                     clicked => { root.new_tab(); }
+                }
+            }
+
+            // Drag strips. Each one occupies an area that does NOT overlap the tab
+            // row (y:6-36). The previous design used one wide TouchArea behind the
+            // layout, which made the + new-tab button unclickable because the drag
+            // area's mouse-capture handler stole the click. With strips, clicks on
+            // any tab or the + button can't be hijacked by the drag handler — the
+            // drag area is physically elsewhere.
+            //
+            // Each strip uses a 4px motion threshold before invoking the native
+            // window drag, so a small jitter on a click doesn't immediately hand
+            // mouse capture to the OS.
+            drag_top := TouchArea {
+                x: 0; y: 0;
+                width: parent.width - 184px;
+                height: 6px;
+                mouse-cursor: move;
+                property <length> px: 0;
+                property <length> py: 0;
+                property <bool> dragging: false;
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                        self.px = self.mouse-x; self.py = self.mouse-y; self.dragging = false;
+                    }
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                        self.dragging = false;
+                    }
+                }
+                moved => {
+                    if (self.pressed && !self.dragging
+                        && (abs(self.mouse-x - self.px) > 4px || abs(self.mouse-y - self.py) > 4px)) {
+                        self.dragging = true;
+                        root.drag_window();
+                    }
+                }
+            }
+            drag_left := TouchArea {
+                x: 0; y: 6px;
+                width: 10px;
+                height: 30px;
+                mouse-cursor: move;
+                property <length> px: 0;
+                property <length> py: 0;
+                property <bool> dragging: false;
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                        self.px = self.mouse-x; self.py = self.mouse-y; self.dragging = false;
+                    }
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                        self.dragging = false;
+                    }
+                }
+                moved => {
+                    if (self.pressed && !self.dragging
+                        && (abs(self.mouse-x - self.px) > 4px || abs(self.mouse-y - self.py) > 4px)) {
+                        self.dragging = true;
+                        root.drag_window();
+                    }
+                }
+            }
+            // Right portion: empty space between the end of the tab row and the
+            // Settings button on the right. Width is computed from the tab row's
+            // intrinsic width so the strip shrinks when many tabs are open.
+            drag_right := TouchArea {
+                x: 10px + min(parent.width - 10px - 184px, tabrow_layout.preferred-width);
+                y: 6px;
+                width: max(0px, (parent.width - 184px) - self.x);
+                height: 30px;
+                mouse-cursor: move;
+                property <length> px: 0;
+                property <length> py: 0;
+                property <bool> dragging: false;
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                        self.px = self.mouse-x; self.py = self.mouse-y; self.dragging = false;
+                    }
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                        self.dragging = false;
+                    }
+                }
+                moved => {
+                    if (self.pressed && !self.dragging
+                        && (abs(self.mouse-x - self.px) > 4px || abs(self.mouse-y - self.py) > 4px)) {
+                        self.dragging = true;
+                        root.drag_window();
+                    }
                 }
             }
 

@@ -1554,14 +1554,21 @@ fn get_drives() -> Vec<DriveInfo> {
 
     #[cfg(target_os = "windows")]
     {
-        for byte in b'A'..=b'Z' {
-            let path = format!("{}:\\", byte as char);
-            if Path::new(&path).exists() {
-                drives.push(DriveInfo {
-                    name: format!("{}:", byte as char),
-                    path,
-                    kind: "local".to_string(),
-                });
+        drives.extend(enumerate_windows_drive_letters());
+        drives.extend(discover_wsl_distros());
+        drives.extend(discover_cloud_sync_folders());
+        // Append unmapped network shares last; skip ones already represented
+        // by a mapped letter so the list doesn't show the same share twice.
+        let mapped_unc: std::collections::HashSet<String> = drives
+            .iter()
+            .filter(|d| d.kind == "network")
+            .filter_map(|d| network_target_for_letter(&d.path))
+            .map(|s| s.to_ascii_lowercase())
+            .collect();
+        for share in discover_remembered_shares() {
+            let key = share.path.trim_end_matches('\\').to_ascii_lowercase();
+            if !mapped_unc.contains(&key) {
+                drives.push(share);
             }
         }
     }
@@ -1584,6 +1591,377 @@ fn get_drives() -> Vec<DriveInfo> {
     }
 
     drives
+}
+
+/// Enumerate every present drive letter using GetLogicalDrives, classify each
+/// with GetDriveTypeW (fixed / removable / network / cdrom / ramdisk), and
+/// attach the volume label via GetVolumeInformationW so the sidebar shows
+/// "C: Windows" or "E: USB Drive" instead of a bare letter.
+#[cfg(target_os = "windows")]
+fn enumerate_windows_drive_letters() -> Vec<DriveInfo> {
+    use windows::Win32::Storage::FileSystem::{
+        GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
+    };
+    use windows::core::PCWSTR;
+    // GetDriveTypeW returns these well-known u32 codes. Inlined so we don't
+    // need to enable the Win32_System_WindowsProgramming feature in the
+    // windows crate (which would pull in a fair bit more codegen).
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+    const DRIVE_REMOTE: u32 = 4;
+    const DRIVE_CDROM: u32 = 5;
+    const DRIVE_RAMDISK: u32 = 6;
+
+    let mut out = Vec::new();
+    let mask = unsafe { GetLogicalDrives() };
+    if mask == 0 {
+        return out;
+    }
+    for i in 0..26u32 {
+        if mask & (1u32 << i) == 0 {
+            continue;
+        }
+        let letter = (b'A' + i as u8) as char;
+        let path = format!("{}:\\", letter);
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let dtype = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
+        let (kind, default_label) = match dtype {
+            // Keep "local" for fixed drives so the "max" indexer keeps including them.
+            x if x == DRIVE_FIXED => ("local", "Local Disk"),
+            x if x == DRIVE_REMOVABLE => ("removable", "Removable Drive"),
+            x if x == DRIVE_REMOTE => ("network", "Network Drive"),
+            x if x == DRIVE_CDROM => ("cdrom", "CD Drive"),
+            x if x == DRIVE_RAMDISK => ("ramdisk", "RAM Disk"),
+            // DRIVE_UNKNOWN / DRIVE_NO_ROOT_DIR — skip.
+            _ => continue,
+        };
+        // Volume label. Fails silently for empty CD trays and offline network
+        // mounts; we fall back to the type-specific default in that case.
+        let mut label = [0u16; 261];
+        let mut serial = 0u32;
+        let mut max_comp = 0u32;
+        let mut flags = 0u32;
+        let mut fs_name = [0u16; 32];
+        let label_str = unsafe {
+            GetVolumeInformationW(
+                PCWSTR(wide.as_ptr()),
+                Some(&mut label),
+                Some(&mut serial),
+                Some(&mut max_comp),
+                Some(&mut flags),
+                Some(&mut fs_name),
+            )
+        }
+        .map(|_| {
+            let len = label.iter().position(|&c| c == 0).unwrap_or(label.len());
+            String::from_utf16_lossy(&label[..len])
+        })
+        .unwrap_or_default();
+        let label_part = if label_str.trim().is_empty() {
+            default_label.to_string()
+        } else {
+            label_str
+        };
+        out.push(DriveInfo {
+            name: format!("{}: {}", letter, label_part),
+            path,
+            kind: kind.to_string(),
+        });
+    }
+    out
+}
+
+/// Read the UNC target of a mapped drive letter via WNetGetConnectionW so we
+/// can dedupe a mapped-letter share against the remembered-shares list.
+#[cfg(target_os = "windows")]
+fn network_target_for_letter(path: &str) -> Option<String> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::NetworkManagement::WNet::WNetGetConnectionW;
+    use windows::core::{PCWSTR, PWSTR};
+
+    let letter = path.chars().next()?;
+    let local: Vec<u16> = format!("{}:", letter)
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let rc = unsafe {
+        WNetGetConnectionW(
+            PCWSTR(local.as_ptr()),
+            Some(PWSTR(buf.as_mut_ptr())),
+            &mut len,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return None;
+    }
+    let chars = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..chars]))
+}
+
+/// WSL distros register themselves under HKCU\Software\Microsoft\Windows
+/// \CurrentVersion\Lxss\<GUID>\DistributionName. Mount via \\wsl.localhost\<name>
+/// which is the modern share path WSL exposes to Windows.
+#[cfg(target_os = "windows")]
+fn discover_wsl_distros() -> Vec<DriveInfo> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_READ, REG_SZ, RegCloseKey, RegEnumKeyExW,
+        RegOpenKeyExW, RegQueryValueExW,
+    };
+    use windows::core::PCWSTR;
+
+    let mut out = Vec::new();
+    let path: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Lxss"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut lxss = HKEY::default();
+    if unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(path.as_ptr()),
+            None,
+            KEY_READ,
+            &mut lxss,
+        )
+    } != ERROR_SUCCESS
+    {
+        return out;
+    }
+    for idx in 0..200u32 {
+        let mut name_buf = [0u16; 256];
+        let mut name_len = name_buf.len() as u32;
+        let rc = unsafe {
+            RegEnumKeyExW(
+                lxss,
+                idx,
+                Some(windows::core::PWSTR(name_buf.as_mut_ptr())),
+                &mut name_len,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            break;
+        }
+        // Open the subkey to read DistributionName.
+        let sub_path: Vec<u16> = name_buf[..name_len as usize]
+            .iter()
+            .copied()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut sub = HKEY::default();
+        if unsafe {
+            RegOpenKeyExW(lxss, PCWSTR(sub_path.as_ptr()), None, KEY_READ, &mut sub)
+        } != ERROR_SUCCESS
+        {
+            continue;
+        }
+        let value_name: Vec<u16> = "DistributionName"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut buf = [0u16; 256];
+        let mut size = (buf.len() * 2) as u32;
+        let mut kind = REG_SZ;
+        let q = unsafe {
+            RegQueryValueExW(
+                sub,
+                PCWSTR(value_name.as_ptr()),
+                None,
+                Some(&mut kind),
+                Some(buf.as_mut_ptr().cast()),
+                Some(&mut size),
+            )
+        };
+        unsafe {
+            let _ = RegCloseKey(sub);
+        }
+        if q != ERROR_SUCCESS {
+            continue;
+        }
+        let chars = (size as usize / 2).saturating_sub(1);
+        let dist = String::from_utf16_lossy(&buf[..chars]);
+        if dist.is_empty() {
+            continue;
+        }
+        out.push(DriveInfo {
+            name: format!("🐧 {}", dist),
+            path: format!("\\\\wsl.localhost\\{}\\", dist),
+            kind: "wsl".to_string(),
+        });
+    }
+    unsafe {
+        let _ = RegCloseKey(lxss);
+    }
+    out
+}
+
+/// Detect cloud-sync folders by checking the well-known env vars and default
+/// install paths set by each provider's desktop client. Folders that don't
+/// exist on disk are skipped so we never show stale entries.
+#[cfg(target_os = "windows")]
+fn discover_cloud_sync_folders() -> Vec<DriveInfo> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut push = |label: &str, path_str: String| {
+        if path_str.is_empty() {
+            return;
+        }
+        let key = path_str.to_ascii_lowercase();
+        if !seen.insert(key) {
+            return;
+        }
+        if Path::new(&path_str).exists() {
+            out.push(DriveInfo {
+                name: label.to_string(),
+                path: path_str,
+                kind: "cloud".to_string(),
+            });
+        }
+    };
+
+    // OneDrive: the desktop client exports up to three env vars depending on
+    // which accounts are linked.
+    if let Ok(p) = std::env::var("OneDrive") {
+        push("OneDrive", p);
+    }
+    if let Ok(p) = std::env::var("OneDriveConsumer") {
+        push("OneDrive Personal", p);
+    }
+    if let Ok(p) = std::env::var("OneDriveCommercial") {
+        push("OneDrive for Business", p);
+    }
+
+    // Defaults under the user home directory used by the other major clients.
+    if let Some(home) = dirs::home_dir() {
+        let candidates = [
+            ("Proton Drive", "Proton Drive"),
+            ("Proton Drive", "ProtonDrive"),
+            ("Google Drive", "Google Drive"),
+            ("Google Drive", "My Drive"),
+            ("Dropbox", "Dropbox"),
+            ("iCloud Drive", "iCloudDrive"),
+            ("Box", "Box"),
+            ("Sync", "Sync"),
+            ("MEGA", "MEGA"),
+        ];
+        for (label, dirname) in candidates {
+            push(label, home.join(dirname).to_string_lossy().into_owned());
+        }
+    }
+
+    // Dropbox info.json holds the real path for users who installed to a
+    // non-default location.
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let info = Path::new(&appdata).join("Dropbox").join("info.json");
+        if let Ok(text) = std::fs::read_to_string(&info)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            for key in ["personal", "business"] {
+                if let Some(p) = v
+                    .get(key)
+                    .and_then(|o| o.get("path"))
+                    .and_then(|s| s.as_str())
+                {
+                    let label = if key == "business" {
+                        "Dropbox (Business)"
+                    } else {
+                        "Dropbox"
+                    };
+                    push(label, p.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Enumerate remembered (persisted) network shares via WNetEnumResourceW so
+/// shares the user once mapped show up even when not currently letter-mapped.
+#[cfg(target_os = "windows")]
+fn discover_remembered_shares() -> Vec<DriveInfo> {
+    use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
+    use windows::Win32::NetworkManagement::WNet::{
+        NETRESOURCEW, RESOURCE_REMEMBERED, RESOURCETYPE_DISK, RESOURCEUSAGE_CONNECTABLE,
+        WNetCloseEnum, WNetEnumResourceW, WNetOpenEnumW,
+    };
+
+    let mut out = Vec::new();
+    let mut handle: windows::Win32::Foundation::HANDLE =
+        windows::Win32::Foundation::HANDLE::default();
+    let open = unsafe {
+        WNetOpenEnumW(
+            RESOURCE_REMEMBERED,
+            RESOURCETYPE_DISK,
+            RESOURCEUSAGE_CONNECTABLE,
+            None,
+            &mut handle,
+        )
+    };
+    if open != ERROR_SUCCESS {
+        return out;
+    }
+    // 16KB scratch is plenty for the typical handful of remembered shares.
+    let buf_bytes = 16 * 1024usize;
+    let mut buf = vec![0u8; buf_bytes];
+    loop {
+        let mut count: u32 = u32::MAX;
+        let mut size: u32 = buf_bytes as u32;
+        let rc = unsafe {
+            WNetEnumResourceW(handle, &mut count, buf.as_mut_ptr().cast(), &mut size)
+        };
+        if rc == ERROR_NO_MORE_ITEMS || count == 0 {
+            break;
+        }
+        if rc != ERROR_SUCCESS {
+            break;
+        }
+        let entries = unsafe {
+            std::slice::from_raw_parts(buf.as_ptr() as *const NETRESOURCEW, count as usize)
+        };
+        for e in entries {
+            let remote = unsafe { wide_to_string(e.lpRemoteName) };
+            if remote.is_empty() || !remote.starts_with("\\\\") {
+                continue;
+            }
+            let comment = unsafe { wide_to_string(e.lpComment) };
+            let label = if comment.is_empty() { remote.clone() } else { comment };
+            let path = if remote.ends_with('\\') {
+                remote
+            } else {
+                format!("{}\\", remote)
+            };
+            out.push(DriveInfo {
+                name: label,
+                path,
+                kind: "network".to_string(),
+            });
+        }
+    }
+    unsafe {
+        let _ = WNetCloseEnum(handle);
+    }
+    out
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn wide_to_string(p: windows::core::PWSTR) -> String {
+    if p.0.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *p.0.add(len) != 0 && len < 4096 {
+            len += 1;
+        }
+    }
+    let slice = unsafe { std::slice::from_raw_parts(p.0, len) };
+    String::from_utf16_lossy(slice)
 }
 
 #[tauri::command]
@@ -10364,6 +10742,18 @@ impl NativeController {
             if let Some(path) = self.history.get(self.history_index).cloned() {
                 self.navigate(ui, path, false);
             }
+            return;
+        }
+        // No history to walk (typical when the app was launched with --path or
+        // from a "Show in folder" shell verb). Fall back to navigating to the
+        // parent folder so Back is never a dead button.
+        if let Some(parent) = Path::new(&self.current_path)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            && !parent.is_empty()
+            && parent != self.current_path
+        {
+            self.navigate(ui, parent, true);
         }
     }
 
