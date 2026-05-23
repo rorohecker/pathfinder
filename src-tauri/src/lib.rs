@@ -4512,16 +4512,16 @@ fn scan_storage_with_progress(
         }
     }
     let mut folders: Vec<(String, u64)> = folder_sizes.into_iter().collect();
-    folders.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    folders.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
 
     // Global top-N: pool the top-N from every bucket plus the top folders,
     // then re-sort and take top_n. Avoids holding all-files-ever in memory.
     let half = top_n / 2;
     let mut combined: Vec<StorageEntry> = Vec::with_capacity(per_bucket_n * meta.len() + folders.len());
-    for (_id, entries) in &bucket_items {
+    for entries in bucket_items.values() {
         combined.extend(entries.iter().cloned());
     }
-    combined.sort_unstable_by(|a, b| b.bytes.cmp(&a.bytes));
+    combined.sort_unstable_by_key(|b| std::cmp::Reverse(b.bytes));
     let top_files: Vec<StorageEntry> = combined.into_iter().take(half).collect();
     let top_folders: Vec<StorageEntry> = folders
         .into_iter()
@@ -4543,7 +4543,7 @@ fn scan_storage_with_progress(
         .collect();
     let mut top_items: Vec<StorageEntry> =
         top_files.into_iter().chain(top_folders).collect();
-    top_items.sort_unstable_by(|a, b| b.bytes.cmp(&a.bytes));
+    top_items.sort_unstable_by_key(|b| std::cmp::Reverse(b.bytes));
 
     if let Some(p) = progress.as_ref() {
         p.files.store(scanned_files, Ordering::Relaxed);
@@ -5772,6 +5772,10 @@ struct NativeController {
     storage_progress: Arc<StorageScanProgress>,
     storage_current_root: String,
     storage_selected_bucket: String,
+    // Total used bytes on the current scan root (from GetDiskFreeSpaceExW).
+    // Used as the progress-bar denominator so % shown is real progress vs.
+    // the actual amount of data on the drive, not just "bytes seen so far".
+    storage_disk_used: u64,
     tabs: Vec<SessionTab>,
     active_tab: usize,
     known_folders: Vec<KnownFolder>,
@@ -9362,6 +9366,7 @@ impl NativeController {
             storage_progress: Arc::new(StorageScanProgress::default()),
             storage_current_root: String::new(),
             storage_selected_bucket: String::new(),
+            storage_disk_used: 0,
             tabs,
             active_tab: 0,
             known_folders,
@@ -13812,12 +13817,13 @@ impl NativeController {
         ui.set_is_storage_view(true);
         ui.set_storage_show_all(self.storage_show_all_state);
         self.push_drive_choices(ui);
-        // Default root: whatever the user picked last time, or C:\ / home on
-        // first visit.
         if self.storage_current_root.is_empty() {
             self.storage_current_root = self.storage_default_root();
         }
-        // Push cached result for the current root, if any.
+        // Cache is persistent across opens — only an explicit Rescan kicks a
+        // new scan. Was 5-minute staleness in v0.9.0; users found that
+        // surprising because the data they were looking at could just
+        // disappear when reopening the tab.
         let cached_for_current = self
             .storage_cache
             .as_ref()
@@ -13879,6 +13885,13 @@ impl NativeController {
         ui.set_storage_scanning(true);
         ui.set_storage_progress_files(0);
         ui.set_storage_progress_bytes_text(ss("0 B"));
+        ui.set_storage_progress_percent(0.0);
+        // Query the volume's used-bytes ahead of the scan so the progress bar
+        // % is computed against a real denominator. drive_free_space returns
+        // (free_to_caller, total_bytes); used = total - free.
+        self.storage_disk_used = drive_free_space(&root)
+            .map(|(free, total)| total.saturating_sub(free))
+            .unwrap_or(0);
         // Fresh progress object so a previous scan's cancelled flag doesn't
         // poison this one.
         self.storage_progress = Arc::new(StorageScanProgress::default());
@@ -13990,8 +14003,21 @@ impl NativeController {
     }
 
     /// Pump progress counters from the live scan into Slint properties. Cheap:
-    /// two relaxed atomic loads per tick.
+    /// two relaxed atomic loads per tick. Also pumps a live "scanned X ago"
+    /// string update for the cached-but-static case so the subtitle ticks
+    /// while the storage view is visible.
     fn pump_storage_progress(&self, ui: &MainWindow) {
+        // Tick the "scanned X ago" subtitle while the storage view is open
+        // and there's a cached result. Cheap (one format call per 100ms tick).
+        if ui.get_is_storage_view() && !self.storage_scan_active {
+            if let Some(cached) = self.storage_cache.as_ref() {
+                ui.set_storage_subtitle(ss(format!(
+                    "Scanned {} ago in {:.1}s — click any bucket to drill in",
+                    format_relative_time(cached.scanned_at),
+                    (cached.elapsed_ms as f64) / 1000.0
+                )));
+            }
+        }
         if !self.storage_scan_active {
             return;
         }
@@ -13999,11 +14025,17 @@ impl NativeController {
         let bytes = self.storage_progress.bytes.load(Ordering::Relaxed);
         ui.set_storage_progress_files(files as i32);
         ui.set_storage_progress_bytes_text(ss(format_size_short(bytes)));
-        // Rough progress estimate — scanning across a drive is hard to
-        // predict, so we cap perceived "percent" at 95 until the scan really
-        // finishes (avoids a stuck-at-100 illusion).
-        let approx_total = (bytes as f64).max(1.0);
-        let pct = ((bytes as f64 / approx_total) * 95.0).min(95.0);
+        // Progress denominator: used bytes from GetDiskFreeSpaceExW (queried
+        // when the scan started). Real progress vs the drive's actual used
+        // space instead of a moving baseline. Cap at 99 until the scan
+        // actually returns so we don't sit at 100% with the bar still moving.
+        let pct = if self.storage_disk_used > 0 {
+            ((bytes as f64 / self.storage_disk_used as f64) * 100.0).min(99.0)
+        } else {
+            // No disk-used baseline (network drive, exotic FS) — show an
+            // animated indeterminate-ish progress that grows slowly.
+            (bytes as f64 / 1_073_741_824.0 * 5.0).min(95.0)
+        };
         ui.set_storage_progress_percent(pct as f32);
     }
 
@@ -14033,6 +14065,16 @@ impl NativeController {
     fn select_storage_bucket(&mut self, ui: &MainWindow, bucket_id: String) {
         self.storage_selected_bucket = bucket_id.clone();
         ui.set_storage_selected_bucket(ss(&bucket_id));
+        // Push the human-readable bucket name to the UI so the list header
+        // can read "Largest in Apps & games" instead of a generic "this
+        // category" label. Name comes from the cached scan result.
+        let name = self
+            .storage_cache
+            .as_ref()
+            .and_then(|r| r.buckets.iter().find(|b| b.id == bucket_id))
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|| bucket_display_name(&bucket_id).to_string());
+        ui.set_storage_selected_bucket_name(ss(&name));
         ui.set_storage_show_all(true);
         self.storage_show_all_state = true;
         if let Some(result) = self.storage_cache.clone() {
@@ -14043,6 +14085,7 @@ impl NativeController {
     fn clear_storage_bucket_filter(&mut self, ui: &MainWindow) {
         self.storage_selected_bucket.clear();
         ui.set_storage_selected_bucket(ss(""));
+        ui.set_storage_selected_bucket_name(ss(""));
         if let Some(result) = self.storage_cache.clone() {
             self.push_storage_top_items(ui, &result);
         }

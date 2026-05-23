@@ -1827,6 +1827,7 @@ component StorageView inherits Rectangle {
     in property <[StorageEntryUi]> drives;
     in property <bool> show_all;
     in property <string> selected_bucket;
+    in property <string> selected_bucket_name;
     in property <int> progress_files;
     in property <string> progress_bytes_text;
     in property <float> progress_percent;
@@ -2040,7 +2041,11 @@ component StorageView inherits Rectangle {
         }
 
         // ── List header strip ─────────────────────────────────────────────
-        if root.top_items.length > 0: Rectangle {
+        // Always shown when a bucket is selected (even if empty) so the user
+        // can read the active filter and click "← All categories" to back out.
+        // Previously gated on top_items.length > 0 which made empty buckets
+        // appear to "do nothing" when clicked.
+        if root.top_items.length > 0 || root.selected_bucket != "": Rectangle {
             preferred-height: 44px;
             min-height: 44px;
             max-height: 44px;
@@ -2056,7 +2061,7 @@ component StorageView inherits Rectangle {
                 x: 24px; y: 0;
                 width: parent.width - 296px; height: parent.height;
                 text: root.selected_bucket != ""
-                    ? "Showing largest items in this category"
+                    ? ("Largest in " + root.selected_bucket_name)
                     : (root.show_all ? "All items ranked by size" : "Largest items overall");
                 color: ThemePalette.text;
                 font-size: 13px;
@@ -2124,6 +2129,22 @@ component StorageView inherits Rectangle {
                     entry: entry;
                     open => { root.open_path(entry.path); }
                 }
+            }
+        }
+        // Empty state shown when a bucket filter is active but it has no
+        // entries (e.g., "Other" on a clean drive, or "Temp" right after the
+        // user cleaned it). Without this the user would just see a blank pane
+        // and assume the click didn't work.
+        if root.top_items.length == 0 && root.selected_bucket != "": Rectangle {
+            vertical-stretch: 1;
+            background: ThemePalette.bg;
+            Text {
+                x: 24px; y: 24px;
+                width: parent.width - 48px;
+                height: 24px;
+                text: "No items in " + root.selected_bucket_name + " on this drive. Click \"← All categories\" to go back.";
+                color: ThemePalette.text_muted;
+                font-size: 12px;
             }
         }
     }
@@ -2207,6 +2228,7 @@ export component MainWindow inherits Window {
     in-out property <[StorageEntryUi]> storage_drives;
     in-out property <bool> storage_show_all: false;
     in-out property <string> storage_selected_bucket: "";
+    in-out property <string> storage_selected_bucket_name: "";
     in-out property <int> storage_progress_files: 0;
     in-out property <string> storage_progress_bytes_text: "";
     in-out property <float> storage_progress_percent: 0;
@@ -2523,20 +2545,34 @@ export component MainWindow inherits Window {
                     activated(i) => { root.tab_activated(i); }
                     closed(i) => { root.tab_closed(i); }
                 }
-                // + new-tab button. Built from raw primitives (no ToolButton
-                // wrapper, no separate inner component) to keep the click path
-                // as short as possible. Previous bug attempts: window-drag
-                // TouchArea shadowing the area (fixed in v0.8.3/0.8.6), then
-                // drag_right strip mis-positioned via preferred-width (fixed in
-                // v0.8.8). v0.9.1 simplifies the chain itself.
+                // + new-tab button. Locked to a fixed 28×28 with all stretch
+                // disabled so HorizontalLayout can't widen the click area past
+                // the visible glyph (previous version had width=28 but no
+                // explicit horizontal-stretch, so the layout could stretch it
+                // wider and the clickable area drifted right of the visible +).
                 Rectangle {
-                    width: 28px;
-                    height: 26px;
+                    // Lock to 28x28 via min/max only. Slint rejects setting both
+                    // `width` and `min-width`/`max-width` on the same element;
+                    // min == max gives the same effective fixed size and lets the
+                    // layout know not to stretch it.
+                    min-width: 28px;
+                    max-width: 28px;
+                    min-height: 28px;
+                    max-height: 28px;
+                    horizontal-stretch: 0;
+                    vertical-stretch: 0;
                     border-radius: 6px;
+                    border-width: 1px;
+                    // Subtle outline always visible so the user can see exactly
+                    // where to click. Brightens on hover.
+                    border-color: plus_touch.has-hover
+                        ? ThemePalette.accent
+                        : ThemePalette.border;
                     background: plus_touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
                     animate background { duration: 60ms; easing: ease-out; }
+                    animate border-color { duration: 60ms; easing: ease-out; }
                     // Plus glyph drawn from two thin rects so the icon stays
-                    // crisp at any DPI without an SVG path.
+                    // crisp at any DPI without an SVG path. Centered in the 28×28.
                     Rectangle {
                         x: (parent.width - 12px) / 2;
                         y: (parent.height - 2px) / 2;
@@ -2554,9 +2590,6 @@ export component MainWindow inherits Window {
                         background: ThemePalette.text;
                     }
                     plus_touch := TouchArea {
-                        // Cover the FULL button explicitly. Default sizing is
-                        // parent.width × parent.height, but being explicit removes
-                        // any layout-induced ambiguity about the hit area.
                         x: 0;
                         y: 0;
                         width: parent.width;
@@ -3828,6 +3861,7 @@ export component MainWindow inherits Window {
                     drives: root.storage_drives;
                     show_all: root.storage_show_all;
                     selected_bucket: root.storage_selected_bucket;
+                    selected_bucket_name: root.storage_selected_bucket_name;
                     progress_files: root.storage_progress_files;
                     progress_bytes_text: root.storage_progress_bytes_text;
                     progress_percent: root.storage_progress_percent;
