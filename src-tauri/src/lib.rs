@@ -21,7 +21,7 @@ use std::process::Command as ProcessCommand;
 use std::rc::Rc;
 use std::sync::{
     Arc, LazyLock, Mutex,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Manager, State, Window};
@@ -411,6 +411,41 @@ pub struct FolderCompareEntry {
     pub status: String,
 }
 
+// ───── Storage analyzer ─────────────────────────────────────────────────────
+// Windows-style storage breakdown. Walks a root in parallel, categorizes every
+// file into one of the standard buckets, and produces both a per-bucket roll-up
+// and a flat top-N list of biggest entries (files and folders).
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StorageBucket {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub bytes: u64,
+    pub file_count: u64,
+    pub color: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StorageEntry {
+    pub path: String,
+    pub name: String,
+    pub bytes: u64,
+    pub is_dir: bool,
+    pub bucket: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StorageScanResult {
+    pub root: String,
+    pub total_bytes: u64,
+    pub scanned_files: u64,
+    pub scanned_at: i64,
+    pub buckets: Vec<StorageBucket>,
+    pub top_items: Vec<StorageEntry>,
+    pub elapsed_ms: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AutomationRule {
     pub name: String,
@@ -504,6 +539,59 @@ fn now_unix_secs() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Parse a "#RRGGBB" string into a slint::Color. Falls back to a neutral
+/// accent if the string is malformed so the storage view never panics on
+/// a bad bucket-metadata color.
+fn parse_hex_color(hex: &str) -> slint::Color {
+    let s = hex.trim_start_matches('#');
+    if s.len() == 6 {
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&s[0..2], 16),
+            u8::from_str_radix(&s[2..4], 16),
+            u8::from_str_radix(&s[4..6], 16),
+        ) {
+            return slint::Color::from_rgb_u8(r, g, b);
+        }
+    }
+    slint::Color::from_rgb_u8(0xBF, 0x3A, 0x1F)
+}
+
+fn bucket_display_name(id: &str) -> &'static str {
+    match id {
+        "apps" => "Apps",
+        "documents" => "Docs",
+        "pictures" => "Pictures",
+        "videos" => "Videos",
+        "music" => "Music",
+        "downloads" => "Downloads",
+        "desktop" => "Desktop",
+        "temp" => "Temp",
+        "system" => "System",
+        _ => "Other",
+    }
+}
+
+/// "5 seconds ago" / "3 minutes ago" / "1 day ago". Used by the Storage tab
+/// to display when the cached scan was last refreshed.
+fn format_relative_time(ts: i64) -> String {
+    if ts <= 0 {
+        return "just now".to_string();
+    }
+    let now = now_unix_secs() as i64;
+    let diff = (now - ts).max(0);
+    if diff < 5 {
+        "just now".to_string()
+    } else if diff < 60 {
+        format!("{}s", diff)
+    } else if diff < 3600 {
+        format!("{}m", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h", diff / 3600)
+    } else {
+        format!("{}d", diff / 86400)
+    }
 }
 
 fn file_kind(path: &Path, metadata: &fs::Metadata) -> FileKind {
@@ -4037,6 +4125,316 @@ fn get_storage_tree(path: String, max_depth: Option<u32>) -> Result<StorageNode,
     Ok(build_storage_tree(&dir, max_depth.unwrap_or(3)))
 }
 
+// ───── Storage analyzer ─────────────────────────────────────────────────────
+// Pre-compiled bucket definitions. Order matters: first match wins, so the
+// path-based "Apps" check must come before extension checks (a .dll inside
+// Program Files should count as Apps, not Other).
+
+const STORAGE_SKIP_DIRS: &[&str] = &[
+    "$Recycle.Bin",
+    "System Volume Information",
+    "Windows.old",
+    "Recovery",
+    "PerfLogs",
+    "Config.Msi",
+    "$WinREAgent",
+    "OneDriveTemp",
+];
+
+fn storage_bucket_for(path: &Path, _is_dir: bool) -> &'static str {
+    let s = path.to_string_lossy().to_ascii_lowercase();
+    // Path-based categorization — checked first so files under Program Files
+    // count as Apps regardless of extension.
+    if s.contains("\\program files\\")
+        || s.contains("\\program files (x86)\\")
+        || s.contains("\\programdata\\")
+        || s.contains("\\appdata\\local\\programs\\")
+        || s.contains("\\appdata\\roaming\\microsoft\\windows\\start menu\\programs\\")
+        || s.contains("\\steamapps\\")
+        || s.contains("\\epic games\\")
+        || s.contains("\\xboxgames\\")
+        || s.contains("\\riot games\\")
+    {
+        return "apps";
+    }
+    if s.contains("\\windows\\") || s.contains("\\winsxs\\") {
+        return "system";
+    }
+    if s.contains("\\appdata\\local\\temp\\")
+        || s.contains("\\windows\\temp\\")
+        || s.ends_with(".tmp")
+        || s.ends_with(".log")
+        || s.contains("\\cache\\")
+        || s.contains("\\caches\\")
+    {
+        return "temp";
+    }
+    // User-folder shortcuts. Hit before extension so a .png inside the user's
+    // Documents folder counts as Documents, not Pictures.
+    if let Some(home) = dirs::home_dir() {
+        let home_lower = home.to_string_lossy().to_ascii_lowercase();
+        if let Some(rest) = s.strip_prefix(&home_lower) {
+            let r = rest.trim_start_matches('\\');
+            if r.starts_with("downloads\\") || r == "downloads" {
+                return "downloads";
+            }
+            if r.starts_with("desktop\\") || r == "desktop" {
+                return "desktop";
+            }
+            if r.starts_with("documents\\") || r == "documents" {
+                return "documents";
+            }
+            if r.starts_with("pictures\\") || r == "pictures" {
+                return "pictures";
+            }
+            if r.starts_with("videos\\") || r == "videos" {
+                return "videos";
+            }
+            if r.starts_with("music\\") || r == "music" {
+                return "music";
+            }
+        }
+    }
+    // Extension-based fallback for files scattered outside the user folders.
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "heic" | "raw"
+        | "cr2" | "nef" | "arw" | "svg" => "pictures",
+        "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" | "flv" | "m4v" | "mpg" | "mpeg" => {
+            "videos"
+        }
+        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" | "opus" => "music",
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "rtf"
+        | "odt" | "epub" => "documents",
+        "exe" | "msi" | "msix" | "appx" | "dll" | "sys" => "apps",
+        _ => "other",
+    }
+}
+
+/// Bucket metadata. Order here drives the display order in the UI.
+fn storage_bucket_meta() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+    vec![
+        ("apps", "Apps & games", "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z", "#7B3FA0"),
+        ("documents", "Documents", "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6", "#185FA5"),
+        ("pictures", "Pictures", "M21 15V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2z M8 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z M21 19l-6-6-9 9", "#A87EF8"),
+        ("videos", "Videos", "M22 8l-6 4 6 4V8z M14 6H4a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2z", "#F472B6"),
+        ("music", "Music", "M9 18V5l12-2v13 M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z", "#0F6E6E"),
+        ("downloads", "Downloads", "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3", "#3B6D11"),
+        ("desktop", "Desktop", "M2 4h20v12H2z M8 21h8 M12 17v4", "#8A5A00"),
+        ("temp", "Temporary", "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2", "#C04870"),
+        ("system", "System", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33", "#5F5E5A"),
+        ("other", "Other", "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z", "#4A6A20"),
+    ]
+}
+
+/// Parallel storage scan. Walks the root with WalkDir, categorizes every file,
+/// rolls totals up into buckets, and produces a top-N list of biggest entries.
+///
+/// Performance notes:
+///   - WalkDir handles directory recursion serially per-root, but each file's
+///     metadata lookup and categorization happens in parallel via rayon.
+///   - Permission-denied / locked file errors are silently skipped so a single
+///     bad dir doesn't kill the whole scan.
+///   - Aggregation for top-N uses a per-thread HashMap merged at the end so the
+///     hot path has no mutex contention.
+fn scan_storage(root: &Path, top_n: usize) -> StorageScanResult {
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let scanned_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // Collect all entries first. WalkDir's iterator is single-threaded but
+    // metadata I/O is the slow part, so we parallelize that step via rayon.
+    let entries: Vec<walkdir::DirEntry> = WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip well-known system/protected directories silently. Saves time
+            // and avoids spurious permission errors.
+            let name = e.file_name().to_string_lossy();
+            !STORAGE_SKIP_DIRS
+                .iter()
+                .any(|skip| name.eq_ignore_ascii_case(skip))
+        })
+        .filter_map(Result::ok)
+        .collect();
+
+    // Per-thread (bucket -> (bytes, count)) maps reduced at the end. Avoids
+    // contention vs a single Mutex<HashMap>.
+    struct PerThread {
+        buckets: HashMap<&'static str, (u64, u64)>,
+        // (path-as-string, size-bytes). We keep raw files here and aggregate
+        // folder totals from them after the parallel walk.
+        files: Vec<(String, u64, &'static str)>,
+    }
+
+    let collected = entries
+        .par_iter()
+        .fold(
+            || PerThread {
+                buckets: HashMap::new(),
+                files: Vec::new(),
+            },
+            |mut acc, entry| {
+                let path = entry.path();
+                let meta = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => return acc,
+                };
+                if !meta.is_file() {
+                    return acc;
+                }
+                let size = meta.len();
+                let bucket = storage_bucket_for(path, false);
+                let slot = acc.buckets.entry(bucket).or_insert((0, 0));
+                slot.0 += size;
+                slot.1 += 1;
+                acc.files.push((path.to_string_lossy().into_owned(), size, bucket));
+                acc
+            },
+        )
+        .reduce(
+            || PerThread {
+                buckets: HashMap::new(),
+                files: Vec::new(),
+            },
+            |mut a, mut b| {
+                for (k, (bytes, count)) in b.buckets.drain() {
+                    let slot = a.buckets.entry(k).or_insert((0, 0));
+                    slot.0 += bytes;
+                    slot.1 += count;
+                }
+                a.files.append(&mut b.files);
+                a
+            },
+        );
+
+    // Build bucket list in defined display order.
+    let meta = storage_bucket_meta();
+    let mut buckets: Vec<StorageBucket> = meta
+        .iter()
+        .map(|(id, name, icon, color)| {
+            let (bytes, count) = collected
+                .buckets
+                .get(*id)
+                .copied()
+                .unwrap_or((0, 0));
+            StorageBucket {
+                id: (*id).to_string(),
+                name: (*name).to_string(),
+                icon: (*icon).to_string(),
+                bytes,
+                file_count: count,
+                color: (*color).to_string(),
+            }
+        })
+        .collect();
+    // Hide empty buckets to keep the UI tight. Always keep "Other" so users
+    // know unclassified bytes are accounted for.
+    buckets.retain(|b| b.bytes > 0 || b.id == "other");
+
+    let total_bytes: u64 = collected.buckets.values().map(|(b, _)| b).sum();
+    let scanned_files: u64 = collected.buckets.values().map(|(_, c)| c).sum();
+
+    // Aggregate folder totals from the flat file list. Walks each file's
+    // ancestor chain up to a max depth so we get useful "biggest folders"
+    // entries (e.g. "C:\Users\shade\Documents\fusntuff") without exploding
+    // memory on every ancestor of every file.
+    const AGG_MAX_DEPTH: usize = 5;
+    let mut folder_sizes: HashMap<String, u64> = HashMap::new();
+    let root_components: usize = root.components().count();
+    for (path_str, size, _bucket) in &collected.files {
+        let path = Path::new(path_str);
+        let mut cur = path.parent();
+        let mut depth = 0usize;
+        while let Some(p) = cur {
+            depth += 1;
+            if p.components().count() <= root_components {
+                break;
+            }
+            if depth > AGG_MAX_DEPTH {
+                break;
+            }
+            *folder_sizes.entry(p.to_string_lossy().into_owned()).or_insert(0) += size;
+            cur = p.parent();
+        }
+    }
+
+    // Build the top-N list. Combine: top N/2 individual files + top N/2 folders.
+    // Users care about both: a 30GB ISO file and a 100GB game folder.
+    let half = top_n / 2;
+    let mut top_files: Vec<&(String, u64, &'static str)> = collected.files.iter().collect();
+    top_files.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    let top_files: Vec<StorageEntry> = top_files
+        .into_iter()
+        .take(half)
+        .map(|(path, size, bucket)| {
+            let name = Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            StorageEntry {
+                path: path.clone(),
+                name,
+                bytes: *size,
+                is_dir: false,
+                bucket: (*bucket).to_string(),
+            }
+        })
+        .collect();
+
+    let mut folders: Vec<(String, u64)> = folder_sizes.into_iter().collect();
+    folders.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    let top_folders: Vec<StorageEntry> = folders
+        .into_iter()
+        .take(top_n - top_files.len())
+        .map(|(path, size)| {
+            let name = Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            let bucket = storage_bucket_for(Path::new(&path), true).to_string();
+            StorageEntry {
+                path,
+                name,
+                bytes: size,
+                is_dir: true,
+                bucket,
+            }
+        })
+        .collect();
+
+    let mut top_items: Vec<StorageEntry> = top_files.into_iter().chain(top_folders).collect();
+    top_items.sort_unstable_by(|a, b| b.bytes.cmp(&a.bytes));
+
+    StorageScanResult {
+        root: root.to_string_lossy().into_owned(),
+        total_bytes,
+        scanned_files,
+        scanned_at,
+        buckets,
+        top_items,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    }
+}
+
+#[tauri::command]
+fn scan_storage_root(root: String, top_n: Option<usize>) -> Result<StorageScanResult, String> {
+    let dir = PathBuf::from(&root);
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {root}"));
+    }
+    Ok(scan_storage(&dir, top_n.unwrap_or(200)))
+}
+
 // ───── archives ─────
 
 fn safe_archive_out_path(dest: &Path, entry_name: &str) -> Option<PathBuf> {
@@ -5201,6 +5599,14 @@ struct NativeController {
     // navigate away from a folder; consulted whenever we navigate into one so
     // Back / Up / re-entering a folder restores the row the user was looking at.
     path_scroll: HashMap<String, f32>,
+    // Cached result of the most recent storage scan + status flags for the
+    // background scan thread. Pumped into Slint properties by the polling tick.
+    storage_cache: Option<StorageScanResult>,
+    storage_scan_pending: Arc<Mutex<Option<StorageScanResult>>>,
+    storage_scan_ready: Arc<AtomicBool>,
+    storage_scan_active: bool,
+    storage_show_all_state: bool,
+    storage_path_before: String,
     tabs: Vec<SessionTab>,
     active_tab: usize,
     known_folders: Vec<KnownFolder>,
@@ -8782,6 +9188,12 @@ impl NativeController {
             history: vec![current_path.clone()],
             history_index: 0,
             path_scroll: HashMap::new(),
+            storage_cache: None,
+            storage_scan_pending: Arc::new(Mutex::new(None)),
+            storage_scan_ready: Arc::new(AtomicBool::new(false)),
+            storage_scan_active: false,
+            storage_show_all_state: false,
+            storage_path_before: String::new(),
             tabs,
             active_tab: 0,
             known_folders,
@@ -9779,6 +10191,19 @@ impl NativeController {
             active: self.current_path == "recycle://",
         });
 
+        // Storage analyzer — virtual `storage://` path. Click swaps the main
+        // pane to the categorized storage view (Apps, Documents, Pictures,
+        // etc.) plus a ranked-by-size list of biggest items.
+        items.push(SideItem {
+            label: ss("Storage"),
+            path: ss("storage://"),
+            icon: ss("storage"),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: false,
+            active: self.current_path == "storage://",
+        });
+
         items.push(SideItem {
             label: ss("DRIVES"),
             path: ss(""),
@@ -9996,8 +10421,21 @@ impl NativeController {
         };
         // Virtual recycle-bin namespace — content comes from trash::os_limited.
         if path == "recycle://" {
+            // Leaving the storage view if we were in it.
+            if ui.get_is_storage_view() {
+                self.close_storage_view(ui);
+            }
             self.open_recycle_bin_view(ui, push_history);
             return;
+        }
+        // Virtual storage-analyzer namespace.
+        if path == "storage://" {
+            self.open_storage_view(ui);
+            return;
+        }
+        // Any non-storage navigation closes the storage view if it was open.
+        if ui.get_is_storage_view() {
+            self.close_storage_view(ui);
         }
         if let Some((archive_path, prefix)) = parse_archive_virtual_path(&path) {
             self.open_archive_view(ui, archive_path, prefix, push_history);
@@ -13184,6 +13622,140 @@ impl NativeController {
         ui.set_preview_meta(ss(status.estimated_storage));
     }
 
+    fn storage_default_root(&self) -> String {
+        // C: drive on Windows; on other OSes fall back to the user's home dir.
+        #[cfg(target_os = "windows")]
+        {
+            "C:\\".to_string()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            dirs::home_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/".to_string())
+        }
+    }
+
+    fn open_storage_view(&mut self, ui: &MainWindow) {
+        // Remember where the user came from so closing the view (or clicking a
+        // result) can route them back into the file pane sensibly.
+        if self.current_path != "storage://" {
+            self.storage_path_before = self.current_path.clone();
+        }
+        self.current_path = "storage://".to_string();
+        ui.set_is_storage_view(true);
+        ui.set_storage_show_all(self.storage_show_all_state);
+        // If a cached result is fresh enough, push it to the UI immediately.
+        if let Some(result) = self.storage_cache.clone() {
+            self.push_storage_to_ui(ui, &result);
+        } else {
+            ui.set_storage_total_text(ss("Preparing scan…"));
+            ui.set_storage_subtitle(ss(""));
+            ui.set_storage_root(ss(self.storage_default_root()));
+        }
+        // Kick off a scan if no cache OR cache is older than 5 minutes.
+        let stale = self
+            .storage_cache
+            .as_ref()
+            .map(|r| {
+                (now_unix_secs() as i64).saturating_sub(r.scanned_at) > 300
+            })
+            .unwrap_or(true);
+        if stale && !self.storage_scan_active {
+            self.start_storage_scan(ui);
+        }
+        ui.set_side_items(model_from_vec(self.side_items()));
+    }
+
+    fn close_storage_view(&mut self, ui: &MainWindow) {
+        ui.set_is_storage_view(false);
+    }
+
+    fn start_storage_scan(&mut self, ui: &MainWindow) {
+        let root = self.storage_default_root();
+        ui.set_storage_root(ss(&root));
+        ui.set_storage_scanning(true);
+        self.storage_scan_active = true;
+        let pending = self.storage_scan_pending.clone();
+        let ready = self.storage_scan_ready.clone();
+        std::thread::spawn(move || {
+            let result = scan_storage(Path::new(&root), 200);
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(result);
+            }
+            ready.store(true, Ordering::Release);
+        });
+    }
+
+    fn push_storage_to_ui(&mut self, ui: &MainWindow, result: &StorageScanResult) {
+        let total = result.total_bytes.max(1);
+        let buckets: Vec<StorageBucketUi> = result
+            .buckets
+            .iter()
+            .map(|b| {
+                let pct = (b.bytes as f64 / total as f64) * 100.0;
+                StorageBucketUi {
+                    id: ss(&b.id),
+                    name: ss(&b.name),
+                    bytes_text: ss(format_size_short(b.bytes)),
+                    file_count_text: ss(format!("{} files", b.file_count)),
+                    percent: pct as f32,
+                    icon: ss(&b.icon),
+                    color: parse_hex_color(&b.color),
+                }
+            })
+            .collect();
+        let largest = result.top_items.first().map(|e| e.bytes).unwrap_or(0).max(1);
+        let entries: Vec<StorageEntryUi> = result
+            .top_items
+            .iter()
+            .map(|e| StorageEntryUi {
+                name: ss(&e.name),
+                path: ss(&e.path),
+                bytes_text: ss(format_size_short(e.bytes)),
+                bucket: ss(bucket_display_name(&e.bucket)),
+                is_dir: e.is_dir,
+                bar_pct: ((e.bytes as f64 / largest as f64) * 100.0) as f32,
+            })
+            .collect();
+        ui.set_storage_root(ss(&result.root));
+        ui.set_storage_total_text(ss(format!(
+            "{} used across {} files",
+            format_size_short(result.total_bytes),
+            result.scanned_files
+        )));
+        ui.set_storage_subtitle(ss(format!(
+            "Scanned {} ago in {:.1}s",
+            format_relative_time(result.scanned_at),
+            (result.elapsed_ms as f64) / 1000.0
+        )));
+        ui.set_storage_buckets(slint::ModelRc::new(slint::VecModel::from(buckets)));
+        ui.set_storage_top_items(slint::ModelRc::new(slint::VecModel::from(entries)));
+        ui.set_storage_scanning(false);
+    }
+
+    fn poll_storage_scan(&mut self, ui: &MainWindow) {
+        if !self.storage_scan_ready.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let result = {
+            let mut lock = match self.storage_scan_pending.lock() {
+                Ok(l) => l,
+                Err(_) => return,
+            };
+            lock.take()
+        };
+        self.storage_scan_active = false;
+        if let Some(result) = result {
+            self.storage_cache = Some(result.clone());
+            if ui.get_is_storage_view() {
+                self.push_storage_to_ui(ui, &result);
+            } else {
+                ui.set_storage_scanning(false);
+            }
+        }
+    }
+
     fn show_privacy_storage(&mut self, ui: &MainWindow) {
         let info = privacy_storage_info_for_state(&self.app_state, &self.settings);
         let stored = info
@@ -14086,6 +14658,43 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
+    // Storage view callbacks. Rescan kicks off a fresh scan in the background;
+    // open-path jumps from a storage row into the regular file pane; toggle
+    // flips between the bucket-grid view and the flat ranked list.
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_storage_rescan(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().storage_cache = None;
+            c.borrow_mut().start_storage_scan(&ui);
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_storage_open_path(move |path| {
+        if let Some(ui) = weak.upgrade() {
+            let p = path.to_string();
+            let target = if Path::new(&p).is_dir() {
+                p
+            } else {
+                Path::new(&p)
+                    .parent()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .unwrap_or(p)
+            };
+            c.borrow_mut().navigate(&ui, target, true);
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_storage_toggle_show_all(move || {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.storage_show_all_state = !ctrl.storage_show_all_state;
+            ui.set_storage_show_all(ctrl.storage_show_all_state);
+        }
+    });
+
     let weak = ui.as_weak();
     ui.on_maximize(move || {
         if let Some(ui) = weak.upgrade() {
@@ -14156,6 +14765,12 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let thumb_fired = ready_flag.swap(false, Ordering::AcqRel);
                 let git_fired = git_ready.swap(false, Ordering::AcqRel);
                 let op_fired = op_ready.swap(false, Ordering::AcqRel);
+
+                // Storage scan completion: drain the pending result, cache it,
+                // and push to the UI if the storage view is currently active.
+                if let Some(ui) = weak.upgrade() {
+                    c.borrow_mut().poll_storage_scan(&ui);
+                }
 
                 // Push live progress for any currently running archive op into
                 // the op drawer. Cheap: at most one entry will be "running" at

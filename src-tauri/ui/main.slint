@@ -66,6 +66,25 @@ export struct CommandItem {
     command: string,
 }
 
+export struct StorageBucketUi {
+    id: string,
+    name: string,
+    bytes_text: string,
+    file_count_text: string,
+    percent: float,
+    icon: string,
+    color: color,
+}
+
+export struct StorageEntryUi {
+    name: string,
+    path: string,
+    bytes_text: string,
+    bucket: string,
+    is_dir: bool,
+    bar_pct: float,
+}
+
 export global ThemePalette {
     in-out property <color> bg: #101318;
     in-out property <color> bg_soft: #171b22;
@@ -401,6 +420,8 @@ component SideRow inherits Rectangle {
               root.item.icon == "documents" ? "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8 M10 9H8" :
               // Trash: bin with lid + handle (Lucide "trash-2" glyph)
               root.item.icon == "trash" ? "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2 M10 11v6 M14 11v6" :
+              // Storage analyzer icon (Lucide "pie-chart" glyph).
+              root.item.icon == "storage" ? "M21.21 15.89A10 10 0 1 1 8 2.83 M22 12A10 10 0 0 0 12 2v10z" :
               "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z";
         tint: root.item.active ? ThemePalette.accent_strong : ThemePalette.text_muted;
     }
@@ -1641,6 +1662,325 @@ component CopyableMessageText {
     }
 }
 
+// One card in the categorized-bucket grid of the Storage view.
+component StorageBucketCard inherits Rectangle {
+    in property <StorageBucketUi> bucket;
+    in property <bool> highlighted;
+    callback clicked();
+    border-radius: AppMetrics.radius;
+    border-width: 1px;
+    border-color: root.highlighted ? root.bucket.color : ThemePalette.border;
+    background: touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel;
+    animate background { duration: 80ms; easing: ease-out; }
+
+    // Coloured swatch on the left so each bucket is visually distinct.
+    Rectangle {
+        x: 0; y: 0;
+        width: 4px; height: parent.height;
+        background: root.bucket.color;
+    }
+    SvgIcon {
+        x: 14px;
+        y: 14px;
+        icon_size: 18px;
+        data: root.bucket.icon;
+        tint: root.bucket.color;
+    }
+    Text {
+        x: 42px;
+        y: 12px;
+        width: parent.width - 50px;
+        height: 18px;
+        text: root.bucket.name;
+        color: ThemePalette.text;
+        font-size: 13px;
+        font-weight: 600;
+        overflow: elide;
+    }
+    Text {
+        x: 42px;
+        y: 32px;
+        width: parent.width - 50px;
+        height: 14px;
+        text: root.bucket.bytes_text + " · " + root.bucket.file_count_text;
+        color: ThemePalette.text_muted;
+        font-size: 11px;
+        overflow: elide;
+    }
+    // Proportion bar — fills horizontally based on percent of total disk used.
+    Rectangle {
+        x: 14px;
+        y: parent.height - 10px;
+        width: parent.width - 28px;
+        height: 4px;
+        border-radius: 2px;
+        background: ThemePalette.panel_alt;
+        Rectangle {
+            x: 0; y: 0;
+            width: max(2px, parent.width * root.bucket.percent / 100);
+            height: parent.height;
+            border-radius: 2px;
+            background: root.bucket.color;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// One row in the ranked-by-size list of the Storage view.
+component StorageEntryRow inherits Rectangle {
+    in property <StorageEntryUi> entry;
+    callback open();
+    height: 36px;
+    background: touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
+    animate background { duration: 60ms; easing: ease-out; }
+    border-radius: AppMetrics.radius_small;
+
+    // Bucket-colour dot left edge.
+    Rectangle {
+        x: 8px;
+        y: (parent.height - 8px) / 2;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: ThemePalette.accent;
+    }
+    SvgIcon {
+        x: 22px;
+        y: (parent.height - 14px) / 2;
+        icon_size: 14px;
+        data: root.entry.is_dir
+            ? "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"
+            : "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6";
+        tint: ThemePalette.text_muted;
+    }
+    Text {
+        x: 44px;
+        y: 0;
+        width: parent.width - 280px;
+        height: parent.height;
+        text: root.entry.name;
+        color: ThemePalette.text;
+        font-size: 12px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Text {
+        x: parent.width - 232px;
+        y: 0;
+        width: 60px;
+        height: parent.height;
+        text: root.entry.bucket;
+        color: ThemePalette.text_faint;
+        font-size: 10.5px;
+        vertical-alignment: center;
+        horizontal-alignment: right;
+        overflow: elide;
+    }
+    // Inline size bar — wider for bigger items so the list reads at a glance.
+    Rectangle {
+        x: parent.width - 162px;
+        y: (parent.height - 4px) / 2;
+        width: 80px;
+        height: 4px;
+        border-radius: 2px;
+        background: ThemePalette.panel_alt;
+        Rectangle {
+            x: 0; y: 0;
+            width: max(2px, parent.width * root.entry.bar_pct / 100);
+            height: parent.height;
+            border-radius: 2px;
+            background: ThemePalette.accent;
+        }
+    }
+    Text {
+        x: parent.width - 76px;
+        y: 0;
+        width: 64px;
+        height: parent.height;
+        text: root.entry.bytes_text;
+        color: ThemePalette.text;
+        font-size: 12px;
+        font-family: AppMetrics.mono_font;
+        vertical-alignment: center;
+        horizontal-alignment: right;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.open(); }
+    }
+}
+
+// Full storage panel. Composed of: a header with totals, a grid of categorized
+// bucket cards, and a scrollable "largest items" list. Composed of separate
+// sub-components so individual rows / cards repaint independently when the
+// underlying models update.
+component StorageView inherits Rectangle {
+    in property <bool> scanning;
+    in property <string> root_label;
+    in property <string> total_text;
+    in property <string> subtitle;
+    in property <[StorageBucketUi]> buckets;
+    in property <[StorageEntryUi]> top_items;
+    in property <bool> show_all;
+    callback rescan();
+    callback open_path(string);
+    callback toggle_show_all();
+    background: ThemePalette.bg;
+
+    // Header row: title + totals + rescan button.
+    Rectangle {
+        x: 0; y: 0;
+        width: parent.width;
+        height: 84px;
+        background: ThemePalette.panel;
+        border-width: 0;
+        Rectangle {
+            x: 0; y: parent.height - 1px;
+            width: parent.width; height: 1px;
+            background: ThemePalette.border;
+        }
+        Text {
+            x: 24px; y: 16px;
+            width: parent.width - 200px; height: 22px;
+            text: "Storage on " + root.root_label;
+            color: ThemePalette.text;
+            font-size: 18px;
+            font-weight: 700;
+        }
+        Text {
+            x: 24px; y: 44px;
+            width: parent.width - 200px; height: 16px;
+            text: root.total_text;
+            color: ThemePalette.text_muted;
+            font-size: 12px;
+        }
+        Text {
+            x: 24px; y: 62px;
+            width: parent.width - 200px; height: 14px;
+            text: root.subtitle;
+            color: ThemePalette.text_faint;
+            font-size: 10.5px;
+            overflow: elide;
+        }
+        // Rescan button on the right side.
+        Rectangle {
+            x: parent.width - 116px;
+            y: 24px;
+            width: 92px;
+            height: 32px;
+            border-radius: AppMetrics.radius_small;
+            border-width: 1px;
+            border-color: ThemePalette.border;
+            background: rescan_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
+            animate background { duration: 80ms; easing: ease-out; }
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: root.scanning ? "Scanning…" : "Rescan";
+                color: ThemePalette.text;
+                font-size: 12px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            rescan_touch := TouchArea {
+                enabled: !root.scanning;
+                mouse-cursor: pointer;
+                clicked => { root.rescan(); }
+            }
+        }
+    }
+
+    // Empty / scanning state.
+    if root.scanning && root.buckets.length == 0: Text {
+        x: 24px; y: 110px;
+        width: parent.width - 48px; height: 24px;
+        text: "Scanning the whole drive… this typically takes 15-90 seconds on first run.";
+        color: ThemePalette.text_muted;
+        font-size: 13px;
+    }
+
+    // Bucket grid. Three columns on wide windows, fewer when the pane is narrow.
+    if root.buckets.length > 0 && !root.show_all: Rectangle {
+        x: 16px;
+        y: 100px;
+        width: parent.width - 32px;
+        height: 280px;
+        property <int> cols: max(1, min(3, floor(self.width / 260px)));
+        property <length> card_w: (self.width - (self.cols - 1) * 12px) / self.cols;
+        property <length> card_h: 78px;
+        for bucket[index] in root.buckets: StorageBucketCard {
+            x: mod(index, parent.cols) * (parent.card_w + 12px);
+            y: floor(index / parent.cols) * (parent.card_h + 12px);
+            width: parent.card_w;
+            height: parent.card_h;
+            bucket: bucket;
+            clicked => {
+                // Clicking a bucket toggles the "show all" mode pre-filtered
+                // to that bucket. v1 just flips to all-items view.
+                root.toggle_show_all();
+            }
+        }
+    }
+
+    // List header for the "largest items" section.
+    if root.top_items.length > 0: Rectangle {
+        x: 24px;
+        y: root.show_all ? 100px : 392px;
+        width: parent.width - 48px;
+        height: 32px;
+        Text {
+            x: 0; y: 0;
+            width: 220px; height: parent.height;
+            text: root.show_all ? "All items ranked by size" : "Largest items";
+            color: ThemePalette.text;
+            font-size: 13px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        // Toggle: switch between bucket-grid view and full ranked list.
+        Rectangle {
+            x: parent.width - 130px;
+            y: 4px;
+            width: 124px;
+            height: 24px;
+            border-radius: AppMetrics.radius_small;
+            border-width: 1px;
+            border-color: ThemePalette.border;
+            background: toggle_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
+            animate background { duration: 80ms; easing: ease-out; }
+            Text {
+                width: parent.width; height: parent.height;
+                text: root.show_all ? "Show buckets" : "Show all";
+                color: ThemePalette.text;
+                font-size: 11px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            toggle_touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.toggle_show_all(); }
+            }
+        }
+    }
+
+    // Items list. Uses a ListView for native scrolling on long results.
+    if root.top_items.length > 0: ListView {
+        x: 24px;
+        y: root.show_all ? 140px : 432px;
+        width: parent.width - 48px;
+        height: parent.height - (root.show_all ? 156px : 448px);
+        for entry[idx] in root.top_items: StorageEntryRow {
+            entry: entry;
+            open => { root.open_path(entry.path); }
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     no-frame: true;
     resize-border-width: 8px;
@@ -1705,6 +2045,21 @@ export component MainWindow inherits Window {
     // (typically the first file's name + a +N marker for multi-file drags).
     in-out property <length> drag_cursor_x: 0;
     in-out property <length> drag_cursor_y: 0;
+    // Storage view mode. When true, the main pane shows the storage analyzer
+    // (categorized buckets + ranked-by-size list) instead of the file list.
+    // Toggled from the "Storage" sidebar entry. Backed by a per-scan cache in
+    // Rust so re-opening the tab doesn't trigger another whole-disk walk.
+    in-out property <bool> is_storage_view: false;
+    in-out property <bool> storage_scanning: false;
+    in-out property <string> storage_root: "";
+    in-out property <string> storage_total_text: "";
+    in-out property <string> storage_subtitle: "";
+    in-out property <[StorageBucketUi]> storage_buckets;
+    in-out property <[StorageEntryUi]> storage_top_items;
+    in-out property <bool> storage_show_all: false;
+    callback storage_rescan();
+    callback storage_open_path(string);
+    callback storage_toggle_show_all();
     // Per-folder scroll memory. Rust saves the leaving folder's viewport-y and
     // restores the arriving folder's saved value on every navigate so back / up
     // / re-entering a folder land on the row the user was looking at, not the top.
@@ -3262,6 +3617,27 @@ export component MainWindow inherits Window {
                         height: parent.height;
                         clicked => { root.clear_selection(); }
                     }
+                }
+
+                // Storage analyzer view. Renders ON TOP of the file pane when
+                // toggled, fully opaque so it hides everything underneath. Z is
+                // explicit so we don't have to worry about declaration-order
+                // hit-test surprises.
+                if root.is_storage_view: StorageView {
+                    z: 100;
+                    x: 0; y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    scanning: root.storage_scanning;
+                    root_label: root.storage_root;
+                    total_text: root.storage_total_text;
+                    subtitle: root.storage_subtitle;
+                    buckets: root.storage_buckets;
+                    top_items: root.storage_top_items;
+                    show_all: root.storage_show_all;
+                    rescan => { root.storage_rescan(); }
+                    open_path(p) => { root.storage_open_path(p); }
+                    toggle_show_all => { root.storage_toggle_show_all(); }
                 }
             }
 
