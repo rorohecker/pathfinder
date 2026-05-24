@@ -867,6 +867,154 @@ const TIP_ACCENT_INFO: slint::Color = slint::Color::from_rgb_u8(0x4a, 0x9c, 0xff
 const TIP_ACCENT_TIP: slint::Color = slint::Color::from_rgb_u8(0x58, 0xc7, 0x7a);
 const TIP_ACCENT_WARN: slint::Color = slint::Color::from_rgb_u8(0xf2, 0xa8, 0x4a);
 
+/// Single input to the treemap layout pass.
+#[derive(Debug, Clone)]
+struct TreemapInput {
+    bytes: u64,
+    label: String,
+    path: String,
+    bucket: String,
+    color: slint::Color,
+    is_dir: bool,
+}
+
+/// Compute a squarified treemap layout for `items` over the unit
+/// rectangle [0,1] x [0,1]. The UI scales the resulting fractions by
+/// the actual pixel size of the treemap container so the layout adapts
+/// to window resizes for free.
+///
+/// Algorithm: Bruls/Huijsen/Wijk squarified treemap. Items must arrive
+/// sorted descending by bytes (we sort defensively below). Walks the
+/// list, growing a row as long as its worst-case aspect ratio is
+/// improving; closes the row and starts a new one in the remaining
+/// rectangle once any further item would make the aspect ratio worse.
+fn compute_storage_treemap(items: &[TreemapInput]) -> Vec<TreemapCellUi> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let mut sorted: Vec<&TreemapInput> = items.iter().filter(|i| i.bytes > 0).collect();
+    if sorted.is_empty() {
+        return Vec::new();
+    }
+    sorted.sort_by_key(|i| std::cmp::Reverse(i.bytes));
+    let total: u64 = sorted.iter().map(|i| i.bytes).sum();
+    if total == 0 {
+        return Vec::new();
+    }
+    let scale = 1.0_f64 / total as f64;
+    let scaled: Vec<f64> = sorted.iter().map(|i| i.bytes as f64 * scale).collect();
+
+    let mut out: Vec<TreemapCellUi> = Vec::with_capacity(sorted.len());
+    let mut rect = (0.0_f32, 0.0_f32, 1.0_f32, 1.0_f32); // x, y, w, h
+    let mut start = 0usize;
+    while start < sorted.len() {
+        let short_side = rect.2.min(rect.3) as f64;
+        if short_side <= 0.0 {
+            break;
+        }
+        // Find best row extent
+        let mut row_end = start;
+        let mut row_sum = scaled[start];
+        let mut best =
+            treemap_worst_aspect(&scaled[start..=start], short_side, row_sum);
+        while row_end + 1 < sorted.len() {
+            let new_sum = row_sum + scaled[row_end + 1];
+            let new_aspect = treemap_worst_aspect(
+                &scaled[start..=row_end + 1],
+                short_side,
+                new_sum,
+            );
+            if new_aspect > best {
+                break;
+            }
+            row_end += 1;
+            row_sum = new_sum;
+            best = new_aspect;
+        }
+        rect = treemap_layout_row(
+            rect,
+            &sorted[start..=row_end],
+            &scaled[start..=row_end],
+            row_sum,
+            &mut out,
+        );
+        start = row_end + 1;
+    }
+    out
+}
+
+fn treemap_worst_aspect(row: &[f64], short_side: f64, row_sum: f64) -> f64 {
+    let row_max = row.iter().cloned().fold(0.0_f64, f64::max);
+    let row_min = row.iter().cloned().fold(f64::INFINITY, f64::min);
+    if row_min <= 0.0 || row_sum <= 0.0 || short_side <= 0.0 {
+        return f64::INFINITY;
+    }
+    let s2 = short_side * short_side;
+    let sum2 = row_sum * row_sum;
+    let a = (s2 * row_max) / sum2;
+    let b = sum2 / (s2 * row_min);
+    a.max(b)
+}
+
+fn treemap_layout_row(
+    rect: (f32, f32, f32, f32),
+    items: &[&TreemapInput],
+    scaled: &[f64],
+    row_sum: f64,
+    out: &mut Vec<TreemapCellUi>,
+) -> (f32, f32, f32, f32) {
+    let (rx, ry, rw, rh) = rect;
+    let horizontal = rw <= rh;
+    if horizontal {
+        let row_h = (row_sum / rw as f64) as f32;
+        let mut cur_x = rx;
+        for (it, &s) in items.iter().zip(scaled.iter()) {
+            let cell_w = if row_h > 0.0 {
+                (s / row_h as f64) as f32
+            } else {
+                0.0
+            };
+            out.push(treemap_make_cell(cur_x, ry, cell_w, row_h, it));
+            cur_x += cell_w;
+        }
+        (rx, ry + row_h, rw, rh - row_h)
+    } else {
+        let row_w = (row_sum / rh as f64) as f32;
+        let mut cur_y = ry;
+        for (it, &s) in items.iter().zip(scaled.iter()) {
+            let cell_h = if row_w > 0.0 {
+                (s / row_w as f64) as f32
+            } else {
+                0.0
+            };
+            out.push(treemap_make_cell(rx, cur_y, row_w, cell_h, it));
+            cur_y += cell_h;
+        }
+        (rx + row_w, ry, rw - row_w, rh)
+    }
+}
+
+fn treemap_make_cell(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    item: &TreemapInput,
+) -> TreemapCellUi {
+    TreemapCellUi {
+        x_pct: x,
+        y_pct: y,
+        w_pct: w,
+        h_pct: h,
+        label: ss(&item.label),
+        bytes_text: ss(format_size_short(item.bytes)),
+        bucket: ss(&item.bucket),
+        path: ss(&item.path),
+        color: item.color,
+        is_dir: item.is_dir,
+    }
+}
+
 /// "5 seconds ago" / "3 minutes ago" / "1 day ago". Used by the Storage tab
 /// to display when the cached scan was last refreshed.
 fn format_relative_time(ts: i64) -> String {
@@ -15012,6 +15160,24 @@ impl NativeController {
         // panel. Pulled from this scan result + the live volume.
         let tips = build_storage_tips(result);
         ui.set_storage_tips(slint::ModelRc::new(slint::VecModel::from(tips)));
+        // Treemap cells. Cap to top 80 by size so the layout stays
+        // dense enough to read - tiny slivers below this threshold
+        // are unreadable and would just add visual noise.
+        let treemap_inputs: Vec<TreemapInput> = result
+            .top_items
+            .iter()
+            .take(80)
+            .map(|e| TreemapInput {
+                bytes: e.bytes,
+                label: e.name.clone(),
+                path: e.path.clone(),
+                bucket: e.bucket.clone(),
+                color: bucket_color_for(&e.bucket),
+                is_dir: e.is_dir,
+            })
+            .collect();
+        let cells = compute_storage_treemap(&treemap_inputs);
+        ui.set_storage_treemap_cells(slint::ModelRc::new(slint::VecModel::from(cells)));
     }
 
     /// Pump progress counters from the live scan into Slint properties. Cheap:

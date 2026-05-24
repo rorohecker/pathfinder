@@ -86,6 +86,23 @@ export struct StorageEntryUi {
     bucket_color: color,
 }
 
+// One cell of the storage treemap. Position fields are unit fractions
+// (0.0-1.0) of the treemap container's pixel size; the layout
+// algorithm runs in Rust and only the resolved geometry crosses the
+// Slint boundary.
+export struct TreemapCellUi {
+    x_pct: float,
+    y_pct: float,
+    w_pct: float,
+    h_pct: float,
+    label: string,
+    bytes_text: string,
+    bucket: string,
+    path: string,
+    color: color,
+    is_dir: bool,
+}
+
 // One recommendation card on the storage overview. Severity drives
 // the left accent: "info" (neutral blue), "tip" (green - actionable
 // cleanup), "warn" (amber - large or stale).
@@ -1683,210 +1700,191 @@ component CopyableMessageText {
     }
 }
 
-// One card in the categorized-bucket grid. Compact and height-flexible so the
-// full bucket set fits the storage overview without scrolling.
-component StorageBucketCard inherits Rectangle {
-    in property <StorageBucketUi> bucket;
-    in property <bool> highlighted;
-    callback clicked();
-    border-radius: AppMetrics.radius;
-    border-width: root.highlighted ? 2px : 1px;
-    border-color: root.highlighted ? root.bucket.color : ThemePalette.border;
-    background: root.highlighted
-        ? root.bucket.color.with-alpha(0.12)
-        : (touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel);
-    animate background { duration: 80ms; easing: ease-out; }
-    animate border-color { duration: 80ms; easing: ease-out; }
 
-    Rectangle {
-        x: 0; y: 0;
-        width: 4px; height: parent.height;
-        background: root.bucket.color;
-    }
-    SvgIcon {
-        x: 12px;
-        y: 8px;
-        icon_size: 14px;
-        data: root.bucket.icon;
-        tint: root.bucket.color;
-    }
-    Text {
-        x: 32px;
-        y: 6px;
-        width: parent.width - 80px;
-        height: 16px;
-        text: root.bucket.name;
-        color: ThemePalette.text_muted;
-        font-size: 10.5px;
-        font-weight: 600;
-        letter-spacing: 0.3px;
-        vertical-alignment: center;
-        overflow: elide;
-    }
-    // Percent badge - top-right corner.
-    Rectangle {
-        x: parent.width - 50px;
-        y: 5px;
-        width: 44px;
-        height: 18px;
-        border-radius: 9px;
-        background: root.bucket.color.with-alpha(0.18);
-        Text {
-            width: parent.width; height: parent.height;
-            text: round(root.bucket.percent * 10) / 10 + "%";
-            color: root.bucket.color;
-            font-size: 10px;
-            font-weight: 700;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-            font-family: AppMetrics.mono_font;
-        }
-    }
-    // Headline: total bytes.
-    Text {
-        x: 12px;
-        y: 24px;
-        width: parent.width - 24px;
-        height: 20px;
-        text: root.bucket.bytes_text;
-        color: ThemePalette.text;
-        font-size: 15px;
-        font-weight: 700;
-        font-family: AppMetrics.mono_font;
-        vertical-alignment: center;
-        overflow: elide;
-    }
-    Text {
-        x: 12px;
-        y: 44px;
-        width: parent.width - 24px;
-        height: 12px;
-        text: root.bucket.file_count_text;
-        color: ThemePalette.text_faint;
-        font-size: 10px;
-        vertical-alignment: center;
-        overflow: elide;
-    }
-    // Proportion bar across the bottom.
-    Rectangle {
-        x: 12px;
-        y: parent.height - 6px;
-        width: parent.width - 24px;
-        height: 3px;
-        border-radius: 1.5px;
-        background: ThemePalette.panel_alt;
-        Rectangle {
-            x: 0; y: 0;
-            width: max(2px, parent.width * root.bucket.percent / 100);
-            height: parent.height;
-            border-radius: 1.5px;
-            background: root.bucket.color;
-        }
-    }
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-}
-
-// One row in the ranked-by-size list of the Storage view.
+// One row in the ranked-by-size list of the Storage view. v0.9.13:
+// rebuilt with absolute positioning to match the file-list aesthetic.
+// Icons + bar + size are scaled up so the row reads from across the
+// room instead of looking like a centered, miniaturized strip.
 component StorageEntryRow inherits Rectangle {
     in property <StorageEntryUi> entry;
     in property <bool> show_bucket_label: true;
-    // Column widths shared with StorageDrillIn header row.
-    in property <length> col_category_w: 84px;
-    in property <length> col_share_w: 64px;
-    in property <length> col_size_w: 84px;
+    in property <length> col_category_w: 120px;
+    in property <length> col_share_w: 140px;
+    in property <length> col_size_w: 110px;
     callback open();
-    height: 36px;
+    height: 48px;
     background: touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
     animate background { duration: 60ms; easing: ease-out; }
     border-radius: AppMetrics.radius_small;
 
-    HorizontalLayout {
-        x: 0; y: 0;
-        width: parent.width;
-        height: parent.height;
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 10px;
-        alignment: center;
+    // Right-aligned column layout: from the right edge inward we
+    // reserve size, share-bar, optional category; the name+path block
+    // gets all the remaining width on the left.
+    property <length> right_pad: 16px;
+    property <length> col_gap: 18px;
+    property <length> size_x: root.width - root.right_pad - root.col_size_w;
+    property <length> share_x: root.size_x - root.col_gap - root.col_share_w;
+    property <length> category_x: root.show_bucket_label
+        ? root.share_x - root.col_gap - root.col_category_w
+        : root.share_x;
+    property <length> name_left: 60px;
+    property <length> name_right_limit: root.category_x - root.col_gap;
+    property <length> name_w: max(120px, root.name_right_limit - root.name_left);
 
-        HorizontalLayout {
-            horizontal-stretch: 1;
-            min-width: 120px;
-            spacing: 8px;
-            alignment: center;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: root.entry.bucket_color;
-            }
-            SvgIcon {
-                width: 14px;
-                height: 14px;
-                icon_size: 14px;
-                data: root.entry.is_dir
-                    ? "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"
-                    : "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6";
-                tint: root.entry.bucket_color;
-            }
-            VerticalLayout {
-                horizontal-stretch: 1;
-                min-width: 60px;
-                spacing: 1px;
-                alignment: center;
-                Text {
-                    text: root.entry.name;
-                    color: ThemePalette.text;
-                    font-size: 11.5px;
-                    font-weight: 600;
-                    overflow: elide;
-                }
-                Text {
-                    text: root.entry.path;
-                    color: ThemePalette.text_faint;
-                    font-size: 9.5px;
-                    overflow: elide;
-                }
-            }
-        }
-        if root.show_bucket_label: Text {
-            width: root.col_category_w;
+    // Bucket-coloured dot (selectable accent, left edge).
+    Rectangle {
+        x: 14px; y: (parent.height - 8px) / 2;
+        width: 8px; height: 8px;
+        border-radius: 4px;
+        background: root.entry.bucket_color;
+    }
+    // Folder/file icon - 22px so it reads as the row's anchor.
+    SvgIcon {
+        x: 30px; y: (parent.height - 22px) / 2;
+        width: 22px; height: 22px;
+        icon_size: 22px;
+        data: root.entry.is_dir
+            ? "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"
+            : "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6";
+        tint: root.entry.bucket_color;
+    }
+    // Name on top, path muted below. Both left-aligned, wide.
+    Text {
+        x: root.name_left;
+        y: 6px;
+        width: root.name_w;
+        height: 18px;
+        text: root.entry.name;
+        color: ThemePalette.text;
+        font-size: 14px;
+        font-weight: 600;
+        vertical-alignment: center;
+        horizontal-alignment: left;
+        overflow: elide;
+    }
+    Text {
+        x: root.name_left;
+        y: 26px;
+        width: root.name_w;
+        height: 16px;
+        text: root.entry.path;
+        color: ThemePalette.text_faint;
+        font-size: 11px;
+        vertical-alignment: center;
+        horizontal-alignment: left;
+        overflow: elide;
+    }
+    // Optional category pill.
+    if root.show_bucket_label: Rectangle {
+        x: root.category_x;
+        y: (parent.height - 22px) / 2;
+        width: root.col_category_w;
+        height: 22px;
+        border-radius: 11px;
+        background: root.entry.bucket_color.with-alpha(0.18);
+        Text {
+            width: parent.width; height: parent.height;
             text: root.entry.bucket;
             color: root.entry.bucket_color;
-            font-size: 10px;
-            font-weight: 600;
-            horizontal-alignment: right;
+            font-size: 11px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
             overflow: elide;
         }
+    }
+    // Share bar - taller and wider than v0.9.12.
+    Rectangle {
+        x: root.share_x;
+        y: (parent.height - 10px) / 2;
+        width: root.col_share_w;
+        height: 10px;
+        border-radius: 5px;
+        background: ThemePalette.panel_alt;
         Rectangle {
-            width: root.col_share_w;
-            height: 6px;
-            border-radius: 3px;
-            background: ThemePalette.panel_alt;
-            Rectangle {
-                x: 0; y: 0;
-                width: max(3px, parent.width * root.entry.bar_pct / 100);
-                height: parent.height;
-                border-radius: 3px;
-                background: root.entry.bucket_color;
-            }
+            x: 0; y: 0;
+            width: max(4px, parent.width * root.entry.bar_pct / 100);
+            height: parent.height;
+            border-radius: 5px;
+            background: root.entry.bucket_color;
         }
-        Text {
-            width: root.col_size_w;
-            text: root.entry.bytes_text;
-            color: ThemePalette.text;
-            font-size: 11.5px;
-            font-weight: 700;
-            font-family: AppMetrics.mono_font;
-            horizontal-alignment: right;
-        }
+    }
+    // Size readout - the loudest text on the row.
+    Text {
+        x: root.size_x;
+        y: 0;
+        width: root.col_size_w;
+        height: parent.height;
+        text: root.entry.bytes_text;
+        color: ThemePalette.text;
+        font-size: 15px;
+        font-weight: 700;
+        font-family: AppMetrics.mono_font;
+        horizontal-alignment: right;
+        vertical-alignment: center;
     }
     touch := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.open(); }
+    }
+}
+
+// Squarified treemap. Each cell already carries normalized 0..1
+// coordinates; this component just multiplies by its pixel size and
+// renders. Cells too small to fit text drop labels gracefully.
+component Treemap inherits Rectangle {
+    in property <[TreemapCellUi]> cells;
+    in property <string> empty_label: "No data yet. Click Rescan to start.";
+    callback open_path(string);
+    background: ThemePalette.panel_alt;
+    clip: true;
+    border-radius: AppMetrics.radius_small;
+
+    for cell in root.cells: cell_rect := Rectangle {
+        x: cell.x_pct * root.width;
+        y: cell.y_pct * root.height;
+        // Subtract a 1px gap so adjacent cells get a thin background
+        // gutter without overlapping. Reads as a real tiled treemap.
+        width: max(2px, cell.w_pct * root.width - 1px);
+        height: max(2px, cell.h_pct * root.height - 1px);
+        background: cell_touch.has-hover
+            ? cell.color.brighter(0.15)
+            : cell.color;
+        animate background { duration: 80ms; easing: ease-out; }
+        border-radius: 2px;
+
+        if cell_rect.width >= 70px && cell_rect.height >= 26px: Text {
+            x: 6px; y: 4px;
+            width: parent.width - 12px; height: 16px;
+            text: cell.label;
+            color: #ffffff;
+            font-size: 11.5px;
+            font-weight: 700;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if cell_rect.width >= 80px && cell_rect.height >= 50px: Text {
+            x: 6px; y: parent.height - 18px;
+            width: parent.width - 12px; height: 14px;
+            text: cell.bytes_text;
+            color: #ffffffd9;
+            font-size: 10.5px;
+            font-family: AppMetrics.mono_font;
+            horizontal-alignment: left;
+            overflow: elide;
+        }
+        cell_touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.open_path(cell.path); }
+        }
+    }
+
+    if root.cells.length == 0: Text {
+        x: 24px; y: 24px;
+        width: parent.width - 48px;
+        text: root.empty_label;
+        color: ThemePalette.text_faint;
+        font-size: 12px;
     }
 }
 
@@ -1906,6 +1904,7 @@ component StorageOverview inherits Rectangle {
     in property <string> disk_summary;
     in property <float> disk_used_pct;
     in property <[StorageTipUi]> tips;
+    in property <[TreemapCellUi]> treemap_cells;
     callback rescan();
     callback select_bucket(string);
     callback switch_root(string);
@@ -2166,67 +2165,115 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // Category header.
+        // Category legend strip - color chip + name + percent per
+        // bucket. Compact replacement for the old large card grid;
+        // click any chip to open its drill-in.
+        if root.buckets.length > 0: Rectangle {
+            preferred-height: 44px;
+            min-height: 44px;
+            max-height: 44px;
+            vertical-stretch: 0;
+            background: ThemePalette.bg;
+            ScrollView {
+                x: 0; y: 0;
+                width: parent.width;
+                height: parent.height;
+                viewport-width: max(parent.width, chips_row.preferred-width + 24px);
+                viewport-height: parent.height;
+                chips_row := HorizontalLayout {
+                    x: 12px; y: 8px;
+                    height: 28px;
+                    spacing: 6px;
+                    alignment: start;
+                    for bucket[i] in root.buckets: Rectangle {
+                        property <bool> is-active: bucket.id == root.selected_bucket;
+                        height: 28px;
+                        width: chip_name.preferred-width + chip_pct.preferred-width + 36px;
+                        border-radius: 14px;
+                        border-width: 1px;
+                        border-color: self.is-active ? bucket.color : ThemePalette.border;
+                        background: chip_touch.has-hover
+                            ? bucket.color.with-alpha(0.18)
+                            : (self.is-active ? bucket.color.with-alpha(0.14) : ThemePalette.panel);
+                        animate background { duration: 80ms; easing: ease-out; }
+                        Rectangle {
+                            x: 10px; y: (parent.height - 8px) / 2;
+                            width: 8px; height: 8px;
+                            border-radius: 4px;
+                            background: bucket.color;
+                        }
+                        chip_name := Text {
+                            x: 24px; y: 0;
+                            height: parent.height;
+                            text: bucket.name;
+                            color: ThemePalette.text;
+                            font-size: 11.5px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                        chip_pct := Text {
+                            x: 24px + chip_name.preferred-width + 6px; y: 0;
+                            height: parent.height;
+                            text: round(bucket.percent * 10) / 10 + "%";
+                            color: bucket.color;
+                            font-size: 11px;
+                            font-weight: 700;
+                            font-family: AppMetrics.mono_font;
+                            vertical-alignment: center;
+                        }
+                        chip_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.select_bucket(bucket.id); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Treemap section header.
         Rectangle {
-            preferred-height: 30px;
-            min-height: 30px;
-            max-height: 30px;
+            preferred-height: 26px;
+            min-height: 26px;
+            max-height: 26px;
             vertical-stretch: 0;
             background: ThemePalette.bg;
             Text {
                 x: 18px; y: 0;
-                width: parent.width - 36px; height: parent.height;
-                text: "Categories";
+                width: parent.width - 200px; height: parent.height;
+                text: "Largest folders - click any tile to open it";
                 color: ThemePalette.text_faint;
                 font-size: 10.5px;
                 font-weight: 700;
                 letter-spacing: 0.6px;
-                vertical-alignment: bottom;
+                vertical-alignment: center;
+                overflow: elide;
             }
         }
 
-        // Bucket grid - 3-4 cols, taller cards. Height fixed by content
-        // so the recommendations panel below has predictable space.
-        grid_holder := Rectangle {
-            property <int> cols: max(1, min(4, floor((self.width - 24px) / 240px)));
-            property <int> rows: max(1, Math.ceil(root.buckets.length / self.cols));
-            property <length> gap: 12px;
-            property <length> card_w: (self.width - 24px - (self.cols - 1) * self.gap) / self.cols;
-            property <length> card_h: 96px;
-            property <length> needed_h: 12px + self.rows * self.card_h + (self.rows - 1) * self.gap;
-            preferred-height: self.needed_h;
-            min-height: self.needed_h;
-            max-height: self.needed_h;
-            vertical-stretch: 0;
-            background: ThemePalette.bg;
-            for bucket[index] in root.buckets: StorageBucketCard {
-                x: 12px + mod(index, grid_holder.cols) * (grid_holder.card_w + grid_holder.gap);
-                y: 4px + floor(index / grid_holder.cols) * (grid_holder.card_h + grid_holder.gap);
-                width: grid_holder.card_w;
-                height: grid_holder.card_h;
-                bucket: bucket;
-                highlighted: bucket.id == root.selected_bucket;
-                clicked => { root.select_bucket(bucket.id); }
-            }
-            if root.buckets.length == 0: Text {
-                x: 24px; y: 24px;
-                width: parent.width - 48px; height: 32px;
-                text: root.scanning
-                    ? "Scanning the drive... categories will appear here as data is collected."
-                    : "No data yet. Click Rescan to start.";
-                color: ThemePalette.text_faint;
-                font-size: 12px;
-            }
-        }
-
-        // Recommendations section - fills remaining vertical space.
-        // Each tip is a clickable row with severity-colored accent.
-        // When the scan hasn't surfaced any tips, an explanatory empty
-        // state still fills the area so the page doesn't look hollow.
+        // Treemap - hero visualization. Each rectangle is a folder
+        // sized by bytes, colored by bucket. Fills the largest share
+        // of the overview.
         Rectangle {
-            preferred-height: 30px;
-            min-height: 30px;
-            max-height: 30px;
+            vertical-stretch: 3;
+            min-height: 220px;
+            background: ThemePalette.bg;
+            Treemap {
+                x: 12px; y: 0;
+                width: parent.width - 24px;
+                height: parent.height - 8px;
+                cells: root.treemap_cells;
+                empty_label: root.scanning
+                    ? "Scanning the drive... folders will appear here as data is collected."
+                    : "No data yet. Click Rescan to start.";
+                open_path(p) => { root.open_path(p); }
+            }
+        }
+
+        // Recommendations section header.
+        Rectangle {
+            preferred-height: 26px;
+            min-height: 26px;
+            max-height: 26px;
             vertical-stretch: 0;
             background: ThemePalette.bg;
             Text {
@@ -2241,69 +2288,76 @@ component StorageOverview inherits Rectangle {
             }
         }
 
+        // Recommendations - compact 44px rows; vertical-stretch 1 so it
+        // shrinks/grows around the treemap (which takes vertical-stretch 3).
         Rectangle {
             vertical-stretch: 1;
-            min-height: 80px;
+            min-height: 100px;
             background: ThemePalette.bg;
             if root.tips.length == 0: Text {
-                x: 24px; y: 18px;
+                x: 24px; y: 14px;
                 width: parent.width - 48px;
                 text: root.scanning
                     ? "Recommendations will appear once the scan completes."
-                    : "Nothing pressing here. Click any category card above to drill into its largest items.";
+                    : "Nothing pressing here. Click any treemap tile or category chip to drill in.";
                 color: ThemePalette.text_faint;
                 font-size: 12px;
             }
+            // v0.9.13: tip rows trimmed to 44px so 4-5 fit in the
+            // visible panel at typical window heights without
+            // scrolling. Detail text collapsed onto one line; users
+            // can hover the row for the tooltip (todo) or read the
+            // truncated detail inline.
             ListView {
                 x: 12px; y: 4px;
                 width: parent.width - 24px;
                 height: parent.height - 8px;
                 for tip[i] in root.tips: Rectangle {
-                    height: 64px;
+                    height: 44px;
                     background: tip_touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel;
                     border-radius: AppMetrics.radius_small;
                     animate background { duration: 80ms; easing: ease-out; }
                     Rectangle {
                         x: 0; y: 0;
-                        width: 4px; height: parent.height;
+                        width: 3px; height: parent.height;
                         background: tip.accent;
                     }
                     Text {
-                        x: 16px; y: 0;
-                        width: 26px; height: parent.height;
+                        x: 12px; y: 0;
+                        width: 28px; height: parent.height;
                         text: tip.icon;
                         color: tip.accent;
-                        font-size: 18px;
+                        font-size: 13px;
                         font-weight: 700;
                         horizontal-alignment: center;
                         vertical-alignment: center;
+                        font-family: AppMetrics.mono_font;
                     }
                     Text {
-                        x: 50px; y: 8px;
-                        width: parent.width - 180px; height: 20px;
+                        x: 46px; y: 4px;
+                        width: parent.width - 170px; height: 18px;
                         text: tip.title;
                         color: ThemePalette.text;
-                        font-size: 13px;
+                        font-size: 12.5px;
                         font-weight: 700;
                         vertical-alignment: center;
                         overflow: elide;
                     }
                     Text {
-                        x: 50px; y: 30px;
-                        width: parent.width - 180px; height: 26px;
+                        x: 46px; y: 22px;
+                        width: parent.width - 170px; height: 18px;
                         text: tip.detail;
                         color: ThemePalette.text_muted;
-                        font-size: 11px;
-                        wrap: word-wrap;
-                        vertical-alignment: top;
+                        font-size: 10.5px;
+                        vertical-alignment: center;
                         overflow: elide;
                     }
                     if tip.bytes_text != "": Text {
-                        x: parent.width - 124px; y: 0;
-                        width: 112px; height: parent.height;
+                        x: parent.width - 118px; y: 0;
+                        width: 108px; height: parent.height;
                         text: tip.bytes_text;
                         color: ThemePalette.text;
-                        font-size: 14px;
+                        font-size: 13px;
                         font-weight: 700;
                         font-family: AppMetrics.mono_font;
                         horizontal-alignment: right;
@@ -2334,9 +2388,15 @@ component StorageDrillIn inherits Rectangle {
     callback close();
     background: ThemePalette.bg;
 
-    property <length> col_category_w: 84px;
-    property <length> col_share_w: 64px;
-    property <length> col_size_w: 84px;
+    // v0.9.13: widened to match the rebuilt StorageEntryRow which
+    // uses absolute right-aligned columns. Sizes here must mirror
+    // the StorageEntryRow defaults so the header labels sit above
+    // their cells.
+    property <length> col_category_w: 120px;
+    property <length> col_share_w: 140px;
+    property <length> col_size_w: 110px;
+    property <length> col_right_pad: 16px;
+    property <length> col_gap: 18px;
     property <bool> show_category_col: root.show_all && root.selected_bucket == "";
 
     // v0.9.10: switched from VerticalLayout (which under conditional
@@ -2344,7 +2404,7 @@ component StorageDrillIn inherits Rectangle {
     // viewport) to explicit absolute positioning. The list area now
     // always reaches the bottom of the pane.
     property <length> header_h: 44px;
-    property <length> labels_h: root.top_items.length > 0 ? 22px : 0px;
+    property <length> labels_h: root.top_items.length > 0 ? 28px : 0px;
     property <length> list_y: root.header_h + root.labels_h;
 
     // Header bar - back, title, close.
@@ -2406,50 +2466,61 @@ component StorageDrillIn inherits Rectangle {
         }
     }
 
-    // Column labels (widths match StorageEntryRow).
-    if root.top_items.length > 0: Rectangle {
+    // Column labels - mirror StorageEntryRow's right-aligned absolute
+    // columns so labels sit exactly above the cells.
+    if root.top_items.length > 0: labels_row := Rectangle {
         x: 0; y: root.header_h;
         width: parent.width; height: root.labels_h;
         background: ThemePalette.panel;
-        HorizontalLayout {
-            x: 12px; y: 4px;
-            width: parent.width - 24px;
-            height: 14px;
-            spacing: 10px;
-            alignment: center;
-            Text {
-                horizontal-stretch: 1;
-                min-width: 120px;
-                text: "Name";
-                color: ThemePalette.text_faint;
-                font-size: 10px;
-                font-weight: 600;
-                letter-spacing: 0.3px;
-            }
-            if root.show_category_col: Text {
-                width: root.col_category_w;
-                text: "Category";
-                color: ThemePalette.text_faint;
-                font-size: 10px;
-                font-weight: 600;
-                horizontal-alignment: right;
-            }
-            Text {
-                width: root.col_share_w;
-                text: "Share";
-                color: ThemePalette.text_faint;
-                font-size: 10px;
-                font-weight: 600;
-                horizontal-alignment: center;
-            }
-            Text {
-                width: root.col_size_w;
-                text: "Size";
-                color: ThemePalette.text_faint;
-                font-size: 10px;
-                font-weight: 600;
-                horizontal-alignment: right;
-            }
+        property <length> size_x: parent.width - root.col_right_pad - root.col_size_w;
+        property <length> share_x: labels_row.size_x - root.col_gap - root.col_share_w;
+        property <length> category_x: root.show_category_col
+            ? labels_row.share_x - root.col_gap - root.col_category_w
+            : labels_row.share_x;
+        Text {
+            x: 60px; y: 0;
+            width: labels_row.category_x - root.col_gap - 60px;
+            height: parent.height;
+            text: "Name";
+            color: ThemePalette.text_faint;
+            font-size: 10.5px;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+        }
+        if root.show_category_col: Text {
+            x: labels_row.category_x; y: 0;
+            width: root.col_category_w; height: parent.height;
+            text: "Category";
+            color: ThemePalette.text_faint;
+            font-size: 10.5px;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Text {
+            x: labels_row.share_x; y: 0;
+            width: root.col_share_w; height: parent.height;
+            text: "Share";
+            color: ThemePalette.text_faint;
+            font-size: 10.5px;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Text {
+            x: labels_row.size_x; y: 0;
+            width: root.col_size_w; height: parent.height;
+            text: "Size";
+            color: ThemePalette.text_faint;
+            font-size: 10.5px;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
         }
     }
 
@@ -2583,6 +2654,8 @@ export component MainWindow inherits Window {
     // Recommendations / explanations shown below the bucket grid on
     // the storage overview. Populated by the Rust storage scan.
     in-out property <[StorageTipUi]> storage_tips;
+    // Treemap cells (squarified) - hero visualization on the overview.
+    in-out property <[TreemapCellUi]> storage_treemap_cells;
     callback storage_rescan();
     callback storage_open_path(string);
     callback storage_toggle_show_all();
@@ -4177,6 +4250,7 @@ export component MainWindow inherits Window {
                     disk_summary: root.storage_disk_summary;
                     disk_used_pct: root.storage_disk_used_pct;
                     tips: root.storage_tips;
+                    treemap_cells: root.storage_treemap_cells;
                     rescan => { root.storage_rescan(); }
                     select_bucket(b) => { root.storage_select_bucket(b); }
                     switch_root(r) => { root.storage_switch_root(r); }
