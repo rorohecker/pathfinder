@@ -294,7 +294,14 @@ component TabButton inherits Rectangle {
     // which tab the drop will route into before they release.
     property <bool> is_drop_target: root.drag_target_path != "" && root.drag_target_path == root.tab.path;
 
-    width: Math.min(240px, Math.max(132px, title_text.preferred-width + 50px));
+    // Use preferred-width + min/max-width (not `width`) so HorizontalLayout's
+    // sizing pass and the rendered visual stay in sync. Setting `width`
+    // directly on a layout child mixed badly with the layout algorithm and
+    // gave clicks vs visible-position mismatches on some tabs.
+    preferred-width: Math.min(240px, Math.max(132px, title_text.preferred-width + 50px));
+    min-width: 132px;
+    max-width: 240px;
+    horizontal-stretch: 0;
     height: 30px;
     border-radius: 7px;
     border-width: root.is_drop_target ? 2px : (root.tab.active ? 1px : 0px);
