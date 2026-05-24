@@ -1982,7 +1982,7 @@ fn discover_wsl_distros() -> Vec<DriveInfo> {
             continue;
         }
         out.push(DriveInfo {
-            name: format!("ðŸ§ {}", dist),
+            name: dist.clone(),
             path: format!("\\\\wsl.localhost\\{}\\", dist),
             kind: "wsl".to_string(),
         });
@@ -14006,18 +14006,24 @@ impl NativeController {
     fn open_storage_view(&mut self, ui: &MainWindow) {
         if self.current_path != "storage://" {
             self.storage_path_before = self.current_path.clone();
-            // v0.9.6: storage view now lives in the preview pane on the
-            // right. Save prior visibility/width so close_storage_view can
-            // restore exactly what the user had before. Widen the pane to
-            // 640px so the bucket grid and ranked list both have room.
+            // v0.9.7: overview lives in the main pane; the preview pane
+            // is only widened when the user drills into a bucket. Save
+            // the user's prior preview state once on entry so we can
+            // restore it when they leave storage entirely.
             self.storage_preview_visible_before = ui.get_preview_visible();
             self.storage_preview_w_before = ui.get_preview_w_user();
-            ui.set_preview_visible(true);
-            ui.set_preview_w_user(640.0);
         }
+        // The overview itself doesn't need a drill-in open. Reset the
+        // bucket selection / show-all flags so re-entering Storage
+        // always lands on the overview, not on whatever drill-in the
+        // user had open last time.
+        self.storage_selected_bucket.clear();
+        ui.set_storage_selected_bucket(ss(""));
+        ui.set_storage_selected_bucket_name(ss(""));
+        self.storage_show_all_state = false;
         self.current_path = "storage://".to_string();
         ui.set_is_storage_view(true);
-        ui.set_storage_show_all(self.storage_show_all_state);
+        ui.set_storage_show_all(false);
         self.push_drive_choices(ui);
         if self.storage_current_root.is_empty() {
             self.storage_current_root = self.storage_default_root();
@@ -14044,14 +14050,21 @@ impl NativeController {
 
     fn close_storage_view(&mut self, ui: &MainWindow) {
         ui.set_is_storage_view(false);
-        // Restore the preview pane to whatever the user had before opening
-        // storage (visibility + width). If they never visited storage in
-        // this session the saved values default to (false, 326) which match
-        // the app defaults.
+        // Restore the preview pane to whatever the user had before
+        // opening storage (visibility + width). The drill-in widened it
+        // to 640px while open; revert here so the user's normal layout
+        // comes back unchanged.
         ui.set_preview_visible(self.storage_preview_visible_before);
         if self.storage_preview_w_before > 0.0 {
             ui.set_preview_w_user(self.storage_preview_w_before);
         }
+        // Drop any drill-in state so the next open lands on the
+        // overview cleanly.
+        self.storage_selected_bucket.clear();
+        ui.set_storage_selected_bucket(ss(""));
+        ui.set_storage_selected_bucket_name(ss(""));
+        self.storage_show_all_state = false;
+        ui.set_storage_show_all(false);
         // Cancel any in-flight scan so it stops burning CPU/disk when the
         // user has already moved on. The scan thread checks the cancelled
         // flag every batch and bails out early.
@@ -14300,11 +14313,19 @@ impl NativeController {
     }
 
     fn select_storage_bucket(&mut self, ui: &MainWindow, bucket_id: String) {
+        // v0.9.7: drill-in lives in the preview pane on the right.
+        // Force the pane visible + widen to 640px so the ranked list
+        // has room. The user's prior preview state was already saved
+        // when they entered the storage view; close_storage_view will
+        // restore it.
+        let drill_was_inactive =
+            self.storage_selected_bucket.is_empty() && !self.storage_show_all_state;
+        if drill_was_inactive {
+            ui.set_preview_visible(true);
+            ui.set_preview_w_user(640.0);
+        }
         self.storage_selected_bucket = bucket_id.clone();
         ui.set_storage_selected_bucket(ss(&bucket_id));
-        // Push the human-readable bucket name to the UI so the list header
-        // can read "Largest in Apps & games" instead of a generic "this
-        // category" label. Name comes from the cached scan result.
         let name = self
             .storage_cache
             .as_ref()
@@ -14321,6 +14342,19 @@ impl NativeController {
         self.storage_selected_bucket.clear();
         ui.set_storage_selected_bucket(ss(""));
         ui.set_storage_selected_bucket_name(ss(""));
+        // Also drop the "show all" full-list mode so closing the
+        // drill-in returns the user to the bucket grid every time
+        // (matches user mental model: X closes the drill-in).
+        self.storage_show_all_state = false;
+        ui.set_storage_show_all(false);
+        // Restore preview pane to the user's pre-storage state. We
+        // saved this in open_storage_view; while the overview is still
+        // showing in the main pane, the preview goes back to the
+        // file-preview the user had before.
+        ui.set_preview_visible(self.storage_preview_visible_before);
+        if self.storage_preview_w_before > 0.0 {
+            ui.set_preview_w_user(self.storage_preview_w_before);
+        }
         if let Some(result) = self.storage_cache.clone() {
             self.push_storage_top_items(ui, &result);
         }
@@ -15261,12 +15295,23 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_storage_toggle_show_all(move || {
         if let Some(ui) = weak.upgrade() {
             let mut ctrl = c.borrow_mut();
+            let drill_was_inactive =
+                ctrl.storage_selected_bucket.is_empty() && !ctrl.storage_show_all_state;
             ctrl.storage_show_all_state = !ctrl.storage_show_all_state;
             ui.set_storage_show_all(ctrl.storage_show_all_state);
             if !ctrl.storage_show_all_state {
                 ctrl.clear_storage_bucket_filter(&ui);
-            } else if let Some(result) = ctrl.storage_cache.clone() {
-                ctrl.push_storage_top_items(&ui, &result);
+            } else {
+                if drill_was_inactive {
+                    ui.set_preview_visible(true);
+                    ui.set_preview_w_user(640.0);
+                }
+                ctrl.storage_selected_bucket.clear();
+                ui.set_storage_selected_bucket(ss(""));
+                ui.set_storage_selected_bucket_name(ss(""));
+                if let Some(result) = ctrl.storage_cache.clone() {
+                    ctrl.push_storage_top_items(&ui, &result);
+                }
             }
         }
     });
