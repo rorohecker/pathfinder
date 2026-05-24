@@ -78,7 +78,12 @@ const PREVIEW_CACHE_TTL: Duration = Duration::from_secs(180);
 const DRIVE_SPACE_CACHE_TTL: Duration = Duration::from_secs(10);
 const MAX_DIRECTORY_CACHE_ENTRIES: usize = 64;
 const MAX_PREVIEW_CACHE_ENTRIES: usize = 96;
-const STORAGE_BUCKET_DRILL_LIMIT: usize = 10;
+// v0.9.11: bumped from 10 to 300. Users explicitly want to see every
+// app/folder/file in a bucket when they drill in, not just the top 10
+// (which left huge empty space in the list pane). 300 is enough to
+// fill any practical viewport and still avoid pushing megabytes of
+// strings to Slint for unusually busy buckets.
+const STORAGE_BUCKET_DRILL_LIMIT: usize = 300;
 const INDEX_DB_FILE: &str = ".pathfinder-index.sqlite3";
 const THUMBNAIL_CACHE_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
 const INDEX_ESTIMATE_BYTES_PER_FILE: u64 = 420;
@@ -4866,32 +4871,13 @@ fn path_is_strict_parent(parent: &str, child: &str) -> bool {
     c.starts_with(&p) && matches!(c.as_bytes().get(p.len()), Some(b'\\'))
 }
 
-/// True for `...\steamapps\common\<GameName>` (direct game install roots).
-fn is_steam_common_game_folder(path: &str) -> bool {
-    let lower = path.replace('/', "\\").to_ascii_lowercase();
-    let marker = "\\steamapps\\common\\";
-    let Some(idx) = lower.find(marker) else {
-        return false;
-    };
-    let rest = &lower[idx + marker.len()..];
-    !rest.is_empty() && !rest.contains('\\')
-}
-
 /// Drill-in folder lists should not show both a parent folder and its nested
 /// children (e.g. `common`, `Crimson Desert`, and `0015` all at once).
-fn refine_storage_drill_folders(bucket_id: &str, mut folders: Vec<StorageEntry>) -> Vec<StorageEntry> {
-    if bucket_id == "apps" {
-        let games: Vec<StorageEntry> = folders
-            .iter()
-            .filter(|e| is_steam_common_game_folder(&e.path))
-            .cloned()
-            .collect();
-        if !games.is_empty() {
-            let mut games = games;
-            games.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
-            return games;
-        }
-    }
+/// v0.9.11: dropped the steam-only filter for the `apps` bucket - it was
+/// hiding Epic/GOG/standalone installs and limiting users to ~5 entries.
+/// The generic dedup pass below already collapses nested duplicates;
+/// non-steam app folders sit alongside steam games naturally.
+fn refine_storage_drill_folders(_bucket_id: &str, mut folders: Vec<StorageEntry>) -> Vec<StorageEntry> {
     folders.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
     let mut out: Vec<StorageEntry> = Vec::new();
     for e in folders {
@@ -9730,6 +9716,33 @@ fn resolve_cli_folder_to_string(raw: PathBuf) -> Option<String> {
     canon.to_str().map(|s| s.to_string())
 }
 
+/// Folders that should always open in detail (list) view regardless
+/// of any saved per-folder preference. Documents, Downloads, and any
+/// drive root are navigation hubs where users want columns visible.
+/// Path is expected lowercased.
+fn is_always_list_view_folder(lower: &str) -> bool {
+    // Drive root: matches "c:", "c:\", "d:\", "x:", "\\server\share",
+    // "/" — short paths with no real folder component below the root.
+    let trimmed = lower.trim_end_matches('\\').trim_end_matches('/');
+    let is_drive_root = trimmed.len() <= 2 && trimmed.ends_with(':');
+    if is_drive_root || trimmed.is_empty() || trimmed == "/" {
+        return true;
+    }
+    // UNC root like \\server\share with no further path.
+    if let Some(after) = trimmed.strip_prefix("\\\\") {
+        let slashes = after.matches('\\').count();
+        if slashes <= 1 {
+            return true;
+        }
+    }
+    // Documents / Downloads (any drive, any depth-1 location).
+    let segments: Vec<&str> = trimmed.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
+    let Some(last) = segments.last() else {
+        return false;
+    };
+    matches!(*last, "documents" | "downloads")
+}
+
 /// Attempt to coerce a bogus user-supplied path into a navigable
 /// folder. The common case this guards against: "Open With" or shell
 /// shortcuts that hand us a comma-joined multi-file string like
@@ -11194,10 +11207,21 @@ impl NativeController {
                 // Pictures, Videos, and Camera Roll folders open in Gallery view
                 // (large thumbnails make sense for media). Everything else opens
                 // in Details (list) so columns and metadata are visible.
-                if let Some(view) = self.folder_views.get(&format!("{path}:view")).cloned() {
+                // v0.9.11: Documents, Downloads, and drive roots
+                // ALWAYS open in list (detail) view. Users expect
+                // table-style columns for those navigation hubs;
+                // saved per-folder preferences are ignored here so
+                // accidentally toggling once doesn't permanently
+                // override them.
+                let lower = path.to_ascii_lowercase();
+                let force_list = is_always_list_view_folder(&lower);
+                if force_list {
+                    ui.set_view_mode(ss("list"));
+                    self.folder_views
+                        .insert(format!("{path}:view"), "list".to_string());
+                } else if let Some(view) = self.folder_views.get(&format!("{path}:view")).cloned() {
                     ui.set_view_mode(ss(&view));
                 } else {
-                    let lower = path.to_ascii_lowercase();
                     let is_media_folder = lower.contains("\\pictures")
                         || lower.contains("/pictures")
                         || lower.contains("\\videos")
@@ -14652,38 +14676,50 @@ impl NativeController {
             if self.storage_show_all_state || self.storage_selected_bucket.is_empty() {
                 result.top_items.clone()
             } else {
-                // Drill-in prefers folder/app roll-ups so a single game with
-                // 5 000 files shows up as one row, not 5 000 rows. Fall back
-                // to individual files only if the bucket has no large
-                // folders (e.g., a bucket dominated by standalone files).
-                let mut folders: Vec<StorageEntry> = result
+                // Drill-in: merge folder roll-ups + individual files so
+                // users see EVERY app/folder/file in the bucket, sorted
+                // by size. Folders go through refine first to drop
+                // nested duplicates; files are then appended unless a
+                // refined folder already contains them. v0.9.11 stopped
+                // gating on "folders.is_empty()" - users complained
+                // that buckets with a handful of refined folders showed
+                // only ~5 rows when there were dozens of standalone
+                // files worth listing alongside them.
+                let folders_raw: Vec<StorageEntry> = result
                     .bucket_folder_items
                     .get(&self.storage_selected_bucket)
                     .cloned()
                     .unwrap_or_default();
-                folders.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
-                if !folders.is_empty() {
-                    refine_storage_drill_folders(&self.storage_selected_bucket, folders)
-                } else {
-                    let mut files: Vec<StorageEntry> = result
-                        .bucket_items
-                        .get(&self.storage_selected_bucket)
-                        .cloned()
-                        .unwrap_or_default();
-                    files.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
-                    if !files.is_empty() {
-                        files
-                    } else {
-                        let mut filtered: Vec<StorageEntry> = result
-                            .top_items
-                            .iter()
-                            .filter(|e| e.bucket == self.storage_selected_bucket)
-                            .cloned()
-                            .collect();
-                        filtered.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
-                        filtered
+                let refined_folders = refine_storage_drill_folders(
+                    &self.storage_selected_bucket,
+                    folders_raw,
+                );
+                let files: Vec<StorageEntry> = result
+                    .bucket_items
+                    .get(&self.storage_selected_bucket)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut merged: Vec<StorageEntry> = refined_folders.clone();
+                for f in files {
+                    let contained = refined_folders.iter().any(|fldr| {
+                        path_is_strict_parent(&fldr.path, &f.path) || fldr.path == f.path
+                    });
+                    if !contained {
+                        merged.push(f);
                     }
                 }
+                // Last-resort fallback: filter top_items if both heaps
+                // produced nothing (rare for tiny buckets).
+                if merged.is_empty() {
+                    merged = result
+                        .top_items
+                        .iter()
+                        .filter(|e| e.bucket == self.storage_selected_bucket)
+                        .cloned()
+                        .collect();
+                }
+                merged.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
+                merged
             };
         let largest = entries_src.first().map(|e| e.bytes).unwrap_or(0).max(1);
         let limit = if self.storage_selected_bucket.is_empty() {
