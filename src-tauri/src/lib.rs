@@ -4305,6 +4305,43 @@ const STORAGE_SKIP_DIRS: &[&str] = &[
     "OneDriveTemp",
 ];
 
+/// Skip folders that are too generic to be useful in the drill-in
+/// list. These are top-level system / vendor directories sitting
+/// directly under the drive root: their rolled-up size dominates
+/// (entire Program Files tree, entire Users tree, etc.) but the user
+/// can't realistically act on a single 200GB "Program Files" entry.
+/// Per-application folders deeper in the tree are far more actionable.
+fn is_too_generic_folder(path: &Path, root_components: usize) -> bool {
+    let depth = path.components().count();
+    // Drive root itself or one level below (e.g., C:\, C:\Users) only.
+    if depth > root_components + 1 {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return true;
+    };
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "program files"
+            | "program files (x86)"
+            | "programdata"
+            | "windows"
+            | "windows.old"
+            | "users"
+            | "perflogs"
+            | "recovery"
+            | "$recycle.bin"
+            | "system volume information"
+            | "$windows.~bt"
+            | "$windows.~ws"
+            | "msocache"
+            | "config.msi"
+            | "documents and settings"
+            | "onedrivetemp"
+    )
+}
+
 fn storage_bucket_for(path: &Path, ctx: &StorageScanCtx) -> &'static str {
     let path_bytes = path.as_os_str().as_encoded_bytes();
     if path_bytes_contains_ci(path_bytes, br"\program files\")
@@ -4762,6 +4799,14 @@ fn scan_storage_with_progress(
             break;
         }
         let pb = Path::new(path);
+        // Skip "too generic" entries: top-level system folders right
+        // under a drive root (Program Files, Windows, Users, etc.).
+        // Users want to see e.g. "Crimson Desert", not "Program Files
+        // (x86)" with 200GB rolled up. Per-application folders deeper
+        // in the tree are far more actionable for cleanup.
+        if is_too_generic_folder(pb, root_components) {
+            continue;
+        }
         let bucket = storage_bucket_for(pb, scan_ctx.as_ref()).to_string();
         let Some(vec) = bucket_folder_items.get_mut(&bucket) else {
             continue;
@@ -9685,6 +9730,35 @@ fn resolve_cli_folder_to_string(raw: PathBuf) -> Option<String> {
     canon.to_str().map(|s| s.to_string())
 }
 
+/// Attempt to coerce a bogus user-supplied path into a navigable
+/// folder. The common case this guards against: "Open With" or shell
+/// shortcuts that hand us a comma-joined multi-file string like
+/// `C:\Downloads\a.txt,b.txt,c.txt...`. Strategy: take the first
+/// comma-separated chunk, then walk up parents until something exists
+/// and is a directory. Returns the recovered path string, or None if
+/// nothing reasonable can be salvaged.
+fn recover_navigable_path(raw: &str) -> Option<String> {
+    let first = raw.split(',').next().unwrap_or("").trim();
+    if first.is_empty() {
+        return None;
+    }
+    let p = Path::new(first);
+    if p.is_dir() {
+        return Some(first.to_string());
+    }
+    let mut cur = p.parent();
+    while let Some(parent) = cur {
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        if parent.is_dir() {
+            return Some(parent.to_string_lossy().into_owned());
+        }
+        cur = parent.parent();
+    }
+    None
+}
+
 /// True when `a` and `b` refer to the same on-disk object (used to skip no-op drops).
 fn same_inode_or_canonical_path(a: &Path, b: &Path) -> bool {
     if a == b {
@@ -11058,6 +11132,15 @@ impl NativeController {
         }
         let is_accessible = Path::new(&path).is_dir();
         if !is_accessible && !path.is_empty() {
+            // Recover gracefully from common bogus paths: "Open With"
+            // multi-selections that get joined as
+            // "C:\\Downloads\\f1.txt,f2.txt,f3.txt..." or paste-mangled
+            // address-bar input. Try the parent of the first segment;
+            // if that's a real directory, navigate there silently.
+            if let Some(target) = recover_navigable_path(&path) {
+                self.navigate(ui, target, push_history);
+                return;
+            }
             ui.set_empty_state(ss(format!("Cannot open \"{}\"", path)));
             return;
         }
@@ -14656,6 +14739,27 @@ impl NativeController {
         self.storage_subtitle_last_update = Instant::now();
         ui.set_storage_buckets(slint::ModelRc::new(slint::VecModel::from(buckets)));
         self.push_storage_top_items(ui, result);
+        // Disk-wide totals for the hero strip. Uses fresh volume data
+        // so the bar reflects ACTUAL disk usage, not just what the
+        // bucket scan summed (which excludes skipped system dirs).
+        if let Some((free, disk_total)) = drive_free_space(&result.root) {
+            let used = disk_total.saturating_sub(free);
+            let pct = if disk_total > 0 {
+                (used as f64 / disk_total as f64) * 100.0
+            } else {
+                0.0
+            };
+            ui.set_storage_disk_summary(ss(format!(
+                "{} used of {}  ·  {} free",
+                format_size_short(used),
+                format_size_short(disk_total),
+                format_size_short(free)
+            )));
+            ui.set_storage_disk_used_pct(pct as f32);
+        } else {
+            ui.set_storage_disk_summary(ss(""));
+            ui.set_storage_disk_used_pct(0.0);
+        }
         ui.set_storage_scanning(false);
         ui.set_storage_progress_files(result.scanned_files as i32);
         ui.set_storage_progress_bytes_text(ss(format_size_short(result.total_bytes)));

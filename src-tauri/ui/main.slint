@@ -1890,6 +1890,8 @@ component StorageOverview inherits Rectangle {
     in property <int> progress_files;
     in property <string> progress_bytes_text;
     in property <float> progress_percent;
+    in property <string> disk_summary;
+    in property <float> disk_used_pct;
     callback rescan();
     callback select_bucket(string);
     callback switch_root(string);
@@ -1985,6 +1987,58 @@ component StorageOverview inherits Rectangle {
                     mouse-cursor: pointer;
                     clicked => { root.rescan(); }
                 }
+            }
+        }
+
+        // Hero "Total storage" strip - prominent used/free bar that
+        // makes the page feel anchored. Shows disk-wide usage (not
+        // just the scanned-categories total).
+        if root.disk_summary != "": Rectangle {
+            preferred-height: 58px;
+            min-height: 58px;
+            max-height: 58px;
+            vertical-stretch: 0;
+            background: ThemePalette.panel;
+            Text {
+                x: 18px; y: 8px;
+                width: parent.width - 36px; height: 18px;
+                text: "Total storage";
+                color: ThemePalette.text_faint;
+                font-size: 10.5px;
+                font-weight: 700;
+                letter-spacing: 0.6px;
+                vertical-alignment: center;
+            }
+            Text {
+                x: 18px; y: 25px;
+                width: parent.width - 36px; height: 18px;
+                text: root.disk_summary;
+                color: ThemePalette.text;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            // Big used/free bar.
+            Rectangle {
+                x: 18px; y: 46px;
+                width: parent.width - 36px;
+                height: 7px;
+                border-radius: 3.5px;
+                background: ThemePalette.panel_alt;
+                Rectangle {
+                    x: 0; y: 0;
+                    width: max(4px, parent.width * root.disk_used_pct / 100);
+                    height: parent.height;
+                    border-radius: 3.5px;
+                    background: ThemePalette.accent;
+                    animate width { duration: 220ms; easing: ease-out; }
+                }
+            }
+            Rectangle {
+                x: 0; y: parent.height - 1px;
+                width: parent.width; height: 1px;
+                background: ThemePalette.border;
             }
         }
 
@@ -2124,164 +2178,157 @@ component StorageDrillIn inherits Rectangle {
     property <length> col_size_w: 84px;
     property <bool> show_category_col: root.show_all && root.selected_bucket == "";
 
-    VerticalLayout {
+    // v0.9.10: switched from VerticalLayout (which under conditional
+    // children with vertical-stretch was producing a tiny ListView
+    // viewport) to explicit absolute positioning. The list area now
+    // always reaches the bottom of the pane.
+    property <length> header_h: 44px;
+    property <length> labels_h: root.top_items.length > 0 ? 22px : 0px;
+    property <length> list_y: root.header_h + root.labels_h;
+
+    // Header bar - back, title, close.
+    Rectangle {
         x: 0; y: 0;
-        width: parent.width;
-        height: parent.height;
-        spacing: 0;
-        alignment: start;
-
-        // Header bar - back, title, close.
+        width: parent.width; height: root.header_h;
+        background: ThemePalette.panel;
         Rectangle {
-            preferred-height: 44px;
-            min-height: 44px;
-            max-height: 44px;
-            vertical-stretch: 0;
-            background: ThemePalette.panel;
-            Rectangle {
-                x: 0; y: parent.height - 1px;
-                width: parent.width; height: 1px;
-                background: ThemePalette.border;
+            x: 0; y: parent.height - 1px;
+            width: parent.width; height: 1px;
+            background: ThemePalette.border;
+        }
+        Rectangle {
+            x: 10px; y: 8px;
+            width: 28px; height: 28px;
+            border-radius: 6px;
+            background: back_touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
+            SvgIcon {
+                x: 7px; y: 7px;
+                icon_size: 14px;
+                data: "M15 18l-6-6 6-6";
+                tint: ThemePalette.text_muted;
             }
-            Rectangle {
-                x: 10px;
-                y: 8px;
-                width: 28px;
-                height: 28px;
-                border-radius: 6px;
-                background: back_touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
-                SvgIcon {
-                    x: 7px; y: 7px;
-                    icon_size: 14px;
-                    data: "M15 18l-6-6 6-6";
-                    tint: ThemePalette.text_muted;
-                }
-                back_touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.close(); }
-                }
+            back_touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.close(); }
             }
+        }
+        Text {
+            x: 46px; y: 0;
+            width: parent.width - 90px; height: parent.height;
+            text: root.selected_bucket != ""
+                ? "Largest in " + root.selected_bucket_name
+                : "All items ranked by size";
+            color: ThemePalette.text;
+            font-size: 13px;
+            font-weight: 700;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Rectangle {
+            x: parent.width - 38px; y: 8px;
+            width: 28px; height: 28px;
+            border-radius: 6px;
+            background: close_touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
             Text {
-                x: 46px; y: 0;
-                width: parent.width - 90px; height: parent.height;
-                text: root.selected_bucket != ""
-                    ? "Largest in " + root.selected_bucket_name
-                    : "All items ranked by size";
-                color: ThemePalette.text;
-                font-size: 13px;
-                font-weight: 700;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            Rectangle {
-                x: parent.width - 38px;
-                y: 8px;
-                width: 28px;
-                height: 28px;
-                border-radius: 6px;
-                background: close_touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
-                Text {
-                    width: parent.width; height: parent.height;
-                    text: "X";
-                    color: ThemePalette.text_muted;
-                    font-size: 14px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-                close_touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.close(); }
-                }
-            }
-        }
-
-        // Column labels (widths match StorageEntryRow).
-        if root.top_items.length > 0: Rectangle {
-            preferred-height: 22px;
-            min-height: 22px;
-            max-height: 22px;
-            vertical-stretch: 0;
-            background: ThemePalette.panel;
-            HorizontalLayout {
-                x: 12px; y: 4px;
-                width: parent.width - 24px;
-                height: 14px;
-                spacing: 10px;
-                alignment: center;
-                Text {
-                    horizontal-stretch: 1;
-                    min-width: 120px;
-                    text: "Name";
-                    color: ThemePalette.text_faint;
-                    font-size: 10px;
-                    font-weight: 600;
-                    letter-spacing: 0.3px;
-                }
-                if root.show_category_col: Text {
-                    width: root.col_category_w;
-                    text: "Category";
-                    color: ThemePalette.text_faint;
-                    font-size: 10px;
-                    font-weight: 600;
-                    horizontal-alignment: right;
-                }
-                Text {
-                    width: root.col_share_w;
-                    text: "Share";
-                    color: ThemePalette.text_faint;
-                    font-size: 10px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                }
-                Text {
-                    width: root.col_size_w;
-                    text: "Size";
-                    color: ThemePalette.text_faint;
-                    font-size: 10px;
-                    font-weight: 600;
-                    horizontal-alignment: right;
-                }
-            }
-        }
-
-        // Ranked list - fills remaining main-pane height.
-        if root.top_items.length > 0: Rectangle {
-            vertical-stretch: 1;
-            min-height: 120px;
-            background: ThemePalette.bg;
-            ListView {
-                x: 0; y: 0;
-                width: parent.width;
-                height: parent.height;
-                for entry[idx] in root.top_items: StorageEntryRow {
-                    width: parent.width;
-                    entry: entry;
-                    show_bucket_label: root.show_category_col;
-                    col_category_w: root.col_category_w;
-                    col_share_w: root.col_share_w;
-                    col_size_w: root.col_size_w;
-                    open => { root.open_path(entry.path); }
-                }
-            }
-        }
-        // Empty state - bucket has no top items (rare, but happens for
-        // buckets that only contain tiny files).
-        if root.top_items.length == 0: Rectangle {
-            vertical-stretch: 1;
-            min-height: 80px;
-            background: ThemePalette.bg;
-            Text {
-                x: 24px; y: 24px;
-                width: parent.width - 48px;
-                text: root.scanning
-                    ? "Still scanning - results will appear shortly."
-                    : (root.selected_bucket != ""
-                        ? ("No large items found in " + root.selected_bucket_name + ".")
-                        : "No items to show. Click Rescan to start.");
+                width: parent.width; height: parent.height;
+                text: "X";
                 color: ThemePalette.text_muted;
-                font-size: 12px;
+                font-size: 14px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
             }
+            close_touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.close(); }
+            }
+        }
+    }
+
+    // Column labels (widths match StorageEntryRow).
+    if root.top_items.length > 0: Rectangle {
+        x: 0; y: root.header_h;
+        width: parent.width; height: root.labels_h;
+        background: ThemePalette.panel;
+        HorizontalLayout {
+            x: 12px; y: 4px;
+            width: parent.width - 24px;
+            height: 14px;
+            spacing: 10px;
+            alignment: center;
+            Text {
+                horizontal-stretch: 1;
+                min-width: 120px;
+                text: "Name";
+                color: ThemePalette.text_faint;
+                font-size: 10px;
+                font-weight: 600;
+                letter-spacing: 0.3px;
+            }
+            if root.show_category_col: Text {
+                width: root.col_category_w;
+                text: "Category";
+                color: ThemePalette.text_faint;
+                font-size: 10px;
+                font-weight: 600;
+                horizontal-alignment: right;
+            }
+            Text {
+                width: root.col_share_w;
+                text: "Share";
+                color: ThemePalette.text_faint;
+                font-size: 10px;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+            Text {
+                width: root.col_size_w;
+                text: "Size";
+                color: ThemePalette.text_faint;
+                font-size: 10px;
+                font-weight: 600;
+                horizontal-alignment: right;
+            }
+        }
+    }
+
+    // Ranked list - explicitly reaches the bottom of the pane.
+    if root.top_items.length > 0: Rectangle {
+        x: 0; y: root.list_y;
+        width: parent.width;
+        height: parent.height - root.list_y;
+        background: ThemePalette.bg;
+        ListView {
+            x: 0; y: 0;
+            width: parent.width;
+            height: parent.height;
+            for entry[idx] in root.top_items: StorageEntryRow {
+                width: parent.width;
+                entry: entry;
+                show_bucket_label: root.show_category_col;
+                col_category_w: root.col_category_w;
+                col_share_w: root.col_share_w;
+                col_size_w: root.col_size_w;
+                open => { root.open_path(entry.path); }
+            }
+        }
+    }
+    // Empty state.
+    if root.top_items.length == 0: Rectangle {
+        x: 0; y: root.header_h;
+        width: parent.width;
+        height: parent.height - root.header_h;
+        background: ThemePalette.bg;
+        Text {
+            x: 24px; y: 24px;
+            width: parent.width - 48px;
+            text: root.scanning
+                ? "Still scanning - results will appear shortly."
+                : (root.selected_bucket != ""
+                    ? ("No large items found in " + root.selected_bucket_name + ".")
+                    : "No items to show. Click Rescan to start.");
+            color: ThemePalette.text_muted;
+            font-size: 12px;
         }
     }
 }
@@ -2369,6 +2416,9 @@ export component MainWindow inherits Window {
     in-out property <int> storage_progress_files: 0;
     in-out property <string> storage_progress_bytes_text: "";
     in-out property <float> storage_progress_percent: 0;
+    // Disk-wide totals shown in the overview's hero bar.
+    in-out property <string> storage_disk_summary: "";
+    in-out property <float> storage_disk_used_pct: 0;
     callback storage_rescan();
     callback storage_open_path(string);
     callback storage_toggle_show_all();
@@ -3960,6 +4010,8 @@ export component MainWindow inherits Window {
                     progress_files: root.storage_progress_files;
                     progress_bytes_text: root.storage_progress_bytes_text;
                     progress_percent: root.storage_progress_percent;
+                    disk_summary: root.storage_disk_summary;
+                    disk_used_pct: root.storage_disk_used_pct;
                     rescan => { root.storage_rescan(); }
                     select_bucket(b) => { root.storage_select_bucket(b); }
                     switch_root(r) => { root.storage_switch_root(r); }
