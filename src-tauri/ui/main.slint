@@ -86,6 +86,19 @@ export struct StorageEntryUi {
     bucket_color: color,
 }
 
+// One recommendation card on the storage overview. Severity drives
+// the left accent: "info" (neutral blue), "tip" (green - actionable
+// cleanup), "warn" (amber - large or stale).
+export struct StorageTipUi {
+    icon: string,
+    title: string,
+    detail: string,
+    bytes_text: string,
+    severity: string,
+    path: string,
+    accent: color,
+}
+
 export global ThemePalette {
     in-out property <color> bg: #101318;
     in-out property <color> bg_soft: #171b22;
@@ -1892,10 +1905,12 @@ component StorageOverview inherits Rectangle {
     in property <float> progress_percent;
     in property <string> disk_summary;
     in property <float> disk_used_pct;
+    in property <[StorageTipUi]> tips;
     callback rescan();
     callback select_bucket(string);
     callback switch_root(string);
     callback show_full_list();
+    callback open_path(string);
     background: ThemePalette.bg;
 
     VerticalLayout {
@@ -1990,18 +2005,20 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // Hero "Total storage" strip - prominent used/free bar that
-        // makes the page feel anchored. Shows disk-wide usage (not
-        // just the scanned-categories total).
-        if root.disk_summary != "": Rectangle {
-            preferred-height: 58px;
-            min-height: 58px;
-            max-height: 58px;
+        // Hero "Total storage" strip - shows disk-wide usage and a
+        // stacked colored bar breaking down the scanned categories.
+        // The colored segments make it possible to compare buckets
+        // proportionally at a glance without scanning the cards below.
+        if root.disk_summary != "": hero_strip := Rectangle {
+            property <length> bar_w: parent.width - 36px;
+            preferred-height: 78px;
+            min-height: 78px;
+            max-height: 78px;
             vertical-stretch: 0;
             background: ThemePalette.panel;
             Text {
                 x: 18px; y: 8px;
-                width: parent.width - 36px; height: 18px;
+                width: parent.width - 36px; height: 16px;
                 text: "Total storage";
                 color: ThemePalette.text_faint;
                 font-size: 10.5px;
@@ -2010,7 +2027,7 @@ component StorageOverview inherits Rectangle {
                 vertical-alignment: center;
             }
             Text {
-                x: 18px; y: 25px;
+                x: 18px; y: 24px;
                 width: parent.width - 36px; height: 18px;
                 text: root.disk_summary;
                 color: ThemePalette.text;
@@ -2019,21 +2036,44 @@ component StorageOverview inherits Rectangle {
                 vertical-alignment: center;
                 overflow: elide;
             }
-            // Big used/free bar.
+            // Stacked colored bar - one segment per bucket, widths
+            // proportional to bucket bytes. Falls back to a single
+            // accent bar of used % if no bucket data yet.
             Rectangle {
-                x: 18px; y: 46px;
-                width: parent.width - 36px;
-                height: 7px;
-                border-radius: 3.5px;
+                x: 18px; y: 48px;
+                width: hero_strip.bar_w;
+                height: 10px;
+                border-radius: 5px;
                 background: ThemePalette.panel_alt;
-                Rectangle {
+                clip: true;
+                if root.buckets.length == 0: Rectangle {
                     x: 0; y: 0;
                     width: max(4px, parent.width * root.disk_used_pct / 100);
                     height: parent.height;
-                    border-radius: 3.5px;
+                    border-radius: 5px;
                     background: ThemePalette.accent;
-                    animate width { duration: 220ms; easing: ease-out; }
                 }
+                if root.buckets.length > 0: HorizontalLayout {
+                    x: 0; y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    spacing: 0;
+                    alignment: start;
+                    for b[i] in root.buckets: Rectangle {
+                        width: max(2px, hero_strip.bar_w * b.percent / 100);
+                        height: parent.height;
+                        background: b.color;
+                    }
+                }
+            }
+            Text {
+                x: 18px; y: 62px;
+                width: parent.width - 36px; height: 12px;
+                text: "Each colored segment is one category - longer = bigger share";
+                color: ThemePalette.text_faint;
+                font-size: 10px;
+                vertical-alignment: center;
+                overflow: elide;
             }
             Rectangle {
                 x: 0; y: parent.height - 1px;
@@ -2126,21 +2166,42 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // Bucket grid - fills the remaining vertical space. Card height is
-        // derived from the available height so the full bucket set is visible
-        // at the app's minimum window size without a scrollbar.
-        grid_holder := Rectangle {
-            vertical-stretch: 1;
-            min-height: 120px;
+        // Category header.
+        Rectangle {
+            preferred-height: 30px;
+            min-height: 30px;
+            max-height: 30px;
+            vertical-stretch: 0;
             background: ThemePalette.bg;
-            property <int> cols: max(1, min(5, floor((self.width - 20px) / 190px)));
+            Text {
+                x: 18px; y: 0;
+                width: parent.width - 36px; height: parent.height;
+                text: "Categories";
+                color: ThemePalette.text_faint;
+                font-size: 10.5px;
+                font-weight: 700;
+                letter-spacing: 0.6px;
+                vertical-alignment: bottom;
+            }
+        }
+
+        // Bucket grid - 3-4 cols, taller cards. Height fixed by content
+        // so the recommendations panel below has predictable space.
+        grid_holder := Rectangle {
+            property <int> cols: max(1, min(4, floor((self.width - 24px) / 240px)));
             property <int> rows: max(1, Math.ceil(root.buckets.length / self.cols));
-            property <length> gap: self.height < 320px ? 7px : 9px;
-            property <length> card_w: (self.width - 20px - (self.cols - 1) * self.gap) / self.cols;
-            property <length> card_h: max(64px, min(74px, (self.height - 14px - (self.rows - 1) * self.gap) / self.rows));
+            property <length> gap: 12px;
+            property <length> card_w: (self.width - 24px - (self.cols - 1) * self.gap) / self.cols;
+            property <length> card_h: 96px;
+            property <length> needed_h: 12px + self.rows * self.card_h + (self.rows - 1) * self.gap;
+            preferred-height: self.needed_h;
+            min-height: self.needed_h;
+            max-height: self.needed_h;
+            vertical-stretch: 0;
+            background: ThemePalette.bg;
             for bucket[index] in root.buckets: StorageBucketCard {
-                x: 10px + mod(index, grid_holder.cols) * (grid_holder.card_w + grid_holder.gap);
-                y: 7px + floor(index / grid_holder.cols) * (grid_holder.card_h + grid_holder.gap);
+                x: 12px + mod(index, grid_holder.cols) * (grid_holder.card_w + grid_holder.gap);
+                y: 4px + floor(index / grid_holder.cols) * (grid_holder.card_h + grid_holder.gap);
                 width: grid_holder.card_w;
                 height: grid_holder.card_h;
                 bucket: bucket;
@@ -2155,6 +2216,106 @@ component StorageOverview inherits Rectangle {
                     : "No data yet. Click Rescan to start.";
                 color: ThemePalette.text_faint;
                 font-size: 12px;
+            }
+        }
+
+        // Recommendations section - fills remaining vertical space.
+        // Each tip is a clickable row with severity-colored accent.
+        // When the scan hasn't surfaced any tips, an explanatory empty
+        // state still fills the area so the page doesn't look hollow.
+        Rectangle {
+            preferred-height: 30px;
+            min-height: 30px;
+            max-height: 30px;
+            vertical-stretch: 0;
+            background: ThemePalette.bg;
+            Text {
+                x: 18px; y: 0;
+                width: parent.width - 36px; height: parent.height;
+                text: "Recommendations";
+                color: ThemePalette.text_faint;
+                font-size: 10.5px;
+                font-weight: 700;
+                letter-spacing: 0.6px;
+                vertical-alignment: bottom;
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 80px;
+            background: ThemePalette.bg;
+            if root.tips.length == 0: Text {
+                x: 24px; y: 18px;
+                width: parent.width - 48px;
+                text: root.scanning
+                    ? "Recommendations will appear once the scan completes."
+                    : "Nothing pressing here. Click any category card above to drill into its largest items.";
+                color: ThemePalette.text_faint;
+                font-size: 12px;
+            }
+            ListView {
+                x: 12px; y: 4px;
+                width: parent.width - 24px;
+                height: parent.height - 8px;
+                for tip[i] in root.tips: Rectangle {
+                    height: 64px;
+                    background: tip_touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel;
+                    border-radius: AppMetrics.radius_small;
+                    animate background { duration: 80ms; easing: ease-out; }
+                    Rectangle {
+                        x: 0; y: 0;
+                        width: 4px; height: parent.height;
+                        background: tip.accent;
+                    }
+                    Text {
+                        x: 16px; y: 0;
+                        width: 26px; height: parent.height;
+                        text: tip.icon;
+                        color: tip.accent;
+                        font-size: 18px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        x: 50px; y: 8px;
+                        width: parent.width - 180px; height: 20px;
+                        text: tip.title;
+                        color: ThemePalette.text;
+                        font-size: 13px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Text {
+                        x: 50px; y: 30px;
+                        width: parent.width - 180px; height: 26px;
+                        text: tip.detail;
+                        color: ThemePalette.text_muted;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                        vertical-alignment: top;
+                        overflow: elide;
+                    }
+                    if tip.bytes_text != "": Text {
+                        x: parent.width - 124px; y: 0;
+                        width: 112px; height: parent.height;
+                        text: tip.bytes_text;
+                        color: ThemePalette.text;
+                        font-size: 14px;
+                        font-weight: 700;
+                        font-family: AppMetrics.mono_font;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                    }
+                    tip_touch := TouchArea {
+                        mouse-cursor: tip.path != "" ? pointer : default;
+                        clicked => {
+                            if (tip.path != "") { root.open_path(tip.path); }
+                        }
+                    }
+                }
             }
         }
     }
@@ -2419,6 +2580,9 @@ export component MainWindow inherits Window {
     // Disk-wide totals shown in the overview's hero bar.
     in-out property <string> storage_disk_summary: "";
     in-out property <float> storage_disk_used_pct: 0;
+    // Recommendations / explanations shown below the bucket grid on
+    // the storage overview. Populated by the Rust storage scan.
+    in-out property <[StorageTipUi]> storage_tips;
     callback storage_rescan();
     callback storage_open_path(string);
     callback storage_toggle_show_all();
@@ -4012,10 +4176,12 @@ export component MainWindow inherits Window {
                     progress_percent: root.storage_progress_percent;
                     disk_summary: root.storage_disk_summary;
                     disk_used_pct: root.storage_disk_used_pct;
+                    tips: root.storage_tips;
                     rescan => { root.storage_rescan(); }
                     select_bucket(b) => { root.storage_select_bucket(b); }
                     switch_root(r) => { root.storage_switch_root(r); }
                     show_full_list => { root.storage_toggle_show_all(); }
+                    open_path(p) => { root.storage_open_path(p); }
                 }
             }
 

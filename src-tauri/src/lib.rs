@@ -659,6 +659,214 @@ impl StorageScanCtx {
     }
 }
 
+/// Generate actionable recommendations + explanations for the
+/// storage overview panel. Pulls from the scan result so we don't
+/// need to re-walk the disk. Output is a small ordered list - the
+/// most actionable / largest items come first so the user can see
+/// quick wins without scrolling.
+fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
+    let mut tips: Vec<StorageTipUi> = Vec::new();
+
+    // System reserved files: pagefile / hiberfil / swapfile. These
+    // tend to top the list on Windows drives and confuse users who
+    // try to delete them. Annotate with what they are + how to
+    // shrink them rather than treating them as "junk".
+    for e in result.top_items.iter() {
+        let lower = e.name.to_ascii_lowercase();
+        match lower.as_str() {
+            "pagefile.sys" => tips.push(StorageTipUi {
+                icon: ss("PG"),
+                title: ss("pagefile.sys - Windows virtual memory"),
+                detail: ss(
+                    "System-managed swap file. Resize via Settings > System > About > Advanced \
+                     system settings > Performance > Virtual memory. Do not delete manually.",
+                ),
+                bytes_text: ss(format_size_short(e.bytes)),
+                severity: ss("info"),
+                path: ss(""),
+                accent: TIP_ACCENT_INFO,
+            }),
+            "hiberfil.sys" => tips.push(StorageTipUi {
+                icon: ss("HB"),
+                title: ss("hiberfil.sys - Hibernation cache"),
+                detail: ss(
+                    "Reserved for Fast Startup and Hibernate. Disable via an admin PowerShell: \
+                     `powercfg /h off` (or `/h size <N>` to shrink) to reclaim this space.",
+                ),
+                bytes_text: ss(format_size_short(e.bytes)),
+                severity: ss("info"),
+                path: ss(""),
+                accent: TIP_ACCENT_INFO,
+            }),
+            "swapfile.sys" => tips.push(StorageTipUi {
+                icon: ss("SW"),
+                title: ss("swapfile.sys - Modern app paging"),
+                detail: ss(
+                    "Windows uses this alongside pagefile.sys for UWP / packaged apps. \
+                     Automatically managed; deleting it has no lasting effect.",
+                ),
+                bytes_text: ss(format_size_short(e.bytes)),
+                severity: ss("info"),
+                path: ss(""),
+                accent: TIP_ACCENT_INFO,
+            }),
+            _ => {}
+        }
+    }
+
+    // Large items inside common "review and delete" locations. We
+    // group multiple paths under the same parent so a Downloads
+    // folder with 30 stale installers shows as one tip, not 30.
+    add_location_tip(
+        &mut tips,
+        result,
+        "DL",
+        "Downloads",
+        "Old downloads worth reviewing",
+        &["\\downloads\\", "/downloads/"],
+        TIP_ACCENT_TIP,
+    );
+    add_location_tip(
+        &mut tips,
+        result,
+        "TM",
+        "Temp / cache",
+        "Temporary files - safe to clear",
+        &[
+            "\\appdata\\local\\temp\\",
+            "\\windows\\temp\\",
+            "\\cache\\",
+            "\\caches\\",
+            "/cache/",
+            "/caches/",
+            "\\packagecache\\",
+        ],
+        TIP_ACCENT_TIP,
+    );
+    add_location_tip(
+        &mut tips,
+        result,
+        "RB",
+        "Recycle Bin",
+        "Files waiting to be permanently deleted. Empty the bin to reclaim.",
+        &["\\$recycle.bin\\"],
+        TIP_ACCENT_WARN,
+    );
+
+    // Per-bucket hints for the largest categories. Encourage drilling
+    // in when one bucket dominates - that's usually where the biggest
+    // cleanup wins live.
+    let total = result.total_bytes.max(1);
+    for b in result.buckets.iter() {
+        let pct = (b.bytes as f64 / total as f64) * 100.0;
+        if pct < 20.0 || b.id == "other" {
+            continue;
+        }
+        let (icon, hint) = match b.id.as_str() {
+            "apps" => (
+                "AG",
+                "Click the Apps & games card to find the largest installs - uninstalling unused \
+                 ones is usually the fastest way to reclaim space.",
+            ),
+            "documents" => (
+                "DC",
+                "Click the Documents card to surface the biggest folders. Archives, project \
+                 backups, and downloads pile up here.",
+            ),
+            "media" | "pictures" => (
+                "PX",
+                "Pictures dominate this drive. Drill in to find duplicates or originals you \
+                 already exported.",
+            ),
+            "videos" => (
+                "VD",
+                "Video files dominate this drive. Drill in to find large recordings you no \
+                 longer need.",
+            ),
+            "system" => (
+                "SY",
+                "System data is large. Windows Update files, driver packages, and component \
+                 stores accumulate over time.",
+            ),
+            "temp" => (
+                "TC",
+                "Temporary files dominate the scan. Safe to clear via Settings > System > \
+                 Storage > Temporary files.",
+            ),
+            _ => continue,
+        };
+        tips.push(StorageTipUi {
+            icon: ss(icon),
+            title: ss(format!(
+                "{} uses {}% ({})",
+                b.name,
+                ((pct * 10.0).round() / 10.0),
+                format_size_short(b.bytes)
+            )),
+            detail: ss(hint),
+            bytes_text: ss(""),
+            severity: ss("tip"),
+            path: ss(""),
+            accent: TIP_ACCENT_TIP,
+        });
+    }
+
+    // Cap so the panel never becomes overwhelming.
+    tips.truncate(12);
+    tips
+}
+
+/// Sum up sizes for top_items whose path contains any of `markers`,
+/// then push a single tip summarising the group. The first matching
+/// path becomes the click target so the user can jump straight to it.
+fn add_location_tip(
+    out: &mut Vec<StorageTipUi>,
+    result: &StorageScanResult,
+    icon: &str,
+    title: &str,
+    detail: &str,
+    markers: &[&str],
+    accent: slint::Color,
+) {
+    let mut total: u64 = 0;
+    let mut count: u32 = 0;
+    let mut first_path: Option<String> = None;
+    let mut largest: u64 = 0;
+    for e in result.top_items.iter() {
+        let lower = e.path.to_ascii_lowercase();
+        if !markers.iter().any(|m| lower.contains(m)) {
+            continue;
+        }
+        total = total.saturating_add(e.bytes);
+        count += 1;
+        if e.bytes > largest {
+            largest = e.bytes;
+            first_path = Some(e.path.clone());
+        }
+    }
+    if count == 0 || total < 100 * 1024 * 1024 {
+        return; // Skip when the cluster is too small to be worth surfacing.
+    }
+    out.push(StorageTipUi {
+        icon: ss(icon),
+        title: ss(format!(
+            "{} ({} item{})",
+            title,
+            count,
+            if count == 1 { "" } else { "s" }
+        )),
+        detail: ss(detail),
+        bytes_text: ss(format_size_short(total)),
+        severity: ss("tip"),
+        path: ss(&first_path.unwrap_or_default()),
+        accent,
+    });
+}
+
+const TIP_ACCENT_INFO: slint::Color = slint::Color::from_rgb_u8(0x4a, 0x9c, 0xff);
+const TIP_ACCENT_TIP: slint::Color = slint::Color::from_rgb_u8(0x58, 0xc7, 0x7a);
+const TIP_ACCENT_WARN: slint::Color = slint::Color::from_rgb_u8(0xf2, 0xa8, 0x4a);
+
 /// "5 seconds ago" / "3 minutes ago" / "1 day ago". Used by the Storage tab
 /// to display when the cached scan was last refreshed.
 fn format_relative_time(ts: i64) -> String {
@@ -14800,6 +15008,10 @@ impl NativeController {
         ui.set_storage_progress_files(result.scanned_files as i32);
         ui.set_storage_progress_bytes_text(ss(format_size_short(result.total_bytes)));
         ui.set_storage_progress_percent(100.0);
+        // Recommendations / explanations for the overview's bottom
+        // panel. Pulled from this scan result + the live volume.
+        let tips = build_storage_tips(result);
+        ui.set_storage_tips(slint::ModelRc::new(slint::VecModel::from(tips)));
     }
 
     /// Pump progress counters from the live scan into Slint properties. Cheap:
