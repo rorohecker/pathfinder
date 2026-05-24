@@ -1924,6 +1924,35 @@ fn discover_wsl_distros() -> Vec<DriveInfo> {
         {
             continue;
         }
+        // Verify the distro is actually installed before listing it.
+        // WSL leaves the registry entry around when a distro is uninstalled
+        // partially, mid-install, or via `wsl --unregister` in some Windows
+        // versions. State == 1 means "installed and runnable" — anything
+        // else (0=uninstalled, 2=installing, 3=being-uninstalled, etc.) is
+        // a ghost that File Explorer's Linux node correctly hides.
+        let state_name: Vec<u16> = "State"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut state_val: u32 = 0;
+        let mut state_size = std::mem::size_of::<u32>() as u32;
+        let mut state_kind = windows::Win32::System::Registry::REG_DWORD;
+        let state_q = unsafe {
+            RegQueryValueExW(
+                sub,
+                PCWSTR(state_name.as_ptr()),
+                None,
+                Some(&mut state_kind),
+                Some((&mut state_val) as *mut u32 as *mut u8),
+                Some(&mut state_size),
+            )
+        };
+        if state_q != ERROR_SUCCESS || state_val != 1 {
+            unsafe {
+                let _ = RegCloseKey(sub);
+            }
+            continue;
+        }
         let value_name: Vec<u16> = "DistributionName"
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -1969,6 +1998,51 @@ fn discover_wsl_distros() -> Vec<DriveInfo> {
 /// exist on disk are skipped so we never show stale entries.
 #[cfg(target_os = "windows")]
 fn discover_cloud_sync_folders() -> Vec<DriveInfo> {
+    // True when the folder looks like an actively-installed cloud sync target,
+    // not just a stale empty directory left over from an uninstall. We check
+    // for any well-known marker file from the cloud client OR for at least one
+    // real child file. Without this guard, a `~/Proton Drive` directory left
+    // behind by an uninstall would still show up in the sidebar.
+    fn looks_active(dir: &Path) -> bool {
+        // Cloud clients drop a sentinel/manifest file the first time they sync.
+        // OneDrive: desktop.ini with a CLSID, or .849C9593-D756-4E56-8D6E-... settings.
+        // Proton Drive: .pd-cache / .protonmeta / sync-related dotfiles.
+        // Generic fallback: at least one non-hidden child file or subfolder
+        // means the folder is actually in use.
+        let known_markers = [
+            "desktop.ini",
+            ".849C9593-D756-4E56-8D6E-42412F2A707B",
+            ".OneDrive",
+            ".pd-cache",
+            ".protonmeta",
+            ".dropbox",
+            ".dropbox.cache",
+            ".icloud",
+            "Google Drive.app",
+            ".gdrive",
+        ];
+        for m in known_markers {
+            if dir.join(m).exists() {
+                return true;
+            }
+        }
+        // Read up to 8 entries — enough to detect a non-empty folder without
+        // walking large trees. Skip the marker files we already checked.
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for (i, entry) in rd.flatten().enumerate() {
+                if i >= 8 {
+                    return true;
+                }
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if !name_str.starts_with('.') && name_str != "desktop.ini" {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::<String>::new();
     let mut push = |label: &str, path_str: String| {
@@ -1979,7 +2053,8 @@ fn discover_cloud_sync_folders() -> Vec<DriveInfo> {
         if !seen.insert(key) {
             return;
         }
-        if Path::new(&path_str).exists() {
+        let path = Path::new(&path_str);
+        if path.exists() && path.is_dir() && looks_active(path) {
             out.push(DriveInfo {
                 name: label.to_string(),
                 path: path_str,
@@ -1989,7 +2064,9 @@ fn discover_cloud_sync_folders() -> Vec<DriveInfo> {
     };
 
     // OneDrive: the desktop client exports up to three env vars depending on
-    // which accounts are linked.
+    // which accounts are linked. The env var alone is not sufficient — it
+    // persists across reboots even after the user signs out, so we still need
+    // the looks_active sync-marker check.
     if let Ok(p) = std::env::var("OneDrive") {
         push("OneDrive", p);
     }
@@ -4576,18 +4653,23 @@ fn scan_storage_with_progress(
     let mut folders: Vec<(String, u64)> = folder_sizes.into_iter().collect();
     folders.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
 
-    // Global top-N: pool the top-N from every bucket plus the top folders,
-    // then re-sort and take top_n. Avoids holding all-files-ever in memory.
-    let half = top_n / 2;
-    let mut combined: Vec<StorageEntry> = Vec::with_capacity(per_bucket_n * meta.len() + folders.len());
+    // Global top-N: favor FOLDERS over individual files (4:1 mix). A single
+    // game install folder at 80 GB is far more useful to surface than 50
+    // individual .pak files inside it. Files only earn a slot if they're
+    // truly large standalone items (ISOs, VM images, backups). Previous
+    // 50/50 split made the list feel noisy because games and apps generated
+    // hundreds of files that crowded out actual folder-level insights.
+    let folders_slots = (top_n * 4 / 5).max(1); // 80%
+    let files_slots = top_n.saturating_sub(folders_slots).max(1);
+    let mut combined: Vec<StorageEntry> = Vec::with_capacity(per_bucket_n * meta.len());
     for entries in bucket_items.values() {
         combined.extend(entries.iter().cloned());
     }
     combined.sort_unstable_by_key(|b| std::cmp::Reverse(b.bytes));
-    let top_files: Vec<StorageEntry> = combined.into_iter().take(half).collect();
+    let top_files: Vec<StorageEntry> = combined.into_iter().take(files_slots).collect();
     let top_folders: Vec<StorageEntry> = folders
         .into_iter()
-        .take(top_n.saturating_sub(top_files.len()))
+        .take(folders_slots)
         .map(|(path, size)| {
             let name = Path::new(&path)
                 .file_name()
@@ -4606,6 +4688,7 @@ fn scan_storage_with_progress(
     let mut top_items: Vec<StorageEntry> =
         top_files.into_iter().chain(top_folders).collect();
     top_items.sort_unstable_by_key(|b| std::cmp::Reverse(b.bytes));
+    top_items.truncate(top_n);
 
     if let Some(p) = progress.as_ref() {
         p.files.store(scanned_files, Ordering::Relaxed);
@@ -5834,6 +5917,11 @@ struct NativeController {
     storage_progress: Arc<StorageScanProgress>,
     storage_current_root: String,
     storage_selected_bucket: String,
+    // Snapshots of the preview pane's prior visibility + width so closing
+    // the storage view restores the pane to exactly what the user had
+    // before opening Storage. Captured in open_storage_view.
+    storage_preview_visible_before: bool,
+    storage_preview_w_before: f32,
     // Total used bytes on the current scan root (from GetDiskFreeSpaceExW).
     // Used as the progress-bar denominator so % shown is real progress vs.
     // the actual amount of data on the drive, not just "bytes seen so far".
@@ -9428,6 +9516,8 @@ impl NativeController {
             storage_progress: Arc::new(StorageScanProgress::default()),
             storage_current_root: String::new(),
             storage_selected_bucket: String::new(),
+            storage_preview_visible_before: false,
+            storage_preview_w_before: 326.0,
             storage_disk_used: 0,
             tabs,
             active_tab: 0,
@@ -11458,6 +11548,23 @@ impl NativeController {
     }
 
     fn go_back(&mut self, ui: &MainWindow) {
+        // Back-from-storage: if the user is currently in the storage analyzer
+        // view, prefer routing them back to the folder they came from (saved
+        // in storage_path_before by open_storage_view) over walking the
+        // history. Otherwise Back was a dead button when the user opened
+        // Storage as their first nav action (history_index = 0, parent of
+        // "storage://" is meaningless).
+        if self.current_path == "storage://" {
+            let target = if !self.storage_path_before.is_empty() {
+                self.storage_path_before.clone()
+            } else {
+                dirs::home_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "/".to_string())
+            };
+            self.navigate(ui, target, false);
+            return;
+        }
         if self.history_index > 0 {
             self.history_index -= 1;
             if let Some(path) = self.history.get(self.history_index).cloned() {
@@ -13899,6 +14006,14 @@ impl NativeController {
     fn open_storage_view(&mut self, ui: &MainWindow) {
         if self.current_path != "storage://" {
             self.storage_path_before = self.current_path.clone();
+            // v0.9.6: storage view now lives in the preview pane on the
+            // right. Save prior visibility/width so close_storage_view can
+            // restore exactly what the user had before. Widen the pane to
+            // 640px so the bucket grid and ranked list both have room.
+            self.storage_preview_visible_before = ui.get_preview_visible();
+            self.storage_preview_w_before = ui.get_preview_w_user();
+            ui.set_preview_visible(true);
+            ui.set_preview_w_user(640.0);
         }
         self.current_path = "storage://".to_string();
         ui.set_is_storage_view(true);
@@ -13929,6 +14044,14 @@ impl NativeController {
 
     fn close_storage_view(&mut self, ui: &MainWindow) {
         ui.set_is_storage_view(false);
+        // Restore the preview pane to whatever the user had before opening
+        // storage (visibility + width). If they never visited storage in
+        // this session the saved values default to (false, 326) which match
+        // the app defaults.
+        ui.set_preview_visible(self.storage_preview_visible_before);
+        if self.storage_preview_w_before > 0.0 {
+            ui.set_preview_w_user(self.storage_preview_w_before);
+        }
         // Cancel any in-flight scan so it stops burning CPU/disk when the
         // user has already moved on. The scan thread checks the cancelled
         // flag every batch and bails out early.

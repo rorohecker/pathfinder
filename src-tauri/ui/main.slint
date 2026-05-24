@@ -1670,16 +1670,22 @@ component CopyableMessageText {
     }
 }
 
-// One card in the categorized-bucket grid of the Storage view.
+// One card in the categorized-bucket grid of the Storage view. v0.9.6
+// redesign: bigger size readout, dedicated percent badge, brighter
+// highlight when selected. The size is now the most prominent text on
+// the card (was the bucket name) so the eye lands on the number first.
 component StorageBucketCard inherits Rectangle {
     in property <StorageBucketUi> bucket;
     in property <bool> highlighted;
     callback clicked();
     border-radius: AppMetrics.radius;
-    border-width: 1px;
+    border-width: root.highlighted ? 2px : 1px;
     border-color: root.highlighted ? root.bucket.color : ThemePalette.border;
-    background: touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel;
+    background: root.highlighted
+        ? root.bucket.color.with-alpha(0.12)
+        : (touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel);
     animate background { duration: 80ms; easing: ease-out; }
+    animate border-color { duration: 80ms; easing: ease-out; }
 
     // Coloured swatch on the left so each bucket is visually distinct.
     Rectangle {
@@ -1687,35 +1693,75 @@ component StorageBucketCard inherits Rectangle {
         width: 4px; height: parent.height;
         background: root.bucket.color;
     }
+    // Top row: icon + name on the left, percent badge on the right.
     SvgIcon {
         x: 14px;
-        y: 14px;
-        icon_size: 18px;
+        y: 12px;
+        icon_size: 16px;
         data: root.bucket.icon;
         tint: root.bucket.color;
     }
     Text {
-        x: 42px;
-        y: 12px;
-        width: parent.width - 50px;
+        x: 38px;
+        y: 10px;
+        width: parent.width - 80px;
         height: 18px;
         text: root.bucket.name;
-        color: ThemePalette.text;
-        font-size: 13px;
-        font-weight: 600;
-        overflow: elide;
-    }
-    Text {
-        x: 42px;
-        y: 32px;
-        width: parent.width - 50px;
-        height: 14px;
-        text: root.bucket.bytes_text + " · " + root.bucket.file_count_text;
         color: ThemePalette.text_muted;
         font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        vertical-alignment: center;
         overflow: elide;
     }
-    // Proportion bar — fills horizontally based on percent of total disk used.
+    // Percent badge — top-right corner. Always visible so users can compare
+    // categories at a glance.
+    Rectangle {
+        x: parent.width - 56px;
+        y: 8px;
+        width: 50px;
+        height: 20px;
+        border-radius: 10px;
+        background: root.bucket.color.with-alpha(0.18);
+        Text {
+            width: parent.width; height: parent.height;
+            text: round(root.bucket.percent * 10) / 10 + "%";
+            color: root.bucket.color;
+            font-size: 11px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            font-family: AppMetrics.mono_font;
+        }
+    }
+    // Headline: total bytes. The number itself is the largest text on the
+    // card so it dominates visually.
+    Text {
+        x: 14px;
+        y: 34px;
+        width: parent.width - 28px;
+        height: 22px;
+        text: root.bucket.bytes_text;
+        color: ThemePalette.text;
+        font-size: 18px;
+        font-weight: 700;
+        font-family: AppMetrics.mono_font;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    // File count, secondary.
+    Text {
+        x: 14px;
+        y: 58px;
+        width: parent.width - 28px;
+        height: 14px;
+        text: root.bucket.file_count_text;
+        color: ThemePalette.text_faint;
+        font-size: 10.5px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    // Proportion bar across the bottom.
     Rectangle {
         x: 14px;
         y: parent.height - 10px;
@@ -1742,7 +1788,7 @@ component StorageEntryRow inherits Rectangle {
     in property <StorageEntryUi> entry;
     in property <bool> show_bucket_label: true;
     callback open();
-    height: 40px;
+    height: 44px;
     background: touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
     animate background { duration: 60ms; easing: ease-out; }
     border-radius: AppMetrics.radius_small;
@@ -1756,6 +1802,10 @@ component StorageEntryRow inherits Rectangle {
         spacing: 10px;
         alignment: center;
 
+        // Bucket-coloured dot + folder/file icon — tint the icon with the
+        // bucket colour too so scanning down the list groups visually by
+        // category. v0.9.5 used neutral text_muted, which made the list
+        // look monochromatic even when files came from different buckets.
         Rectangle {
             width: 8px;
             height: 8px;
@@ -1763,50 +1813,72 @@ component StorageEntryRow inherits Rectangle {
             background: root.entry.bucket_color;
         }
         SvgIcon {
-            width: 14px;
-            height: 14px;
-            icon_size: 14px;
+            width: 16px;
+            height: 16px;
+            icon_size: 16px;
+            // Folder icon for is_dir (most entries now, since v0.9.6
+            // weighted top_items 80% toward folders/apps). File icon for
+            // standalone large files like ISOs.
             data: root.entry.is_dir
                 ? "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"
                 : "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6";
-            tint: ThemePalette.text_muted;
+            tint: root.entry.bucket_color;
         }
-        Text {
+        VerticalLayout {
             horizontal-stretch: 1;
             min-width: 80px;
-            text: root.entry.name;
-            color: ThemePalette.text;
-            font-size: 12px;
-            vertical-alignment: center;
-            overflow: elide;
+            spacing: 2px;
+            alignment: center;
+            // Name (top) + parent path (bottom, smaller). Helps differentiate
+            // identically-named folders from different parents (e.g.
+            // "Cache" appears in dozens of app dirs).
+            Text {
+                text: root.entry.name;
+                color: ThemePalette.text;
+                font-size: 12.5px;
+                font-weight: 600;
+                vertical-alignment: bottom;
+                overflow: elide;
+            }
+            Text {
+                text: root.entry.path;
+                color: ThemePalette.text_faint;
+                font-size: 10px;
+                vertical-alignment: top;
+                overflow: elide;
+            }
         }
         if root.show_bucket_label: Text {
-            width: 72px;
+            width: 78px;
             text: root.entry.bucket;
-            color: ThemePalette.text_faint;
+            color: root.entry.bucket_color;
             font-size: 10.5px;
+            font-weight: 600;
             vertical-alignment: center;
             horizontal-alignment: right;
             overflow: elide;
         }
         Rectangle {
-            width: 88px;
-            height: 4px;
-            border-radius: 2px;
+            width: 90px;
+            height: 6px;
+            border-radius: 3px;
             background: ThemePalette.panel_alt;
             Rectangle {
                 x: 0; y: 0;
-                width: max(2px, parent.width * root.entry.bar_pct / 100);
+                width: max(3px, parent.width * root.entry.bar_pct / 100);
                 height: parent.height;
-                border-radius: 2px;
+                border-radius: 3px;
                 background: root.entry.bucket_color;
             }
         }
+        // Size — bumped to 13px monospace + bold so the number reads
+        // immediately when scanning down the list. Was 12px regular.
         Text {
-            width: 76px;
+            width: 88px;
             text: root.entry.bytes_text;
             color: ThemePalette.text;
-            font-size: 12px;
+            font-size: 13px;
+            font-weight: 700;
             font-family: AppMetrics.mono_font;
             vertical-alignment: center;
             horizontal-alignment: right;
@@ -3853,35 +3925,11 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Storage analyzer view. Renders ON TOP of the file pane when
-                // toggled, fully opaque so it hides everything underneath. Z is
-                // explicit so we don't have to worry about declaration-order
-                // hit-test surprises.
-                if root.is_storage_view: StorageView {
-                    z: 100;
-                    x: 0; y: 0;
-                    width: parent.width;
-                    height: parent.height;
-                    scanning: root.storage_scanning;
-                    root_label: root.storage_root;
-                    total_text: root.storage_total_text;
-                    subtitle: root.storage_subtitle;
-                    buckets: root.storage_buckets;
-                    top_items: root.storage_top_items;
-                    drives: root.storage_drives;
-                    show_all: root.storage_show_all;
-                    selected_bucket: root.storage_selected_bucket;
-                    selected_bucket_name: root.storage_selected_bucket_name;
-                    progress_files: root.storage_progress_files;
-                    progress_bytes_text: root.storage_progress_bytes_text;
-                    progress_percent: root.storage_progress_percent;
-                    rescan => { root.storage_rescan(); }
-                    open_path(p) => { root.storage_open_path(p); }
-                    toggle_show_all => { root.storage_toggle_show_all(); }
-                    select_bucket(b) => { root.storage_select_bucket(b); }
-                    clear_bucket => { root.storage_clear_bucket(); }
-                    switch_root(r) => { root.storage_switch_root(r); }
-                }
+                // Storage analyzer view used to be overlaid here at z:100.
+                // Moved into the preview pane in v0.9.6 so the file list
+                // stays visible alongside the storage breakdown (matches the
+                // pattern of file preview, which also lives in the right
+                // pane).
             }
 
             if root.dual_pane: Rectangle {
@@ -4217,6 +4265,35 @@ export component MainWindow inherits Window {
                             root.preview_w_user_target = 326px;
                         }
                     }
+                }
+
+                // Storage analyzer view — lives in the preview pane so the
+                // file list on the left stays visible. z:200 so it fully
+                // covers the file-preview content below when active.
+                if root.is_storage_view: StorageView {
+                    z: 200;
+                    x: 1px; y: 0;
+                    width: parent.width - 1px;
+                    height: parent.height;
+                    scanning: root.storage_scanning;
+                    root_label: root.storage_root;
+                    total_text: root.storage_total_text;
+                    subtitle: root.storage_subtitle;
+                    buckets: root.storage_buckets;
+                    top_items: root.storage_top_items;
+                    drives: root.storage_drives;
+                    show_all: root.storage_show_all;
+                    selected_bucket: root.storage_selected_bucket;
+                    selected_bucket_name: root.storage_selected_bucket_name;
+                    progress_files: root.storage_progress_files;
+                    progress_bytes_text: root.storage_progress_bytes_text;
+                    progress_percent: root.storage_progress_percent;
+                    rescan => { root.storage_rescan(); }
+                    open_path(p) => { root.storage_open_path(p); }
+                    toggle_show_all => { root.storage_toggle_show_all(); }
+                    select_bucket(b) => { root.storage_select_bucket(b); }
+                    clear_bucket => { root.storage_clear_bucket(); }
+                    switch_root(r) => { root.storage_switch_root(r); }
                 }
 
 
