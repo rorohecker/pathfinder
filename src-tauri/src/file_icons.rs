@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, I
 ///
 /// `use_real_file` controls whether SHGetFileInfo opens the file to read
 /// embedded icons. Pass true for `.exe`, `.lnk`, `.ico`. Pass false for
-/// generic extension probes — we feed a fake filename like `dummy.docx`
+/// generic extension probes - we feed a fake filename like `dummy.docx`
 /// with FILE_ATTRIBUTE_NORMAL so the shell returns the system icon for
 /// the extension without touching the disk.
 pub fn extract_icon_rgba(path: &str, use_real_file: bool) -> Option<Image> {

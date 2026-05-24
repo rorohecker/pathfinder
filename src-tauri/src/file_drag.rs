@@ -1,5 +1,5 @@
 //! Windows shell HDROP drag-and-drop: IDataObject + IDropSource (outgoing)
-//! and IDropTarget (incoming — registered on the app HWND).
+//! and IDropTarget (incoming - registered on the app HWND).
 //!
 //! Diagnostic events (registration result, every DragEnter/Drop) are written
 //! to `%TEMP%\pathfinder_dragdrop.log` since stderr is not always captured.
@@ -40,7 +40,7 @@ const MK_CONTROL: u32 = 0x0008; // Ctrl key in MODIFIERKEYS_FLAGS
 const WM_COPYGLOBALDATA: u32 = 0x0049;
 const WM_COPYDATA: u32 = 0x004A;
 
-// ── Diagnostic logging ────────────────────────────────────────────────────────
+// -- Diagnostic logging --------------------------------------------------------
 
 fn log_path() -> std::path::PathBuf {
     std::env::temp_dir().join("pathfinder_dragdrop.log")
@@ -73,7 +73,7 @@ struct DropFiles {
     f_wide: i32,
 }
 
-// ── HGLOBAL helpers ───────────────────────────────────────────────────────────
+// -- HGLOBAL helpers -----------------------------------------------------------
 
 unsafe fn build_hdrop(paths: &[String]) -> windows::core::Result<HGLOBAL> {
     unsafe {
@@ -257,7 +257,7 @@ unsafe fn paths_from_data_object(data: &IDataObject) -> Vec<String> {
     }
 }
 
-// ── IDataObject (outgoing drag source) ───────────────────────────────────────
+// -- IDataObject (outgoing drag source) ---------------------------------------
 
 #[implement(IDataObject)]
 struct HDropData {
@@ -328,7 +328,7 @@ impl IDataObject_Impl for HDropData_Impl {
     }
 }
 
-// ── IDropSource ───────────────────────────────────────────────────────────────
+// -- IDropSource ---------------------------------------------------------------
 
 #[implement(IDropSource)]
 struct DropSrc;
@@ -355,17 +355,17 @@ impl IDropSource_Impl for DropSrc_Impl {
     }
 }
 
-// ── IDropTarget (incoming drops onto Pathfinder) ──────────────────────────────
+// -- IDropTarget (incoming drops onto Pathfinder) ------------------------------
 
 thread_local! {
-    // (paths, is_move, screen_x, screen_y) — coordinates are screen pixels
+    // (paths, is_move, screen_x, screen_y) - coordinates are screen pixels
     // (HIDPI raw units), so the receiver must convert to client/logical.
     static DROP_HANDLER: std::cell::RefCell<Option<Box<dyn Fn(Vec<String>, bool, i32, i32)>>> =
         std::cell::RefCell::new(None);
 
     // Called on DragEnter / DragOver / DragLeave with screen coordinates so
     // the UI can highlight the destination pane during the drag. The bool
-    // is `is_active` — false on DragLeave to clear the highlight.
+    // is `is_active` - false on DragLeave to clear the highlight.
     static DRAG_OVER_HANDLER: std::cell::RefCell<Option<Box<dyn Fn(bool, i32, i32)>>> =
         std::cell::RefCell::new(None);
 
@@ -513,11 +513,11 @@ impl IDropTarget_Impl for PathfinderDropTarget_Impl {
     }
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// -- Public API ----------------------------------------------------------------
 
 /// Allow OLE drag-drop messages through UIPI so drops from lower-integrity
 /// processes (e.g. non-elevated Explorer into an elevated Pathfinder) reach us.
-/// Safe to call even when not elevated — no-op in that case.
+/// Safe to call even when not elevated - no-op in that case.
 unsafe fn enable_uipi_dragdrop(hwnd: HWND) {
     unsafe {
         let _ = ChangeWindowMessageFilterEx(hwnd, WM_DROPFILES, MSGFLT_ALLOW, None);
@@ -533,7 +533,7 @@ unsafe fn enable_uipi_dragdrop(hwnd: HWND) {
 ///   1. Calls `OleInitialize` (REQUIRED for `RegisterDragDrop`; CoInitializeEx
 ///      alone does not set up the OLE drag-drop subsystem).
 ///   2. Bypasses UIPI so cross-IL drops aren't silently filtered.
-///   3. Calls `RevokeDragDrop` first to clear winit's IDropTarget — winit
+///   3. Calls `RevokeDragDrop` first to clear winit's IDropTarget - winit
 ///      registers its own to surface DroppedFile events, and a window can
 ///      only have one IDropTarget. Without revoking, our RegisterDragDrop
 ///      returns DRAGDROP_E_ALREADYREGISTERED and our handler never fires.
@@ -570,7 +570,7 @@ pub fn register_drop_target(
 
 /// Install a callback that fires on every DragEnter/DragOver/DragLeave so the
 /// UI can highlight the destination pane during a drag-drop. The bool argument
-/// is `is_active` — true while dragging over the window, false on DragLeave or
+/// is `is_active` - true while dragging over the window, false on DragLeave or
 /// after Drop completes.
 pub fn register_drag_over_handler(handler: impl Fn(bool, i32, i32) + 'static) {
     DRAG_OVER_HANDLER.with(|h| *h.borrow_mut() = Some(Box::new(handler)));
@@ -595,7 +595,7 @@ pub fn unregister_drop_target(hwnd: HWND) {
 /// Returns the DROPEFFECT that the target performed (NONE = cancelled/rejected).
 ///
 /// IDragSourceHelper is attached to the IDataObject before DoDragDrop so the
-/// Windows shell renders a real drag image at the cursor — same mechanism
+/// Windows shell renders a real drag image at the cursor - same mechanism
 /// Explorer uses. This means the drag visual works even though slint may not
 /// repaint our window during DoDragDrop's modal message pump.
 pub fn start(paths: Vec<String>) -> DROPEFFECT {
@@ -619,7 +619,7 @@ pub fn start(paths: Vec<String>) -> DROPEFFECT {
         let mut effect = DROPEFFECT_NONE;
 
         // Attach a drag image via IDragSourceHelper so the Windows shell paints
-        // a real preview at the cursor. Failure is non-fatal — DoDragDrop still
+        // a real preview at the cursor. Failure is non-fatal - DoDragDrop still
         // runs and the OS falls back to the default cursor change.
         match attach_drag_image(&data, &paths) {
             Ok(()) => log("IDragSourceHelper attached"),
@@ -737,7 +737,7 @@ unsafe fn attach_drag_image(
         }
         let old_obj = SelectObject(memdc, HGDIOBJ::from(hbm));
 
-        // Fill with magenta (color key) — the shell treats this colour as
+        // Fill with magenta (color key) - the shell treats this colour as
         // fully transparent at draw time, so we get a non-rectangular drag
         // image with a rounded panel behind the icon and text.
         const KEY_COLORREF: u32 = 0x00_FF_00_FF; // BGR 0xFF00FF == magenta

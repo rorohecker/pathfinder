@@ -216,7 +216,7 @@ component ToolButton inherits Rectangle {
         vertical-alignment: center;
     }
 
-    // Inline caption (icon-left layout) — wider buttons use this form so the
+    // Inline caption (icon-left layout) - wider buttons use this form so the
     // text has breathing room and reads naturally.
     if root.show_caption && root.text_label != "" && root.caption_inline: Text {
         x: 32px;
@@ -232,7 +232,7 @@ component ToolButton inherits Rectangle {
         overflow: elide;
     }
 
-    // Stacked caption (icon-on-top layout) — kept for narrow captioned buttons
+    // Stacked caption (icon-on-top layout) - kept for narrow captioned buttons
     // where there isn't room for the inline form.
     if root.show_caption && root.text_label != "" && !root.caption_inline: Text {
         x: 0;
@@ -484,7 +484,7 @@ component SideRow inherits Rectangle {
     // Match the highlight pill's width (which reserves 20px on the right for
     // the sidebar scrollbar). Previously this TouchArea covered the full row,
     // so hovering the rightmost 20px registered hover but the pill rendered
-    // only over the first parent.width-20 — the highlight looked broken in
+    // only over the first parent.width-20 - the highlight looked broken in
     // that lane. Shrinking the hit area keeps hover and visual highlight
     // exactly aligned across the full clickable region.
     touch := TouchArea {
@@ -537,7 +537,7 @@ component NodeVisual {
     // areas of the PNG don't reveal the standard yellow folder underneath.
     property <bool> use_image: ThemePalette.folder_icon_image.width > 0;
 
-    // ── IMAGE OVERLAY ─────────────────────────────────────────────────────
+    // -- IMAGE OVERLAY -----------------------------------------------------
     // PNG saved to %APPDATA%\Pathfinder\theme_icons\<theme>.png renders here.
     if root.is_dir && root.use_image: Image {
         x: 0; y: 0;
@@ -562,11 +562,11 @@ component NodeVisual {
     // Drawn in three layers so the silhouette reads at any size and renders
     // crisply on HiDPI without rasterised assets.
     //
-    //   1. Darker back edge — thin strip at the bottom that peeks below the
+    //   1. Darker back edge - thin strip at the bottom that peeks below the
     //      body, suggesting the rear flap of a manila folder.
-    //   2. Tab — darker amber rectangle at top-left, ~42% wide, with the right
+    //   2. Tab - darker amber rectangle at top-left, ~42% wide, with the right
     //      edge angled by a 1.5x-wide triangle-ish rectangle slanted in.
-    //   3. Body — full-width rounded rectangle covering ~80% of the height,
+    //   3. Body - full-width rounded rectangle covering ~80% of the height,
     //      overlapping the bottom edge of the tab so only the tab's top sticks
     //      up like an actual manila folder tab.
     //   4. Subtle top highlight stripe inside the body for depth.
@@ -586,7 +586,7 @@ component NodeVisual {
         border-radius: 4px;
         background: ThemePalette.icon_folder_2.darker(0.15);
     }
-    // Tab right-edge taper — a smaller rectangle just to the right of the tab
+    // Tab right-edge taper - a smaller rectangle just to the right of the tab
     // body extends it with a stepped silhouette that reads as an angled cut.
     if root.is_dir && !root.use_image && root.uses_standard_folder: Rectangle {
         x: parent.width * 0.42 - 6px;
@@ -596,7 +596,7 @@ component NodeVisual {
         border-radius: 3px;
         background: ThemePalette.icon_folder_2.darker(0.15);
     }
-    // Body — overlaps the tab from below so only the tab's top sticks up.
+    // Body - overlaps the tab from below so only the tab's top sticks up.
     if root.is_dir && !root.use_image && root.uses_standard_folder: Rectangle {
         x: 0;
         y: parent.height * 0.20;
@@ -616,7 +616,7 @@ component NodeVisual {
         }
     }
 
-    // ── TERMINAL: CRT monitor ─────────────────────────────────────────────
+    // -- TERMINAL: CRT monitor ---------------------------------------------
     if root.is_dir && !root.use_image && ThemePalette.active_theme == "terminal": Rectangle {
         x: 0; y: 0; width: parent.width; height: parent.height * 0.74;
         border-radius: 3px; background: #1c2820;
@@ -638,13 +638,13 @@ component NodeVisual {
         x: parent.width * 0.12; y: parent.height * 0.83; width: parent.width * 0.76; height: parent.height * 0.17; border-radius: 2px; background: #1c2820;
     }
 
-    // ── CYBERPUNK: data terminal ──────────────────────────────────────────
+    // -- CYBERPUNK: data terminal ------------------------------------------
     if root.is_dir && !root.use_image && ThemePalette.active_theme == "cyberpunk": Rectangle {
         x: 0; y: 0; width: parent.width; height: parent.height; border-radius: 2px; background: #080220; border-width: 1px; border-color: #00fff2;
         Rectangle { x: parent.width*0.34; y: parent.height*0.30; width: parent.width*0.32; height: parent.height*0.40; border-radius: 1px; background: #1a0440; border-width: 1px; border-color: #00fff2; }
     }
 
-    // ── RETRO: chunky pixel-art folder with floppy disk centerpiece ──────
+    // -- RETRO: chunky pixel-art folder with floppy disk centerpiece ------
     // Reads as a folder silhouette but rendered with visible blocky pixels,
     // a magenta-on-yellow palette, and a tiny 8-bit floppy disk dropped on top.
     if root.is_dir && !root.use_image && ThemePalette.active_theme == "retro": Rectangle {
@@ -713,7 +713,7 @@ component NodeVisual {
         }
     }
 
-    // ── FANTASY: ornate wooden treasure chest with gold bands ────────────
+    // -- FANTASY: ornate wooden treasure chest with gold bands ------------
     // Clearly distinct from a folder shape: rounded lid on top of trapezoidal
     // body, two gold horizontal bands, and a small gold lock plate.
     if root.is_dir && !root.use_image && ThemePalette.active_theme == "fantasy": Rectangle {
@@ -789,7 +789,7 @@ component NodeVisual {
         }
     }
 
-    // ── SHELL-EXTRACTED ICON (replaces procedural icon when available) ───
+    // -- SHELL-EXTRACTED ICON (replaces procedural icon when available) ---
     // Used for .exe (embedded icons), .lnk (target icon), and registered
     // file types like .docx/.pdf/.xlsx where the shell knows the brand icon.
     in property <image> system_icon;
@@ -802,7 +802,7 @@ component NodeVisual {
         image-fit: contain;
     }
 
-    // ── FILE ICON (same for all themes - used when no shell icon exists) ─
+    // -- FILE ICON (same for all themes - used when no shell icon exists) -
     if !root.is_dir && !root.has_system_icon: Rectangle {
         x: 7px; y: 3px;
         width: parent.width - 14px;
@@ -1099,7 +1099,7 @@ component FileRow inherits Rectangle {
     //   < 360px: name only (size/modified/type all hidden; name fills the row)
     //   < 480px: name + modified
     //   < 600px: name + size + modified
-    //   ≥ 600px: name + size + modified + type
+    //   >= 600px: name + size + modified + type
     property <bool> show_list_size: root.width >= 360px;
     property <bool> show_list_modified: root.width >= 480px;
     property <bool> show_list_type: root.width >= 600px;
@@ -1424,7 +1424,7 @@ component ListHeader inherits Rectangle {
         height: parent.height;
         background: nh.has-hover ? rgba(255,255,255,0.04) : transparent;
         Text { x: 0; width: parent.width - 14px; height: parent.height; text: "NAME"; color: root.sort_by == "name" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
-        Text { visible: root.sort_by == "name"; x: parent.width - 13px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "↑" : "↓"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
+        Text { visible: root.sort_by == "name"; x: parent.width - 13px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "^" : "v"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
         nh := TouchArea { mouse-cursor: pointer; clicked => { root.sort_col("name"); } }
     }
     // SIZE - right-aligned to align with file size text
@@ -1434,7 +1434,7 @@ component ListHeader inherits Rectangle {
         height: parent.height;
         background: sh.has-hover ? rgba(255,255,255,0.04) : transparent;
         Text { x: 0; width: parent.width - 14px; height: parent.height; text: "SIZE"; color: root.sort_by == "size" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; horizontal-alignment: right; vertical-alignment: center; }
-        Text { visible: root.sort_by == "size"; x: parent.width - 12px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "↑" : "↓"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
+        Text { visible: root.sort_by == "size"; x: parent.width - 12px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "^" : "v"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
         sh := TouchArea { mouse-cursor: pointer; clicked => { root.sort_col("size"); } }
     }
     // MODIFIED
@@ -1444,7 +1444,7 @@ component ListHeader inherits Rectangle {
         height: parent.height;
         background: mh.has-hover ? rgba(255,255,255,0.04) : transparent;
         Text { x: 0; width: parent.width - 14px; height: parent.height; text: "MODIFIED"; color: root.sort_by == "modified" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
-        Text { visible: root.sort_by == "modified"; x: parent.width - 12px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "↑" : "↓"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
+        Text { visible: root.sort_by == "modified"; x: parent.width - 12px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "^" : "v"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
         mh := TouchArea { mouse-cursor: pointer; clicked => { root.sort_col("modified"); } }
     }
     // TYPE
@@ -1454,7 +1454,7 @@ component ListHeader inherits Rectangle {
         height: parent.height;
         background: th.has-hover ? rgba(255,255,255,0.04) : transparent;
         Text { x: 0; width: parent.width - 14px; height: parent.height; text: "TYPE"; color: root.sort_by == "type" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
-        Text { visible: root.sort_by == "type"; x: parent.width - 12px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "↑" : "↓"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
+        Text { visible: root.sort_by == "type"; x: parent.width - 12px; width: 12px; height: parent.height; text: root.sort_dir == "asc" ? "^" : "v"; color: ThemePalette.accent; font-size: 10px; vertical-alignment: center; }
         th := TouchArea { mouse-cursor: pointer; clicked => { root.sort_col("type"); } }
     }
 
@@ -1643,7 +1643,7 @@ component DialogButton inherits Rectangle {
     TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
-// Selectable message body — select text and Ctrl+C, or use toast Copy button.
+// Selectable message body - select text and Ctrl+C, or use toast Copy button.
 component CopyableMessageText {
     in property <string> text;
     in property <length> content-width;
@@ -1776,13 +1776,16 @@ component StorageBucketCard inherits Rectangle {
     }
 }
 
-// One row in the ranked-by-size list of the Storage view. Dense enough for a
-// bucket drill-in to fit its visible top groups without scrolling.
+// One row in the ranked-by-size list of the Storage view.
 component StorageEntryRow inherits Rectangle {
     in property <StorageEntryUi> entry;
     in property <bool> show_bucket_label: true;
+    // Column widths shared with StorageDrillIn header row.
+    in property <length> col_category_w: 84px;
+    in property <length> col_share_w: 64px;
+    in property <length> col_size_w: 84px;
     callback open();
-    height: 30px;
+    height: 36px;
     background: touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
     animate background { duration: 60ms; easing: ease-out; }
     border-radius: AppMetrics.radius_small;
@@ -1791,88 +1794,80 @@ component StorageEntryRow inherits Rectangle {
         x: 0; y: 0;
         width: parent.width;
         height: parent.height;
-        padding-left: 8px;
-        padding-right: 10px;
-        spacing: 8px;
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
         alignment: center;
 
-        // Bucket-coloured dot + folder/file icon — tint the icon with the
-        // bucket colour too so scanning down the list groups visually by
-        // category. v0.9.5 used neutral text_muted, which made the list
-        // look monochromatic even when files came from different buckets.
-        Rectangle {
-            width: 8px;
-            height: 8px;
-            border-radius: 4px;
-            background: root.entry.bucket_color;
-        }
-        SvgIcon {
-            width: 14px;
-            height: 14px;
-            icon_size: 14px;
-            // Folder icon for is_dir (most entries now, since v0.9.6
-            // weighted top_items 80% toward folders/apps). File icon for
-            // standalone large files like ISOs.
-            data: root.entry.is_dir
-                ? "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"
-                : "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6";
-            tint: root.entry.bucket_color;
-        }
-        VerticalLayout {
+        HorizontalLayout {
             horizontal-stretch: 1;
-            min-width: 80px;
-            spacing: 2px;
+            min-width: 120px;
+            spacing: 8px;
             alignment: center;
-            // Name (top) + parent path (bottom, smaller). Helps differentiate
-            // identically-named folders from different parents (e.g.
-            // "Cache" appears in dozens of app dirs).
-            Text {
-                text: root.entry.name;
-                color: ThemePalette.text;
-                font-size: 11.5px;
-                font-weight: 600;
-                vertical-alignment: bottom;
-                overflow: elide;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: root.entry.bucket_color;
             }
-            Text {
-                text: root.entry.path;
-                color: ThemePalette.text_faint;
-                font-size: 9.5px;
-                vertical-alignment: top;
-                overflow: elide;
+            SvgIcon {
+                width: 14px;
+                height: 14px;
+                icon_size: 14px;
+                data: root.entry.is_dir
+                    ? "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"
+                    : "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6";
+                tint: root.entry.bucket_color;
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                min-width: 60px;
+                spacing: 1px;
+                alignment: center;
+                Text {
+                    text: root.entry.name;
+                    color: ThemePalette.text;
+                    font-size: 11.5px;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.entry.path;
+                    color: ThemePalette.text_faint;
+                    font-size: 9.5px;
+                    overflow: elide;
+                }
             }
         }
         if root.show_bucket_label: Text {
-            width: 72px;
+            width: root.col_category_w;
             text: root.entry.bucket;
             color: root.entry.bucket_color;
             font-size: 10px;
             font-weight: 600;
-            vertical-alignment: center;
             horizontal-alignment: right;
             overflow: elide;
         }
         Rectangle {
-            width: 62px;
-            height: 5px;
-            border-radius: 2.5px;
+            width: root.col_share_w;
+            height: 6px;
+            border-radius: 3px;
             background: ThemePalette.panel_alt;
             Rectangle {
                 x: 0; y: 0;
                 width: max(3px, parent.width * root.entry.bar_pct / 100);
                 height: parent.height;
-                border-radius: 2.5px;
+                border-radius: 3px;
                 background: root.entry.bucket_color;
             }
         }
         Text {
-            width: 72px;
+            width: root.col_size_w;
             text: root.entry.bytes_text;
             color: ThemePalette.text;
             font-size: 11.5px;
             font-weight: 700;
             font-family: AppMetrics.mono_font;
-            vertical-alignment: center;
             horizontal-alignment: right;
         }
     }
@@ -1934,7 +1929,7 @@ component StorageOverview inherits Rectangle {
             Text {
                 x: 18px; y: 27px;
                 width: parent.width - 236px; height: 18px;
-                text: root.total_text + (root.subtitle == "" ? "" : "  |  " + root.subtitle);
+                text: root.total_text + (root.subtitle == "" ? "" : " | " + root.subtitle);
                 color: ThemePalette.text_muted;
                 font-size: 11px;
                 vertical-alignment: center;
@@ -2111,7 +2106,7 @@ component StorageOverview inherits Rectangle {
     }
 }
 
-// Drill-in pane — shown in the preview pane area when a bucket is
+// Drill-in pane - shown in the preview pane area when a bucket is
 // selected or "Full list" is active. Header bar with title + close,
 // then the ranked-by-size list.
 component StorageDrillIn inherits Rectangle {
@@ -2124,6 +2119,11 @@ component StorageDrillIn inherits Rectangle {
     callback close();
     background: ThemePalette.bg;
 
+    property <length> col_category_w: 84px;
+    property <length> col_share_w: 64px;
+    property <length> col_size_w: 84px;
+    property <bool> show_category_col: root.show_all && root.selected_bucket == "";
+
     VerticalLayout {
         x: 0; y: 0;
         width: parent.width;
@@ -2131,11 +2131,11 @@ component StorageDrillIn inherits Rectangle {
         spacing: 0;
         alignment: start;
 
-        // Header bar - title + close (X).
+        // Header bar - back, title, close.
         Rectangle {
-            preferred-height: 38px;
-            min-height: 38px;
-            max-height: 38px;
+            preferred-height: 44px;
+            min-height: 44px;
+            max-height: 44px;
             vertical-stretch: 0;
             background: ThemePalette.panel;
             Rectangle {
@@ -2143,9 +2143,27 @@ component StorageDrillIn inherits Rectangle {
                 width: parent.width; height: 1px;
                 background: ThemePalette.border;
             }
+            Rectangle {
+                x: 10px;
+                y: 8px;
+                width: 28px;
+                height: 28px;
+                border-radius: 6px;
+                background: back_touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
+                SvgIcon {
+                    x: 7px; y: 7px;
+                    icon_size: 14px;
+                    data: "M15 18l-6-6 6-6";
+                    tint: ThemePalette.text_muted;
+                }
+                back_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.close(); }
+                }
+            }
             Text {
-                x: 14px; y: 0;
-                width: parent.width - 50px; height: parent.height;
+                x: 46px; y: 0;
+                width: parent.width - 90px; height: parent.height;
                 text: root.selected_bucket != ""
                     ? "Largest in " + root.selected_bucket_name
                     : "All items ranked by size";
@@ -2156,13 +2174,12 @@ component StorageDrillIn inherits Rectangle {
                 overflow: elide;
             }
             Rectangle {
-                x: parent.width - 34px;
-                y: 7px;
-                width: 24px;
-                height: 24px;
+                x: parent.width - 38px;
+                y: 8px;
+                width: 28px;
+                height: 28px;
                 border-radius: 6px;
                 background: close_touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
-                animate background { duration: 80ms; easing: ease-out; }
                 Text {
                     width: parent.width; height: parent.height;
                     text: "X";
@@ -2179,30 +2196,30 @@ component StorageDrillIn inherits Rectangle {
             }
         }
 
-        // Column labels.
+        // Column labels (widths match StorageEntryRow).
         if root.top_items.length > 0: Rectangle {
-            preferred-height: 18px;
-            min-height: 18px;
-            max-height: 18px;
+            preferred-height: 22px;
+            min-height: 22px;
+            max-height: 22px;
             vertical-stretch: 0;
             background: ThemePalette.panel;
             HorizontalLayout {
-                x: 14px; y: 2px;
-                width: parent.width - 28px;
+                x: 12px; y: 4px;
+                width: parent.width - 24px;
                 height: 14px;
-                spacing: 8px;
+                spacing: 10px;
                 alignment: center;
                 Text {
                     horizontal-stretch: 1;
-                    min-width: 80px;
+                    min-width: 120px;
                     text: "Name";
                     color: ThemePalette.text_faint;
                     font-size: 10px;
                     font-weight: 600;
                     letter-spacing: 0.3px;
                 }
-                if root.show_all && root.selected_bucket == "": Text {
-                    width: 68px;
+                if root.show_category_col: Text {
+                    width: root.col_category_w;
                     text: "Category";
                     color: ThemePalette.text_faint;
                     font-size: 10px;
@@ -2210,14 +2227,15 @@ component StorageDrillIn inherits Rectangle {
                     horizontal-alignment: right;
                 }
                 Text {
-                    width: 62px;
+                    width: root.col_share_w;
                     text: "Share";
                     color: ThemePalette.text_faint;
                     font-size: 10px;
                     font-weight: 600;
+                    horizontal-alignment: center;
                 }
                 Text {
-                    width: 68px;
+                    width: root.col_size_w;
                     text: "Size";
                     color: ThemePalette.text_faint;
                     font-size: 10px;
@@ -2227,23 +2245,27 @@ component StorageDrillIn inherits Rectangle {
             }
         }
 
-        // Ranked list.
+        // Ranked list - fills remaining main-pane height.
         if root.top_items.length > 0: Rectangle {
             vertical-stretch: 1;
             min-height: 120px;
             background: ThemePalette.bg;
             ListView {
-                x: 8px; y: 3px;
-                width: parent.width - 16px;
-                height: parent.height - 6px;
+                x: 0; y: 0;
+                width: parent.width;
+                height: parent.height;
                 for entry[idx] in root.top_items: StorageEntryRow {
+                    width: parent.width;
                     entry: entry;
-                    show_bucket_label: root.show_all && root.selected_bucket == "";
+                    show_bucket_label: root.show_category_col;
+                    col_category_w: root.col_category_w;
+                    col_share_w: root.col_share_w;
+                    col_size_w: root.col_size_w;
                     open => { root.open_path(entry.path); }
                 }
             }
         }
-        // Empty state — bucket has no top items (rare, but happens for
+        // Empty state - bucket has no top items (rare, but happens for
         // buckets that only contain tiny files).
         if root.top_items.length == 0: Rectangle {
             vertical-stretch: 1;
@@ -2369,7 +2391,7 @@ export component MainWindow inherits Window {
     // Windows-only: shell integration (set from Rust at startup).
     in-out property <bool> show_windows_integration: false;
 
-    // ── AI install/uninstall state ────────────────────────────────────────
+    // -- AI install/uninstall state ----------------------------------------
     // "not_installed" | "downloading" | "installed" | "error"
     in-out property <string> ai_install_state: "not_installed";
     in-out property <float> ai_download_progress: 0;
@@ -2702,7 +2724,7 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Empty strip to the right of tabs — window drag only here.
+                // Empty strip to the right of tabs - window drag only here.
                 Rectangle {
                     horizontal-stretch: 1;
                     height: parent.height;
@@ -2998,7 +3020,7 @@ export component MainWindow inherits Window {
                             alignment: start;
                             Text {
                                 visible: ci > 0;
-                                text: " › ";
+                                text: " > ";
                                 color: ThemePalette.text_faint;
                                 font-size: 12px;
                                 font-family: AppMetrics.mono_font;
@@ -3159,7 +3181,7 @@ export component MainWindow inherits Window {
                     y: 0;
                     width: 22px;
                     height: parent.height;
-                    text: "Σ";
+                    text: "S";
                     color: root.search_semantic_mode ? ThemePalette.accent_strong : ThemePalette.text_faint;
                     font-size: 14px;
                     font-weight: 700;
@@ -3227,7 +3249,7 @@ export component MainWindow inherits Window {
             }
 
             Rectangle {
-                // Hidden in simple mode for the same reason as the search box —
+                // Hidden in simple mode for the same reason as the search box -
                 // the simple-mode row 2 occupies this region.
                 visible: toolbar.show_toolbar_sort && !root.is_simple;
                 x: parent.width - 489px;
@@ -3245,7 +3267,7 @@ export component MainWindow inherits Window {
                     border-width: root.sort_by == "name" ? 1px : 0px;
                     border-color: ThemePalette.accent;
                     background: sort_name_touch.has-hover || root.sort_by == "name" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
-                    Text { width: parent.width; height: parent.height; text: root.sort_by == "name" ? (root.sort_dir == "asc" ? "Name↑" : "Name↓") : "Name"; color: root.sort_by == "name" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                    Text { width: parent.width; height: parent.height; text: root.sort_by == "name" ? (root.sort_dir == "asc" ? "Name ^" : "Name v") : "Name"; color: root.sort_by == "name" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
                     sort_name_touch := TouchArea { mouse-cursor: pointer; clicked => { root.sort_column("name"); } }
                 }
                 Rectangle {
@@ -3254,7 +3276,7 @@ export component MainWindow inherits Window {
                     border-width: root.sort_by == "size" ? 1px : 0px;
                     border-color: ThemePalette.accent;
                     background: sort_size_touch.has-hover || root.sort_by == "size" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
-                    Text { width: parent.width; height: parent.height; text: root.sort_by == "size" ? (root.sort_dir == "asc" ? "Size↑" : "Size↓") : "Size"; color: root.sort_by == "size" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                    Text { width: parent.width; height: parent.height; text: root.sort_by == "size" ? (root.sort_dir == "asc" ? "Size ^" : "Size v") : "Size"; color: root.sort_by == "size" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
                     sort_size_touch := TouchArea { mouse-cursor: pointer; clicked => { root.sort_column("size"); } }
                 }
                 Rectangle {
@@ -3263,7 +3285,7 @@ export component MainWindow inherits Window {
                     border-width: root.sort_by == "modified" ? 1px : 0px;
                     border-color: ThemePalette.accent;
                     background: sort_date_touch.has-hover || root.sort_by == "modified" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
-                    Text { width: parent.width; height: parent.height; text: root.sort_by == "modified" ? (root.sort_dir == "asc" ? "Date↑" : "Date↓") : "Date"; color: root.sort_by == "modified" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                    Text { width: parent.width; height: parent.height; text: root.sort_by == "modified" ? (root.sort_dir == "asc" ? "Date ^" : "Date v") : "Date"; color: root.sort_by == "modified" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
                     sort_date_touch := TouchArea { mouse-cursor: pointer; clicked => { root.sort_column("modified"); } }
                 }
                 Rectangle {
@@ -3272,7 +3294,7 @@ export component MainWindow inherits Window {
                     border-width: root.sort_by == "type" ? 1px : 0px;
                     border-color: ThemePalette.accent;
                     background: sort_type_touch.has-hover || root.sort_by == "type" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
-                    Text { width: parent.width; height: parent.height; text: root.sort_by == "type" ? (root.sort_dir == "asc" ? "Type↑" : "Type↓") : "Type"; color: root.sort_by == "type" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                    Text { width: parent.width; height: parent.height; text: root.sort_by == "type" ? (root.sort_dir == "asc" ? "Type ^" : "Type v") : "Type"; color: root.sort_by == "type" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
                     sort_type_touch := TouchArea { mouse-cursor: pointer; clicked => { root.sort_column("type"); } }
                 }
 
@@ -3280,7 +3302,7 @@ export component MainWindow inherits Window {
                     x: 2px;
                     y: parent.height + 6px;
                     tip_max_width: 280px;
-                    tip_text: "Sort by name, size, date, or type. Click active column to toggle ↑/↓ direction.";
+                    tip_text: "Sort by name, size, date, or type. Click active column to toggle ^/v direction.";
                 }
             }
 
@@ -3350,7 +3372,7 @@ export component MainWindow inherits Window {
             }
             ToolButton { visible: !root.is_simple; x: parent.width - 136px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
             // Clear-sort button - appears in the gap between Dual Pane and Command Palette
-            // when any non-default sort is active. Resets to Name ↑ (natural order).
+            // when any non-default sort is active. Resets to Name ^ (natural order).
             ToolButton {
                 visible: toolbar.show_toolbar_sort && (root.sort_by != "name" || root.sort_dir != "asc");
                 x: parent.width - 101px;
@@ -3358,7 +3380,7 @@ export component MainWindow inherits Window {
                 button_width: 26px;
                 button_height: 31px;
                 icon_data: "M18 6L6 18 M6 6l12 12";
-                tooltip: "Clear sort (reset to Name ↑)";
+                tooltip: "Clear sort (reset to Name ^)";
                 clicked => { root.sort_column("reset"); }
             }
             ToolButton {
@@ -3907,13 +3929,23 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Storage analyzer overview — main pane. Lives here so
-                // the bucket grid has the full main-pane width to spread
-                // out (was crammed into the preview pane in v0.9.6).
-                // Clicking a bucket opens the drill-in inside the
-                // preview pane on the right. z:200 covers the file
-                // list / marquee / empty-state below.
-                if root.is_storage_view: StorageOverview {
+                // Storage drill-in uses the full main pane (not the narrow preview strip).
+                if root.is_storage_view && (root.storage_selected_bucket != "" || root.storage_show_all): StorageDrillIn {
+                    z: 200;
+                    x: 0; y: 0;
+                    width: parent.width;
+                    height: parent.height;
+                    scanning: root.storage_scanning;
+                    top_items: root.storage_top_items;
+                    show_all: root.storage_show_all;
+                    selected_bucket: root.storage_selected_bucket;
+                    selected_bucket_name: root.storage_selected_bucket_name;
+                    open_path(p) => { root.storage_open_path(p); }
+                    close => { root.storage_clear_bucket(); }
+                }
+
+                // Storage overview (bucket grid) when no drill-in is active.
+                if root.is_storage_view && root.storage_selected_bucket == "" && !root.storage_show_all: StorageOverview {
                     z: 200;
                     x: 0; y: 0;
                     width: parent.width;
@@ -4016,7 +4048,7 @@ export component MainWindow inherits Window {
                 border-radius: AppMetrics.radius;
             }
 
-            // Drag-over indicator during OLE drag-drop (Explorer → Pathfinder).
+            // Drag-over indicator during OLE drag-drop (Explorer -> Pathfinder).
             if root.drag_over_pane == "primary": Rectangle {
                 x: 0; y: 0;
                 width: root.primary_pane_w;
@@ -4270,27 +4302,6 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Storage drill-in — only present while a bucket is
-                // selected or the user clicked "Full list" in the
-                // overview. The overview itself lives in the main pane;
-                // this drill-in is the preview-pane counterpart and
-                // shows the ranked items for the active bucket. z:200
-                // so it fully covers the file-preview content below.
-                if root.is_storage_view && (root.storage_selected_bucket != "" || root.storage_show_all): StorageDrillIn {
-                    z: 200;
-                    x: 1px; y: 0;
-                    width: parent.width - 1px;
-                    height: parent.height;
-                    scanning: root.storage_scanning;
-                    top_items: root.storage_top_items;
-                    show_all: root.storage_show_all;
-                    selected_bucket: root.storage_selected_bucket;
-                    selected_bucket_name: root.storage_selected_bucket_name;
-                    open_path(p) => { root.storage_open_path(p); }
-                    close => { root.storage_clear_bucket(); }
-                }
-
-
                 Rectangle {
                     x: 1px;
                     y: 0;
@@ -4466,7 +4477,7 @@ export component MainWindow inherits Window {
                     Text {
                         x: 0; width: root.update_download_url != "" ? parent.width - 54px : parent.width;
                         height: parent.height;
-                        text: "↑ v" + root.update_version + " available";
+                        text: "Update v" + root.update_version + " available";
                         color: white;
                         font-size: 10px;
                         font-weight: 600;
@@ -4485,7 +4496,7 @@ export component MainWindow inherits Window {
                         mouse-cursor: pointer;
                         clicked => { root.command("open-releases"); }
                     }
-                    // Install pill — declared AFTER the banner TouchArea so it
+                    // Install pill - declared AFTER the banner TouchArea so it
                     // wins z-order for clicks on its area. z is set explicitly
                     // too as belt-and-suspenders against any Slint hit-test
                     // ordering quirk. The TouchArea inside also extends a 4px
@@ -4569,7 +4580,7 @@ export component MainWindow inherits Window {
             width: 216px;
             padding: 5px;
             spacing: 2px;
-            // ── Recycle-bin-only actions ──────────────────────────────
+            // -- Recycle-bin-only actions ------------------------------
             // Surfaced only when browsing `recycle://`; replace the standard
             // open/copy/cut chain because those don't apply to trash items.
             if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Restore"; command_name: "restore"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -4577,7 +4588,7 @@ export component MainWindow inherits Window {
             if root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
             if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Empty Recycle Bin"; command_name: "empty-trash"; picked(c) => { root.context_visible = false; root.command(c); } }
 
-            // ── Core actions (regular folders) ────────────────────────
+            // -- Core actions (regular folders) ------------------------
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Open"; command_name: "open"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Rename"; command_name: "rename"; picked(_c) => { root.context_visible = false; root.rename_index = root.selected_index; } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Copy"; command_name: "copy"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -4651,7 +4662,7 @@ export component MainWindow inherits Window {
             Rectangle { visible: !root.is_simple; height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: "Create ZIP"; command_name: "create-zip"; picked(c) => { root.context_visible = false; root.command(c); } }
 
-            // ── Advanced toggle (ZIP lives above; this expands power / Windows tools) ──────────────
+            // -- Advanced toggle (ZIP lives above; this expands power / Windows tools) --------------
             Rectangle {
                 visible: !root.is_simple;
                 width: parent.width;
@@ -4666,14 +4677,14 @@ export component MainWindow inherits Window {
                     width: parent.width - 18px;
                     x: 9px;
                     height: parent.height;
-                    text: root.context_advanced ? "▲ Hide advanced" : "▼ Advanced & Windows tools";
+                    text: root.context_advanced ? "^ Hide advanced" : "v Advanced & Windows tools";
                     color: ThemePalette.text_faint;
                     font-size: 11px;
                     vertical-alignment: center;
                 }
             }
 
-            // ── Advanced items (hidden by default, never shown in simple mode) ────────────────────
+            // -- Advanced items (hidden by default, never shown in simple mode) --------------------
             if root.context_is_archive: Rectangle { height: 1px; background: ThemePalette.border; }
             if root.context_is_archive: ChoiceMenuRow { width: parent.width; label: "Archive Browser"; command_name: "archive-browser"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.context_is_archive: ChoiceMenuRow { width: parent.width; label: "Extract Here"; command_name: "extract-here"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -4928,7 +4939,7 @@ export component MainWindow inherits Window {
                     y: 4px;
                     button_width: 26px;
                     button_height: 26px;
-                    text_label: "✕";
+                    text_label: "X";
                     clicked => {
                         if (root.command_filter != "") {
                             root.command_filter = "";
@@ -6530,7 +6541,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    // ── FIRST RUN WELCOME ─────────────────────────────────────────────
+    // -- FIRST RUN WELCOME ---------------------------------------------
     // Shown the first time Pathfinder launches. Offers to register as the
     // default folder handler in one click, and explains the manual steps for
     // pinning Pathfinder to the taskbar / unpinning File Explorer since
@@ -6725,7 +6736,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    // ── DRAG INDICATOR ───────────────────────────────────────────────
+    // -- DRAG INDICATOR -----------------------------------------------
     if ThemePalette.is_dragging: Rectangle {
         x: parent.width - 168px;
         y: parent.height - 96px;
@@ -6744,7 +6755,7 @@ export component MainWindow inherits Window {
             background: rgba(0, 0, 0, 0.18);
             Text {
                 width: parent.width; height: parent.height;
-                text: ThemePalette.drag_count > 1 ? "⬡⬡" : "⬡";
+                text: ThemePalette.drag_count > 1 ? "[][]" : "[]";
                 color: rgba(255, 255, 255, 0.90);
                 font-size: ThemePalette.drag_count > 1 ? 11px : 14px;
                 horizontal-alignment: center;
@@ -6766,18 +6777,18 @@ export component MainWindow inherits Window {
         Text {
             x: 52px; y: 16px;
             width: parent.width - 60px; height: parent.height - 20px;
-            text: "dragging…";
+            text: "dragging...";
             color: rgba(255, 255, 255, 0.68);
             font-size: 10.5px;
             vertical-alignment: center;
         }
     }
 
-    // ── DRAG GHOST OVERLAY ───────────────────────────────────────────
+    // -- DRAG GHOST OVERLAY -------------------------------------------
     // Holographic preview of the dragged file(s) that follows the cursor while
     // an OLE drag operation is in flight inside the Pathfinder window. The
     // IDropTarget DragOver handler in lib.rs updates root.drag_cursor_x/y
-    // every tick (screen coords → ScreenToClient → /scale_factor → logical),
+    // every tick (screen coords -> ScreenToClient -> /scale_factor -> logical),
     // and root.drag_label is seeded from the dragged file names on DragEnter.
     // For drag-outs to another app the OS provides its own preview so this
     // overlay only shows when the cursor is inside the Pathfinder window.
@@ -6828,7 +6839,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    // ── UI mode first-run prompt ──────────────────────────────────────
+    // -- UI mode first-run prompt --------------------------------------
     if root.ui_mode_prompt_visible: Rectangle {
         width: parent.width;
         height: parent.height;
@@ -6858,7 +6869,7 @@ export component MainWindow inherits Window {
             Text {
                 x: 24px; y: 62px;
                 width: parent.width - 48px; height: 44px;
-                text: "Pick how much of Pathfinder you want to see. You can change this anytime in Settings → Appearance.";
+                text: "Pick how much of Pathfinder you want to see. You can change this anytime in Settings -> Appearance.";
                 color: ThemePalette.text_muted;
                 font-size: 12.5px;
                 wrap: word-wrap;

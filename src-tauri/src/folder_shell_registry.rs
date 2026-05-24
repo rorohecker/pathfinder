@@ -1,5 +1,5 @@
 //! Per-user (HKCU) overrides so Explorer opens folders with Pathfinder via `--path \"%1\"`.
-//! Does not touch `HKCU\\...\\file\\shell\\open` — that would hijack all file opens.
+//! Does not touch `HKCU\\...\\file\\shell\\open` - that would hijack all file opens.
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -17,7 +17,7 @@ fn to_wide_nul(s: &str) -> Vec<u16> {
 }
 
 /// Opens or creates `HKCU\\<relative>` one segment at a time. Returns a handle to the leaf key
-/// (caller must `RegCloseKey` — never close `HKEY_CURRENT_USER`).
+/// (caller must `RegCloseKey` - never close `HKEY_CURRENT_USER`).
 fn hkcu_open_create_leaf(relative_path: &str) -> Result<HKEY, String> {
     let segments: Vec<&str> = relative_path
         .split('\\')
@@ -92,19 +92,19 @@ fn set_key_string(key: HKEY, name: Option<&str>, value: &str) -> Result<(), Stri
 /// in Start menu, double-clicked drives in This PC, anything that calls
 /// ShellExecute on a directory) through Pathfinder.
 ///
-///   - `Folder\shell\open\command`     — generic folder class, picked up by
+///   - `Folder\shell\open\command`     - generic folder class, picked up by
 ///     ShellExecute("open", "C:\..."). The Folder class is what most apps
 ///     trigger when they want to reveal a directory.
-///   - `Folder\shell\explore\command`  — same class, "explore" verb. Some
+///   - `Folder\shell\explore\command`  - same class, "explore" verb. Some
 ///     Win32 apps explicitly invoke this verb instead of "open".
-///   - `Directory\shell\open\command`  — file-system directory class. Many
+///   - `Directory\shell\open\command`  - file-system directory class. Many
 ///     apps target this directly because the "Folder" alias can resolve to
 ///     virtual shell folders (Control Panel, etc) that we don't want to host.
-///   - `Directory\shell\explore\command` — same as above for "explore".
-///   - `Drive\shell\open\command`      — what double-clicking a drive in
+///   - `Directory\shell\explore\command` - same as above for "explore".
+///   - `Drive\shell\open\command`      - what double-clicking a drive in
 ///     This PC triggers. Without this entry, drives still open in Explorer
 ///     even when every folder above opens in Pathfinder.
-///   - `Drive\shell\explore\command`   — same for "explore" verb on drives.
+///   - `Drive\shell\explore\command`   - same for "explore" verb on drives.
 const FOLDER_HANDLER_PATHS: [&str; 6] = [
     r"Software\Classes\Folder\shell\open\command",
     r"Software\Classes\Folder\shell\explore\command",
@@ -116,7 +116,7 @@ const FOLDER_HANDLER_PATHS: [&str; 6] = [
 
 /// Per-user redirect so `explorer.exe` (taskbar/desktop shortcut, Chrome
 /// "Show in folder" via `/select`, etc.) launches Pathfinder with the same args.
-/// HKCU only — no admin rights. Removed by [`restore_windows_default_folder_handler`].
+/// HKCU only - no admin rights. Removed by [`restore_windows_default_folder_handler`].
 const EXPLORER_APP_PATH_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\App Paths\explorer.exe";
 
@@ -354,7 +354,7 @@ pub fn generate_registry_file_content() -> Result<String, String> {
 
     let content = format!(
         "Windows Registry Editor Version 5.00\n\
-         ; Pathfinder — per-user default folder handler\n\
+         ; Pathfinder - per-user default folder handler\n\
          ; Generated automatically with the current Pathfinder path.\n\
          ; Safe to import: only affects HKCU (per-user), not system registry.\n\
          ;\n\

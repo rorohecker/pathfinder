@@ -114,7 +114,7 @@ pathfinder.exe "C:\path\to\item"               # Auto-detect (file = select pare
 ```
 
 **JetBrains (IntelliJ, PyCharm, etc.):**
-1. Settings → Tools → External Tools
+1. Settings -> Tools -> External Tools
 2. Add a new tool:
    - Name: "Open in Pathfinder"
    - Program: `C:\path\to\pathfinder.exe`

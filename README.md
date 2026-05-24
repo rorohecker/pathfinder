@@ -34,7 +34,7 @@ It also has a bit of personality. Eleven themes, each with its own folder color 
 - **Multiple views.** Icon grid, details list, gallery view, preview pane, and dual pane mode.
 - **Inline rename.** F2 or the context menu renames in place without a dialog.
 - **Fast folders.** Directory caching using the Windows FindFirstFileExW cache, background file watching, and a SQLite index of visited directories for instant cross directory search.
-- **Search.** Windows Search integration where available, a recursive fallback scan, and prefix filters: `ext:`, `kind:`, `size:`, `name:`, `content:`, `modified:`, `tag:`. An optional semantic mode (Σ) ranks indexed hits by on device MiniLM embeddings when Local AI models are installed.
+- **Search.** Windows Search integration where available, a recursive fallback scan, and prefix filters: `ext:`, `kind:`, `size:`, `name:`, `content:`, `modified:`, `tag:`. An optional semantic mode (S) ranks indexed hits by on device MiniLM embeddings when Local AI models are installed.
 - **Command palette.** Ctrl P runs any action by name. Results are ranked by relevance so exact matches always come first.
 - **File tools.** Copy, cut, paste, rename, delete to Recycle Bin, new folder, archive actions, checksums, batch rename, duplicate finder, and a storage treemap.
 - **Smart duplicate detection.** Three phase finder that groups by file size first, then compares a 64 KB partial hash, then reads the full file only for candidates that survived both filters.

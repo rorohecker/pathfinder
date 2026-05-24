@@ -166,7 +166,7 @@ fn ensure_ort_environment() -> ort::Result<()> {
         }
         let dll = model_dir().join("onnxruntime.dll");
         if !dll.is_file() {
-            let msg = "onnxruntime.dll missing — install Local AI from Settings (downloads ORT + models)".to_string();
+            let msg = "onnxruntime.dll missing - install Local AI from Settings (downloads ORT + models)".to_string();
             *guard = Some(Err(msg.clone()));
             return Err(ort::Error::new(msg));
         }
@@ -216,7 +216,7 @@ fn try_build_text_embedder() -> ort::Result<TextEmbedder> {
                 chain.push(format!("iGPU {}", a.name));
             }
             chain.push(format!("CPU ({threads} threads)"));
-            format!("DirectML fallback chain: {}", chain.join(" → "))
+            format!("DirectML fallback chain: {}", chain.join(" -> "))
         };
         #[cfg(not(windows))]
         let routing = format!("CPU ({threads} threads)");
@@ -486,7 +486,7 @@ fn mobilenet_logits(path: &Path) -> Option<Vec<f32>> {
     let img = image::open(path).ok()?.into_rgb8();
     let dyn_img = DynamicImage::ImageRgb8(img);
     // Triangle (linear) filter is a good speed / quality trade for a 224x224 input
-    // to a classifier — Lanczos3 would be sharper but the model is robust to small
+    // to a classifier - Lanczos3 would be sharper but the model is robust to small
     // resampling differences and Triangle is ~3x faster.
     let resized = dyn_img.resize_exact(224, 224, FilterType::Triangle);
     let resized_rgb = resized.into_rgb8();

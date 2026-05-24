@@ -15,7 +15,7 @@ tauri-build = { version = "2", features = [] }
 slint = "1"
 # Default femtovg/OpenGL renderer. Skia would be faster but its bundled ICU
 # duplicates symbols with the windows-rs crate (`u_memcmp`, `u_unescapeAt`,
-# etc.) — link fails. Stick with femtovg.
+# etc.) - link fails. Stick with femtovg.
 i-slint-backend-winit = "1"
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
@@ -26,7 +26,7 @@ base64 = "0.22"
 trash = "5"
 rayon = "1"
 walkdir = "2"
-# jwalk: parallel directory walker. Used by the Storage analyzer — descends
+# jwalk: parallel directory walker. Used by the Storage analyzer - descends
 # multiple subtrees concurrently on rayon's pool, so a whole-drive scan
 # finishes in a fraction of the time walkdir's serial iterator would take.
 # On NVMe with 500k files: typically 3-8s vs 25-45s with walkdir.
@@ -41,7 +41,7 @@ memchr = "2"
 once_cell = "1.19"
 # Updater: HTTPS to GitHub API without shelling to PowerShell. ureq 2.x default
 # features bundle rustls + rustls-native-certs (system trust store on Windows),
-# which the runtime actually picks up — opting out of defaults and only picking
+# which the runtime actually picks up - opting out of defaults and only picking
 # `native-tls` left the binary with no TLS backend wired in. Keep defaults on so
 # HTTPS works out of the box.
 ureq = { version = "2.12", features = ["json"] }
@@ -99,7 +99,7 @@ ort = { version = "2.0.0-rc.12", default-features = false, features = [
 ] }
 
 [profile.release]
-# Parallelizable LTO: ~95% the runtime perf of full LTO, but compiles 5–10× faster
+# Parallelizable LTO: ~95% the runtime perf of full LTO, but compiles 5-10x faster
 # because thin-LTO splits the work across all CPU cores.
 codegen-units = 16
 lto = "thin"

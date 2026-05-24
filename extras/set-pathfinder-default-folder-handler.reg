@@ -1,24 +1,24 @@
 Windows Registry Editor Version 5.00
 ;
-; Pathfinder — per-user default folder handler registration
+; Pathfinder - per-user default folder handler registration
 ;
 ; SAFE: Only modifies HKEY_CURRENT_USER (per-user), not HKLM (system-wide).
-; Does NOT affect how individual files (.txt, .pdf, .exe, etc.) open — only Folder/Directory/Drive verbs.
+; Does NOT affect how individual files (.txt, .pdf, .exe, etc.) open - only Folder/Directory/Drive verbs.
 ;
 ; TO INSTALL:
 ;   1. Replace "C:\path\to\pathfinder.exe" below with your actual Pathfinder installation path
-;   2. Keep the double backslashes (\\) — this is required by Windows Registry format
+;   2. Keep the double backslashes (\\) - this is required by Windows Registry format
 ;   3. Save this file, then double-click it OR use: reg import set-pathfinder-default-folder-handler.reg
 ;   4. Click "Yes" when prompted
 ;
 ; WHAT IT DOES:
-;   - Double-clicking folders → opens in Pathfinder
-;   - Double-clicking drives in "This PC" → opens in Pathfinder
-;   - "Open" and "Explore" context menu verbs → route to Pathfinder
-;   - File Explorer shortcut / Chrome "Show in folder" → opens in Pathfinder
+;   - Double-clicking folders -> opens in Pathfinder
+;   - Double-clicking drives in "This PC" -> opens in Pathfinder
+;   - "Open" and "Explore" context menu verbs -> route to Pathfinder
+;   - File Explorer shortcut / Chrome "Show in folder" -> opens in Pathfinder
 ;     (via per-user App Paths redirect for explorer.exe)
-;   - Steam "Show in folder" → opens in Pathfinder
-;   - Discord/Slack/other apps "Show in folder" → opens in Pathfinder
+;   - Steam "Show in folder" -> opens in Pathfinder
+;   - Discord/Slack/other apps "Show in folder" -> opens in Pathfinder
 ;
 ; TO UNDO:
 ;   Open Registry Editor (regedit) and delete:

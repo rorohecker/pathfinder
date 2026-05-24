@@ -242,7 +242,7 @@ fn enumerate_npus_in_class(class_guid: Option<windows::core::GUID>) -> Vec<Strin
             if SetupDiEnumDeviceInfo(h, index, &mut data).is_err() {
                 break;
             }
-            // FriendlyName isn't always set — the AMD Ryzen AI XDNA NPU on a
+            // FriendlyName isn't always set - the AMD Ryzen AI XDNA NPU on a
             // Ryzen 9 7940HS for example only has DeviceDesc populated. Try
             // FriendlyName first (more user-facing when present) and fall back
             // to DeviceDesc otherwise so we don't silently skip the NPU.

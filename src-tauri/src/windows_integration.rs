@@ -262,7 +262,7 @@ pub fn invoke_context_menu_action(path: &str, action_id: u32) -> Result<(), Stri
     match action_id {
         0 => shell_execute_verb(path, "open"),
         1 => {
-            // Copy Path — Win32 clipboard, no PowerShell spawn
+            // Copy Path - Win32 clipboard, no PowerShell spawn
             win32_clipboard_copy(path)
         }
         2 => {

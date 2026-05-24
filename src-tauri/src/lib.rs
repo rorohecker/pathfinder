@@ -458,7 +458,7 @@ pub struct StorageScanResult {
     // dominated by standalone files like ISOs).
     pub bucket_items: std::collections::HashMap<String, Vec<StorageEntry>>,
     // Per-bucket top folders/apps. This is the primary source the UI
-    // drill-in reads — clicking "Apps & games" shows a list of game
+    // drill-in reads - clicking "Apps & games" shows a list of game
     // folders (not the 5 000 individual .pak files inside them).
     // Populated by classifying each top folder via storage_bucket_for.
     pub bucket_folder_items: std::collections::HashMap<String, Vec<StorageEntry>>,
@@ -1142,7 +1142,7 @@ impl AppState {
 
     /// Update the running totals on a queue entry so the UI can show a live
     /// progress bar during long compress / extract runs. Safe to call as
-    /// often as you like — the lock contention is tiny because the queue
+    /// often as you like - the lock contention is tiny because the queue
     /// is a short VecDeque and the call is non-blocking on failure.
     fn queue_progress(&self, id: u64, bytes_done: u64, started: Instant) {
         if let Ok(mut queue) = self.operation_queue.lock() {
@@ -1591,7 +1591,7 @@ fn list_directory_uncached(dir: &Path) -> Result<Vec<FileEntry>, String> {
     }
 
     // Collect DirEntry instead of PathBuf so we can call entry.metadata() which on Windows
-    // reads from the cached WIN32_FIND_DATA returned by FindFirstFileEx — zero extra syscalls.
+    // reads from the cached WIN32_FIND_DATA returned by FindFirstFileEx - zero extra syscalls.
     let dir_entries: Vec<fs::DirEntry> = fs::read_dir(dir)
         .map_err(|e| e.to_string())?
         .filter_map(Result::ok)
@@ -1810,7 +1810,7 @@ fn enumerate_windows_drive_letters() -> Vec<DriveInfo> {
             x if x == DRIVE_REMOTE => ("network", "Network Drive"),
             x if x == DRIVE_CDROM => ("cdrom", "CD Drive"),
             x if x == DRIVE_RAMDISK => ("ramdisk", "RAM Disk"),
-            // DRIVE_UNKNOWN / DRIVE_NO_ROOT_DIR — skip.
+            // DRIVE_UNKNOWN / DRIVE_NO_ROOT_DIR - skip.
             _ => continue,
         };
         // Volume label. Fails silently for empty CD trays and offline network
@@ -1941,7 +1941,7 @@ fn discover_wsl_distros() -> Vec<DriveInfo> {
         // Verify the distro is actually installed before listing it.
         // WSL leaves the registry entry around when a distro is uninstalled
         // partially, mid-install, or via `wsl --unregister` in some Windows
-        // versions. State == 1 means "installed and runnable" — anything
+        // versions. State == 1 means "installed and runnable" - anything
         // else (0=uninstalled, 2=installing, 3=being-uninstalled, etc.) is
         // a ghost that File Explorer's Linux node correctly hides.
         let state_name: Vec<u16> = "State".encode_utf16().chain(std::iter::once(0)).collect();
@@ -2037,7 +2037,7 @@ fn discover_cloud_sync_folders() -> Vec<DriveInfo> {
                 return true;
             }
         }
-        // Read up to 8 entries — enough to detect a non-empty folder without
+        // Read up to 8 entries - enough to detect a non-empty folder without
         // walking large trees. Skip the marker files we already checked.
         if let Ok(rd) = std::fs::read_dir(dir) {
             for (i, entry) in rd.flatten().enumerate() {
@@ -2075,7 +2075,7 @@ fn discover_cloud_sync_folders() -> Vec<DriveInfo> {
     };
 
     // OneDrive: the desktop client exports up to three env vars depending on
-    // which accounts are linked. The env var alone is not sufficient — it
+    // which accounts are linked. The env var alone is not sufficient - it
     // persists across reboots even after the user signs out, so we still need
     // the looks_active sync-marker check.
     if let Ok(p) = std::env::var("OneDrive") {
@@ -2381,7 +2381,7 @@ fn open_windows_properties(path: &str) -> Result<(), String> {
 
 // -- Windows-specific shell helpers ------------------------------------------
 
-/// Run a file elevated via ShellExecuteExW "runas" — triggers UAC immediately, no PowerShell spawn.
+/// Run a file elevated via ShellExecuteExW "runas" - triggers UAC immediately, no PowerShell spawn.
 fn run_as_admin(path: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -2448,7 +2448,7 @@ fn list_previous_versions(path: &str) -> Vec<String> {
             current_time = rest.trim().to_string();
         } else if let Some(rest) = line.strip_prefix("Shadow Copy Volume:") {
             if !current_time.is_empty() {
-                versions.push(format!("{} — {}", current_time, rest.trim()));
+                versions.push(format!("{} - {}", current_time, rest.trim()));
                 current_time.clear();
             }
         }
@@ -3399,7 +3399,7 @@ fn read_preview_uncached(
     if is_image_ext(&ext) {
         let mime = mime_for_ext(&ext).unwrap_or("image/*");
         // Inline embedding limit: 8 MB. Larger images get a metadata preview with dimensions
-        // read from the image header only — no full decode needed.
+        // read from the image header only - no full decode needed.
         const INLINE_MAX: u64 = 8 * 1024 * 1024;
         let can_inline = is_inline_preview_image_ext(&ext);
         let can_decode = is_thumbnail_image_ext(&ext);
@@ -3631,18 +3631,18 @@ fn gpu_capability_summary() -> String {
     if discrete.is_empty() {
         format!(
             "dGPU: none detected. Integrated GPU only: {}",
-            integrated.join(" · ")
+            integrated.join(" | ")
         )
     } else if integrated.is_empty() {
         format!(
             "dGPU detected: {} (used for DirectML acceleration)",
-            discrete.join(" · ")
+            discrete.join(" | ")
         )
     } else {
         format!(
-            "dGPU detected: {} (used for DirectML) · Integrated: {}",
-            discrete.join(" · "),
-            integrated.join(" · ")
+            "dGPU detected: {} (used for DirectML) | Integrated: {}",
+            discrete.join(" | "),
+            integrated.join(" | ")
         )
     }
 }
@@ -3718,7 +3718,7 @@ fn compute_ai_capabilities() -> AiCapabilities {
             device_name, ort
         )
     } else {
-        format!("No NPU detected — CPU inference on-device. [{}]", ort)
+        format!("No NPU detected - CPU inference on-device. [{}]", ort)
     };
     let gpu_summary = gpu_capability_summary();
 
@@ -4086,7 +4086,7 @@ fn get_image_info(path: String) -> Result<ImageInfo, String> {
             format: ext.to_uppercase(),
         });
     }
-    // Read only the image header for dimensions — avoids decoding the full file.
+    // Read only the image header for dimensions - avoids decoding the full file.
     let (width, height) = image::ImageReader::open(&path)
         .ok()
         .and_then(|r| r.with_guessed_format().ok())
@@ -4111,7 +4111,7 @@ fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEn
     let dir = PathBuf::from(&path);
     let min = min_size.unwrap_or(4096);
 
-    // Phase 1: group by exact size — unique sizes cannot be duplicates.
+    // Phase 1: group by exact size - unique sizes cannot be duplicates.
     // WalkDir entry.metadata() is cache-backed on Windows (FindFirstFileExW), zero extra syscalls.
     let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     for entry in WalkDir::new(&dir)
@@ -4141,7 +4141,7 @@ fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEn
         return Ok(Vec::new());
     }
 
-    // Phase 2: partial hash (first 64 KB) — eliminates near-size false matches cheaply.
+    // Phase 2: partial hash (first 64 KB) - eliminates near-size false matches cheaply.
     let partial_results: Vec<(String, PathBuf)> = THUMBNAIL_POOL.install(|| {
         size_candidates
             .par_iter()
@@ -4164,7 +4164,7 @@ fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEn
         return Ok(Vec::new());
     }
 
-    // Phase 3: full hash — only files that survived both prior filters.
+    // Phase 3: full hash - only files that survived both prior filters.
     let items: Vec<(String, FileEntry)> = THUMBNAIL_POOL.install(|| {
         full_candidates
             .par_iter()
@@ -4469,7 +4469,7 @@ fn storage_bucket_meta() -> Vec<(&'static str, &'static str, &'static str, &'sta
 ///      in the same call), so no extra syscall per file.
 ///   3. Categorization + per-bucket aggregation runs inside jwalk's
 ///      `process_read_dir` callback, so it happens in parallel during the
-///      walk — no second pass over the entries.
+///      walk - no second pass over the entries.
 ///   4. Per-bucket top-N lists are maintained via bounded min-heaps; memory
 ///      stays at O(buckets x top_per_bucket) regardless of total file count.
 ///   5. Progress counters are lock-free AtomicU64s the UI polls at 100ms,
@@ -4747,7 +4747,7 @@ fn scan_storage_with_progress(
     // Per-bucket folder roll-ups: walk the globally-sorted folder list,
     // classify each by bucket, push to that bucket's list until we have
     // per_bucket_n entries. This is what the drill-in UI shows when the
-    // user clicks "Apps & games" etc. — full folders/apps grouped by
+    // user clicks "Apps & games" etc. - full folders/apps grouped by
     // category, not the thousands of individual files inside them.
     let mut bucket_folder_items: HashMap<String, Vec<StorageEntry>> = HashMap::new();
     for (id, _, _, _) in meta.iter() {
@@ -4755,7 +4755,9 @@ fn scan_storage_with_progress(
     }
     let buckets_count = meta.len();
     let mut completed_buckets = 0usize;
-    for (path, size) in folders.iter() {
+    // Bounded to top 4 000 folders so the classify loop stays cheap
+    // even when one or two buckets have few matching folders.
+    for (path, size) in folders.iter().take(4000) {
         if completed_buckets >= buckets_count {
             break;
         }
@@ -4807,6 +4809,56 @@ fn scan_storage(root: &Path, top_n: usize) -> StorageScanResult {
     scan_storage_with_progress(root, top_n, None)
 }
 
+fn path_is_strict_parent(parent: &str, child: &str) -> bool {
+    let p = parent
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
+    let c = child.replace('/', "\\").to_ascii_lowercase();
+    if p.is_empty() || c.len() <= p.len() || p == c {
+        return false;
+    }
+    c.starts_with(&p) && matches!(c.as_bytes().get(p.len()), Some(b'\\'))
+}
+
+/// True for `...\steamapps\common\<GameName>` (direct game install roots).
+fn is_steam_common_game_folder(path: &str) -> bool {
+    let lower = path.replace('/', "\\").to_ascii_lowercase();
+    let marker = "\\steamapps\\common\\";
+    let Some(idx) = lower.find(marker) else {
+        return false;
+    };
+    let rest = &lower[idx + marker.len()..];
+    !rest.is_empty() && !rest.contains('\\')
+}
+
+/// Drill-in folder lists should not show both a parent folder and its nested
+/// children (e.g. `common`, `Crimson Desert`, and `0015` all at once).
+fn refine_storage_drill_folders(bucket_id: &str, mut folders: Vec<StorageEntry>) -> Vec<StorageEntry> {
+    if bucket_id == "apps" {
+        let games: Vec<StorageEntry> = folders
+            .iter()
+            .filter(|e| is_steam_common_game_folder(&e.path))
+            .cloned()
+            .collect();
+        if !games.is_empty() {
+            let mut games = games;
+            games.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
+            return games;
+        }
+    }
+    folders.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
+    let mut out: Vec<StorageEntry> = Vec::new();
+    for e in folders {
+        if out.iter().any(|k| path_is_strict_parent(&k.path, &e.path)) {
+            continue;
+        }
+        out.retain(|k| !path_is_strict_parent(&e.path, &k.path));
+        out.push(e);
+    }
+    out
+}
+
 /// Cheap FNV-1a string hash for picking a shard. Stable per-run, that's all
 /// we need for spreading the folder-aggregation map across shards.
 fn fxhash_str(s: &str) -> u64 {
@@ -4837,6 +4889,37 @@ fn scan_storage_root(root: String, top_n: Option<usize>) -> Result<StorageScanRe
 #[cfg(test)]
 mod storage_tests {
     use super::*;
+
+    #[test]
+    fn storage_drill_folders_drop_nested_subfolders() {
+        let folders = vec![
+            StorageEntry {
+                path: r"C:\Steam\steamapps\common".to_string(),
+                name: "common".to_string(),
+                bytes: 200,
+                is_dir: true,
+                bucket: "apps".to_string(),
+            },
+            StorageEntry {
+                path: r"C:\Steam\steamapps\common\GameA".to_string(),
+                name: "GameA".to_string(),
+                bytes: 150,
+                is_dir: true,
+                bucket: "apps".to_string(),
+            },
+            StorageEntry {
+                path: r"C:\Steam\steamapps\common\GameA\pak".to_string(),
+                name: "pak".to_string(),
+                bytes: 50,
+                is_dir: true,
+                bucket: "apps".to_string(),
+            },
+        ];
+        let refined = refine_storage_drill_folders("other", folders);
+        // Largest ancestor wins — nested GameA/pak rows are dropped.
+        assert_eq!(refined.len(), 1);
+        assert_eq!(refined[0].name, "common");
+    }
 
     #[test]
     fn storage_bucket_drill_in_uses_folder_rollups_for_apps() {
@@ -6220,7 +6303,7 @@ fn theme_icons_dir() -> PathBuf {
 /// the Slint UI uses `width > 0px` to decide whether to overlay it on the fallback shape.
 ///
 /// Restricted to themes whose folder visual is intentionally an image (cyberpunk
-/// and terminal — they were designed as PNGs with non-removable borders). Every
+/// and terminal - they were designed as PNGs with non-removable borders). Every
 /// other theme uses the procedural themed folder shape so palette tints flow
 /// through cleanly. This prevents stale `%APPDATA%` icon files from leaking into
 /// themes the user expects to render via the standard folder.
@@ -7075,7 +7158,7 @@ fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, S
         (format!("%{}%", like_escape(query)), query.to_lowercase())
     };
 
-    // COLLATE NOCASE on the `name LIKE ?2` clause is critical — SQLite's
+    // COLLATE NOCASE on the `name LIKE ?2` clause is critical - SQLite's
     // default LIKE collation is BINARY which made the index search refuse to
     // match `appdata` against the column value `AppData`. Path filter stays
     // BINARY because Windows paths are stored in their actual case and the
@@ -7435,7 +7518,7 @@ fn powershell_executable() -> String {
 
 /// Append a timestamped line to %APPDATA%\Pathfinder\updater.log so users
 /// (and we) can answer "is the auto-update check running?" without attaching
-/// a debugger or rebuilding with a console subsystem. Best effort — failures
+/// a debugger or rebuilding with a console subsystem. Best effort - failures
 /// are swallowed because the updater must keep running even if disk is full.
 fn updater_log(msg: &str) {
     let path = native_data_file("updater.log");
@@ -7785,7 +7868,7 @@ fn write_native_json<T: Serialize>(name: &str, value: &T) -> Result<(), String> 
 /// Implementation: a HashMap keyed by file name holds the latest serialised
 /// bytes for each file. A single background thread drains the map every
 /// 250 ms and writes the bytes to disk. Repeated writes to the same file in
-/// the same window coalesce — only the most recent payload hits disk.
+/// the same window coalesce - only the most recent payload hits disk.
 static JSON_WRITE_QUEUE: LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -7810,7 +7893,7 @@ static JSON_WRITER_THREAD: LazyLock<std::thread::JoinHandle<()>> = LazyLock::new
 
 /// Fire-and-forget version of write_native_json. Serialises now (fast),
 /// hands off to the background writer (slow disk I/O). Callers that need
-/// the bytes flushed immediately (rare — most settings/tag writes are best
+/// the bytes flushed immediately (rare - most settings/tag writes are best
 /// effort) should still use write_native_json directly.
 fn write_native_json_async<T: Serialize>(name: &str, value: &T) {
     // Ensure the drainer thread is alive on first call. LazyLock initialises
@@ -8332,6 +8415,16 @@ fn native_rename(state: &AppState, path: &str, new_name: &str) -> Result<String,
 }
 
 fn native_delete(state: &AppState, path: &str) -> Result<(), String> {
+    native_delete_inner(state, path, true)
+}
+
+/// Recycle-bin delete without walking the tree for queue byte totals — keeps
+/// the UI thread responsive when the user confirms deleting huge folders.
+fn native_delete_fast(state: &AppState, path: &str) -> Result<(), String> {
+    native_delete_inner(state, path, false)
+}
+
+fn native_delete_inner(state: &AppState, path: &str, measure_folder_bytes: bool) -> Result<(), String> {
     if state.queue_is_paused() {
         return Err("Operation queue is paused.".to_string());
     }
@@ -8339,7 +8432,13 @@ fn native_delete(state: &AppState, path: &str) -> Result<(), String> {
     if !path_buf.exists() {
         return Err(format!("Path does not exist: {path}"));
     }
-    let total = folder_size_quick(&path_buf, 25_000);
+    let total = if measure_folder_bytes {
+        folder_size_quick(&path_buf, 25_000)
+    } else if path_buf.is_file() {
+        fs::metadata(&path_buf).map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    };
     let op_id = state.queue_start("delete", path, None, total);
     let started = Instant::now();
     trash::delete(&path_buf).map_err(|e| e.to_string())?;
@@ -8744,7 +8843,7 @@ fn theme_palette(id: &str) -> PaletteSpec {
             outer_border: 0.0,
         },
         "warm" => PaletteSpec {
-            // Deeper latte — more saturated honey tones, richer shadows
+            // Deeper latte - more saturated honey tones, richer shadows
             bg: color("#e8d8c0"),
             bg_soft: color("#f4ead8"),
             panel: rgba_u8(254, 244, 226, 0.92),
@@ -8854,7 +8953,7 @@ fn theme_palette(id: &str) -> PaletteSpec {
             accent_strong: color("#ffef7a"),
             radius: 0.0,
             radius_small: 0.0,
-            // Press Start 2P (bundled, OFL) — true 8-bit arcade pixel font.
+            // Press Start 2P (bundled, OFL) - true 8-bit arcade pixel font.
             ui_font: "Press Start 2P",
             mono_font: "Press Start 2P",
             light_controls: false,
@@ -8885,7 +8984,7 @@ fn theme_palette(id: &str) -> PaletteSpec {
             outer_border: 0.0,
         },
         "fantasy" => PaletteSpec {
-            // Enchanted forest at dusk — deep moss greens with antique gold trim
+            // Enchanted forest at dusk - deep moss greens with antique gold trim
             // and burnished bronze highlights. Clearly distinct from sunset warm,
             // mica blues, and retro neon.
             bg: color("#0d1a14"),
@@ -9509,12 +9608,12 @@ fn command_items() -> ModelRc<CommandItem> {
 /// Accepts every form Windows / other apps pass when they want to "open a
 /// folder", so the user doesn't see broken openings from third-party callers:
 ///
-///   - `--path <dir>` / `--path=<dir>` — what the HKCU shell handler we
+///   - `--path <dir>` / `--path=<dir>` - what the HKCU shell handler we
 ///     register passes (`"%1"`).
-///   - `/select,<file>` or `/select <file>` — the Explorer convention used by
+///   - `/select,<file>` or `/select <file>` - the Explorer convention used by
 ///     "Show in folder" / "Open file location" in many apps (Chrome, Steam,
 ///     Discord, Slack, Notepad, etc). We open the file's parent directory.
-///   - A bare path argument — when an app invokes us as `pathfinder.exe
+///   - A bare path argument - when an app invokes us as `pathfinder.exe
 ///     C:\Users\Foo` without any flag. Treats files like /select (opens the
 ///     parent).
 ///
@@ -9534,7 +9633,7 @@ fn parse_cli_startup_folder() -> Option<PathBuf> {
                 return Some(PathBuf::from(rest));
             }
         } else if let Some(rest) = a.strip_prefix("/select,") {
-            // Explorer-style /select,<file> — open parent and (ideally) select.
+            // Explorer-style /select,<file> - open parent and (ideally) select.
             if !rest.is_empty() {
                 let f = std::path::PathBuf::from(rest);
                 if let Some(parent) = f.parent() {
@@ -9737,12 +9836,12 @@ impl NativeController {
                 acceleration_kind: "CPU".to_string(),
                 runtime_configured: false,
                 reason: "Detecting...".to_string(),
-                gpu_summary: "Detecting GPUs…".to_string(),
+                gpu_summary: "Detecting GPUs...".to_string(),
             },
             clipboard: None,
             pending_prompt: None,
             // Default sort: most recently modified first. Matches what most
-            // people actually want when they open a folder — see the newest
+            // people actually want when they open a folder - see the newest
             // download / latest screenshot / freshly built artifact.
             sort_by: "modified".to_string(),
             sort_dir: "desc".to_string(),
@@ -9976,7 +10075,7 @@ impl NativeController {
         let status = index_status_for_settings(&self.settings);
         ui.set_active_index_mode(ss(&self.settings.index_mode));
         ui.set_index_status(ss(format!(
-            "{} files indexed · {} on disk · thumbnails {} of {} cap · {}",
+            "{} files indexed | {} on disk | thumbnails {} of {} cap | {}",
             status.indexed_files,
             format_size_short(status.index_bytes),
             format_size_short(status.thumbnail_bytes),
@@ -10311,7 +10410,7 @@ impl NativeController {
                 (0, f) => format!("{f} file{}", if f == 1 { "" } else { "s" }),
                 (d, 0) => format!("{d} folder{}", if d == 1 { "" } else { "s" }),
                 (d, f) => format!(
-                    "{d} folder{} · {f} file{}",
+                    "{d} folder{} | {f} file{}",
                     if d == 1 { "" } else { "s" },
                     if f == 1 { "" } else { "s" }
                 ),
@@ -10322,7 +10421,7 @@ impl NativeController {
                 .filter_map(|&i| self.visible_files.get(i))
                 .map(|e| e.size)
                 .sum();
-            format!("{sel_count} selected · {}", format_size_short(sel_size))
+            format!("{sel_count} selected | {}", format_size_short(sel_size))
         };
 
         ui.set_status_left(ss(left));
@@ -10336,7 +10435,7 @@ impl NativeController {
         let current_path = self.current_path.clone();
         let right = match self.drive_space_for_status(&current_path) {
             Some((free, total)) => format!(
-                "{} · {} free of {}",
+                "{} | {} free of {}",
                 shown_path,
                 format_size_short(free),
                 format_size_short(total)
@@ -10695,7 +10794,7 @@ impl NativeController {
             });
         }
 
-        // Recycle Bin entry — virtual `recycle://` path. Click to browse,
+        // Recycle Bin entry - virtual `recycle://` path. Click to browse,
         // right-click items inside to restore or delete permanently.
         items.push(SideItem {
             label: ss("Recycle Bin"),
@@ -10707,7 +10806,7 @@ impl NativeController {
             active: self.current_path == "recycle://",
         });
 
-        // Storage analyzer — virtual `storage://` path. Click swaps the main
+        // Storage analyzer - virtual `storage://` path. Click swaps the main
         // pane to the categorized storage view (Apps, Documents, Pictures,
         // etc.) plus a ranked-by-size list of biggest items.
         items.push(SideItem {
@@ -10935,7 +11034,7 @@ impl NativeController {
         } else {
             path
         };
-        // Virtual recycle-bin namespace — content comes from trash::os_limited.
+        // Virtual recycle-bin namespace - content comes from trash::os_limited.
         if path == "recycle://" {
             // Leaving the storage view if we were in it.
             if ui.get_is_storage_view() {
@@ -10996,7 +11095,7 @@ impl NativeController {
                 // Update recent_locations cheaply: dedup the existing entry,
                 // push the new path to the front, truncate to 12. The previous
                 // implementation rebuilt the list via condense_recent_locations
-                // which stat()s every path on disk for existence — a dozen sync
+                // which stat()s every path on disk for existence - a dozen sync
                 // I/O ops on every folder change. Stale entries are pruned at
                 // startup instead; runtime keeps it allocation-light.
                 self.recent_locations
@@ -11164,7 +11263,7 @@ impl NativeController {
                     });
                 }
 
-                // No fade — content snaps in instantly for File-Explorer-level responsiveness.
+                // No fade - content snaps in instantly for File-Explorer-level responsiveness.
             }
             Err(error) => {
                 ui.set_empty_state(ss(format!("Cannot read folder: {error}")));
@@ -11175,7 +11274,7 @@ impl NativeController {
 
     /// Switch the primary view to a virtual listing of the OS recycle bin.
     /// Right-click an item to restore (move back to original path) or delete
-    /// permanently. The view is read-only otherwise — paste/new-file disabled.
+    /// permanently. The view is read-only otherwise - paste/new-file disabled.
     fn open_recycle_bin_view(&mut self, ui: &MainWindow, push_history: bool) {
         let entries = list_recycle_bin_entries();
         self.active_archive = None;
@@ -11313,7 +11412,7 @@ impl NativeController {
             // in parallel chunks of 2000, publishing each chunk to the UI so very
             // large folders fill in progressively rather than freezing on a final
             // single replace. Each chunk is sorted and the running total is
-            // resorted before publishing — keeps the displayed order stable.
+            // resorted before publishing - keeps the displayed order stable.
             let dir = Path::new(&path);
             let dir_entries: Vec<fs::DirEntry> = match fs::read_dir(dir) {
                 Ok(rd) => rd.filter_map(Result::ok).collect(),
@@ -11673,7 +11772,7 @@ impl NativeController {
                     other => format!("{other} file"),
                 };
                 let truncated_note = if preview.truncated {
-                    " · truncated"
+                    " | truncated"
                 } else {
                     ""
                 };
@@ -11743,12 +11842,15 @@ impl NativeController {
     }
 
     fn go_back(&mut self, ui: &MainWindow) {
-        // Back-from-storage: if the user is currently in the storage analyzer
-        // view, prefer routing them back to the folder they came from (saved
-        // in storage_path_before by open_storage_view) over walking the
-        // history. Otherwise Back was a dead button when the user opened
-        // Storage as their first nav action (history_index = 0, parent of
-        // "storage://" is meaningless).
+        // Storage drill-in: Back / mouse back returns to the bucket overview
+        // before leaving the storage view entirely.
+        if self.current_path == "storage://"
+            && (!self.storage_selected_bucket.is_empty() || self.storage_show_all_state)
+        {
+            self.clear_storage_bucket_filter(ui);
+            return;
+        }
+        // Leave storage view → folder the user had open before Storage.
         if self.current_path == "storage://" {
             let target = if !self.storage_path_before.is_empty() {
                 self.storage_path_before.clone()
@@ -11865,9 +11967,9 @@ impl NativeController {
         let ready = self.search_ready.clone();
         let pending = self.pending_search_result.clone();
         ui.set_status_right(ss(if self.search_all_scope {
-            format!("{path}  |  searching drive...")
+            format!("{path} | searching drive...")
         } else {
-            format!("{path}  |  searching...")
+            format!("{path} | searching...")
         }));
         let semantic = self.settings.search_semantic_mode;
         let clip = self.settings.clip_search_enabled;
@@ -12066,7 +12168,7 @@ impl NativeController {
             && self.secondary_selected_set.is_empty()
         {
             // Rust has no selection, but `selected_count` can stay stale after
-            // `update_models` until now — resync so the action bar, Esc, and X
+            // `update_models` until now - resync so the action bar, Esc, and X
             // behave consistently.
             self.sync_selection_count_to_ui(ui);
             ui.set_selected_index(-1);
@@ -12706,7 +12808,7 @@ impl NativeController {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        ui.set_preview_title(ss("Batch Rename — template syntax"));
+        ui.set_preview_title(ss("Batch Rename - template syntax"));
         ui.set_preview_body(ss(format!(
             "{preview}\n\nTokens:\n  {{n}}      sequence number (1-based)\n  {{n:04}}   zero-padded to N digits\n  {{name}}   original filename without extension\n  {{ext}}    original extension (no dot)\n\nExample: IMG_{{n:04}}.{{ext}}"
         )));
@@ -12990,15 +13092,9 @@ impl NativeController {
         if paths.is_empty() {
             return;
         }
+        ui.set_confirm_visible(false);
+
         let n = paths.len();
-        let mut errors = 0usize;
-        for path in &paths {
-            if native_delete(&self.app_state, path).is_err() {
-                errors += 1;
-            }
-        }
-        // Deleted files cannot stay "selected". Drop the selection sets first
-        // so the contextual action bar collapses, then refresh the listing.
         self.selected_set.clear();
         self.secondary_selected_set.clear();
         self.selected_index = -1;
@@ -13007,17 +13103,63 @@ impl NativeController {
         self.secondary_select_anchor = -1;
         ui.set_selected_count(0);
         ui.set_selected_index(-1);
-        self.refresh(ui);
-        if errors == 0 {
-            let msg = if n == 1 {
-                "Moved to Recycle Bin".to_string()
-            } else {
-                format!("{n} items moved to Recycle Bin")
-            };
-            self.show_toast_kind(ui, msg, "success");
+
+        ui.set_op_drawer_text(ss(if n == 1 {
+            "Moving to Recycle Bin...".to_string()
         } else {
-            self.show_toast_kind(ui, format!("{errors} of {n} failed to delete"), "error");
-        }
+            format!("Moving {n} items to Recycle Bin...")
+        }));
+        ui.set_op_drawer_visible(true);
+        ui.set_op_drawer_progress(-1.0);
+
+        let app_state = self.app_state.clone();
+        let operation_ready = self.operation_ready.clone();
+        let pending_result = self.pending_operation_result.clone();
+        std::thread::spawn(move || {
+            let mut errors = 0usize;
+            let mut first_error: Option<String> = None;
+            for path in &paths {
+                match native_delete_fast(&app_state, path) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        errors += 1;
+                        if first_error.is_none() {
+                            first_error = Some(e);
+                        }
+                    }
+                }
+            }
+            let result = if let Some(err) = first_error {
+                NativeOperationResult {
+                    message: if errors == paths.len() {
+                        err
+                    } else {
+                        format!("{errors} of {n} failed to delete. {err}")
+                    },
+                    kind: "error".to_string(),
+                    refresh: errors < paths.len(),
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                }
+            } else {
+                let msg = if n == 1 {
+                    "Moved to Recycle Bin".to_string()
+                } else {
+                    format!("{n} items moved to Recycle Bin")
+                };
+                NativeOperationResult {
+                    message: msg,
+                    kind: "success".to_string(),
+                    refresh: true,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                }
+            };
+            if let Ok(mut lock) = pending_result.lock() {
+                *lock = Some(result);
+            }
+            operation_ready.store(true, Ordering::Release);
+        });
     }
 
     fn copy_selected(&mut self, cut: bool, ui: &MainWindow) {
@@ -13053,7 +13195,7 @@ impl NativeController {
         let n = clipboard.paths.len();
         if n > 1 {
             let verb = if clipboard.cut { "Moving" } else { "Copying" };
-            ui.set_op_drawer_text(ss(format!("{verb} {n} items…")));
+            ui.set_op_drawer_text(ss(format!("{verb} {n} items...")));
             ui.set_op_drawer_visible(true);
         }
         let mut pasted = 0usize;
@@ -14256,7 +14398,7 @@ impl NativeController {
         if self.storage_current_root.is_empty() {
             self.storage_current_root = self.storage_default_root();
         }
-        // Cache is persistent across opens — only an explicit Rescan kicks a
+        // Cache is persistent across opens - only an explicit Rescan kicks a
         // new scan. Was 5-minute staleness in v0.9.0; users found that
         // surprising because the data they were looking at could just
         // disappear when reopening the tab.
@@ -14269,7 +14411,7 @@ impl NativeController {
             self.push_storage_to_ui(ui, &result);
         } else {
             ui.set_storage_root(ss(&self.storage_current_root));
-            ui.set_storage_total_text(ss("Preparing scan…"));
+            ui.set_storage_total_text(ss("Preparing scan..."));
             ui.set_storage_subtitle(ss(""));
             self.storage_subtitle_last_update = Instant::now();
             self.start_storage_scan(ui);
@@ -14403,7 +14545,7 @@ impl NativeController {
             self.push_storage_to_ui(ui, &result);
         } else {
             ui.set_storage_root(ss(&self.storage_current_root));
-            ui.set_storage_total_text(ss("Preparing scan…"));
+            ui.set_storage_total_text(ss("Preparing scan..."));
             ui.set_storage_subtitle(ss(""));
             self.storage_subtitle_last_update = Instant::now();
             self.start_storage_scan(ui);
@@ -14438,7 +14580,7 @@ impl NativeController {
                     .unwrap_or_default();
                 folders.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
                 if !folders.is_empty() {
-                    folders
+                    refine_storage_drill_folders(&self.storage_selected_bucket, folders)
                 } else {
                     let mut files: Vec<StorageEntry> = result
                         .bucket_items
@@ -14507,7 +14649,7 @@ impl NativeController {
             result.scanned_files
         )));
         ui.set_storage_subtitle(ss(format!(
-            "Scanned {} ago in {:.1}s — click any bucket to drill in",
+            "Scanned {} ago in {:.1}s - click any bucket to drill in",
             format_relative_time(result.scanned_at),
             (result.elapsed_ms as f64) / 1000.0
         )));
@@ -14535,7 +14677,7 @@ impl NativeController {
         {
             if let Some(cached) = self.storage_cache.as_ref() {
                 ui.set_storage_subtitle(ss(format!(
-                    "Scanned {} ago in {:.1}s — click any bucket to drill in",
+                    "Scanned {} ago in {:.1}s - click any bucket to drill in",
                     format_relative_time(cached.scanned_at),
                     (cached.elapsed_ms as f64) / 1000.0
                 )));
@@ -14556,7 +14698,7 @@ impl NativeController {
         let pct = if self.storage_disk_used > 0 {
             ((bytes as f64 / self.storage_disk_used as f64) * 100.0).min(99.0)
         } else {
-            // No disk-used baseline (network drive, exotic FS) — show an
+            // No disk-used baseline (network drive, exotic FS) - show an
             // animated indeterminate-ish progress that grows slowly.
             (bytes as f64 / 1_073_741_824.0 * 5.0).min(95.0)
         };
@@ -14595,17 +14737,6 @@ impl NativeController {
     }
 
     fn select_storage_bucket(&mut self, ui: &MainWindow, bucket_id: String) {
-        // v0.9.7: drill-in lives in the preview pane on the right.
-        // Force the pane visible + widen to 640px so the ranked list
-        // has room. The user's prior preview state was already saved
-        // when they entered the storage view; close_storage_view will
-        // restore it.
-        let drill_was_inactive =
-            self.storage_selected_bucket.is_empty() && !self.storage_show_all_state;
-        if drill_was_inactive {
-            ui.set_preview_visible(true);
-            ui.set_preview_w_user(640.0);
-        }
         self.storage_selected_bucket = bucket_id.clone();
         ui.set_storage_selected_bucket(ss(&bucket_id));
         let name = self
@@ -15501,15 +15632,15 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 return;
             }
             // Show toast on the event loop thread where Rc is accessible.
-            c.borrow_mut().show_toast(&ui, "Downloading update…");
+            c.borrow_mut().show_toast(&ui, "Downloading update...");
             let weak2 = weak.clone();
             std::thread::spawn(move || {
                 match download_and_install_update(&url) {
                     Ok(()) => {
                         let toast = if url.to_ascii_lowercase().contains(".msi") {
-                            "Windows Installer started — follow the MSI wizard, then restart Pathfinder."
+                            "Windows Installer started - follow the MSI wizard, then restart Pathfinder."
                         } else {
-                            "Installer launched — Pathfinder will close."
+                            "Installer launched - Pathfinder will close."
                         };
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak2.upgrade() {
@@ -15576,17 +15707,11 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_storage_toggle_show_all(move || {
         if let Some(ui) = weak.upgrade() {
             let mut ctrl = c.borrow_mut();
-            let drill_was_inactive =
-                ctrl.storage_selected_bucket.is_empty() && !ctrl.storage_show_all_state;
             ctrl.storage_show_all_state = !ctrl.storage_show_all_state;
             ui.set_storage_show_all(ctrl.storage_show_all_state);
             if !ctrl.storage_show_all_state {
                 ctrl.clear_storage_bucket_filter(&ui);
             } else {
-                if drill_was_inactive {
-                    ui.set_preview_visible(true);
-                    ui.set_preview_w_user(640.0);
-                }
                 ctrl.storage_selected_bucket.clear();
                 ui.set_storage_selected_bucket(ss(""));
                 ui.set_storage_selected_bucket_name(ss(""));
@@ -15679,7 +15804,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let timer = slint::Timer::default();
         let prev_ai_install = Rc::new(Cell::new(local_ai::InstallState::NotInstalled));
         let prev_ai_cell = prev_ai_install.clone();
-        // 100ms tick instead of 350 — when a large directory finishes loading
+        // 100ms tick instead of 350 - when a large directory finishes loading
         // in the background, the full result is merged into the UI within 100ms
         // of the worker thread setting the ready flag. Cost is negligible: each
         // tick is a swap + branch on five atomics with nothing to do most ticks.
@@ -17165,7 +17290,7 @@ fn pick_drop_destination(
                 }
             }
         }
-        // Sidebar hit but not on a usable item — fall through to pane logic below
+        // Sidebar hit but not on a usable item - fall through to pane logic below
         // so the user still gets a sensible destination instead of an empty path.
     }
 
@@ -17373,7 +17498,7 @@ fn check_handler_registration() -> Result<String, String> {
             )
         } else if valid > 0 {
             format!(
-                "[!]  Partial registration: {}/{} registry entries configured. \
+                "[!] Partial registration: {}/{} registry entries configured. \
                  Click 'Set as default' to complete the registration.",
                 valid, total
             )
@@ -17508,7 +17633,7 @@ pub fn run() {
     // Register IDropTarget so files dropped from Explorer land in the current folder.
     //
     // We DEFER this via a one-shot Slint Timer because calling `with_winit_window`
-    // synchronously right after `ui.show()` returns silently — the winit Window
+    // synchronously right after `ui.show()` returns silently - the winit Window
     // object isn't fully reachable through Slint's accessor until the event loop
     // has pumped at least one tick. The Timer callback runs on the UI thread
     // (no Send bound), so we can pass our Rc<RefCell<NativeController>> in.
@@ -17593,7 +17718,7 @@ pub fn run() {
                 });
 
                 // Highlight the destination pane AND the exact target folder
-                // while dragging — fires every DragOver tick on the UI thread.
+                // while dragging - fires every DragOver tick on the UI thread.
                 // pick_drop_destination resolves the cursor position to the
                 // folder path that a drop would land in (sidebar entry, subfolder
                 // row, or pane background) and we surface that as drag_target_path
@@ -17736,7 +17861,7 @@ pub fn run() {
                             }
                         });
                         if r.is_err() {
-                            updater_log("invoke_from_event_loop failed — will retry next cycle");
+                            updater_log("invoke_from_event_loop failed - will retry next cycle");
                         } else {
                             updater_log("pill set on UI thread");
                         }
