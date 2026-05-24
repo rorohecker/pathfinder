@@ -1670,10 +1670,8 @@ component CopyableMessageText {
     }
 }
 
-// One card in the categorized-bucket grid of the Storage view. v0.9.6
-// redesign: bigger size readout, dedicated percent badge, brighter
-// highlight when selected. The size is now the most prominent text on
-// the card (was the bucket name) so the eye lands on the number first.
+// One card in the categorized-bucket grid. Compact and height-flexible so the
+// full bucket set fits the storage overview without scrolling.
 component StorageBucketCard inherits Rectangle {
     in property <StorageBucketUi> bucket;
     in property <bool> highlighted;
@@ -1687,93 +1685,88 @@ component StorageBucketCard inherits Rectangle {
     animate background { duration: 80ms; easing: ease-out; }
     animate border-color { duration: 80ms; easing: ease-out; }
 
-    // Coloured swatch on the left so each bucket is visually distinct.
     Rectangle {
         x: 0; y: 0;
         width: 4px; height: parent.height;
         background: root.bucket.color;
     }
-    // Top row: icon + name on the left, percent badge on the right.
     SvgIcon {
-        x: 14px;
-        y: 12px;
-        icon_size: 16px;
+        x: 12px;
+        y: 8px;
+        icon_size: 14px;
         data: root.bucket.icon;
         tint: root.bucket.color;
     }
     Text {
-        x: 38px;
-        y: 10px;
+        x: 32px;
+        y: 6px;
         width: parent.width - 80px;
-        height: 18px;
+        height: 16px;
         text: root.bucket.name;
         color: ThemePalette.text_muted;
-        font-size: 11px;
+        font-size: 10.5px;
         font-weight: 600;
         letter-spacing: 0.3px;
         vertical-alignment: center;
         overflow: elide;
     }
-    // Percent badge — top-right corner. Always visible so users can compare
-    // categories at a glance.
+    // Percent badge - top-right corner.
     Rectangle {
-        x: parent.width - 56px;
-        y: 8px;
-        width: 50px;
-        height: 20px;
-        border-radius: 10px;
+        x: parent.width - 50px;
+        y: 5px;
+        width: 44px;
+        height: 18px;
+        border-radius: 9px;
         background: root.bucket.color.with-alpha(0.18);
         Text {
             width: parent.width; height: parent.height;
             text: round(root.bucket.percent * 10) / 10 + "%";
             color: root.bucket.color;
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 700;
             horizontal-alignment: center;
             vertical-alignment: center;
             font-family: AppMetrics.mono_font;
         }
     }
-    // Headline: total bytes. The number itself is the largest text on the
-    // card so it dominates visually.
+    // Headline: total bytes.
     Text {
-        x: 14px;
-        y: 34px;
-        width: parent.width - 28px;
-        height: 22px;
+        x: 12px;
+        y: 24px;
+        width: parent.width - 24px;
+        height: 20px;
         text: root.bucket.bytes_text;
         color: ThemePalette.text;
-        font-size: 18px;
+        font-size: 15px;
         font-weight: 700;
         font-family: AppMetrics.mono_font;
         vertical-alignment: center;
         overflow: elide;
     }
-    // File count, secondary.
     Text {
-        x: 14px;
-        y: 58px;
-        width: parent.width - 28px;
-        height: 14px;
+        x: 12px;
+        y: 44px;
+        width: parent.width - 24px;
+        height: 12px;
         text: root.bucket.file_count_text;
         color: ThemePalette.text_faint;
-        font-size: 10.5px;
+        font-size: 10px;
         vertical-alignment: center;
         overflow: elide;
     }
     // Proportion bar across the bottom.
     Rectangle {
-        x: 14px;
-        y: parent.height - 10px;
-        width: parent.width - 28px;
-        height: 4px;
-        border-radius: 2px;
+        x: 12px;
+        y: parent.height - 6px;
+        width: parent.width - 24px;
+        height: 3px;
+        border-radius: 1.5px;
         background: ThemePalette.panel_alt;
         Rectangle {
             x: 0; y: 0;
             width: max(2px, parent.width * root.bucket.percent / 100);
             height: parent.height;
-            border-radius: 2px;
+            border-radius: 1.5px;
             background: root.bucket.color;
         }
     }
@@ -1783,12 +1776,13 @@ component StorageBucketCard inherits Rectangle {
     }
 }
 
-// One row in the ranked-by-size list of the Storage view.
+// One row in the ranked-by-size list of the Storage view. Dense enough for a
+// bucket drill-in to fit its visible top groups without scrolling.
 component StorageEntryRow inherits Rectangle {
     in property <StorageEntryUi> entry;
     in property <bool> show_bucket_label: true;
     callback open();
-    height: 44px;
+    height: 30px;
     background: touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
     animate background { duration: 60ms; easing: ease-out; }
     border-radius: AppMetrics.radius_small;
@@ -1797,9 +1791,9 @@ component StorageEntryRow inherits Rectangle {
         x: 0; y: 0;
         width: parent.width;
         height: parent.height;
-        padding-left: 10px;
-        padding-right: 12px;
-        spacing: 10px;
+        padding-left: 8px;
+        padding-right: 10px;
+        spacing: 8px;
         alignment: center;
 
         // Bucket-coloured dot + folder/file icon — tint the icon with the
@@ -1813,9 +1807,9 @@ component StorageEntryRow inherits Rectangle {
             background: root.entry.bucket_color;
         }
         SvgIcon {
-            width: 16px;
-            height: 16px;
-            icon_size: 16px;
+            width: 14px;
+            height: 14px;
+            icon_size: 14px;
             // Folder icon for is_dir (most entries now, since v0.9.6
             // weighted top_items 80% toward folders/apps). File icon for
             // standalone large files like ISOs.
@@ -1835,7 +1829,7 @@ component StorageEntryRow inherits Rectangle {
             Text {
                 text: root.entry.name;
                 color: ThemePalette.text;
-                font-size: 12.5px;
+                font-size: 11.5px;
                 font-weight: 600;
                 vertical-alignment: bottom;
                 overflow: elide;
@@ -1843,41 +1837,39 @@ component StorageEntryRow inherits Rectangle {
             Text {
                 text: root.entry.path;
                 color: ThemePalette.text_faint;
-                font-size: 10px;
+                font-size: 9.5px;
                 vertical-alignment: top;
                 overflow: elide;
             }
         }
         if root.show_bucket_label: Text {
-            width: 78px;
+            width: 72px;
             text: root.entry.bucket;
             color: root.entry.bucket_color;
-            font-size: 10.5px;
+            font-size: 10px;
             font-weight: 600;
             vertical-alignment: center;
             horizontal-alignment: right;
             overflow: elide;
         }
         Rectangle {
-            width: 90px;
-            height: 6px;
-            border-radius: 3px;
+            width: 62px;
+            height: 5px;
+            border-radius: 2.5px;
             background: ThemePalette.panel_alt;
             Rectangle {
                 x: 0; y: 0;
                 width: max(3px, parent.width * root.entry.bar_pct / 100);
                 height: parent.height;
-                border-radius: 3px;
+                border-radius: 2.5px;
                 background: root.entry.bucket_color;
             }
         }
-        // Size — bumped to 13px monospace + bold so the number reads
-        // immediately when scanning down the list. Was 12px regular.
         Text {
-            width: 88px;
+            width: 72px;
             text: root.entry.bytes_text;
             color: ThemePalette.text;
-            font-size: 13px;
+            font-size: 11.5px;
             font-weight: 700;
             font-family: AppMetrics.mono_font;
             vertical-alignment: center;
@@ -1890,13 +1882,8 @@ component StorageEntryRow inherits Rectangle {
     }
 }
 
-// v0.9.7: the storage view is split in two. The overview (header +
-// drive picker + scan progress + bucket grid) lives in the main pane,
-// where it replaces the file list while is_storage_view is active. The
-// drill-in (header + ranked-item list) lives in the preview pane and is
-// only shown while a bucket is selected or the user clicked "Full
-// list". This matches the way the file preview pane works for files,
-// and keeps the overview comfortably wide for the bucket grid.
+// Storage overview: main-pane header, drive picker, scan progress, and bucket
+// grid. The preview pane is hidden until a bucket/full-list drill-in opens.
 component StorageOverview inherits Rectangle {
     in property <bool> scanning;
     in property <string> root_label;
@@ -1921,11 +1908,12 @@ component StorageOverview inherits Rectangle {
         spacing: 0;
         alignment: start;
 
-        // Header strip — drive title + total + rescan + full-list button.
+        // Compact header strip - title + totals on one row with action
+        // buttons inline on the right.
         Rectangle {
-            preferred-height: 86px;
-            min-height: 86px;
-            max-height: 86px;
+            preferred-height: 52px;
+            min-height: 52px;
+            max-height: 52px;
             vertical-stretch: 0;
             background: ThemePalette.panel;
             Rectangle {
@@ -1934,40 +1922,30 @@ component StorageOverview inherits Rectangle {
                 background: ThemePalette.border;
             }
             Text {
-                x: 24px; y: 16px;
-                width: parent.width - 236px; height: 24px;
+                x: 18px; y: 7px;
+                width: parent.width - 236px; height: 20px;
                 text: "Storage on " + root.root_label;
                 color: ThemePalette.text;
-                font-size: 18px;
+                font-size: 15px;
                 font-weight: 700;
                 vertical-alignment: center;
                 overflow: elide;
             }
             Text {
-                x: 24px; y: 44px;
+                x: 18px; y: 27px;
                 width: parent.width - 236px; height: 18px;
-                text: root.total_text;
+                text: root.total_text + (root.subtitle == "" ? "" : "  |  " + root.subtitle);
                 color: ThemePalette.text_muted;
-                font-size: 12px;
+                font-size: 11px;
                 vertical-alignment: center;
                 overflow: elide;
             }
-            Text {
-                x: 24px; y: 64px;
-                width: parent.width - 236px; height: 14px;
-                text: root.subtitle;
-                color: ThemePalette.text_faint;
-                font-size: 10.5px;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            // Full list button — opens the drill-in pane in "show all
-            // ranked items" mode.
+            // Full list button.
             Rectangle {
                 x: parent.width - 220px;
-                y: 24px;
+                y: 11px;
                 width: 96px;
-                height: 32px;
+                height: 28px;
                 border-radius: AppMetrics.radius_small;
                 border-width: 1px;
                 border-color: ThemePalette.border;
@@ -1990,9 +1968,9 @@ component StorageOverview inherits Rectangle {
             // Rescan button.
             Rectangle {
                 x: parent.width - 116px;
-                y: 24px;
+                y: 11px;
                 width: 92px;
-                height: 32px;
+                height: 28px;
                 border-radius: AppMetrics.radius_small;
                 border-width: 1px;
                 border-color: ThemePalette.border;
@@ -2017,15 +1995,15 @@ component StorageOverview inherits Rectangle {
 
         // Drive picker row.
         if root.drives.length > 1: Rectangle {
-            preferred-height: 44px;
-            min-height: 44px;
-            max-height: 44px;
+            preferred-height: 36px;
+            min-height: 36px;
+            max-height: 36px;
             vertical-stretch: 0;
             background: ThemePalette.panel;
             HorizontalLayout {
-                x: 16px; y: 8px;
+                x: 14px; y: 5px;
                 width: parent.width - 32px;
-                height: 28px;
+                height: 26px;
                 spacing: 6px;
                 alignment: start;
                 for drv[i] in root.drives: Rectangle {
@@ -2064,13 +2042,13 @@ component StorageOverview inherits Rectangle {
 
         // Progress bar (only while scanning).
         if root.scanning: Rectangle {
-            preferred-height: 50px;
-            min-height: 50px;
-            max-height: 50px;
+            preferred-height: 40px;
+            min-height: 40px;
+            max-height: 40px;
             vertical-stretch: 0;
             background: ThemePalette.panel;
             Text {
-                x: 24px; y: 10px;
+                x: 18px; y: 6px;
                 width: parent.width - 48px; height: 16px;
                 text: "Scanning " + root.progress_files + " files | " + root.progress_bytes_text;
                 color: ThemePalette.text_muted;
@@ -2078,16 +2056,16 @@ component StorageOverview inherits Rectangle {
                 vertical-alignment: center;
             }
             Rectangle {
-                x: 24px; y: 32px;
-                width: parent.width - 48px;
-                height: 6px;
-                border-radius: 3px;
+                x: 18px; y: 26px;
+                width: parent.width - 36px;
+                height: 5px;
+                border-radius: 2.5px;
                 background: ThemePalette.panel_alt;
                 Rectangle {
                     x: 0; y: 0;
                     width: max(6px, parent.width * root.progress_percent / 100);
                     height: parent.height;
-                    border-radius: 3px;
+                    border-radius: 2.5px;
                     background: ThemePalette.accent;
                     animate width { duration: 220ms; easing: ease-out; }
                 }
@@ -2099,58 +2077,26 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // Section heading above the bucket grid.
-        Rectangle {
-            preferred-height: 36px;
-            min-height: 36px;
-            max-height: 36px;
-            vertical-stretch: 0;
-            background: ThemePalette.bg;
-            Text {
-                x: 24px; y: 0;
-                width: parent.width - 48px;
-                height: parent.height;
-                text: root.selected_bucket != ""
-                    ? "Categories - viewing details on the right"
-                    : "Categories - click a card to drill in";
-                color: ThemePalette.text_muted;
-                font-size: 11px;
-                font-weight: 600;
-                letter-spacing: 0.4px;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-        }
-
-        // Bucket grid — fills the remaining vertical space. ScrollView
-        // handles overflow when the window is too short to show every
-        // card at once.
+        // Bucket grid - fills the remaining vertical space. Card height is
+        // derived from the available height so the full bucket set is visible
+        // at the app's minimum window size without a scrollbar.
         grid_holder := Rectangle {
             vertical-stretch: 1;
             min-height: 120px;
             background: ThemePalette.bg;
-            // Wider min card width (320px) than the v0.9.6 preview-pane
-            // layout because the overview now has the full main pane to
-            // spread out — typically 3-4 cards per row.
-            property <int> cols: max(1, min(4, floor((self.width - 32px) / 320px)));
-            property <length> card_w: (self.width - 32px - (self.cols - 1) * 14px) / self.cols;
-            property <length> card_h: 96px;
-            property <length> grid_h: 16px + Math.ceil(root.buckets.length / self.cols) * (self.card_h + 14px);
-            ScrollView {
-                x: 0; y: 0;
-                width: parent.width;
-                height: parent.height;
-                viewport-width: parent.width;
-                viewport-height: max(parent.height, grid_holder.grid_h);
-                for bucket[index] in root.buckets: StorageBucketCard {
-                    x: 16px + mod(index, grid_holder.cols) * (grid_holder.card_w + 14px);
-                    y: 8px + floor(index / grid_holder.cols) * (grid_holder.card_h + 14px);
-                    width: grid_holder.card_w;
-                    height: grid_holder.card_h;
-                    bucket: bucket;
-                    highlighted: bucket.id == root.selected_bucket;
-                    clicked => { root.select_bucket(bucket.id); }
-                }
+            property <int> cols: max(1, min(5, floor((self.width - 20px) / 190px)));
+            property <int> rows: max(1, Math.ceil(root.buckets.length / self.cols));
+            property <length> gap: self.height < 320px ? 7px : 9px;
+            property <length> card_w: (self.width - 20px - (self.cols - 1) * self.gap) / self.cols;
+            property <length> card_h: max(64px, min(74px, (self.height - 14px - (self.rows - 1) * self.gap) / self.rows));
+            for bucket[index] in root.buckets: StorageBucketCard {
+                x: 10px + mod(index, grid_holder.cols) * (grid_holder.card_w + grid_holder.gap);
+                y: 7px + floor(index / grid_holder.cols) * (grid_holder.card_h + grid_holder.gap);
+                width: grid_holder.card_w;
+                height: grid_holder.card_h;
+                bucket: bucket;
+                highlighted: bucket.id == root.selected_bucket;
+                clicked => { root.select_bucket(bucket.id); }
             }
             if root.buckets.length == 0: Text {
                 x: 24px; y: 24px;
@@ -2185,11 +2131,11 @@ component StorageDrillIn inherits Rectangle {
         spacing: 0;
         alignment: start;
 
-        // Header bar — title + close (X).
+        // Header bar - title + close (X).
         Rectangle {
-            preferred-height: 48px;
-            min-height: 48px;
-            max-height: 48px;
+            preferred-height: 38px;
+            min-height: 38px;
+            max-height: 38px;
             vertical-stretch: 0;
             background: ThemePalette.panel;
             Rectangle {
@@ -2198,22 +2144,22 @@ component StorageDrillIn inherits Rectangle {
                 background: ThemePalette.border;
             }
             Text {
-                x: 18px; y: 0;
-                width: parent.width - 56px; height: parent.height;
+                x: 14px; y: 0;
+                width: parent.width - 50px; height: parent.height;
                 text: root.selected_bucket != ""
                     ? "Largest in " + root.selected_bucket_name
                     : "All items ranked by size";
                 color: ThemePalette.text;
-                font-size: 14px;
+                font-size: 13px;
                 font-weight: 700;
                 vertical-alignment: center;
                 overflow: elide;
             }
             Rectangle {
-                x: parent.width - 38px;
-                y: 10px;
-                width: 28px;
-                height: 28px;
+                x: parent.width - 34px;
+                y: 7px;
+                width: 24px;
+                height: 24px;
                 border-radius: 6px;
                 background: close_touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
                 animate background { duration: 80ms; easing: ease-out; }
@@ -2235,16 +2181,16 @@ component StorageDrillIn inherits Rectangle {
 
         // Column labels.
         if root.top_items.length > 0: Rectangle {
-            preferred-height: 24px;
-            min-height: 24px;
-            max-height: 24px;
+            preferred-height: 18px;
+            min-height: 18px;
+            max-height: 18px;
             vertical-stretch: 0;
             background: ThemePalette.panel;
             HorizontalLayout {
-                x: 16px; y: 4px;
-                width: parent.width - 32px;
-                height: 16px;
-                spacing: 10px;
+                x: 14px; y: 2px;
+                width: parent.width - 28px;
+                height: 14px;
+                spacing: 8px;
                 alignment: center;
                 Text {
                     horizontal-stretch: 1;
@@ -2256,7 +2202,7 @@ component StorageDrillIn inherits Rectangle {
                     letter-spacing: 0.3px;
                 }
                 if root.show_all && root.selected_bucket == "": Text {
-                    width: 72px;
+                    width: 68px;
                     text: "Category";
                     color: ThemePalette.text_faint;
                     font-size: 10px;
@@ -2264,14 +2210,14 @@ component StorageDrillIn inherits Rectangle {
                     horizontal-alignment: right;
                 }
                 Text {
-                    width: 88px;
-                    text: "Relative size";
+                    width: 62px;
+                    text: "Share";
                     color: ThemePalette.text_faint;
                     font-size: 10px;
                     font-weight: 600;
                 }
                 Text {
-                    width: 76px;
+                    width: 68px;
                     text: "Size";
                     color: ThemePalette.text_faint;
                     font-size: 10px;
@@ -2287,9 +2233,9 @@ component StorageDrillIn inherits Rectangle {
             min-height: 120px;
             background: ThemePalette.bg;
             ListView {
-                x: 12px; y: 4px;
-                width: parent.width - 24px;
-                height: parent.height - 8px;
+                x: 8px; y: 3px;
+                width: parent.width - 16px;
+                height: parent.height - 6px;
                 for entry[idx] in root.top_items: StorageEntryRow {
                     entry: entry;
                     show_bucket_label: root.show_all && root.selected_bucket == "";

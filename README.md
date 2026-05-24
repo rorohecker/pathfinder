@@ -16,6 +16,8 @@ It also has a bit of personality. Eleven themes, each with its own folder color 
 
 ## What is new
 
+**Version 0.9.8** tightens the Storage analyzer layout so all category buckets fit the overview without scrolling, makes bucket drill-ins show compact top folder/app groups, verifies app drill-ins roll up folders instead of individual files, and trims UI-thread work that could cause small hitches when going back or switching tabs.
+
 **Version 0.7.3** adds a Folder Color picker on the Appearance tab. You can override the per theme folder color with any hex value or one of eight presets, and the choice persists across launches.
 
 **Version 0.7.2** added a real updater log at `%APPDATA%\Pathfinder\updater.log` so silent failures are visible without rebuilding with a console subsystem, tiered retry on update check failure (30 seconds, 2 minutes, 10 minutes, then hourly) so a network blip during the first cycle no longer wastes an hour, explicit TLS 1.2 and 1.3 in the PowerShell call, an enlarged first run welcome dialog where every step box grows from its own text height instead of fixed pixel boxes, and a DialogButton that auto sizes to its label so long labels like Set as default folder handler no longer overlap.
