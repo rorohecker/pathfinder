@@ -87,23 +87,6 @@ export struct StorageEntryUi {
     bucket_color: color,
 }
 
-// One cell of the storage treemap. Position fields are unit fractions
-// (0.0-1.0) of the treemap container's pixel size; the layout
-// algorithm runs in Rust and only the resolved geometry crosses the
-// Slint boundary.
-export struct TreemapCellUi {
-    x_pct: float,
-    y_pct: float,
-    w_pct: float,
-    h_pct: float,
-    label: string,
-    bytes_text: string,
-    bucket: string,
-    path: string,
-    color: color,
-    is_dir: bool,
-}
-
 // One recommendation card on the storage overview. Severity drives
 // the left accent: "info" (neutral blue), "tip" (green - actionable
 // cleanup), "warn" (amber - large or stale).
@@ -1843,65 +1826,6 @@ component StorageEntryRow inherits Rectangle {
     }
 }
 
-// Squarified treemap. Each cell already carries normalized 0..1
-// coordinates; this component just multiplies by its pixel size and
-// renders. Cells too small to fit text drop labels gracefully.
-component Treemap inherits Rectangle {
-    in property <[TreemapCellUi]> cells;
-    in property <string> empty_label: "No data yet. Click Rescan to start.";
-    callback open_path(string);
-    background: ThemePalette.panel_alt;
-    clip: true;
-    border-radius: AppMetrics.radius_small;
-
-    for cell in root.cells: cell_rect := Rectangle {
-        x: cell.x_pct * root.width;
-        y: cell.y_pct * root.height;
-        // Subtract a 1px gap so adjacent cells get a thin background
-        // gutter without overlapping. Reads as a real tiled treemap.
-        width: max(2px, cell.w_pct * root.width - 1px);
-        height: max(2px, cell.h_pct * root.height - 1px);
-        background: cell_touch.has-hover
-            ? cell.color.brighter(0.15)
-            : cell.color;
-        animate background { duration: 80ms; easing: ease-out; }
-        border-radius: 2px;
-
-        if cell_rect.width >= 70px && cell_rect.height >= 26px: Text {
-            x: 6px; y: 4px;
-            width: parent.width - 12px; height: 16px;
-            text: cell.label;
-            color: #ffffff;
-            font-size: 11.5px;
-            font-weight: 700;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        if cell_rect.width >= 80px && cell_rect.height >= 50px: Text {
-            x: 6px; y: parent.height - 18px;
-            width: parent.width - 12px; height: 14px;
-            text: cell.bytes_text;
-            color: #ffffffd9;
-            font-size: 10.5px;
-            font-family: AppMetrics.mono_font;
-            horizontal-alignment: left;
-            overflow: elide;
-        }
-        cell_touch := TouchArea {
-            mouse-cursor: pointer;
-            clicked => { root.open_path(cell.path); }
-        }
-    }
-
-    if root.cells.length == 0: Text {
-        x: 24px; y: 24px;
-        width: parent.width - 48px;
-        text: root.empty_label;
-        color: ThemePalette.text_faint;
-        font-size: 12px;
-    }
-}
-
 // Storage overview: main-pane header, drive picker, scan progress, and bucket
 // grid. The preview pane is hidden until a bucket/full-list drill-in opens.
 component StorageOverview inherits Rectangle {
@@ -1918,7 +1842,6 @@ component StorageOverview inherits Rectangle {
     in property <string> disk_summary;
     in property <float> disk_used_pct;
     in property <[StorageTipUi]> tips;
-    in property <[TreemapCellUi]> treemap_cells;
     callback rescan();
     callback select_bucket(string);
     callback switch_root(string);
@@ -2113,113 +2036,104 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // Category legend strip - color chip + name + percent per
-        // bucket. Compact replacement for the old large card grid;
-        // click any chip to open its drill-in.
-        if root.buckets.length > 0: Rectangle {
-            preferred-height: 44px;
-            min-height: 44px;
-            max-height: 44px;
+        // v0.9.16: dropped the cramped pill row + treemap. Category
+        // cards now show the name, byte size, AND percentage in a
+        // single 92px-tall row of cards that scrolls horizontally when
+        // narrow. Cards are click targets for the bucket drill-in,
+        // matching the rest of the app's "card = pane" affordance.
+        if root.buckets.length > 0: bucket_strip := Rectangle {
+            property <int> cards_per_row: max(1, min(8, floor((self.width - 24px) / 168px)));
+            property <length> card_w: (self.width - 24px - (self.cards_per_row - 1) * 8px) / self.cards_per_row;
+            preferred-height: 92px;
+            min-height: 92px;
+            max-height: 92px;
             vertical-stretch: 0;
             background: ThemePalette.bg;
-            ScrollView {
-                x: 0; y: 0;
-                width: parent.width;
-                height: parent.height;
-                viewport-width: max(parent.width, chips_row.preferred-width + 24px);
-                viewport-height: parent.height;
-                chips_row := HorizontalLayout {
+            for bucket[i] in root.buckets: Rectangle {
+                property <bool> is-active: bucket.id == root.selected_bucket;
+                x: 12px + mod(i, bucket_strip.cards_per_row) * (bucket_strip.card_w + 8px);
+                y: 4px + floor(i / bucket_strip.cards_per_row) * 88px;
+                width: bucket_strip.card_w;
+                height: 84px;
+                border-radius: AppMetrics.radius_small;
+                border-width: 1px;
+                border-color: self.is-active ? bucket.color : ThemePalette.border;
+                background: bcard_touch.has-hover
+                    ? bucket.color.with-alpha(0.16)
+                    : (self.is-active
+                        ? bucket.color.with-alpha(0.12)
+                        : ThemePalette.panel);
+                animate background { duration: 80ms; easing: ease-out; }
+                animate border-color { duration: 80ms; easing: ease-out; }
+                // Left edge color rail.
+                Rectangle {
+                    x: 0; y: 0;
+                    width: 3px; height: parent.height;
+                    background: bucket.color;
+                }
+                // Bucket name + colored dot.
+                Rectangle {
                     x: 12px; y: 8px;
-                    height: 28px;
-                    spacing: 6px;
-                    alignment: start;
-                    for bucket[i] in root.buckets: Rectangle {
-                        property <bool> is-active: bucket.id == root.selected_bucket;
-                        height: 28px;
-                        width: chip_name.preferred-width + chip_pct.preferred-width + 36px;
-                        border-radius: 14px;
-                        border-width: 1px;
-                        border-color: self.is-active ? bucket.color : ThemePalette.border;
-                        background: chip_touch.has-hover
-                            ? bucket.color.with-alpha(0.18)
-                            : (self.is-active ? bucket.color.with-alpha(0.14) : ThemePalette.panel);
-                        animate background { duration: 80ms; easing: ease-out; }
-                        Rectangle {
-                            x: 10px; y: (parent.height - 8px) / 2;
-                            width: 8px; height: 8px;
-                            border-radius: 4px;
-                            background: bucket.color;
-                        }
-                        chip_name := Text {
-                            x: 24px; y: 0;
-                            height: parent.height;
-                            text: bucket.name;
-                            color: ThemePalette.text;
-                            font-size: 11.5px;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-                        chip_pct := Text {
-                            x: 24px + chip_name.preferred-width + 6px; y: 0;
-                            height: parent.height;
-                            // v0.9.14: floor at "<0.1%" so tiny but
-                            // non-zero buckets (e.g. Videos with a
-                            // few hundred MB on a 1TB drive) don't
-                            // misleadingly render as "0%".
-                            text: bucket.percent > 0 && (round(bucket.percent * 10) / 10 == 0)
-                                ? "<0.1%"
-                                : (round(bucket.percent * 10) / 10 + "%");
-                            color: bucket.color;
-                            font-size: 11px;
-                            font-weight: 700;
-                            font-family: AppMetrics.mono_font;
-                            vertical-alignment: center;
-                        }
-                        chip_touch := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.select_bucket(bucket.id); }
-                        }
+                    width: 6px; height: 6px;
+                    border-radius: 3px;
+                    background: bucket.color;
+                }
+                Text {
+                    x: 24px; y: 4px;
+                    width: parent.width - 36px; height: 16px;
+                    text: bucket.name;
+                    color: ThemePalette.text_muted;
+                    font-size: 10.5px;
+                    font-weight: 700;
+                    letter-spacing: 0.4px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                // Byte size - large, dominant.
+                Text {
+                    x: 12px; y: 26px;
+                    width: parent.width - 24px; height: 22px;
+                    text: bucket.bytes_text;
+                    color: ThemePalette.text;
+                    font-size: 17px;
+                    font-weight: 700;
+                    font-family: AppMetrics.mono_font;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                // Percent + file count.
+                Text {
+                    x: 12px; y: 50px;
+                    width: parent.width - 24px; height: 14px;
+                    text: (bucket.percent > 0 && round(bucket.percent * 10) / 10 == 0
+                            ? "<0.1%"
+                            : (round(bucket.percent * 10) / 10 + "%"))
+                        + "  ·  " + bucket.file_count_text;
+                    color: bucket.color;
+                    font-size: 11px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                // Proportion bar at the bottom.
+                Rectangle {
+                    x: 12px; y: parent.height - 10px;
+                    width: parent.width - 24px;
+                    height: 3px;
+                    border-radius: 1.5px;
+                    background: ThemePalette.panel_alt;
+                    Rectangle {
+                        x: 0; y: 0;
+                        width: max(2px, parent.width * bucket.percent / 100);
+                        height: parent.height;
+                        border-radius: 1.5px;
+                        background: bucket.color;
                     }
                 }
-            }
-        }
-
-        // Treemap section header.
-        Rectangle {
-            preferred-height: 26px;
-            min-height: 26px;
-            max-height: 26px;
-            vertical-stretch: 0;
-            background: ThemePalette.bg;
-            Text {
-                x: 18px; y: 0;
-                width: parent.width - 200px; height: parent.height;
-                text: "Largest folders - click any tile to open it";
-                color: ThemePalette.text_faint;
-                font-size: 10.5px;
-                font-weight: 700;
-                letter-spacing: 0.6px;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-        }
-
-        // Treemap - hero visualization. Each rectangle is a folder
-        // sized by bytes, colored by bucket. Fills the largest share
-        // of the overview.
-        Rectangle {
-            vertical-stretch: 3;
-            min-height: 220px;
-            background: ThemePalette.bg;
-            Treemap {
-                x: 12px; y: 0;
-                width: parent.width - 24px;
-                height: parent.height - 8px;
-                cells: root.treemap_cells;
-                empty_label: root.scanning
-                    ? "Scanning the drive... folders will appear here as data is collected."
-                    : "No data yet. Click Rescan to start.";
-                open_path(p) => { root.open_path(p); }
+                bcard_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.select_bucket(bucket.id); }
+                }
             }
         }
 
@@ -2242,11 +2156,12 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // Recommendations - compact 44px rows. v0.9.14: bumped from
-        // stretch 1 to 2 so 5-7 tips are visible at a typical window
-        // height without scrolling now that the hero strip is gone.
+        // v0.9.16: recommendations now own all remaining vertical
+        // space - vertical-stretch: 1 with no upper cap and no other
+        // stretch siblings, so the list runs all the way to the
+        // bottom of the storage view at any window height.
         Rectangle {
-            vertical-stretch: 2;
+            vertical-stretch: 1;
             min-height: 180px;
             background: ThemePalette.bg;
             if root.tips.length == 0: Text {
@@ -2254,7 +2169,7 @@ component StorageOverview inherits Rectangle {
                 width: parent.width - 48px;
                 text: root.scanning
                     ? "Recommendations will appear once the scan completes."
-                    : "Nothing pressing here. Click any treemap tile or category chip to drill in.";
+                    : "Nothing pressing here. Click any category card above to drill into its largest items.";
                 color: ThemePalette.text_faint;
                 font-size: 12px;
             }
@@ -2692,8 +2607,6 @@ export component MainWindow inherits Window {
     // Recommendations / explanations shown below the bucket grid on
     // the storage overview. Populated by the Rust storage scan.
     in-out property <[StorageTipUi]> storage_tips;
-    // Treemap cells (squarified) - hero visualization on the overview.
-    in-out property <[TreemapCellUi]> storage_treemap_cells;
     callback storage_rescan();
     callback storage_open_path(string);
     callback storage_toggle_show_all();
@@ -4291,7 +4204,6 @@ export component MainWindow inherits Window {
                     disk_summary: root.storage_disk_summary;
                     disk_used_pct: root.storage_disk_used_pct;
                     tips: root.storage_tips;
-                    treemap_cells: root.storage_treemap_cells;
                     rescan => { root.storage_rescan(); }
                     select_bucket(b) => { root.storage_select_bucket(b); }
                     switch_root(r) => { root.storage_switch_root(r); }
