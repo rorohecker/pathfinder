@@ -84,6 +84,7 @@ const MAX_PREVIEW_CACHE_ENTRIES: usize = 96;
 // fill any practical viewport and still avoid pushing megabytes of
 // strings to Slint for unusually busy buckets.
 const STORAGE_BUCKET_DRILL_LIMIT: usize = 300;
+const STORAGE_DUPLICATE_MIN_SIZE: u64 = 64 * 1024 * 1024;
 const INDEX_DB_FILE: &str = ".pathfinder-index.sqlite3";
 const THUMBNAIL_CACHE_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
 const INDEX_ESTIMATE_BYTES_PER_FILE: u64 = 420;
@@ -446,8 +447,16 @@ pub struct StorageEntry {
     pub path: String,
     pub name: String,
     pub bytes: u64,
+    #[serde(default)]
+    pub modified: i64,
     pub is_dir: bool,
     pub bucket: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct StorageRootMtime {
+    pub path: String,
+    pub modified: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -468,6 +477,14 @@ pub struct StorageScanResult {
     // Populated by classifying each top folder via storage_bucket_for.
     pub bucket_folder_items: std::collections::HashMap<String, Vec<StorageEntry>>,
     pub elapsed_ms: u64,
+    #[serde(default)]
+    pub root_signature: Vec<StorageRootMtime>,
+    #[serde(default)]
+    pub duplicate_groups: u64,
+    #[serde(default)]
+    pub duplicate_count: u64,
+    #[serde(default)]
+    pub duplicate_reclaimable_bytes: u64,
 }
 
 /// Shared progress state for an in-flight storage scan. Lock-free counters
@@ -567,6 +584,10 @@ fn unix_secs(time: Result<SystemTime, std::io::Error>) -> u64 {
         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn unix_secs_i64(time: Result<SystemTime, std::io::Error>) -> i64 {
+    unix_secs(time) as i64
 }
 
 fn now_unix_secs() -> u64 {
@@ -684,6 +705,7 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
                 bytes_text: ss(format_size_short(e.bytes)),
                 severity: ss("info"),
                 path: ss(""),
+                action: ss(""),
                 accent: TIP_ACCENT_INFO,
             }),
             "hiberfil.sys" => tips.push(StorageTipUi {
@@ -696,6 +718,7 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
                 bytes_text: ss(format_size_short(e.bytes)),
                 severity: ss("info"),
                 path: ss(""),
+                action: ss(""),
                 accent: TIP_ACCENT_INFO,
             }),
             "swapfile.sys" => tips.push(StorageTipUi {
@@ -708,6 +731,7 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
                 bytes_text: ss(format_size_short(e.bytes)),
                 severity: ss("info"),
                 path: ss(""),
+                action: ss(""),
                 accent: TIP_ACCENT_INFO,
             }),
             _ => {}
@@ -725,6 +749,7 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
         "Old downloads worth reviewing",
         &["\\downloads\\", "/downloads/"],
         TIP_ACCENT_TIP,
+        "",
     );
     add_location_tip(
         &mut tips,
@@ -742,6 +767,7 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
             "\\packagecache\\",
         ],
         TIP_ACCENT_TIP,
+        "",
     );
     add_location_tip(
         &mut tips,
@@ -751,7 +777,34 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
         "Files waiting to be permanently deleted. Empty the bin to reclaim.",
         &["\\$recycle.bin\\"],
         TIP_ACCENT_WARN,
+        "",
     );
+
+    add_age_based_tips(&mut tips, result);
+
+    if result.duplicate_count > 0 && result.duplicate_reclaimable_bytes >= 128 * 1024 * 1024 {
+        tips.push(StorageTipUi {
+            icon: ss("DU"),
+            title: ss(format!(
+                "{} large duplicate{} found",
+                result.duplicate_count,
+                if result.duplicate_count == 1 { "" } else { "s" }
+            )),
+            detail: ss(format!(
+                "{} duplicate group{} above {} each. Open Duplicate Finder before deleting so you keep the right copy.",
+                result.duplicate_groups,
+                if result.duplicate_groups == 1 { "" } else { "s" },
+                format_size_short(STORAGE_DUPLICATE_MIN_SIZE)
+            )),
+            bytes_text: ss(format_size_short(result.duplicate_reclaimable_bytes)),
+            severity: ss("warn"),
+            path: ss(""),
+            action: ss("duplicates"),
+            accent: TIP_ACCENT_WARN,
+        });
+    }
+
+    add_orphan_app_tip(&mut tips, result);
 
     // Per-bucket hints for the largest categories. Encourage drilling
     // in when one bucket dominates - that's usually where the biggest
@@ -807,6 +860,7 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
             bytes_text: ss(""),
             severity: ss("tip"),
             path: ss(""),
+            action: ss(""),
             accent: TIP_ACCENT_TIP,
         });
     }
@@ -819,6 +873,7 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
 /// Sum up sizes for top_items whose path contains any of `markers`,
 /// then push a single tip summarising the group. The first matching
 /// path becomes the click target so the user can jump straight to it.
+#[allow(clippy::too_many_arguments)]
 fn add_location_tip(
     out: &mut Vec<StorageTipUi>,
     result: &StorageScanResult,
@@ -827,6 +882,7 @@ fn add_location_tip(
     detail: &str,
     markers: &[&str],
     accent: slint::Color,
+    action: &str,
 ) {
     let mut total: u64 = 0;
     let mut count: u32 = 0;
@@ -859,7 +915,357 @@ fn add_location_tip(
         bytes_text: ss(format_size_short(total)),
         severity: ss("tip"),
         path: ss(&first_path.unwrap_or_default()),
+        action: ss(action),
         accent,
+    });
+}
+
+fn storage_entry_key(path: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        path.to_ascii_lowercase()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.to_string()
+    }
+}
+
+fn collect_storage_tip_entries(result: &StorageScanResult) -> Vec<StorageEntry> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for entry in result
+        .top_items
+        .iter()
+        .chain(result.bucket_items.values().flatten())
+        .chain(result.bucket_folder_items.values().flatten())
+    {
+        if seen.insert(storage_entry_key(&entry.path)) {
+            out.push(entry.clone());
+        }
+    }
+    out.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
+    out
+}
+
+fn entry_path_has_marker(entry: &StorageEntry, markers: &[&str]) -> bool {
+    let lower = entry.path.to_ascii_lowercase();
+    markers.iter().any(|m| lower.contains(m))
+}
+
+fn entry_is_system_reserved(entry: &StorageEntry) -> bool {
+    let name = entry.name.to_ascii_lowercase();
+    entry.bucket == "system"
+        || matches!(
+            name.as_str(),
+            "pagefile.sys" | "hiberfil.sys" | "swapfile.sys"
+        )
+}
+
+fn add_age_based_tips(out: &mut Vec<StorageTipUi>, result: &StorageScanResult) {
+    let now = now_unix_secs() as i64;
+    let entries = collect_storage_tip_entries(result);
+
+    let old_downloads: Vec<StorageEntry> = entries
+        .iter()
+        .filter(|e| {
+            e.modified > 0
+                && now.saturating_sub(e.modified) > 90 * 86_400
+                && entry_path_has_marker(e, &["\\downloads\\", "/downloads/"])
+        })
+        .take(40)
+        .cloned()
+        .collect();
+    push_cleanup_tip(
+        out,
+        "90",
+        "Old downloads (>90d)",
+        "These downloads have not changed in more than 90 days. Review before deleting.",
+        "cleanup:old-downloads",
+        old_downloads,
+        TIP_ACCENT_TIP,
+    );
+
+    let stale: Vec<StorageEntry> = entries
+        .iter()
+        .filter(|e| {
+            e.modified > 0
+                && now.saturating_sub(e.modified) > 365 * 86_400
+                && !entry_is_system_reserved(e)
+                && !entry_path_has_marker(e, &["\\windows\\", "/windows/"])
+        })
+        .take(40)
+        .cloned()
+        .collect();
+    push_cleanup_tip(
+        out,
+        "1Y",
+        "Stale >1y",
+        "Large items that have not changed in over a year. Good candidates for archiving or cleanup.",
+        "cleanup:stale",
+        stale,
+        TIP_ACCENT_WARN,
+    );
+}
+
+fn push_cleanup_tip(
+    out: &mut Vec<StorageTipUi>,
+    icon: &str,
+    title: &str,
+    detail: &str,
+    action: &str,
+    entries: Vec<StorageEntry>,
+    accent: slint::Color,
+) {
+    let count = entries.len();
+    let total: u64 = entries.iter().map(|e| e.bytes).sum();
+    if count == 0 || total < 100 * 1024 * 1024 {
+        return;
+    }
+    let first_path = entries.first().map(|e| e.path.clone()).unwrap_or_default();
+    out.push(StorageTipUi {
+        icon: ss(icon),
+        title: ss(format!(
+            "{} ({} item{})",
+            title,
+            count,
+            if count == 1 { "" } else { "s" }
+        )),
+        detail: ss(detail),
+        bytes_text: ss(format_size_short(total)),
+        severity: ss("warn"),
+        path: ss(first_path),
+        action: ss(action),
+        accent,
+    });
+}
+
+fn app_owner_from_storage_path(path: &str) -> Option<String> {
+    let normalized = path.replace('/', "\\");
+    let parts: Vec<&str> = normalized
+        .split('\\')
+        .filter(|part| !part.is_empty())
+        .collect();
+    for idx in 0..parts.len() {
+        if parts[idx].eq_ignore_ascii_case("programdata") {
+            return parts.get(idx + 1).map(|s| (*s).to_string());
+        }
+        if parts[idx].eq_ignore_ascii_case("appdata")
+            && parts
+                .get(idx + 1)
+                .map(|s| s.eq_ignore_ascii_case("local") || s.eq_ignore_ascii_case("roaming"))
+                .unwrap_or(false)
+        {
+            return parts.get(idx + 2).map(|s| (*s).to_string());
+        }
+    }
+    None
+}
+
+fn normalize_app_match_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn is_generic_appdata_owner(owner: &str) -> bool {
+    matches!(
+        owner.to_ascii_lowercase().as_str(),
+        "microsoft"
+            | "windows"
+            | "packages"
+            | "package cache"
+            | "temp"
+            | "cache"
+            | "crashdumps"
+            | "connecteddevicesplatform"
+            | "nvidia"
+            | "intel"
+            | "amd"
+    )
+}
+
+fn installed_app_names_for_orphan_check() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        installed_app_display_names_windows()
+            .into_iter()
+            .map(|name| normalize_app_match_name(&name))
+            .filter(|name| name.len() >= 4)
+            .collect()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn installed_app_display_names_windows() -> Vec<String> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, RegCloseKey, RegEnumKeyExW,
+        RegOpenKeyExW, RegQueryValueExW,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    fn wide_nul(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn read_reg_string(key: HKEY, name: &str) -> Option<String> {
+        let name = wide_nul(name);
+        let mut kind = REG_SZ;
+        let mut buf = [0u16; 512];
+        let mut size = (buf.len() * 2) as u32;
+        let rc = unsafe {
+            RegQueryValueExW(
+                key,
+                PCWSTR(name.as_ptr()),
+                None,
+                Some(&mut kind),
+                Some(buf.as_mut_ptr().cast()),
+                Some(&mut size),
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            return None;
+        }
+        let chars = (size as usize / 2).saturating_sub(1).min(buf.len());
+        let value = String::from_utf16_lossy(&buf[..chars]).trim().to_string();
+        (!value.is_empty()).then_some(value)
+    }
+
+    fn enumerate_uninstall_key(root: HKEY, rel: &str, out: &mut Vec<String>) {
+        let rel = wide_nul(rel);
+        let mut key = HKEY::default();
+        if unsafe { RegOpenKeyExW(root, PCWSTR(rel.as_ptr()), None, KEY_READ, &mut key) }
+            != ERROR_SUCCESS
+        {
+            return;
+        }
+
+        for idx in 0..4096u32 {
+            let mut name_buf = [0u16; 256];
+            let mut name_len = name_buf.len() as u32;
+            let rc = unsafe {
+                RegEnumKeyExW(
+                    key,
+                    idx,
+                    Some(PWSTR(name_buf.as_mut_ptr())),
+                    &mut name_len,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            };
+            if rc != ERROR_SUCCESS {
+                break;
+            }
+            let sub_path: Vec<u16> = name_buf[..name_len as usize]
+                .iter()
+                .copied()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut sub = HKEY::default();
+            if unsafe { RegOpenKeyExW(key, PCWSTR(sub_path.as_ptr()), None, KEY_READ, &mut sub) }
+                == ERROR_SUCCESS
+            {
+                if let Some(display_name) = read_reg_string(sub, "DisplayName") {
+                    out.push(display_name);
+                }
+                unsafe {
+                    let _ = RegCloseKey(sub);
+                }
+            }
+        }
+        unsafe {
+            let _ = RegCloseKey(key);
+        }
+    }
+
+    let mut out = Vec::new();
+    for rel in [
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    ] {
+        enumerate_uninstall_key(HKEY_CURRENT_USER, rel, &mut out);
+        enumerate_uninstall_key(HKEY_LOCAL_MACHINE, rel, &mut out);
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn installed_app_name_matches(owner: &str, installed: &[String]) -> bool {
+    let candidate = normalize_app_match_name(owner);
+    if candidate.len() < 4 {
+        return true;
+    }
+    installed.iter().any(|name| {
+        name == &candidate
+            || (candidate.len() >= 5 && name.contains(&candidate))
+            || (name.len() >= 5 && candidate.contains(name))
+    })
+}
+
+fn add_orphan_app_tip(out: &mut Vec<StorageTipUi>, result: &StorageScanResult) {
+    let installed = installed_app_names_for_orphan_check();
+    if installed.is_empty() {
+        return;
+    }
+
+    let mut by_owner: HashMap<String, (String, u64)> = HashMap::new();
+    for entry in collect_storage_tip_entries(result) {
+        if !entry.is_dir || entry.bytes < 25 * 1024 * 1024 {
+            continue;
+        }
+        let lower = entry.path.to_ascii_lowercase();
+        if !(lower.contains("\\appdata\\")
+            || lower.contains("/appdata/")
+            || lower.contains("\\programdata\\")
+            || lower.contains("/programdata/"))
+        {
+            continue;
+        }
+        let Some(owner) = app_owner_from_storage_path(&entry.path) else {
+            continue;
+        };
+        if is_generic_appdata_owner(&owner) || installed_app_name_matches(&owner, &installed) {
+            continue;
+        }
+        let key = normalize_app_match_name(&owner);
+        let owner_entry = by_owner.entry(key).or_insert((entry.path.clone(), 0));
+        owner_entry.1 = owner_entry.1.saturating_add(entry.bytes);
+    }
+
+    let count = by_owner.len();
+    let total: u64 = by_owner.values().map(|(_, bytes)| *bytes).sum();
+    if count == 0 || total < 100 * 1024 * 1024 {
+        return;
+    }
+    let first_path = by_owner
+        .values()
+        .max_by_key(|(_, bytes)| *bytes)
+        .map(|(path, _)| path.clone())
+        .unwrap_or_default();
+    out.push(StorageTipUi {
+        icon: ss("OR"),
+        title: ss(format!(
+            "Possible orphan app data ({} folder{})",
+            count,
+            if count == 1 { "" } else { "s" }
+        )),
+        detail: ss(
+            "AppData / ProgramData folders whose names do not match installed apps. Review before deleting.",
+        ),
+        bytes_text: ss(format_size_short(total)),
+        severity: ss("warn"),
+        path: ss(first_path),
+        action: ss(""),
+        accent: TIP_ACCENT_WARN,
     });
 }
 
@@ -915,15 +1321,11 @@ fn compute_storage_treemap(items: &[TreemapInput]) -> Vec<TreemapCellUi> {
         // Find best row extent
         let mut row_end = start;
         let mut row_sum = scaled[start];
-        let mut best =
-            treemap_worst_aspect(&scaled[start..=start], short_side, row_sum);
+        let mut best = treemap_worst_aspect(&scaled[start..=start], short_side, row_sum);
         while row_end + 1 < sorted.len() {
             let new_sum = row_sum + scaled[row_end + 1];
-            let new_aspect = treemap_worst_aspect(
-                &scaled[start..=row_end + 1],
-                short_side,
-                new_sum,
-            );
+            let new_aspect =
+                treemap_worst_aspect(&scaled[start..=row_end + 1], short_side, new_sum);
             if new_aspect > best {
                 break;
             }
@@ -994,13 +1396,7 @@ fn treemap_layout_row(
     }
 }
 
-fn treemap_make_cell(
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    item: &TreemapInput,
-) -> TreemapCellUi {
+fn treemap_make_cell(x: f32, y: f32, w: f32, h: f32, item: &TreemapInput) -> TreemapCellUi {
     TreemapCellUi {
         x_pct: x,
         y_pct: y,
@@ -1034,6 +1430,63 @@ fn format_relative_time(ts: i64) -> String {
     } else {
         format!("{}d", diff / 86400)
     }
+}
+
+fn format_storage_entry_age(ts: i64) -> String {
+    if ts <= 0 {
+        return String::new();
+    }
+    let now = now_unix_secs() as i64;
+    let days = ((now - ts).max(0) / 86_400) as u64;
+    if days == 0 {
+        "today".to_string()
+    } else if days == 1 {
+        "yesterday".to_string()
+    } else if days < 45 {
+        format!("{days}d ago")
+    } else if days < 365 {
+        let months = (days / 30).max(1);
+        if months == 1 {
+            "1 month ago".to_string()
+        } else {
+            format!("{months} months ago")
+        }
+    } else {
+        let years = (days / 365).max(1);
+        if years == 1 {
+            "1y ago".to_string()
+        } else {
+            format!("{years}y ago")
+        }
+    }
+}
+
+fn capture_storage_root_signature(root: &Path) -> Vec<StorageRootMtime> {
+    let Ok(read_dir) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<StorageRootMtime> = read_dir
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = entry.metadata().ok()?;
+            Some(StorageRootMtime {
+                path: path.to_string_lossy().into_owned(),
+                modified: unix_secs_i64(metadata.modified()),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.path
+            .to_ascii_lowercase()
+            .cmp(&b.path.to_ascii_lowercase())
+    });
+    out
+}
+
+fn storage_root_signature_matches(result: &StorageScanResult) -> bool {
+    !result.root_signature.is_empty()
+        && capture_storage_root_signature(Path::new(&result.root)) == result.root_signature
 }
 
 fn file_kind(path: &Path, metadata: &fs::Metadata) -> FileKind {
@@ -4462,20 +4915,11 @@ fn get_image_info(path: String) -> Result<ImageInfo, String> {
 
 // ----- duplicate finder -----
 
-#[tauri::command]
-fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEntry>>, String> {
-    if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= MAX_HEAVY_OPS {
-        ACTIVE_HEAVY_OPS.fetch_sub(1, Ordering::SeqCst);
-        return Err("Too many operations in progress. Please wait.".to_string());
-    }
-    let _guard = HeavyOpGuard;
-    let dir = PathBuf::from(&path);
-    let min = min_size.unwrap_or(4096);
-
+fn find_duplicates_impl(dir: &Path, min: u64) -> Result<Vec<Vec<FileEntry>>, String> {
     // Phase 1: group by exact size - unique sizes cannot be duplicates.
     // WalkDir entry.metadata() is cache-backed on Windows (FindFirstFileExW), zero extra syscalls.
     let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    for entry in WalkDir::new(&dir)
+    for entry in WalkDir::new(dir)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
@@ -4558,6 +5002,33 @@ fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEn
         sb.cmp(&sa)
     });
     Ok(groups)
+}
+
+fn duplicate_reclaimable_bytes(groups: &[Vec<FileEntry>]) -> (u64, u64, u64) {
+    let mut group_count = 0u64;
+    let mut duplicate_count = 0u64;
+    let mut reclaimable = 0u64;
+    for group in groups.iter().filter(|g| g.len() > 1) {
+        let Some(size) = group.first().map(|entry| entry.size) else {
+            continue;
+        };
+        group_count += 1;
+        duplicate_count += group.len().saturating_sub(1) as u64;
+        reclaimable =
+            reclaimable.saturating_add(size.saturating_mul(group.len().saturating_sub(1) as u64));
+    }
+    (group_count, duplicate_count, reclaimable)
+}
+
+#[tauri::command]
+fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEntry>>, String> {
+    if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= MAX_HEAVY_OPS {
+        ACTIVE_HEAVY_OPS.fetch_sub(1, Ordering::SeqCst);
+        return Err("Too many operations in progress. Please wait.".to_string());
+    }
+    let _guard = HeavyOpGuard;
+    let dir = PathBuf::from(&path);
+    find_duplicates_impl(&dir, min_size.unwrap_or(4096))
 }
 
 // ----- storage tree -----
@@ -4705,6 +5176,15 @@ fn is_too_generic_folder(path: &Path, root_components: usize) -> bool {
 
 fn storage_bucket_for(path: &Path, ctx: &StorageScanCtx) -> &'static str {
     let path_bytes = path.as_os_str().as_encoded_bytes();
+    // v0.9.14: any .sys file is OS-managed (drivers, paging files,
+    // hibernation, etc.) - never classify as "apps" even when the
+    // extension lookup would otherwise place it there. Also catches
+    // pagefile.sys / hiberfil.sys / swapfile.sys at the drive root,
+    // which previously fell through to "apps" via the .sys ext rule.
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if file_name.to_ascii_lowercase().ends_with(".sys") {
+        return "system";
+    }
     if path_bytes_contains_ci(path_bytes, br"\program files\")
         || path_bytes_contains_ci(path_bytes, br"\program files (x86)\")
         || path_bytes_contains_ci(path_bytes, br"\programdata\")
@@ -4785,8 +5265,8 @@ fn storage_bucket_for_ext(ext: &str) -> &'static str {
         "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "rtf" | "odt"
         | "epub" | "PDF" | "DOC" | "DOCX" | "XLS" | "XLSX" | "PPT" | "PPTX" | "TXT" | "MD"
         | "RTF" | "ODT" | "EPUB" => "documents",
-        "exe" | "msi" | "msix" | "appx" | "dll" | "sys" | "EXE" | "MSI" | "MSIX" | "APPX"
-        | "DLL" | "SYS" => "apps",
+        "exe" | "msi" | "msix" | "appx" | "dll" | "EXE" | "MSI" | "MSIX" | "APPX" | "DLL" => "apps",
+        "sys" | "SYS" => "system",
         _ => "other",
     }
 }
@@ -4894,7 +5374,7 @@ fn scan_storage_with_progress(
         .collect();
 
     #[derive(PartialEq, Eq, Clone)]
-    struct MinByBytes(std::cmp::Reverse<u64>, String);
+    struct MinByBytes(std::cmp::Reverse<u64>, String, i64);
     impl Ord for MinByBytes {
         fn cmp(&self, other: &Self) -> std::cmp::Ordering {
             self.0.cmp(&other.0)
@@ -4912,14 +5392,20 @@ fn scan_storage_with_progress(
         top: StdMutex<BinaryHeap<MinByBytes>>,
     }
 
-    fn push_top(heap: &mut BinaryHeap<MinByBytes>, cap: usize, size: u64, path: String) {
+    fn push_top(
+        heap: &mut BinaryHeap<MinByBytes>,
+        cap: usize,
+        size: u64,
+        modified: i64,
+        path: String,
+    ) {
         if heap.len() < cap {
-            heap.push(MinByBytes(std::cmp::Reverse(size), path));
+            heap.push(MinByBytes(std::cmp::Reverse(size), path, modified));
         } else if let Some(min) = heap.peek()
             && (min.0).0 < size
         {
             heap.pop();
-            heap.push(MinByBytes(std::cmp::Reverse(size), path));
+            heap.push(MinByBytes(std::cmp::Reverse(size), path, modified));
         }
     }
 
@@ -4939,8 +5425,14 @@ fn scan_storage_with_progress(
             .collect(),
     );
 
+    #[derive(Clone, Copy, Default)]
+    struct FolderAggregate {
+        bytes: u64,
+        modified: i64,
+    }
+
     const SHARDS: usize = 64;
-    let folder_shards: Arc<Vec<StdMutex<HashMap<String, u64>>>> =
+    let folder_shards: Arc<Vec<StdMutex<HashMap<String, FolderAggregate>>>> =
         Arc::new((0..SHARDS).map(|_| StdMutex::new(HashMap::new())).collect());
 
     let total_bytes_atomic = Arc::new(AtomicU64::new(0));
@@ -4967,7 +5459,7 @@ fn scan_storage_with_progress(
             let progress_ref = progress_ref.clone();
             let scan_ctx = scan_ctx.clone();
             move |_depth, _dir_path, _state, children| {
-                let mut files: Vec<(u64, PathBuf)> = Vec::new();
+                let mut files: Vec<(u64, i64, PathBuf)> = Vec::new();
                 children.retain(|c| {
                     let Ok(entry) = c.as_ref() else {
                         return false;
@@ -4978,11 +5470,15 @@ fn scan_storage_with_progress(
                             .iter()
                             .any(|skip| name.eq_ignore_ascii_case(skip));
                     }
-                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                    files.push((size, entry.path()));
+                    let Ok(metadata) = entry.metadata() else {
+                        return false;
+                    };
+                    let size = metadata.len();
+                    let modified = unix_secs_i64(metadata.modified());
+                    files.push((size, modified, entry.path()));
                     false
                 });
-                files.par_iter().for_each(|(size, path)| {
+                files.par_iter().for_each(|(size, modified, path)| {
                     if let Some(p) = progress_ref.as_ref()
                         && p.cancelled.load(Ordering::Relaxed)
                     {
@@ -4999,7 +5495,7 @@ fn scan_storage_with_progress(
 
                     let path_str = path.to_string_lossy().into_owned();
                     if let Ok(mut heap) = state.top.lock() {
-                        push_top(&mut heap, per_bucket_n, *size, path_str.clone());
+                        push_top(&mut heap, per_bucket_n, *size, *modified, path_str.clone());
                     }
 
                     const AGG_MAX_DEPTH: usize = 3;
@@ -5013,7 +5509,9 @@ fn scan_storage_with_progress(
                         let key = p.to_string_lossy();
                         let shard_idx = (fxhash_str(key.as_ref()) as usize) % SHARDS;
                         if let Ok(mut shard) = folder_shards[shard_idx].lock() {
-                            *shard.entry(key.into_owned()).or_insert(0) += *size;
+                            let agg = shard.entry(key.into_owned()).or_default();
+                            agg.bytes = agg.bytes.saturating_add(*size);
+                            agg.modified = agg.modified.max(*modified);
                         }
                         cur = p.parent();
                     }
@@ -5052,7 +5550,7 @@ fn scan_storage_with_progress(
         let entries: Vec<StorageEntry> = heap
             .into_iter()
             .rev()
-            .map(|MinByBytes(size_rev, path)| {
+            .map(|MinByBytes(size_rev, path, modified)| {
                 let name = Path::new(&path)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -5061,6 +5559,7 @@ fn scan_storage_with_progress(
                     path,
                     name,
                     bytes: size_rev.0,
+                    modified,
                     is_dir: false,
                     bucket: (*id).to_string(),
                 }
@@ -5095,16 +5594,18 @@ fn scan_storage_with_progress(
     let scanned_files = total_files_atomic.load(Ordering::Relaxed);
 
     // Combine all folder shards then take top folders.
-    let mut folder_sizes: HashMap<String, u64> = HashMap::new();
+    let mut folder_sizes: HashMap<String, FolderAggregate> = HashMap::new();
     for shard in folder_shards.iter() {
         if let Ok(map) = shard.lock() {
             for (k, v) in map.iter() {
-                *folder_sizes.entry(k.clone()).or_insert(0) += v;
+                let agg = folder_sizes.entry(k.clone()).or_default();
+                agg.bytes = agg.bytes.saturating_add(v.bytes);
+                agg.modified = agg.modified.max(v.modified);
             }
         }
     }
-    let mut folders: Vec<(String, u64)> = folder_sizes.into_iter().collect();
-    folders.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
+    let mut folders: Vec<(String, FolderAggregate)> = folder_sizes.into_iter().collect();
+    folders.sort_unstable_by_key(|b| std::cmp::Reverse(b.1.bytes));
 
     // Global top-N: favor FOLDERS over individual files (4:1 mix). A single
     // game install folder at 80 GB is far more useful to surface than 50
@@ -5123,7 +5624,7 @@ fn scan_storage_with_progress(
     let top_folders: Vec<StorageEntry> = folders
         .iter()
         .take(folders_slots)
-        .map(|(path, size)| {
+        .map(|(path, agg)| {
             let name = Path::new(&path)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -5132,7 +5633,8 @@ fn scan_storage_with_progress(
             StorageEntry {
                 path: path.clone(),
                 name,
-                bytes: *size,
+                bytes: agg.bytes,
+                modified: agg.modified,
                 is_dir: true,
                 bucket,
             }
@@ -5155,7 +5657,7 @@ fn scan_storage_with_progress(
     let mut completed_buckets = 0usize;
     // Bounded to top 4 000 folders so the classify loop stays cheap
     // even when one or two buckets have few matching folders.
-    for (path, size) in folders.iter().take(4000) {
+    for (path, agg) in folders.iter().take(4000) {
         if completed_buckets >= buckets_count {
             break;
         }
@@ -5183,7 +5685,8 @@ fn scan_storage_with_progress(
         vec.push(StorageEntry {
             path: path.clone(),
             name,
-            bytes: *size,
+            bytes: agg.bytes,
+            modified: agg.modified,
             is_dir: true,
             bucket,
         });
@@ -5198,6 +5701,19 @@ fn scan_storage_with_progress(
         p.done.store(true, Ordering::Release);
     }
 
+    let root_signature = capture_storage_root_signature(root);
+    let (duplicate_groups, duplicate_count, duplicate_reclaimable_bytes) = if progress
+        .as_ref()
+        .map(|p| p.cancelled.load(Ordering::Relaxed))
+        .unwrap_or(false)
+    {
+        (0, 0, 0)
+    } else {
+        find_duplicates_impl(root, STORAGE_DUPLICATE_MIN_SIZE)
+            .map(|groups| duplicate_reclaimable_bytes(&groups))
+            .unwrap_or((0, 0, 0))
+    };
+
     StorageScanResult {
         root: root.to_string_lossy().into_owned(),
         total_bytes,
@@ -5208,6 +5724,10 @@ fn scan_storage_with_progress(
         bucket_items,
         bucket_folder_items,
         elapsed_ms: started.elapsed().as_millis() as u64,
+        root_signature,
+        duplicate_groups,
+        duplicate_count,
+        duplicate_reclaimable_bytes,
     }
 }
 
@@ -5233,7 +5753,10 @@ fn path_is_strict_parent(parent: &str, child: &str) -> bool {
 /// hiding Epic/GOG/standalone installs and limiting users to ~5 entries.
 /// The generic dedup pass below already collapses nested duplicates;
 /// non-steam app folders sit alongside steam games naturally.
-fn refine_storage_drill_folders(_bucket_id: &str, mut folders: Vec<StorageEntry>) -> Vec<StorageEntry> {
+fn refine_storage_drill_folders(
+    _bucket_id: &str,
+    mut folders: Vec<StorageEntry>,
+) -> Vec<StorageEntry> {
     folders.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
     let mut out: Vec<StorageEntry> = Vec::new();
     for e in folders {
@@ -5284,6 +5807,7 @@ mod storage_tests {
                 path: r"C:\Steam\steamapps\common".to_string(),
                 name: "common".to_string(),
                 bytes: 200,
+                modified: 0,
                 is_dir: true,
                 bucket: "apps".to_string(),
             },
@@ -5291,6 +5815,7 @@ mod storage_tests {
                 path: r"C:\Steam\steamapps\common\GameA".to_string(),
                 name: "GameA".to_string(),
                 bytes: 150,
+                modified: 0,
                 is_dir: true,
                 bucket: "apps".to_string(),
             },
@@ -5298,6 +5823,7 @@ mod storage_tests {
                 path: r"C:\Steam\steamapps\common\GameA\pak".to_string(),
                 name: "pak".to_string(),
                 bytes: 50,
+                modified: 0,
                 is_dir: true,
                 bucket: "apps".to_string(),
             },
@@ -6500,6 +7026,7 @@ enum PendingPrompt {
         dest: String,
         cut: bool,
     },
+    StorageCleanup(Vec<String>),
     RenameTag(String),
 }
 
@@ -6536,6 +7063,10 @@ struct NativeController {
     storage_progress: Arc<StorageScanProgress>,
     storage_current_root: String,
     storage_selected_bucket: String,
+    // v0.9.14: drill-in search filter (case-insensitive substring).
+    // Empty = no filter. Re-applied on every push_storage_top_items
+    // call so the bound model and the input box stay in sync.
+    storage_drill_search: String,
     // Snapshots of the preview pane's prior visibility + width so closing
     // the storage view restores the pane to exactly what the user had
     // before opening Storage. Captured in open_storage_view.
@@ -6652,6 +7183,22 @@ fn native_data_dir() -> PathBuf {
 
 fn native_data_file(name: &str) -> PathBuf {
     native_data_dir().join(name)
+}
+
+fn read_storage_scan_cache() -> Option<StorageScanResult> {
+    let path = native_data_file("storage_scan_cache.json");
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|data| serde_json::from_str::<StorageScanResult>(&data).ok())
+}
+
+fn write_storage_scan_cache(result: &StorageScanResult) -> Result<(), String> {
+    let path = native_data_file("storage_scan_cache.json");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let data = serde_json::to_string_pretty(result).map_err(|e| e.to_string())?;
+    fs::write(path, data).map_err(|e| e.to_string())
 }
 
 fn native_index_file() -> PathBuf {
@@ -8811,7 +9358,11 @@ fn native_delete_fast(state: &AppState, path: &str) -> Result<(), String> {
     native_delete_inner(state, path, false)
 }
 
-fn native_delete_inner(state: &AppState, path: &str, measure_folder_bytes: bool) -> Result<(), String> {
+fn native_delete_inner(
+    state: &AppState,
+    path: &str,
+    measure_folder_bytes: bool,
+) -> Result<(), String> {
     if state.queue_is_paused() {
         return Err("Operation queue is paused.".to_string());
     }
@@ -10092,7 +10643,10 @@ fn is_always_list_view_folder(lower: &str) -> bool {
         }
     }
     // Documents / Downloads (any drive, any depth-1 location).
-    let segments: Vec<&str> = trimmed.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
+    let segments: Vec<&str> = trimmed
+        .split(['\\', '/'])
+        .filter(|s| !s.is_empty())
+        .collect();
     let Some(last) = segments.last() else {
         return false;
     };
@@ -10215,7 +10769,7 @@ impl NativeController {
             history: vec![current_path.clone()],
             history_index: 0,
             path_scroll: HashMap::new(),
-            storage_cache: None,
+            storage_cache: read_storage_scan_cache(),
             storage_scan_pending: Arc::new(Mutex::new(None)),
             storage_scan_ready: Arc::new(AtomicBool::new(false)),
             storage_scan_generation: Arc::new(AtomicU64::new(0)),
@@ -10225,6 +10779,7 @@ impl NativeController {
             storage_progress: Arc::new(StorageScanProgress::default()),
             storage_current_root: String::new(),
             storage_selected_bucket: String::new(),
+            storage_drill_search: String::new(),
             storage_preview_visible_before: false,
             storage_preview_w_before: 326.0,
             storage_subtitle_last_update: Instant::now(),
@@ -13546,18 +14101,29 @@ impl NativeController {
                 ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
                 self.show_toast_kind(ui, "Tag renamed", "success");
             }
-            Some(PendingPrompt::Archive) | None => {}
+            Some(PendingPrompt::Archive) | Some(PendingPrompt::StorageCleanup(_)) | None => {}
         }
     }
 
     fn confirm_delete(&mut self, ui: &MainWindow) {
-        let paths = self.selected_paths();
+        let cleanup_paths = match self.pending_prompt.take() {
+            Some(PendingPrompt::StorageCleanup(paths)) => Some(paths),
+            other => {
+                self.pending_prompt = other;
+                None
+            }
+        };
+        let from_storage_cleanup = cleanup_paths.is_some();
+        let paths = cleanup_paths.unwrap_or_else(|| self.selected_paths());
         if paths.is_empty() {
             return;
         }
         ui.set_confirm_visible(false);
 
         let n = paths.len();
+        if from_storage_cleanup {
+            self.storage_cache = None;
+        }
         self.selected_set.clear();
         self.secondary_selected_set.clear();
         self.selected_index = -1;
@@ -13606,7 +14172,11 @@ impl NativeController {
                 }
             } else {
                 let msg = if n == 1 {
-                    "Moved to Recycle Bin".to_string()
+                    if from_storage_cleanup {
+                        "Cleanup item moved to Recycle Bin".to_string()
+                    } else {
+                        "Moved to Recycle Bin".to_string()
+                    }
                 } else {
                     format!("{n} items moved to Recycle Bin")
                 };
@@ -14899,6 +15469,8 @@ impl NativeController {
         ui.set_storage_selected_bucket_name(ss(""));
         self.storage_show_all_state = false;
         ui.set_storage_show_all(false);
+        self.storage_drill_search.clear();
+        ui.set_storage_drill_search(ss(""));
         // Cancel any in-flight scan so it stops burning CPU/disk when the
         // user has already moved on. The scan thread checks the cancelled
         // flag every batch and bails out early.
@@ -14927,6 +15499,7 @@ impl NativeController {
                     name: ss(label),
                     path: ss(&d.path),
                     bytes_text: ss(""),
+                    modified_text: ss(""),
                     bucket: ss(if d.kind == "local" {
                         "Fixed"
                     } else {
@@ -14979,6 +15552,128 @@ impl NativeController {
             }
             ready.store(true, Ordering::Release);
         });
+    }
+
+    fn rescan_storage(&mut self, ui: &MainWindow) {
+        if let Some(mut cached) = self
+            .storage_cache
+            .clone()
+            .filter(|r| r.root == self.storage_current_root)
+            && storage_root_signature_matches(&cached)
+        {
+            cached.scanned_at = now_unix_secs() as i64;
+            cached.elapsed_ms = 0;
+            self.storage_cache = Some(cached.clone());
+            let _ = write_storage_scan_cache(&cached);
+            self.push_storage_to_ui(ui, &cached);
+            self.show_toast_kind(ui, "Storage cache is current", "success");
+            return;
+        }
+        self.storage_cache = None;
+        self.start_storage_scan(ui);
+    }
+
+    fn storage_cleanup_entries_for_action(&self, action: &str) -> Vec<StorageEntry> {
+        let Some(result) = self.storage_cache.as_ref() else {
+            return Vec::new();
+        };
+        let now = now_unix_secs() as i64;
+        let mut entries: Vec<StorageEntry> = match action {
+            "cleanup:old-downloads" => collect_storage_tip_entries(result)
+                .into_iter()
+                .filter(|e| {
+                    e.modified > 0
+                        && now.saturating_sub(e.modified) > 90 * 86_400
+                        && entry_path_has_marker(e, &["\\downloads\\", "/downloads/"])
+                })
+                .take(40)
+                .collect(),
+            "cleanup:stale" => collect_storage_tip_entries(result)
+                .into_iter()
+                .filter(|e| {
+                    e.modified > 0
+                        && now.saturating_sub(e.modified) > 365 * 86_400
+                        && !entry_is_system_reserved(e)
+                        && !entry_path_has_marker(e, &["\\windows\\", "/windows/"])
+                })
+                .take(40)
+                .collect(),
+            _ => Vec::new(),
+        };
+        entries.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
+        entries
+    }
+
+    fn prepare_storage_tip_action(&mut self, ui: &MainWindow, action: String, _path: String) {
+        if action == "duplicates" {
+            if let Some(result) = self.storage_cache.as_ref() {
+                ui.set_preview_visible(true);
+                ui.set_preview_title(ss("Duplicate Finder"));
+                ui.set_preview_body(ss(format!(
+                    "{} large duplicate file{} across {} group{}.\nEstimated reclaimable: {}\n\nOpen the drive root and run Find Duplicates when you are ready to choose which copies to keep.",
+                    result.duplicate_count,
+                    if result.duplicate_count == 1 { "" } else { "s" },
+                    result.duplicate_groups,
+                    if result.duplicate_groups == 1 { "" } else { "s" },
+                    format_size_short(result.duplicate_reclaimable_bytes)
+                )));
+                ui.set_preview_meta(ss(format!(
+                    "Minimum duplicate size: {}",
+                    format_size_short(STORAGE_DUPLICATE_MIN_SIZE)
+                )));
+            }
+            return;
+        }
+
+        let mut entries = self.storage_cleanup_entries_for_action(&action);
+        if entries.is_empty() {
+            self.show_toast_kind(ui, "No cleanup items found for this tip", "info");
+            return;
+        }
+        entries.sort_unstable_by_key(|e| e.path.len());
+        let mut paths: Vec<String> = Vec::new();
+        let mut cleanup_total = 0u64;
+        for entry in entries {
+            if paths
+                .iter()
+                .any(|parent| path_is_strict_parent(parent, &entry.path) || parent == &entry.path)
+            {
+                continue;
+            }
+            cleanup_total = cleanup_total.saturating_add(entry.bytes);
+            paths.push(entry.path);
+        }
+        if paths.is_empty() {
+            self.show_toast_kind(ui, "No cleanup items found for this tip", "info");
+            return;
+        }
+
+        let preview = paths
+            .iter()
+            .take(8)
+            .map(|path| {
+                Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let n = paths.len();
+        self.pending_prompt = Some(PendingPrompt::StorageCleanup(paths));
+        let question = if n == 1 {
+            "Delete this item to the Recycle Bin?".to_string()
+        } else {
+            format!("Delete these {n} items to the Recycle Bin?")
+        };
+        ui.set_confirm_text(ss(format!(
+            "{}\n\nEstimated reclaimable: {}\n\n{}{}",
+            question,
+            format_size_short(cleanup_total),
+            preview,
+            if n > 8 { "\n..." } else { "" }
+        )));
+        ui.set_confirm_visible(true);
     }
 
     fn switch_storage_root(&mut self, ui: &MainWindow, new_root: String) {
@@ -15046,10 +15741,8 @@ impl NativeController {
                     .get(&self.storage_selected_bucket)
                     .cloned()
                     .unwrap_or_default();
-                let refined_folders = refine_storage_drill_folders(
-                    &self.storage_selected_bucket,
-                    folders_raw,
-                );
+                let refined_folders =
+                    refine_storage_drill_folders(&self.storage_selected_bucket, folders_raw);
                 let files: Vec<StorageEntry> = result
                     .bucket_items
                     .get(&self.storage_selected_bucket)
@@ -15077,19 +15770,35 @@ impl NativeController {
                 merged.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
                 merged
             };
-        let largest = entries_src.first().map(|e| e.bytes).unwrap_or(0).max(1);
+        // v0.9.14: search filter applied AFTER sorting + bucket
+        // selection so the user's "show me everything in this bucket"
+        // input narrows what's already there, never widens the scope.
+        let search_lower = self.storage_drill_search.trim().to_lowercase();
+        let filtered: Vec<StorageEntry> = if search_lower.is_empty() {
+            entries_src
+        } else {
+            entries_src
+                .into_iter()
+                .filter(|e| {
+                    e.name.to_lowercase().contains(&search_lower)
+                        || e.path.to_lowercase().contains(&search_lower)
+                })
+                .collect()
+        };
+        let largest = filtered.first().map(|e| e.bytes).unwrap_or(0).max(1);
         let limit = if self.storage_selected_bucket.is_empty() {
             usize::MAX
         } else {
             STORAGE_BUCKET_DRILL_LIMIT
         };
-        let entries: Vec<StorageEntryUi> = entries_src
+        let entries: Vec<StorageEntryUi> = filtered
             .into_iter()
             .take(limit)
             .map(|e| StorageEntryUi {
                 name: ss(&e.name),
                 path: ss(&e.path),
                 bytes_text: ss(format_size_short(e.bytes)),
+                modified_text: ss(format_storage_entry_age(e.modified)),
                 bucket: ss(bucket_display_name(&e.bucket)),
                 is_dir: e.is_dir,
                 bar_pct: ((e.bytes as f64 / largest as f64) * 100.0) as f32,
@@ -15244,6 +15953,7 @@ impl NativeController {
         self.storage_scan_active = false;
         if let Some(result) = result {
             self.storage_cache = Some(result.clone());
+            let _ = write_storage_scan_cache(&result);
             if ui.get_is_storage_view() {
                 self.push_storage_to_ui(ui, &result);
             } else {
@@ -15255,6 +15965,10 @@ impl NativeController {
     }
 
     fn select_storage_bucket(&mut self, ui: &MainWindow, bucket_id: String) {
+        // Reset the search filter when switching buckets so a query
+        // typed in one category doesn't silently narrow the next.
+        self.storage_drill_search.clear();
+        ui.set_storage_drill_search(ss(""));
         self.storage_selected_bucket = bucket_id.clone();
         ui.set_storage_selected_bucket(ss(&bucket_id));
         let name = self
@@ -15278,6 +15992,8 @@ impl NativeController {
         // (matches user mental model: X closes the drill-in).
         self.storage_show_all_state = false;
         ui.set_storage_show_all(false);
+        self.storage_drill_search.clear();
+        ui.set_storage_drill_search(ss(""));
         // Return to the overview with the preview pane hidden. The user's
         // original preview visibility/width is restored when storage closes.
         ui.set_preview_visible(false);
@@ -16200,8 +16916,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_storage_rescan(move || {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().storage_cache = None;
-            c.borrow_mut().start_storage_scan(&ui);
+            c.borrow_mut().rescan_storage(&ui);
         }
     });
     let weak = ui.as_weak();
@@ -16260,6 +16975,25 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut()
                 .switch_storage_root(&ui, new_root.to_string());
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_storage_drill_search_changed(move |q| {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.storage_drill_search = q.to_string();
+            if let Some(result) = ctrl.storage_cache.clone() {
+                ctrl.push_storage_top_items(&ui, &result);
+            }
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_storage_tip_action(move |action, path| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut()
+                .prepare_storage_tip_action(&ui, action.to_string(), path.to_string());
         }
     });
 

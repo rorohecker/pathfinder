@@ -80,6 +80,7 @@ export struct StorageEntryUi {
     name: string,
     path: string,
     bytes_text: string,
+    modified_text: string,
     bucket: string,
     is_dir: bool,
     bar_pct: float,
@@ -113,6 +114,7 @@ export struct StorageTipUi {
     bytes_text: string,
     severity: string,
     path: string,
+    action: string,
     accent: color,
 }
 
@@ -1812,9 +1814,9 @@ component StorageEntryRow inherits Rectangle {
     // Size readout - the loudest text on the row.
     Text {
         x: root.size_x;
-        y: 0;
+        y: root.entry.modified_text != "" ? 7px : 0px;
         width: root.col_size_w;
-        height: parent.height;
+        height: root.entry.modified_text != "" ? 18px : parent.height;
         text: root.entry.bytes_text;
         color: ThemePalette.text;
         font-size: 15px;
@@ -1822,6 +1824,18 @@ component StorageEntryRow inherits Rectangle {
         font-family: AppMetrics.mono_font;
         horizontal-alignment: right;
         vertical-alignment: center;
+    }
+    if root.entry.modified_text != "": Text {
+        x: root.size_x;
+        y: 27px;
+        width: root.col_size_w;
+        height: 14px;
+        text: root.entry.modified_text;
+        color: ThemePalette.text_faint;
+        font-size: 10.5px;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        overflow: elide;
     }
     touch := TouchArea {
         mouse-cursor: pointer;
@@ -1910,6 +1924,7 @@ component StorageOverview inherits Rectangle {
     callback switch_root(string);
     callback show_full_list();
     callback open_path(string);
+    callback tip_action(string, string);
     background: ThemePalette.bg;
 
     VerticalLayout {
@@ -1945,7 +1960,12 @@ component StorageOverview inherits Rectangle {
             Text {
                 x: 18px; y: 27px;
                 width: parent.width - 236px; height: 18px;
-                text: root.total_text + (root.subtitle == "" ? "" : " | " + root.subtitle);
+                // Show the disk-wide summary when available (more
+                // actionable: "X used of Y, Z free"); fall back to
+                // the scanned-categories total otherwise.
+                text: root.disk_summary != ""
+                    ? root.disk_summary + (root.subtitle == "" ? "" : "  ·  " + root.subtitle)
+                    : (root.total_text + (root.subtitle == "" ? "" : "  ·  " + root.subtitle));
                 color: ThemePalette.text_muted;
                 font-size: 11px;
                 vertical-alignment: center;
@@ -2004,82 +2024,10 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // Hero "Total storage" strip - shows disk-wide usage and a
-        // stacked colored bar breaking down the scanned categories.
-        // The colored segments make it possible to compare buckets
-        // proportionally at a glance without scanning the cards below.
-        if root.disk_summary != "": hero_strip := Rectangle {
-            property <length> bar_w: parent.width - 36px;
-            preferred-height: 78px;
-            min-height: 78px;
-            max-height: 78px;
-            vertical-stretch: 0;
-            background: ThemePalette.panel;
-            Text {
-                x: 18px; y: 8px;
-                width: parent.width - 36px; height: 16px;
-                text: "Total storage";
-                color: ThemePalette.text_faint;
-                font-size: 10.5px;
-                font-weight: 700;
-                letter-spacing: 0.6px;
-                vertical-alignment: center;
-            }
-            Text {
-                x: 18px; y: 24px;
-                width: parent.width - 36px; height: 18px;
-                text: root.disk_summary;
-                color: ThemePalette.text;
-                font-size: 13px;
-                font-weight: 600;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            // Stacked colored bar - one segment per bucket, widths
-            // proportional to bucket bytes. Falls back to a single
-            // accent bar of used % if no bucket data yet.
-            Rectangle {
-                x: 18px; y: 48px;
-                width: hero_strip.bar_w;
-                height: 10px;
-                border-radius: 5px;
-                background: ThemePalette.panel_alt;
-                clip: true;
-                if root.buckets.length == 0: Rectangle {
-                    x: 0; y: 0;
-                    width: max(4px, parent.width * root.disk_used_pct / 100);
-                    height: parent.height;
-                    border-radius: 5px;
-                    background: ThemePalette.accent;
-                }
-                if root.buckets.length > 0: HorizontalLayout {
-                    x: 0; y: 0;
-                    width: parent.width;
-                    height: parent.height;
-                    spacing: 0;
-                    alignment: start;
-                    for b[i] in root.buckets: Rectangle {
-                        width: max(2px, hero_strip.bar_w * b.percent / 100);
-                        height: parent.height;
-                        background: b.color;
-                    }
-                }
-            }
-            Text {
-                x: 18px; y: 62px;
-                width: parent.width - 36px; height: 12px;
-                text: "Each colored segment is one category - longer = bigger share";
-                color: ThemePalette.text_faint;
-                font-size: 10px;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            Rectangle {
-                x: 0; y: parent.height - 1px;
-                width: parent.width; height: 1px;
-                background: ThemePalette.border;
-            }
-        }
+        // v0.9.14: dropped the dedicated hero strip - the bucket
+        // chips below already convey the per-category breakdown, and
+        // the disk used/free text moved into the compact header so
+        // the treemap + recommendations have more vertical room.
 
         // Drive picker row.
         if root.drives.length > 1: Rectangle {
@@ -2214,7 +2162,13 @@ component StorageOverview inherits Rectangle {
                         chip_pct := Text {
                             x: 24px + chip_name.preferred-width + 6px; y: 0;
                             height: parent.height;
-                            text: round(bucket.percent * 10) / 10 + "%";
+                            // v0.9.14: floor at "<0.1%" so tiny but
+                            // non-zero buckets (e.g. Videos with a
+                            // few hundred MB on a 1TB drive) don't
+                            // misleadingly render as "0%".
+                            text: bucket.percent > 0 && (round(bucket.percent * 10) / 10 == 0)
+                                ? "<0.1%"
+                                : (round(bucket.percent * 10) / 10 + "%");
                             color: bucket.color;
                             font-size: 11px;
                             font-weight: 700;
@@ -2288,11 +2242,12 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // Recommendations - compact 44px rows; vertical-stretch 1 so it
-        // shrinks/grows around the treemap (which takes vertical-stretch 3).
+        // Recommendations - compact 44px rows. v0.9.14: bumped from
+        // stretch 1 to 2 so 5-7 tips are visible at a typical window
+        // height without scrolling now that the hero strip is gone.
         Rectangle {
-            vertical-stretch: 1;
-            min-height: 100px;
+            vertical-stretch: 2;
+            min-height: 180px;
             background: ThemePalette.bg;
             if root.tips.length == 0: Text {
                 x: 24px; y: 14px;
@@ -2364,9 +2319,13 @@ component StorageOverview inherits Rectangle {
                         vertical-alignment: center;
                     }
                     tip_touch := TouchArea {
-                        mouse-cursor: tip.path != "" ? pointer : default;
+                        mouse-cursor: tip.path != "" || tip.action != "" ? pointer : default;
                         clicked => {
-                            if (tip.path != "") { root.open_path(tip.path); }
+                            if (tip.action != "") {
+                                root.tip_action(tip.action, tip.path);
+                            } else if (tip.path != "") {
+                                root.open_path(tip.path);
+                            }
                         }
                     }
                 }
@@ -2384,8 +2343,10 @@ component StorageDrillIn inherits Rectangle {
     in property <string> selected_bucket;
     in property <string> selected_bucket_name;
     in property <bool> scanning;
+    in-out property <string> search_text: "";
     callback open_path(string);
     callback close();
+    callback search_changed(string);
     background: ThemePalette.bg;
 
     // v0.9.13: widened to match the rebuilt StorageEntryRow which
@@ -2404,8 +2365,9 @@ component StorageDrillIn inherits Rectangle {
     // viewport) to explicit absolute positioning. The list area now
     // always reaches the bottom of the pane.
     property <length> header_h: 44px;
+    property <length> search_h: 40px;
     property <length> labels_h: root.top_items.length > 0 ? 28px : 0px;
-    property <length> list_y: root.header_h + root.labels_h;
+    property <length> list_y: root.header_h + root.search_h + root.labels_h;
 
     // Header bar - back, title, close.
     Rectangle {
@@ -2466,10 +2428,79 @@ component StorageDrillIn inherits Rectangle {
         }
     }
 
+    // Search box - filter the visible list by name or path substring.
+    // Rust handles the filter so the model stays bounded even for huge
+    // buckets.
+    Rectangle {
+        x: 0; y: root.header_h;
+        width: parent.width; height: root.search_h;
+        background: ThemePalette.panel;
+        Rectangle {
+            x: 0; y: parent.height - 1px;
+            width: parent.width; height: 1px;
+            background: ThemePalette.border;
+        }
+        Rectangle {
+            x: 12px; y: 6px;
+            width: parent.width - 24px;
+            height: 28px;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: search_input.has-focus ? ThemePalette.accent : ThemePalette.border;
+            background: ThemePalette.bg;
+            SvgIcon {
+                x: 10px; y: 6px;
+                icon_size: 14px;
+                data: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3";
+                tint: ThemePalette.text_faint;
+            }
+            search_input := TextInput {
+                x: 32px; y: 0;
+                width: parent.width - 64px; height: parent.height;
+                text <=> root.search_text;
+                color: ThemePalette.text;
+                font-size: 12px;
+                vertical-alignment: center;
+                horizontal-alignment: left;
+                edited => { root.search_changed(self.text); }
+            }
+            if root.search_text == "": Text {
+                x: 32px; y: 0;
+                width: parent.width - 64px; height: parent.height;
+                text: "Search by name or path...";
+                color: ThemePalette.text_faint;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+            if root.search_text != "": Rectangle {
+                x: parent.width - 28px; y: 4px;
+                width: 20px; height: 20px;
+                border-radius: 10px;
+                background: clear_touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
+                Text {
+                    width: parent.width; height: parent.height;
+                    text: "X";
+                    color: ThemePalette.text_muted;
+                    font-size: 11px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                clear_touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.search_text = "";
+                        root.search_changed("");
+                    }
+                }
+            }
+        }
+    }
+
     // Column labels - mirror StorageEntryRow's right-aligned absolute
     // columns so labels sit exactly above the cells.
     if root.top_items.length > 0: labels_row := Rectangle {
-        x: 0; y: root.header_h;
+        x: 0; y: root.header_h + root.search_h;
         width: parent.width; height: root.labels_h;
         background: ThemePalette.panel;
         property <length> size_x: parent.width - root.col_right_pad - root.col_size_w;
@@ -2547,18 +2578,20 @@ component StorageDrillIn inherits Rectangle {
     }
     // Empty state.
     if root.top_items.length == 0: Rectangle {
-        x: 0; y: root.header_h;
+        x: 0; y: root.header_h + root.search_h;
         width: parent.width;
-        height: parent.height - root.header_h;
+        height: parent.height - root.header_h - root.search_h;
         background: ThemePalette.bg;
         Text {
             x: 24px; y: 24px;
             width: parent.width - 48px;
             text: root.scanning
                 ? "Still scanning - results will appear shortly."
-                : (root.selected_bucket != ""
-                    ? ("No large items found in " + root.selected_bucket_name + ".")
-                    : "No items to show. Click Rescan to start.");
+                : (root.search_text != ""
+                    ? ("No matches for \"" + root.search_text + "\" in this category.")
+                    : (root.selected_bucket != ""
+                        ? ("No large items found in " + root.selected_bucket_name + ".")
+                        : "No items to show. Click Rescan to start."));
             color: ThemePalette.text_muted;
             font-size: 12px;
         }
@@ -2648,6 +2681,11 @@ export component MainWindow inherits Window {
     in-out property <int> storage_progress_files: 0;
     in-out property <string> storage_progress_bytes_text: "";
     in-out property <float> storage_progress_percent: 0;
+    // Drill-in search filter - user types here to narrow the bucket
+    // drill-in list. Rust filters server-side so the model stays
+    // bounded even on huge buckets.
+    in-out property <string> storage_drill_search: "";
+    callback storage_drill_search_changed(string);
     // Disk-wide totals shown in the overview's hero bar.
     in-out property <string> storage_disk_summary: "";
     in-out property <float> storage_disk_used_pct: 0;
@@ -2662,6 +2700,7 @@ export component MainWindow inherits Window {
     callback storage_select_bucket(string);
     callback storage_clear_bucket();
     callback storage_switch_root(string);
+    callback storage_tip_action(string, string);
     // Per-folder scroll memory. Rust saves the leaving folder's viewport-y and
     // restores the arriving folder's saved value on every navigate so back / up
     // / re-entering a folder land on the row the user was looking at, not the top.
@@ -4227,8 +4266,10 @@ export component MainWindow inherits Window {
                     show_all: root.storage_show_all;
                     selected_bucket: root.storage_selected_bucket;
                     selected_bucket_name: root.storage_selected_bucket_name;
+                    search_text <=> root.storage_drill_search;
                     open_path(p) => { root.storage_open_path(p); }
                     close => { root.storage_clear_bucket(); }
+                    search_changed(q) => { root.storage_drill_search_changed(q); }
                 }
 
                 // Storage overview (bucket grid) when no drill-in is active.
@@ -4256,6 +4297,7 @@ export component MainWindow inherits Window {
                     switch_root(r) => { root.storage_switch_root(r); }
                     show_full_list => { root.storage_toggle_show_all(); }
                     open_path(p) => { root.storage_open_path(p); }
+                    tip_action(action, path) => { root.storage_tip_action(action, path); }
                 }
             }
 
