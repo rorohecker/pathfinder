@@ -1842,6 +1842,7 @@ component StorageOverview inherits Rectangle {
     in property <string> disk_summary;
     in property <float> disk_used_pct;
     in property <[StorageTipUi]> tips;
+    in property <[StorageEntryUi]> top_items;
     callback rescan();
     callback select_bucket(string);
     callback switch_root(string);
@@ -2156,13 +2157,19 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // v0.9.16: recommendations now own all remaining vertical
-        // space - vertical-stretch: 1 with no upper cap and no other
-        // stretch siblings, so the list runs all the way to the
-        // bottom of the storage view at any window height.
+        // v0.9.17: recommendations are now intrinsically-sized
+        // (preferred-height = tip rows + padding, capped so a flood
+        // of tips still scrolls). The page no longer looks empty when
+        // there are only a few tips because the "Largest items"
+        // section below takes the remaining vertical space.
         Rectangle {
-            vertical-stretch: 1;
-            min-height: 180px;
+            property <length> needed_h: root.tips.length == 0
+                ? 70px
+                : min(8px + (root.tips.length * 50px), 460px);
+            preferred-height: self.needed_h;
+            min-height: self.needed_h;
+            max-height: self.needed_h;
+            vertical-stretch: 0;
             background: ThemePalette.bg;
             if root.tips.length == 0: Text {
                 x: 24px; y: 14px;
@@ -2243,6 +2250,57 @@ component StorageOverview inherits Rectangle {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Largest items - fills whatever vertical space remains after
+        // recommendations. Shows top 30 folders/files from the scan
+        // sorted by size; click any row to open. Replaces the dead
+        // empty area at the bottom of the page when the rec list is
+        // short.
+        Rectangle {
+            preferred-height: 26px;
+            min-height: 26px;
+            max-height: 26px;
+            vertical-stretch: 0;
+            background: ThemePalette.bg;
+            Text {
+                x: 18px; y: 0;
+                width: parent.width - 36px; height: parent.height;
+                text: "Largest items - click any row to open";
+                color: ThemePalette.text_faint;
+                font-size: 10.5px;
+                font-weight: 700;
+                letter-spacing: 0.6px;
+                vertical-alignment: bottom;
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            min-height: 120px;
+            background: ThemePalette.bg;
+            if root.top_items.length == 0: Text {
+                x: 24px; y: 14px;
+                width: parent.width - 48px;
+                text: root.scanning
+                    ? "Largest items will appear once the scan completes."
+                    : "Nothing to list yet. Click Rescan to start.";
+                color: ThemePalette.text_faint;
+                font-size: 12px;
+            }
+            ListView {
+                x: 12px; y: 4px;
+                width: parent.width - 24px;
+                height: parent.height - 12px;
+                for entry[i] in root.top_items: StorageEntryRow {
+                    width: parent.width;
+                    entry: entry;
+                    show_bucket_label: true;
+                    col_category_w: 120px;
+                    col_share_w: 140px;
+                    col_size_w: 110px;
+                    open => { root.open_path(entry.path); }
                 }
             }
         }
@@ -4204,6 +4262,7 @@ export component MainWindow inherits Window {
                     disk_summary: root.storage_disk_summary;
                     disk_used_pct: root.storage_disk_used_pct;
                     tips: root.storage_tips;
+                    top_items: root.storage_top_items;
                     rescan => { root.storage_rescan(); }
                     select_bucket(b) => { root.storage_select_bucket(b); }
                     switch_root(r) => { root.storage_switch_root(r); }
