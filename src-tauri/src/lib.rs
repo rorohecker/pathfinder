@@ -145,8 +145,9 @@ impl NoWindow for ProcessCommand {
 }
 const FIRST_DIRECTORY_CHUNK: usize = 2_500;
 const LARGE_DIRECTORY_GIT_CAP: usize = 20_000;
-const SEARCH_INDEX_LIMIT: usize = 800;
-const SEARCH_LIVE_SCAN_LIMIT: usize = 1_200;
+const SEARCH_INDEX_LIMIT: usize = 1_200;
+const SEARCH_LIVE_SCAN_LIMIT: usize = 5_000;
+const SEARCH_DRIVE_SCAN_LIMIT: usize = 50_000;
 const ARCHIVE_SCHEME: &str = "archive://";
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -1346,10 +1347,12 @@ fn capture_storage_root_signature(root: &Path) -> Vec<StorageRootMtime> {
     out
 }
 
-fn storage_root_signature_matches(result: &StorageScanResult) -> bool {
-    !result.root_signature.is_empty()
-        && capture_storage_root_signature(Path::new(&result.root)) == result.root_signature
-}
+// Note: storage_root_signature_matches was removed in v0.9.18 - it
+// powered a Rescan fast-path that reused the cache when top-level
+// subdir mtimes hadn't changed, but uninstallers that leave stale
+// folders behind would silently slip past the check. The signature
+// is still persisted in the scan result for potential future use
+// (e.g. an explicit "Reload from cache" affordance).
 
 fn file_kind(path: &Path, metadata: &fs::Metadata) -> FileKind {
     if fs::symlink_metadata(path)
@@ -2191,6 +2194,7 @@ fn matches_query(path: &Path, metadata: &fs::Metadata, parsed: &ParsedQuery) -> 
         .unwrap_or_default()
         .to_string_lossy()
         .to_lowercase();
+    let path_lower = path.to_string_lossy().to_lowercase();
     let ext = extension(path);
     let kind = file_type_for_query(path, metadata);
 
@@ -2246,11 +2250,12 @@ fn matches_query(path: &Path, metadata: &fs::Metadata, parsed: &ParsedQuery) -> 
     for term in &parsed.terms {
         let needle = term.as_bytes();
         let in_name = name.contains(term.as_str());
+        let in_path = path_lower.contains(term.as_str());
         let in_content = content
             .as_ref()
             .map(|bytes| memchr::memmem::find(bytes, needle).is_some())
             .unwrap_or(false);
-        if !in_name && !in_content {
+        if !in_name && !in_path && !in_content {
             return false;
         }
     }
@@ -3559,40 +3564,13 @@ fn live_search_scan(
     let dir = PathBuf::from(root);
     let parsed = Arc::new(parse_query(query));
     let generation = state.search_generation.clone();
-    let is_drive_root = {
-        #[cfg(target_os = "windows")]
-        {
-            dir.components().count() == 1
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            dir.to_str() == Some("/")
-        }
-    };
+    let is_drive_root = is_filesystem_root(&dir);
     let mut work_units: Vec<PathBuf> = fs::read_dir(&dir)
         .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).collect())
         .unwrap_or_default();
     if is_drive_root {
-        // Exclude Windows system directories that inflate result counts without user data
-        let skip: &[&str] = &[
-            "windows",
-            "program files",
-            "program files (x86)",
-            "programdata",
-            "$recycle.bin",
-            "system volume information",
-            "perflogs",
-            "recovery",
-        ];
-        work_units.retain(|p| {
-            let name = p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            !skip.contains(&name.as_str())
-        });
-        // Prioritize Users directory so user documents appear first
+        // Search-all really means the whole drive. Keep every root child and
+        // only reorder common user content to surface likely hits sooner.
         work_units.sort_by_key(|p| {
             let name = p
                 .file_name()
@@ -3607,13 +3585,15 @@ fn live_search_scan(
         .into_par_iter()
         .flat_map_iter(|subtree| {
             let parsed = Arc::clone(&parsed);
-            let generation = Arc::clone(&generation);
+            let generation_for_descent = Arc::clone(&generation);
+            let generation_for_match = Arc::clone(&generation);
             WalkDir::new(subtree)
                 .follow_links(false)
                 .into_iter()
+                .filter_entry(move |_| generation_for_descent.load(Ordering::Relaxed) == token)
                 .filter_map(Result::ok)
                 .filter_map(move |entry| {
-                    if generation.load(Ordering::Relaxed) != token {
+                    if generation_for_match.load(Ordering::Relaxed) != token {
                         return None;
                     }
                     let entry_path = entry.path().to_path_buf();
@@ -3661,7 +3641,7 @@ fn hybrid_search_background(
         return (Vec::new(), "cancelled".to_string());
     }
 
-    if results.len() < max.min(80) {
+    if results.len() < max {
         let live = live_search_scan(state, root, query, max.saturating_sub(results.len()), token);
         if !live.is_empty() {
             let _ = upsert_index_entries(&live);
@@ -4412,6 +4392,31 @@ fn compute_ai_capabilities() -> AiCapabilities {
     }
 }
 
+fn local_ai_semantic_ready() -> bool {
+    if !local_ai::core_models_installed() {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let env_runtime = std::env::var("PATHFINDER_LOCAL_AI_RUNTIME")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+        let manifest_installed = matches!(
+            local_ai::read_manifest().state,
+            local_ai::InstallState::Installed
+        );
+        local_ai::onnx_runtime_installed() || env_runtime || manifest_installed
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
+}
+
+fn local_ai_image_search_ready() -> bool {
+    local_ai_semantic_ready() && crate::inference::image_classifier_available()
+}
+
 fn ai_status_label(capabilities: &AiCapabilities) -> &'static str {
     if capabilities.npu_available && capabilities.acceleration_kind == "NPU" {
         "NPU Accelerated"
@@ -5036,6 +5041,156 @@ fn is_too_generic_folder(path: &Path, root_components: usize) -> bool {
     )
 }
 
+fn storage_path_prefixes(path: &Path) -> Vec<(String, PathBuf)> {
+    let mut current = PathBuf::new();
+    let mut out = Vec::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if let std::path::Component::Normal(name) = component {
+            out.push((name.to_string_lossy().to_string(), current.clone()));
+        }
+    }
+    out
+}
+
+fn is_default_storage_segment(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "users"
+            | "appdata"
+            | "local"
+            | "locallow"
+            | "roaming"
+            | "program files"
+            | "program files (x86)"
+            | "programdata"
+            | "steamapps"
+            | "common"
+            | "packages"
+            | "package cache"
+            | "cache"
+            | "caches"
+            | "temp"
+            | "tmp"
+            | "windows"
+            | "microsoft"
+            | "start menu"
+            | "programs"
+            | "$recycle.bin"
+            | "system volume information"
+            | "perflogs"
+            | "recovery"
+    )
+}
+
+fn known_profile_folder(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "desktop" | "documents" | "downloads" | "pictures" | "videos" | "music"
+    )
+}
+
+fn storage_rollup_folder_for_file(file_path: &Path, root_components: usize) -> Option<PathBuf> {
+    let parent = file_path.parent()?;
+    let prefixes = storage_path_prefixes(parent);
+    if prefixes.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = prefixes
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect();
+
+    let first_below_root = prefixes
+        .iter()
+        .position(|(_, path)| path.components().count() > root_components)
+        .unwrap_or(0);
+
+    for i in first_below_root..names.len() {
+        match names[i].as_str() {
+            "users" => {
+                let after_user = i + 2;
+                if names.get(after_user).map(|s| s.as_str()) == Some("appdata") {
+                    let channel = after_user + 1;
+                    let mut owner = if matches!(
+                        names.get(channel).map(|s| s.as_str()),
+                        Some("local" | "locallow" | "roaming")
+                    ) {
+                        channel + 1
+                    } else {
+                        channel
+                    };
+                    while names
+                        .get(owner)
+                        .map(|name| is_default_storage_segment(name))
+                        .unwrap_or(false)
+                        && owner + 1 < names.len()
+                    {
+                        owner += 1;
+                    }
+                    if let Some((_, path)) = prefixes.get(owner) {
+                        return Some(path.clone());
+                    }
+                }
+                if names
+                    .get(after_user)
+                    .map(|name| known_profile_folder(name))
+                    .unwrap_or(false)
+                {
+                    if let Some((_, path)) = prefixes.get(after_user + 1) {
+                        return Some(path.clone());
+                    }
+                    if let Some((_, path)) = prefixes.get(after_user) {
+                        return Some(path.clone());
+                    }
+                }
+                if let Some((_, path)) = prefixes.get(after_user) {
+                    return Some(path.clone());
+                }
+            }
+            "program files" | "program files (x86)" | "programdata" => {
+                let mut owner = i + 1;
+                while names
+                    .get(owner)
+                    .map(|name| is_default_storage_segment(name))
+                    .unwrap_or(false)
+                    && owner + 1 < names.len()
+                {
+                    owner += 1;
+                }
+                if let Some((_, path)) = prefixes.get(owner) {
+                    return Some(path.clone());
+                }
+            }
+            "steamapps" if names.get(i + 1).map(|s| s.as_str()) == Some("common") => {
+                if let Some((_, path)) = prefixes.get(i + 2) {
+                    return Some(path.clone());
+                }
+            }
+            "common" if i > 0 && names.get(i - 1).map(|s| s.as_str()) == Some("steamapps") => {
+                if let Some((_, path)) = prefixes.get(i + 1) {
+                    return Some(path.clone());
+                }
+            }
+            "epic games" | "xboxgames" | "riot games" => {
+                if let Some((_, path)) = prefixes.get(i + 1) {
+                    return Some(path.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    prefixes
+        .iter()
+        .skip(first_below_root)
+        .find(|(name, path)| {
+            !is_default_storage_segment(name) && path.components().count() > root_components
+        })
+        .map(|(_, path)| path.clone())
+        .or_else(|| Some(parent.to_path_buf()))
+}
+
 fn storage_bucket_for(path: &Path, ctx: &StorageScanCtx) -> &'static str {
     let path_bytes = path.as_os_str().as_encoded_bytes();
     // v0.9.14: any .sys file is OS-managed (drivers, paging files,
@@ -5360,22 +5515,16 @@ fn scan_storage_with_progress(
                         push_top(&mut heap, per_bucket_n, *size, *modified, path_str.clone());
                     }
 
-                    const AGG_MAX_DEPTH: usize = 3;
-                    let mut cur = path.parent();
-                    let mut depth = 0usize;
-                    while let Some(p) = cur {
-                        depth += 1;
-                        if p.components().count() <= root_components || depth > AGG_MAX_DEPTH {
-                            break;
+                    if let Some(folder) = storage_rollup_folder_for_file(path, root_components) {
+                        if folder.components().count() > root_components {
+                            let key = folder.to_string_lossy();
+                            let shard_idx = (fxhash_str(key.as_ref()) as usize) % SHARDS;
+                            if let Ok(mut shard) = folder_shards[shard_idx].lock() {
+                                let agg = shard.entry(key.into_owned()).or_default();
+                                agg.bytes = agg.bytes.saturating_add(*size);
+                                agg.modified = agg.modified.max(*modified);
+                            }
                         }
-                        let key = p.to_string_lossy();
-                        let shard_idx = (fxhash_str(key.as_ref()) as usize) % SHARDS;
-                        if let Ok(mut shard) = folder_shards[shard_idx].lock() {
-                            let agg = shard.entry(key.into_owned()).or_default();
-                            agg.bytes = agg.bytes.saturating_add(*size);
-                            agg.modified = agg.modified.max(*modified);
-                        }
-                        cur = p.parent();
                     }
 
                     if let Some(p) = progress_ref.as_ref()
@@ -5622,6 +5771,9 @@ fn refine_storage_drill_folders(
     folders.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
     let mut out: Vec<StorageEntry> = Vec::new();
     for e in folders {
+        if is_default_storage_segment(&e.name) {
+            continue;
+        }
         if out.iter().any(|k| path_is_strict_parent(&k.path, &e.path)) {
             continue;
         }
@@ -5691,9 +5843,33 @@ mod storage_tests {
             },
         ];
         let refined = refine_storage_drill_folders("other", folders);
-        // Largest ancestor wins — nested GameA/pak rows are dropped.
+        // Default container folders are ignored; the highest useful child wins.
         assert_eq!(refined.len(), 1);
-        assert_eq!(refined[0].name, "common");
+        assert_eq!(refined[0].name, "GameA");
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn storage_rollup_skips_default_container_folders() {
+        let root = Path::new(r"C:\");
+        let root_components = root.components().count();
+        let appdata_file =
+            Path::new(r"C:\Users\shade\AppData\Local\Google\Chrome\User Data\Cache\a.bin");
+        let steam_file = Path::new(r"D:\SteamLibrary\steamapps\common\SpaceGame\pak0.pak");
+
+        let appdata_rollup =
+            storage_rollup_folder_for_file(appdata_file, root_components).expect("appdata rollup");
+        let steam_rollup =
+            storage_rollup_folder_for_file(steam_file, root_components).expect("steam rollup");
+
+        assert_eq!(
+            appdata_rollup.file_name().and_then(|n| n.to_str()),
+            Some("Google")
+        );
+        assert_eq!(
+            steam_rollup.file_name().and_then(|n| n.to_str()),
+            Some("SpaceGame")
+        );
     }
 
     #[test]
@@ -6720,7 +6896,7 @@ impl Default for NativeSettings {
             density: "cozy".to_string(),
             wallpaper: "none".to_string(),
             custom_theme: None,
-            index_mode: "low".to_string(),
+            index_mode: "fast".to_string(),
             index_roots: Vec::new(),
             thumbnail_cache_limit_mb: 50,
             // Auto-update check runs once at startup and lights up the green
@@ -7613,6 +7789,10 @@ fn like_escape(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+fn sqlite_limit(max: usize) -> i64 {
+    i64::try_from(max).unwrap_or(i64::MAX)
+}
+
 fn embedding_blob_to_vec(blob: &[u8]) -> Option<Vec<f32>> {
     if !blob.len().is_multiple_of(4) {
         return None;
@@ -7910,7 +8090,7 @@ fn index_search_fts(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params![root_prefix, fts_query, max as i64], |row| {
+        .query_map(params![root_prefix, fts_query, sqlite_limit(max)], |row| {
             let is_dir = row.get::<_, i64>(2)? == 1;
             let ext = row.get::<_, String>(5)?;
             let name: String = row.get(1)?;
@@ -7946,12 +8126,21 @@ fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, S
 
     let conn = open_index_connection()?;
     let root_prefix = format!("{}%", root.trim_end_matches(['\\', '/']));
-    let (name_like, ext_exact) = if let Some(ext) = query.strip_prefix("ext:") {
-        ("%".to_string(), ext.trim_start_matches('.').to_lowercase())
+    let (name_like, path_like, ext_exact) = if let Some(ext) = query.strip_prefix("ext:") {
+        (
+            "%".to_string(),
+            "%".to_string(),
+            ext.trim_start_matches('.').to_lowercase(),
+        )
     } else if let Some(name) = query.strip_prefix("name:") {
-        (format!("%{}%", like_escape(name)), String::new())
+        (
+            format!("%{}%", like_escape(name)),
+            "%".to_string(),
+            String::new(),
+        )
     } else {
-        (format!("%{}%", like_escape(query)), query.to_lowercase())
+        let escaped = format!("%{}%", like_escape(query));
+        (escaped.clone(), escaped, query.to_lowercase())
     };
 
     // COLLATE NOCASE on the `name LIKE ?2` clause is critical - SQLite's
@@ -7965,16 +8154,26 @@ fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, S
             SELECT path, name, is_dir, size, modified, extension
             FROM files
             WHERE path LIKE ?1 ESCAPE '\\'
-              AND (name LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR extension = ?3)
+              AND (
+                name LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+                OR path LIKE ?3 ESCAPE '\\' COLLATE NOCASE
+                OR extension = ?4
+              )
             ORDER BY is_dir DESC, name COLLATE NOCASE ASC
-            LIMIT ?4
+            LIMIT ?5
             ",
         )
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
         .query_map(
-            params![root_prefix, name_like, ext_exact, max as i64],
+            params![
+                root_prefix,
+                name_like,
+                path_like,
+                ext_exact,
+                sqlite_limit(max)
+            ],
             |row| {
                 let is_dir = row.get::<_, i64>(2)? == 1;
                 let ext = row.get::<_, String>(5)?;
@@ -8960,6 +9159,25 @@ fn drive_root_for_path(path: &str) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+fn is_filesystem_root(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let mut components = path.components();
+        matches!(
+            (components.next(), components.next(), components.next()),
+            (
+                Some(std::path::Component::Prefix(_)),
+                Some(std::path::Component::RootDir),
+                None
+            )
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.parent().is_none() || path == Path::new("/")
+    }
 }
 
 fn compact_drive_label(path: &str) -> String {
@@ -10872,6 +11090,20 @@ impl NativeController {
         ui.set_show_windows_integration(true);
         #[cfg(not(target_os = "windows"))]
         ui.set_show_windows_integration(false);
+        let ai_install_state = self
+            .ai_progress
+            .state
+            .lock()
+            .map(|s| *s)
+            .unwrap_or(local_ai::InstallState::NotInstalled);
+        ui.set_ai_install_state(SharedString::from(ai_install_state.as_slint_str()));
+        if !local_ai_semantic_ready() {
+            self.settings.search_semantic_mode = false;
+        }
+        if !local_ai_image_search_ready() {
+            self.settings.clip_search_enabled = false;
+        }
+        ui.set_semantic_search_available(local_ai_semantic_ready());
         ui.set_search_semantic_mode(self.settings.search_semantic_mode);
         ui.set_clip_search_enabled(self.settings.clip_search_enabled);
 
@@ -11158,6 +11390,22 @@ impl NativeController {
         false
     }
 
+    fn entries_for_tag(&self, tag_id: &str) -> Vec<FileEntry> {
+        let mut entries: Vec<FileEntry> = self
+            .tags
+            .iter()
+            .filter(|(_, tag)| tag.eq_ignore_ascii_case(tag_id))
+            .filter_map(|(path, _)| {
+                let path_buf = PathBuf::from(path);
+                let metadata = fs::metadata(&path_buf).ok()?;
+                let entry = path_to_entry(&path_buf, &metadata);
+                (self.show_hidden || !Self::is_hidden_entry(&entry)).then_some(entry)
+            })
+            .collect();
+        sort_entries(&mut entries);
+        entries
+    }
+
     fn apply_filter(&mut self) {
         let query = self.search_query.trim().to_lowercase();
         self.visible_files.clear();
@@ -11205,17 +11453,17 @@ impl NativeController {
             self.apply_sort();
             return;
         }
+        if let Some(expected) = query.strip_prefix("tag:") {
+            self.visible_files = self.entries_for_tag(expected);
+            self.apply_sort();
+            return;
+        }
         for entry in &self.files {
             let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
             let matched = if let Some(expected) = query.strip_prefix("ext:") {
                 ext == expected.trim_start_matches('.')
             } else if let Some(expected) = query.strip_prefix("name:") {
                 entry.name_lower.contains(expected)
-            } else if let Some(expected) = query.strip_prefix("tag:") {
-                self.tags
-                    .get(&entry.path)
-                    .map(|tag| tag == expected)
-                    .unwrap_or(false)
             } else if let Some(expected) = query.strip_prefix("kind:") {
                 let kind = if entry.kind == FileKind::Directory {
                     "folder"
@@ -11232,7 +11480,9 @@ impl NativeController {
                 };
                 kind == expected
             } else {
-                entry.name_lower.contains(&query) || ext.contains(&query)
+                entry.name_lower.contains(&query)
+                    || entry.path.to_lowercase().contains(&query)
+                    || ext.contains(&query)
             };
             if matched && (self.show_hidden || !Self::is_hidden_entry(entry)) {
                 self.visible_files.push(entry.clone());
@@ -12803,12 +13053,14 @@ impl NativeController {
         self.files_model = None;
         let trimmed = self.search_query.trim().to_string();
         let search_root = self.search_root();
+        let semantic_enabled = self.settings.search_semantic_mode && local_ai_semantic_ready();
+        let clip_enabled = self.settings.clip_search_enabled && local_ai_image_search_ready();
         let mut indexed = if trimmed.starts_with("tag:") || trimmed.starts_with("smart:") {
             Vec::new()
         } else {
             index_search(&search_root, &trimmed, SEARCH_INDEX_LIMIT).unwrap_or_default()
         };
-        if (self.settings.search_semantic_mode || self.settings.clip_search_enabled)
+        if (semantic_enabled || clip_enabled)
             && trimmed.len() >= 2
             && !indexed.is_empty()
             && !trimmed.starts_with("tag:")
@@ -12817,8 +13069,8 @@ impl NativeController {
             apply_semantic_search_ranking_entries(
                 &search_root,
                 &trimmed,
-                self.settings.search_semantic_mode,
-                self.settings.clip_search_enabled,
+                semantic_enabled,
+                clip_enabled,
                 &mut indexed,
             );
         }
@@ -12851,16 +13103,15 @@ impl NativeController {
         } else {
             format!("{path} | searching...")
         }));
-        let semantic = self.settings.search_semantic_mode;
-        let clip = self.settings.clip_search_enabled;
+        let semantic = self.settings.search_semantic_mode && local_ai_semantic_ready();
+        let clip = self.settings.clip_search_enabled && local_ai_image_search_ready();
         // Searching from a drive root (or with the search-all-scope toggle on)
-        // pushes the live-scan ceiling up so a folder anywhere on the disk can
-        // surface. The default 1200-cap covers a single directory subtree but
-        // misses targets buried deep in unrelated trees on a full C drive.
+        // uses a much larger live-scan ceiling so the first search pulls from
+        // the whole drive instead of waiting for a second query after indexing.
         let path_for_limit = path.clone();
-        let is_drive_root = std::path::Path::new(&path_for_limit).components().count() == 1;
+        let is_drive_root = is_filesystem_root(std::path::Path::new(&path_for_limit));
         let limit = if self.search_all_scope || is_drive_root {
-            10_000
+            SEARCH_DRIVE_SCAN_LIMIT
         } else {
             SEARCH_LIVE_SCAN_LIMIT
         };
@@ -15417,20 +15668,22 @@ impl NativeController {
     }
 
     fn rescan_storage(&mut self, ui: &MainWindow) {
-        if let Some(mut cached) = self
-            .storage_cache
-            .clone()
-            .filter(|r| r.root == self.storage_current_root)
-            && storage_root_signature_matches(&cached)
-        {
-            cached.scanned_at = now_unix_secs() as i64;
-            cached.elapsed_ms = 0;
-            self.storage_cache = Some(cached.clone());
-            let _ = write_storage_scan_cache(&cached);
-            self.push_storage_to_ui(ui, &cached);
-            self.show_toast_kind(ui, "Storage cache is current", "success");
+        if self.storage_scan_active {
+            self.show_toast_kind(ui, "Storage scan is already running.", "info");
             return;
         }
+        // v0.9.18: the Rescan button now ALWAYS triggers a full
+        // rewalk. Previously a signature-match fast-path skipped the
+        // walker entirely - but the signature only tracks top-level
+        // subdir mtimes, so an uninstaller that leaves stale folders
+        // behind (Ubisoft Connect, leftover game caches, mod
+        // directories) wouldn't shift the signature even though the
+        // actual contents had changed. Cache reuse still happens on
+        // app-launch / storage-view-reopen via the persisted cache;
+        // it's only the explicit Rescan affordance that's been
+        // tightened. Quick signature-only mode is no longer surfaced
+        // - if users want it back we can add a separate "Reload from
+        // cache" button.
         self.storage_cache = None;
         self.start_storage_scan(ui);
     }
@@ -16410,11 +16663,17 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 }
                 let caps = compute_ai_capabilities();
                 b.ai = caps.clone();
+                b.settings.search_semantic_mode = false;
+                b.settings.clip_search_enabled = false;
+                b.save_settings();
                 ui.set_ai_device(ss(&caps.reason));
                 ui.set_ai_gpu_status(ss(&caps.gpu_summary));
                 ui.set_ai_label(ss(ai_status_label(&caps)));
             }
             ui.set_ai_install_state(SharedString::from("not_installed"));
+            ui.set_semantic_search_available(false);
+            ui.set_search_semantic_mode(false);
+            ui.set_clip_search_enabled(false);
             ui.set_ai_download_progress(0.0);
             ui.set_ai_install_message(SharedString::from(""));
         }
@@ -16582,6 +16841,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_toggle_search_semantic_mode(move || {
         if let Some(ui) = weak.upgrade() {
             let mut ctrl = c.borrow_mut();
+            if !local_ai_semantic_ready() {
+                ctrl.settings.search_semantic_mode = false;
+                ui.set_search_semantic_mode(false);
+                ui.set_semantic_search_available(false);
+                ctrl.save_settings();
+                ctrl.show_toast(&ui, "Install Local AI before using semantic search.");
+                return;
+            }
             ctrl.settings.search_semantic_mode = !ctrl.settings.search_semantic_mode;
             ui.set_search_semantic_mode(ctrl.settings.search_semantic_mode);
             ctrl.save_settings();
@@ -16595,6 +16862,16 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_set_clip_search_enabled(move |enabled| {
         if let Some(ui) = weak.upgrade() {
             let mut ctrl = c.borrow_mut();
+            if enabled && !local_ai_image_search_ready() {
+                ctrl.settings.clip_search_enabled = false;
+                ui.set_clip_search_enabled(false);
+                ctrl.save_settings();
+                ctrl.show_toast(
+                    &ui,
+                    "Install Local AI image models before enabling image tags in search.",
+                );
+                return;
+            }
             ctrl.settings.clip_search_enabled = enabled;
             ctrl.save_settings();
             ui.set_clip_search_enabled(enabled);
@@ -16980,6 +17257,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                             ui.set_ai_device(ss(&caps.reason));
                             ui.set_ai_gpu_status(ss(&caps.gpu_summary));
                             ui.set_ai_label(ss(ai_status_label(&caps)));
+                            ui.set_semantic_search_available(local_ai_semantic_ready());
                         }
                     }
                     prev_ai_cell.set(state);

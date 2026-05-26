@@ -2043,17 +2043,19 @@ component StorageOverview inherits Rectangle {
         // narrow. Cards are click targets for the bucket drill-in,
         // matching the rest of the app's "card = pane" affordance.
         if root.buckets.length > 0: bucket_strip := Rectangle {
-            property <int> cards_per_row: max(1, min(8, floor((self.width - 24px) / 168px)));
+            property <int> cards_per_row: Math.max(1, Math.min(8, Math.floor((self.width - 24px) / 168px)));
+            property <int> card_rows: Math.max(1, Math.ceil(root.buckets.length / self.cards_per_row));
             property <length> card_w: (self.width - 24px - (self.cards_per_row - 1) * 8px) / self.cards_per_row;
-            preferred-height: 92px;
-            min-height: 92px;
-            max-height: 92px;
+            property <length> needed_h: 8px + self.card_rows * 88px;
+            preferred-height: self.needed_h;
+            min-height: self.needed_h;
+            max-height: self.needed_h;
             vertical-stretch: 0;
             background: ThemePalette.bg;
             for bucket[i] in root.buckets: Rectangle {
                 property <bool> is-active: bucket.id == root.selected_bucket;
-                x: 12px + mod(i, bucket_strip.cards_per_row) * (bucket_strip.card_w + 8px);
-                y: 4px + floor(i / bucket_strip.cards_per_row) * 88px;
+                x: 12px + Math.mod(i, bucket_strip.cards_per_row) * (bucket_strip.card_w + 8px);
+                y: 4px + Math.floor(i / bucket_strip.cards_per_row) * 88px;
                 width: bucket_strip.card_w;
                 height: 84px;
                 border-radius: AppMetrics.radius_small;
@@ -2604,6 +2606,7 @@ export component MainWindow inherits Window {
     in-out property <string> search_scope_label: "Folder";
     // When true, ranked by on-device embedding similarity (requires Local AI models).
     in-out property <bool> search_semantic_mode: false;
+    in-out property <bool> semantic_search_available: false;
     // Experimental: CLIP-style description search (optional model; may be unavailable).
     in-out property <bool> clip_search_enabled: false;
     in-out property <string> active_theme: "mica-dark";
@@ -3443,10 +3446,11 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Rectangle {
+            search_box := Rectangle {
                 // Hidden in simple mode because row 2 is dedicated to view modes
                 // and the wider captioned buttons would overlap the search field.
                 visible: toolbar.show_toolbar_search && !root.is_simple;
+                property <bool> semantic_available: root.semantic_search_available;
                 x: toolbar.show_toolbar_sort ? parent.width - 705px : parent.width - 524px;
                 y: 6px;
                 width: 208px;
@@ -3474,6 +3478,7 @@ export component MainWindow inherits Window {
                     tip_text: root.search_scope_all ? "Searching entire drive - click to search this folder only" : "Click to search the entire drive";
                 }
                 Text {
+                    visible: search_box.semantic_available;
                     x: 30px;
                     y: 0;
                     width: 22px;
@@ -3487,18 +3492,19 @@ export component MainWindow inherits Window {
                 }
                 sem_touch := TouchArea {
                     x: 28px; y: 2px; width: 26px; height: 26px;
+                    enabled: search_box.semantic_available;
                     mouse-cursor: pointer;
                     clicked => { root.toggle_search_semantic_mode(); }
                 }
-                if sem_touch.has-hover: HoverTip {
+                if search_box.semantic_available && sem_touch.has-hover: HoverTip {
                     x: 0px;
                     y: parent.height + 6px;
                     tip_text: root.search_semantic_mode ? "Semantic ranking on (embeddings)" : "Semantic ranking off - click to rank by name embeddings";
                 }
                 search := TextInput {
-                    x: 56px;
+                    x: search_box.semantic_available ? 56px : 30px;
                     y: 0;
-                    width: parent.width - 84px;
+                    width: parent.width - (search_box.semantic_available ? 84px : 58px);
                     height: parent.height;
                     text: root.search_text;
                     font-size: 12.5px;
@@ -3522,9 +3528,9 @@ export component MainWindow inherits Window {
                 // bound property are empty AND the field isn't focused. Checking
                 // search.text explicitly prevents a flicker overlap when typing.
                 if root.search_text == "" && search.text == "" && !search.has-focus: Text {
-                    x: 56px;
+                    x: search_box.semantic_available ? 56px : 30px;
                     y: 0;
-                    width: parent.width - 84px;
+                    width: parent.width - (search_box.semantic_available ? 84px : 58px);
                     height: parent.height;
                     text: root.search_scope_all ? "Search entire drive" : "Search this folder";
                     color: ThemePalette.text_faint;
