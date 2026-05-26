@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "0.9.18"
+version = "0.9.19"
 edition = "2024"
 
 [lib]
@@ -83,6 +83,7 @@ windows = { version = "0.62", features = [
     "Win32_System_RestartManager",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Controls",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",

@@ -18,8 +18,10 @@ use windows::Win32::Graphics::Gdi::{
     DeleteObject, GetDC, GetDIBits, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
 };
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::{
-    SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_USEFILEATTRIBUTES,
+    SHGetFileInfoW, SHGetImageList, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SYSICONINDEX,
+    SHGFI_USEFILEATTRIBUTES, SHIL_EXTRALARGE, SHIL_JUMBO,
 };
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 
@@ -32,6 +34,18 @@ use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, I
 /// with FILE_ATTRIBUTE_NORMAL so the shell returns the system icon for
 /// the extension without touching the disk.
 pub fn extract_icon_rgba(path: &str, use_real_file: bool) -> Option<Image> {
+    // v0.9.19: try to pull a high-resolution icon from the system
+    // image list first (SHIL_JUMBO = 256x256, SHIL_EXTRALARGE = 48x48).
+    // Most modern Windows icons ship at 256px - the old SHGFI_LARGEICON
+    // path was giving us 32x32 pixels and the .lnk shortcuts on the
+    // user's desktop looked blocky as a result. Falls back to the
+    // 32px path when the high-res image list isn't available.
+    if let Some(img) = try_extract_high_res_icon(path, use_real_file, SHIL_JUMBO) {
+        return Some(img);
+    }
+    if let Some(img) = try_extract_high_res_icon(path, use_real_file, SHIL_EXTRALARGE) {
+        return Some(img);
+    }
     unsafe {
         let wide: Vec<u16> = OsStr::new(path)
             .encode_wide()
@@ -54,6 +68,42 @@ pub fn extract_icon_rgba(path: &str, use_real_file: bool) -> Option<Image> {
         }
         let img = hicon_to_image(sfi.hIcon);
         let _ = DestroyIcon(sfi.hIcon);
+        img
+    }
+}
+
+/// Pull the icon at `image_list_size` (SHIL_JUMBO or SHIL_EXTRALARGE)
+/// from the shell's system image list and return it as a slint Image.
+/// Returns None if the system doesn't expose the requested list (very
+/// old Windows) or if any of the COM calls fail.
+fn try_extract_high_res_icon(path: &str, use_real_file: bool, image_list_size: u32) -> Option<Image> {
+    unsafe {
+        let wide: Vec<u16> = OsStr::new(path)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let mut sfi = SHFILEINFOW::default();
+        let mut flags = SHGFI_SYSICONINDEX;
+        if !use_real_file {
+            flags |= SHGFI_USEFILEATTRIBUTES;
+        }
+        let result = SHGetFileInfoW(
+            windows::core::PCWSTR(wide.as_ptr()),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut sfi),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            flags,
+        );
+        if result == 0 {
+            return None;
+        }
+        let image_list: IImageList = SHGetImageList(image_list_size as i32).ok()?;
+        let hicon = image_list.GetIcon(sfi.iIcon, ILD_TRANSPARENT.0).ok()?;
+        if hicon.is_invalid() {
+            return None;
+        }
+        let img = hicon_to_image(hicon);
+        let _ = DestroyIcon(hicon);
         img
     }
 }

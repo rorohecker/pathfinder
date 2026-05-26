@@ -5106,6 +5106,43 @@ fn storage_rollup_folder_for_file(file_path: &Path, root_components: usize) -> O
         .position(|(_, path)| path.components().count() > root_components)
         .unwrap_or(0);
 
+    // v0.9.19: specialized game-launcher patterns win before the
+    // generic Program Files handler. Without this, a file under
+    // ...\Steam\steamapps\common\<Game>\... rolls up to "Steam"
+    // (good for "Discord" under AppData, wrong here) because the
+    // Program Files match fires first in path order. Walk all
+    // segments first to detect known game-store directory shapes,
+    // and surface the actual game/app folder when found.
+    for i in first_below_root..names.len() {
+        match names[i].as_str() {
+            "steamapps" if names.get(i + 1).map(|s| s.as_str()) == Some("common") => {
+                if let Some((_, path)) = prefixes.get(i + 2) {
+                    return Some(path.clone());
+                }
+            }
+            "common" if i > 0 && names.get(i - 1).map(|s| s.as_str()) == Some("steamapps") => {
+                if let Some((_, path)) = prefixes.get(i + 1) {
+                    return Some(path.clone());
+                }
+            }
+            "epic games" | "xboxgames" | "riot games" => {
+                let mut owner = i + 1;
+                while names
+                    .get(owner)
+                    .map(|name| is_default_storage_segment(name))
+                    .unwrap_or(false)
+                    && owner + 1 < names.len()
+                {
+                    owner += 1;
+                }
+                if let Some((_, path)) = prefixes.get(owner) {
+                    return Some(path.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
     for i in first_below_root..names.len() {
         match names[i].as_str() {
             "users" => {
