@@ -84,6 +84,10 @@ const MAX_PREVIEW_CACHE_ENTRIES: usize = 96;
 // fill any practical viewport and still avoid pushing megabytes of
 // strings to Slint for unusually busy buckets.
 const STORAGE_BUCKET_DRILL_LIMIT: usize = 300;
+// Limit for the overall top-items shown on the overview page to keep
+// UI model construction bounded and responsive when the scan result
+// contains many thousands of entries.
+const STORAGE_TOP_ITEMS_LIMIT: usize = 200;
 const STORAGE_DUPLICATE_MIN_SIZE: u64 = 64 * 1024 * 1024;
 const INDEX_DB_FILE: &str = ".pathfinder-index.sqlite3";
 const THUMBNAIL_CACHE_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
@@ -147,7 +151,10 @@ const FIRST_DIRECTORY_CHUNK: usize = 2_500;
 const LARGE_DIRECTORY_GIT_CAP: usize = 20_000;
 const SEARCH_INDEX_LIMIT: usize = 1_200;
 const SEARCH_LIVE_SCAN_LIMIT: usize = 5_000;
-const SEARCH_DRIVE_SCAN_LIMIT: usize = 50_000;
+// Whole-drive live scans should surface a useful first page quickly. Asking the
+// walker for tens of thousands of matches delays the first visible refresh and
+// makes the second search feel faster only because the first one seeded the DB.
+const SEARCH_DRIVE_SCAN_LIMIT: usize = 8_000;
 const ARCHIVE_SCHEME: &str = "archive://";
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -3142,12 +3149,66 @@ fn open_more_options(path: &str, _ui: &MainWindow) -> Result<(), String> {
     reveal_in_folder(path.to_string())
 }
 
-fn open_with_dialog(path: &str) -> Result<(), String> {
+#[cfg(target_os = "windows")]
+fn main_window_hwnd(ui: Option<&MainWindow>) -> windows::Win32::Foundation::HWND {
+    use i_slint_backend_winit::WinitWindowAccessor;
+    use i_slint_backend_winit::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+
+    if let Some(ui) = ui {
+        let mut found = HWND(std::ptr::null_mut());
+        ui.window().with_winit_window(|window| {
+            if let Ok(handle) = window.window_handle() {
+                if let RawWindowHandle::Win32(handle) = handle.as_raw() {
+                    found = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
+                }
+            }
+        });
+        if !found.0.is_null() {
+            return found;
+        }
+    }
+    find_pathfinder_hwnd().unwrap_or(HWND(std::ptr::null_mut()))
+}
+
+fn open_with_dialog(path: &str, ui: Option<&MainWindow>) -> Result<(), String> {
+    if Path::new(path).is_dir() {
+        return Err("Open With applies to files, not folders.".to_string());
+    }
+
     #[cfg(target_os = "windows")]
     {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::UI::Shell::{SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, ShellExecuteExW};
+        use windows::core::PCWSTR;
+
+        let path_wide: Vec<u16> = OsStr::new(path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let verb_wide: Vec<u16> = "openas\0".encode_utf16().collect();
+        let hwnd = main_window_hwnd(ui);
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_INVOKEIDLIST,
+            hwnd,
+            lpVerb: PCWSTR(verb_wide.as_ptr()),
+            lpFile: PCWSTR(path_wide.as_ptr()),
+            lpParameters: PCWSTR::null(),
+            lpDirectory: PCWSTR::null(),
+            nShow: 1,
+            ..Default::default()
+        };
+
+        unsafe {
+            if ShellExecuteExW(&mut info).is_ok() {
+                return Ok(());
+            }
+        }
+
         ProcessCommand::new("rundll32.exe")
             .args(["shell32.dll,OpenAs_RunDLL", path])
-            .no_window()
             .spawn()
             .map(|_| ())
             .map_err(|e| e.to_string())
@@ -3155,7 +3216,7 @@ fn open_with_dialog(path: &str) -> Result<(), String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = path;
+        let _ = (path, ui);
         Err("Open With is only available on Windows.".to_string())
     }
 }
@@ -3656,6 +3717,25 @@ fn hybrid_search_background(
 
     sort_entries(&mut results);
     (results, source)
+}
+
+fn publish_search_result(
+    pending: &Arc<Mutex<Option<NativeSearchResult>>>,
+    ready: &Arc<AtomicBool>,
+    path: &str,
+    query: &str,
+    entries: Vec<FileEntry>,
+    source: String,
+) {
+    if let Ok(mut lock) = pending.lock() {
+        *lock = Some(NativeSearchResult {
+            path: path.to_string(),
+            query: query.to_string(),
+            entries,
+            source,
+        });
+    }
+    ready.store(true, Ordering::Release);
 }
 
 #[tauri::command]
@@ -5066,8 +5146,24 @@ fn is_default_storage_segment(name: &str) -> bool {
             | "programdata"
             | "steamapps"
             | "common"
+            | "games"
+            | "game library"
+            | "steamlibrary"
+            | "steam library"
             | "packages"
             | "package cache"
+            | "content"
+            | "data"
+            | "pak"
+            | "paks"
+            | "binaries"
+            | "bin"
+            | "win64"
+            | "win32"
+            | "x64"
+            | "_commonredist"
+            | "redist"
+            | "redistributables"
             | "cache"
             | "caches"
             | "temp"
@@ -5125,7 +5221,40 @@ fn storage_rollup_folder_for_file(file_path: &Path, root_components: usize) -> O
                     return Some(path.clone());
                 }
             }
-            "epic games" | "xboxgames" | "riot games" => {
+            "epic games"
+            | "xboxgames"
+            | "riot games"
+            | "gog games"
+            | "gog galaxy"
+            | "ea games"
+            | "origin games"
+            | "ubisoft game launcher"
+            | "battle.net"
+            | "bethesda.net launcher"
+            | "rockstar games" => {
+                let mut owner = i + 1;
+                while names
+                    .get(owner)
+                    .map(|name| is_default_storage_segment(name))
+                    .unwrap_or(false)
+                    && owner + 1 < names.len()
+                {
+                    owner += 1;
+                }
+                if let Some((_, path)) = prefixes.get(owner) {
+                    return Some(path.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Generic game-library folders such as D:\Games\<Game> need a softer
+    // fallback: surface the first useful child, but only after known launcher
+    // shapes above had a chance to win.
+    for i in first_below_root..names.len() {
+        match names[i].as_str() {
+            "games" | "game library" | "steamlibrary" | "steam library" => {
                 let mut owner = i + 1;
                 while names
                     .get(owner)
@@ -5209,7 +5338,17 @@ fn storage_rollup_folder_for_file(file_path: &Path, root_components: usize) -> O
                     return Some(path.clone());
                 }
             }
-            "epic games" | "xboxgames" | "riot games" => {
+            "epic games"
+            | "xboxgames"
+            | "riot games"
+            | "gog games"
+            | "gog galaxy"
+            | "ea games"
+            | "origin games"
+            | "ubisoft game launcher"
+            | "battle.net"
+            | "bethesda.net launcher"
+            | "rockstar games" => {
                 if let Some((_, path)) = prefixes.get(i + 1) {
                     return Some(path.clone());
                 }
@@ -5251,6 +5390,18 @@ fn storage_bucket_for(path: &Path, ctx: &StorageScanCtx) -> &'static str {
         || path_bytes_contains_ci(path_bytes, br"\epic games\")
         || path_bytes_contains_ci(path_bytes, br"\xboxgames\")
         || path_bytes_contains_ci(path_bytes, br"\riot games\")
+        || path_bytes_contains_ci(path_bytes, br"\gog games\")
+        || path_bytes_contains_ci(path_bytes, br"\gog galaxy\")
+        || path_bytes_contains_ci(path_bytes, br"\ea games\")
+        || path_bytes_contains_ci(path_bytes, br"\origin games\")
+        || path_bytes_contains_ci(path_bytes, br"\ubisoft game launcher\")
+        || path_bytes_contains_ci(path_bytes, br"\battle.net\")
+        || path_bytes_contains_ci(path_bytes, br"\bethesda.net launcher\")
+        || path_bytes_contains_ci(path_bytes, br"\rockstar games\")
+        || path_bytes_contains_ci(path_bytes, br"\games\")
+        || path_bytes_contains_ci(path_bytes, br"\game library\")
+        || path_bytes_contains_ci(path_bytes, br"\steamlibrary\")
+        || path_bytes_contains_ci(path_bytes, br"\steam library\")
     {
         return "apps";
     }
@@ -5797,12 +5948,66 @@ fn path_is_strict_parent(parent: &str, child: &str) -> bool {
 
 /// Drill-in folder lists should not show both a parent folder and its nested
 /// children (e.g. `common`, `Crimson Desert`, and `0015` all at once).
+fn is_storage_apps_drill_noise(path: &str) -> bool {
+    let lower = path.replace('/', "\\").to_ascii_lowercase();
+    if lower.contains("\\appdata\\") && !lower.contains("\\appdata\\local\\programs\\") {
+        return true;
+    }
+    false
+}
+
+fn storage_apps_drill_rank(path: &str) -> u8 {
+    let lower = path.replace('/', "\\").to_ascii_lowercase();
+    if lower.contains("\\steamapps\\common\\")
+        || lower.contains("\\steamlibrary\\steamapps\\common\\")
+        || lower.contains("\\epic games\\")
+        || lower.contains("\\xboxgames\\")
+        || lower.contains("\\riot games\\")
+        || lower.contains("\\gog games\\")
+        || lower.contains("\\ea games\\")
+        || lower.contains("\\origin games\\")
+        || lower.contains("\\ubisoft game launcher\\")
+        || lower.contains("\\battle.net\\")
+        || lower.contains("\\rockstar games\\")
+    {
+        return 3;
+    }
+    if lower.contains("\\program files\\") || lower.contains("\\program files (x86)\\") {
+        return 2;
+    }
+    if lower.contains("\\games\\") || lower.contains("\\game library\\") {
+        return 1;
+    }
+    0
+}
+
+fn sort_storage_drill_entries(bucket_id: &str, entries: &mut [StorageEntry]) {
+    if bucket_id == "apps" {
+        entries.sort_unstable_by(|a, b| {
+            storage_apps_drill_rank(&b.path)
+                .cmp(&storage_apps_drill_rank(&a.path))
+                .then_with(|| b.bytes.cmp(&a.bytes))
+                .then_with(|| {
+                    a.name
+                        .to_ascii_lowercase()
+                        .cmp(&b.name.to_ascii_lowercase())
+                })
+        });
+        return;
+    }
+    entries.sort_unstable_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+    });
+}
+
 /// v0.9.11: dropped the steam-only filter for the `apps` bucket - it was
 /// hiding Epic/GOG/standalone installs and limiting users to ~5 entries.
 /// The generic dedup pass below already collapses nested duplicates;
 /// non-steam app folders sit alongside steam games naturally.
 fn refine_storage_drill_folders(
-    _bucket_id: &str,
+    bucket_id: &str,
     mut folders: Vec<StorageEntry>,
 ) -> Vec<StorageEntry> {
     folders.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
@@ -5811,12 +6016,16 @@ fn refine_storage_drill_folders(
         if is_default_storage_segment(&e.name) {
             continue;
         }
+        if bucket_id == "apps" && is_storage_apps_drill_noise(&e.path) {
+            continue;
+        }
         if out.iter().any(|k| path_is_strict_parent(&k.path, &e.path)) {
             continue;
         }
         out.retain(|k| !path_is_strict_parent(&e.path, &k.path));
         out.push(e);
     }
+    sort_storage_drill_entries(bucket_id, &mut out);
     out
 }
 
@@ -5879,7 +6088,7 @@ mod storage_tests {
                 bucket: "apps".to_string(),
             },
         ];
-        let refined = refine_storage_drill_folders("other", folders);
+        let refined = refine_storage_drill_folders("apps", folders);
         // Default container folders are ignored; the highest useful child wins.
         assert_eq!(refined.len(), 1);
         assert_eq!(refined[0].name, "GameA");
@@ -6933,7 +7142,11 @@ impl Default for NativeSettings {
             density: "cozy".to_string(),
             wallpaper: "none".to_string(),
             custom_theme: None,
-            index_mode: "fast".to_string(),
+            // v0.9.20: default to "max" so fresh installs index every
+            // fixed drive, which makes "Search entire drive" find
+            // every file on the first try instead of needing a follow-
+            // up scan to expand coverage.
+            index_mode: "max".to_string(),
             index_roots: Vec::new(),
             thumbnail_cache_limit_mb: 50,
             // Auto-update check runs once at startup and lights up the green
@@ -7148,6 +7361,9 @@ struct NativeController {
     storage_preview_visible_before: bool,
     storage_preview_w_before: f32,
     storage_subtitle_last_update: Instant,
+    // v0.9.20: debounce timestamp for sidebar clicks. Used by
+    // side_activated to drop redundant clicks fired within 120ms.
+    side_last_activated: Instant,
     // Total used bytes on the current scan root (from GetDiskFreeSpaceExW).
     // Used as the progress-bar denominator so % shown is real progress vs.
     // the actual amount of data on the drive, not just "bytes seen so far".
@@ -10900,6 +11116,7 @@ impl NativeController {
             storage_preview_visible_before: false,
             storage_preview_w_before: 326.0,
             storage_subtitle_last_update: Instant::now(),
+            side_last_activated: Instant::now() - Duration::from_secs(1),
             storage_disk_used: 0,
             drive_space_cache: HashMap::new(),
             tabs,
@@ -11335,14 +11552,44 @@ impl NativeController {
 
     fn selected_entry(&self) -> Option<FileEntry> {
         if self.active_pane == ActivePane::Secondary {
-            self.secondary_visible_files
-                .get(self.secondary_selected_index as usize)
-                .cloned()
-        } else {
-            self.visible_files
-                .get(self.selected_index as usize)
-                .cloned()
+            if self.secondary_selected_index >= 0 {
+                let idx = self.secondary_selected_index as usize;
+                if self.secondary_selected_set.is_empty()
+                    || self.secondary_selected_set.contains(&idx)
+                {
+                    return self.secondary_visible_files.get(idx).cloned();
+                }
+            }
+            return self
+                .secondary_selected_set
+                .iter()
+                .min()
+                .and_then(|&i| self.secondary_visible_files.get(i).cloned());
         }
+
+        if self.selected_index >= 0 {
+            let idx = self.selected_index as usize;
+            if self.selected_set.is_empty() || self.selected_set.contains(&idx) {
+                return self.visible_files.get(idx).cloned();
+            }
+        }
+        self.selected_set
+            .iter()
+            .min()
+            .and_then(|&i| self.visible_files.get(i).cloned())
+    }
+
+    fn primary_rename_index(&self) -> Option<i32> {
+        if !self.selected_set.is_empty() {
+            if self.selected_set.len() != 1 {
+                return None;
+            }
+            return self.selected_set.iter().next().copied().map(|i| i as i32);
+        }
+        if self.selected_index >= 0 {
+            return Some(self.selected_index);
+        }
+        None
     }
 
     fn selected_paths(&self) -> Vec<String> {
@@ -12962,6 +13209,16 @@ impl NativeController {
     }
 
     fn side_activated(&mut self, ui: &MainWindow, index: i32) {
+        // v0.9.20: cheap debounce + same-target skip so rapid double-
+        // or triple-clicks on a sidebar entry don't queue a stack of
+        // navigate() calls (each doing synchronous directory I/O).
+        // Previously hammering the sidebar on a huge folder produced
+        // a visible UI freeze while the queued nav calls drained.
+        let now = Instant::now();
+        if now.duration_since(self.side_last_activated).as_millis() < 120 {
+            return;
+        }
+        self.side_last_activated = now;
         let items = self.side_items();
         if let Some(item) = items.get(index as usize) {
             let path = item.path.to_string();
@@ -12984,6 +13241,9 @@ impl NativeController {
                 self.selected_index = -1;
                 self.update_models(ui);
             } else if !path.is_empty() {
+                if same_path_string(&self.current_path, &path) {
+                    return;
+                }
                 self.navigate(ui, path, true);
             }
         }
@@ -13090,6 +13350,8 @@ impl NativeController {
         self.files_model = None;
         let trimmed = self.search_query.trim().to_string();
         let search_root = self.search_root();
+        let drive_wide =
+            self.search_all_scope || is_filesystem_root(std::path::Path::new(&search_root));
         let semantic_enabled = self.settings.search_semantic_mode && local_ai_semantic_ready();
         let clip_enabled = self.settings.clip_search_enabled && local_ai_image_search_ready();
         let mut indexed = if trimmed.starts_with("tag:") || trimmed.starts_with("smart:") {
@@ -13097,6 +13359,27 @@ impl NativeController {
         } else {
             index_search(&search_root, &trimmed, SEARCH_INDEX_LIMIT).unwrap_or_default()
         };
+
+        // Whole-drive searches often miss on the first keystroke because the
+        // local index is still cold. Ask Windows Search synchronously so the
+        // first query can already show multiple matches.
+        if drive_wide
+            && trimmed.len() >= 2
+            && indexed.is_empty()
+            && !trimmed.starts_with("tag:")
+            && !trimmed.starts_with("smart:")
+        {
+            #[cfg(target_os = "windows")]
+            if let Ok(windows_results) =
+                windows_index_search_impl(&trimmed, &search_root, SEARCH_INDEX_LIMIT)
+            {
+                if !windows_results.is_empty() {
+                    let _ = upsert_index_entries(&windows_results);
+                    merge_search_entries(&mut indexed, windows_results, SEARCH_INDEX_LIMIT);
+                }
+            }
+        }
+
         if (semantic_enabled || clip_enabled)
             && trimmed.len() >= 2
             && !indexed.is_empty()
@@ -13111,11 +13394,18 @@ impl NativeController {
                 &mut indexed,
             );
         }
-        if trimmed.is_empty() || indexed.is_empty() {
+        if trimmed.is_empty() {
             self.apply_filter();
-        } else {
+            ui.set_empty_state(ss(""));
+        } else if !indexed.is_empty() {
             self.visible_files = indexed;
             self.apply_sort();
+            ui.set_empty_state(ss(""));
+        } else if drive_wide {
+            self.visible_files.clear();
+            ui.set_empty_state(ss("Searching drive..."));
+        } else {
+            self.visible_files.clear();
             ui.set_empty_state(ss(""));
         }
         self.update_models(ui);
@@ -13153,21 +13443,79 @@ impl NativeController {
             SEARCH_LIVE_SCAN_LIMIT
         };
         std::thread::spawn(move || {
-            let (mut entries, source) =
-                hybrid_search_background(&state, &path, &query, limit, token);
+            let mut results = index_search(&path, &query, limit).unwrap_or_default();
+            let mut source = if results.is_empty() {
+                "live scan".to_string()
+            } else {
+                "Pathfinder index".to_string()
+            };
+
             if state.search_generation.load(Ordering::SeqCst) != token {
                 return;
             }
-            apply_semantic_search_ranking_entries(&path, &query, semantic, clip, &mut entries);
-            if let Ok(mut lock) = pending.lock() {
-                *lock = Some(NativeSearchResult {
-                    path,
-                    query,
-                    entries,
-                    source,
-                });
+
+            if results.is_empty() {
+                if let Ok(windows_results) = windows_index_search_impl(&query, &path, limit) {
+                    if !windows_results.is_empty() {
+                        let _ = upsert_index_entries(&windows_results);
+                        merge_search_entries(&mut results, windows_results, limit);
+                        source = "Windows Search".to_string();
+                    }
+                }
+            } else if let Ok(windows_results) = windows_index_search_impl(&query, &path, limit) {
+                if !windows_results.is_empty() {
+                    let _ = upsert_index_entries(&windows_results);
+                    merge_search_entries(&mut results, windows_results, limit);
+                    source = "Pathfinder index + Windows Search".to_string();
+                }
             }
-            ready.store(true, Ordering::Release);
+
+            if state.search_generation.load(Ordering::SeqCst) != token {
+                return;
+            }
+
+            if !results.is_empty() {
+                sort_entries(&mut results);
+                let mut partial = results.clone();
+                apply_semantic_search_ranking_entries(&path, &query, semantic, clip, &mut partial);
+                publish_search_result(
+                    &pending,
+                    &ready,
+                    &path,
+                    &query,
+                    partial,
+                    format!("{source} + live scan"),
+                );
+            }
+
+            if results.len() < limit {
+                let live = live_search_scan(
+                    &state,
+                    &path,
+                    &query,
+                    limit.saturating_sub(results.len()),
+                    token,
+                );
+                if state.search_generation.load(Ordering::SeqCst) != token {
+                    return;
+                }
+                if !live.is_empty() {
+                    let _ = upsert_index_entries(&live);
+                    merge_search_entries(&mut results, live, limit);
+                    source = if source.contains("Windows") {
+                        "Pathfinder index + Windows Search + live scan".to_string()
+                    } else {
+                        "Pathfinder index + live scan".to_string()
+                    };
+                }
+            }
+
+            if state.search_generation.load(Ordering::SeqCst) != token {
+                return;
+            }
+            sort_entries(&mut results);
+            apply_semantic_search_ranking_entries(&path, &query, semantic, clip, &mut results);
+            publish_search_result(&pending, &ready, &path, &query, results, source);
         });
     }
 
@@ -13666,8 +14014,8 @@ impl NativeController {
             }
             "open-with" => {
                 if let Some(entry) = self.selected_entry() {
-                    match open_with_dialog(&entry.path) {
-                        Ok(()) => self.show_toast(ui, "Opening Windows Open With"),
+                    match open_with_dialog(&entry.path, Some(ui)) {
+                        Ok(()) => {}
                         Err(error) => self.show_toast_kind(ui, error, "error"),
                     }
                 } else {
@@ -13919,14 +14267,27 @@ impl NativeController {
     }
 
     fn prompt_rename(&mut self, ui: &MainWindow) {
-        let Some(entry) = self.selected_entry() else {
-            self.show_toast(ui, "Select a file first.");
+        if self.active_pane == ActivePane::Secondary {
+            if let Some(entry) = self.selected_entry() {
+                self.pending_prompt = Some(PendingPrompt::Rename(entry.path));
+                ui.set_prompt_title(ss("Rename"));
+                ui.set_prompt_value(ss(entry.name));
+                ui.set_prompt_visible(true);
+            } else {
+                self.show_toast(ui, "Select a file first.");
+            }
+            return;
+        }
+
+        let Some(index) = self.primary_rename_index() else {
+            if !self.selected_set.is_empty() {
+                self.show_toast(ui, "Select a single item to rename.");
+            } else {
+                self.show_toast(ui, "Select a file first.");
+            }
             return;
         };
-        self.pending_prompt = Some(PendingPrompt::Rename(entry.path));
-        ui.set_prompt_title(ss("Rename"));
-        ui.set_prompt_value(ss(entry.name));
-        ui.set_prompt_visible(true);
+        ui.set_rename_index(index);
     }
 
     fn prompt_new_folder(&mut self, ui: &MainWindow) {
@@ -15902,6 +16263,11 @@ impl NativeController {
                     .unwrap_or_default();
                 let mut merged: Vec<StorageEntry> = refined_folders.clone();
                 for f in files {
+                    if self.storage_selected_bucket == "apps"
+                        && is_storage_apps_drill_noise(&f.path)
+                    {
+                        continue;
+                    }
                     let contained = refined_folders.iter().any(|fldr| {
                         path_is_strict_parent(&fldr.path, &f.path) || fldr.path == f.path
                     });
@@ -15919,7 +16285,7 @@ impl NativeController {
                         .cloned()
                         .collect();
                 }
-                merged.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
+                sort_storage_drill_entries(&self.storage_selected_bucket, &mut merged);
                 merged
             };
         // v0.9.14: search filter applied AFTER sorting + bucket
@@ -15939,10 +16305,10 @@ impl NativeController {
         };
         let largest = filtered.first().map(|e| e.bytes).unwrap_or(0).max(1);
         let limit = if self.storage_selected_bucket.is_empty() {
-            usize::MAX
+            STORAGE_TOP_ITEMS_LIMIT
         } else {
             STORAGE_BUCKET_DRILL_LIMIT
-        };
+        }; // cap overall top-items for responsiveness
         let entries: Vec<StorageEntryUi> = filtered
             .into_iter()
             .take(limit)
@@ -16282,7 +16648,23 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             if should_select {
                 c.borrow_mut().select(&ui, index);
             } else {
-                c.borrow_mut().active_pane = ActivePane::Primary;
+                let mut ctrl = c.borrow_mut();
+                ctrl.active_pane = ActivePane::Primary;
+                if index >= 0 {
+                    ctrl.selected_index = index;
+                    if !ctrl.selected_set.contains(&(index as usize)) {
+                        ctrl.selected_set.clear();
+                        ctrl.selected_set.insert(index as usize);
+                        ctrl.select_anchor = index;
+                    }
+                    if let Some(entry) = ctrl.visible_files.get(index as usize) {
+                        ui.set_selected_name(ss(&entry.name));
+                    }
+                    ui.set_selected_index(index);
+                    ctrl.sync_selection_count_to_ui(&ui);
+                    ctrl.update_selection_in_model(&ui, &[index as usize]);
+                    ctrl.update_status(&ui);
+                }
             }
             ui.set_context_on_file(index >= 0);
             ui.set_context_is_archive(is_archive);
@@ -16585,7 +16967,17 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 c.borrow_mut()
                     .secondary_file_selected(&ui, index, false, false);
             } else {
-                c.borrow_mut().active_pane = ActivePane::Secondary;
+                let mut ctrl = c.borrow_mut();
+                ctrl.active_pane = ActivePane::Secondary;
+                if index >= 0 {
+                    ctrl.secondary_selected_index = index;
+                    if let Some(entry) = ctrl.secondary_visible_files.get(index as usize) {
+                        ui.set_selected_name(ss(&entry.name));
+                    }
+                    ui.set_selected_index(index);
+                    ctrl.sync_selection_count_to_ui(&ui);
+                    ctrl.update_status(&ui);
+                }
             }
             c.borrow().update_preview(&ui);
             ui.set_context_on_file(index >= 0);
@@ -17154,6 +17546,27 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 .prepare_storage_tip_action(&ui, action.to_string(), path.to_string());
         }
     });
+    // Storage entry context helpers: reveal in Explorer and Open With.
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_storage_entry_more(move |path| {
+        if let Some(ui) = weak.upgrade() {
+            let p = path.to_string();
+            if let Err(e) = reveal_in_folder(p.clone()) {
+                c.borrow_mut().show_toast_kind(&ui, e, "error");
+            }
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_storage_entry_open_with(move |path| {
+        if let Some(ui) = weak.upgrade() {
+            let p = path.to_string();
+            if let Err(e) = open_with_dialog(&p, Some(&ui)) {
+                c.borrow_mut().show_toast_kind(&ui, e, "error");
+            }
+        }
+    });
 
     let weak = ui.as_weak();
     ui.on_maximize(move || {
@@ -17492,20 +17905,20 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let ctrl = c.borrow();
                 ctrl.visible_files
                     .get(index as usize)
-                    .map(|e| (e.path.clone(), e.name.clone()))
+                    .map(|e| (e.path.clone(), e.name.clone(), ctrl.app_state.clone()))
             };
-            if let Some((old_path, _old_name)) = result {
-                let parent = PathBuf::from(&old_path)
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_default();
-                let new_path = parent.join(new_name.as_str());
-                match fs::rename(&old_path, &new_path) {
-                    Ok(()) => {
-                        c.borrow_mut().refresh(&ui);
-                        c.borrow_mut().show_toast(&ui, "Renamed");
+            if let Some((old_path, old_name, app_state)) = result {
+                let new_name = new_name.trim().to_string();
+                if new_name.is_empty() || new_name == old_name {
+                    return;
+                }
+                match native_rename(&app_state, &old_path, &new_name) {
+                    Ok(_) => {
+                        let mut ctrl = c.borrow_mut();
+                        ctrl.refresh(&ui);
+                        ctrl.show_toast_kind(&ui, "Renamed", "success");
                     }
-                    Err(e) => c.borrow_mut().show_toast(&ui, e.to_string()),
+                    Err(error) => c.borrow_mut().show_toast_kind(&ui, error, "error"),
                 }
             }
         }

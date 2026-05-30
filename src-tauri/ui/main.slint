@@ -1697,6 +1697,9 @@ component StorageEntryRow inherits Rectangle {
     in property <length> col_share_w: 140px;
     in property <length> col_size_w: 110px;
     callback open();
+    // Action callbacks for context / extra actions
+    callback more(string);
+    callback open_with(string);
     height: 48px;
     background: touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
     animate background { duration: 60ms; easing: ease-out; }
@@ -1779,7 +1782,7 @@ component StorageEntryRow inherits Rectangle {
         }
     }
     // Share bar - taller and wider than v0.9.12.
-    Rectangle {
+    if root.col_share_w > 0px: Rectangle {
         x: root.share_x;
         y: (parent.height - 10px) / 2;
         width: root.col_share_w;
@@ -1820,9 +1823,215 @@ component StorageEntryRow inherits Rectangle {
         vertical-alignment: center;
         overflow: elide;
     }
+    // Small action buttons on the right: Open With and More (reveal)
+    // Main row click target stops before these buttons so their TouchAreas
+    // stay reachable (Slint hit-tests later siblings on top).
     touch := TouchArea {
+        x: 0;
+        y: 0;
+        width: parent.width - 88px;
+        height: parent.height;
         mouse-cursor: pointer;
         clicked => { root.open(); }
+    }
+    Rectangle {
+        x: parent.width - 44px;
+        y: (parent.height - 28px) / 2;
+        width: 28px; height: 28px;
+        border-radius: 6px;
+        background: open_with_touch.has-hover ? ThemePalette.panel_alt : rgba(0,0,0,0);
+        Text {
+            width: parent.width; height: parent.height;
+            text: "↗";
+            color: ThemePalette.text_muted;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        open_with_touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.open_with(root.entry.path); }
+        }
+    }
+    Rectangle {
+        x: parent.width - 80px;
+        y: (parent.height - 28px) / 2;
+        width: 28px; height: 28px;
+        border-radius: 6px;
+        background: more_touch.has-hover ? ThemePalette.panel_alt : rgba(0,0,0,0);
+        Text {
+            width: parent.width; height: parent.height;
+            text: "⋯";
+            color: ThemePalette.text_muted;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        more_touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.more(root.entry.path); }
+        }
+    }
+}
+
+component StorageTipsPanel inherits Rectangle {
+    in property <[StorageTipUi]> tips;
+    in property <bool> scanning;
+    callback open_path(string);
+    callback tip_action(string, string);
+    background: ThemePalette.bg;
+    property <bool> show_tip_bytes: self.width >= 520px;
+
+    Text {
+        x: 6px; y: 0;
+        width: parent.width - 12px; height: 26px;
+        text: "Recommendations";
+        color: ThemePalette.text_faint;
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.6px;
+        vertical-alignment: bottom;
+    }
+    Rectangle {
+        x: 0; y: 26px;
+        width: parent.width; height: parent.height - 26px;
+        background: ThemePalette.bg;
+        if root.tips.length == 0: Text {
+            x: 12px; y: 14px;
+            width: parent.width - 24px;
+            text: root.scanning
+                ? "Recommendations will appear once the scan completes."
+                : "Nothing pressing here. Pick a category to drill into its largest items.";
+            color: ThemePalette.text_faint;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        ListView {
+            x: 0; y: 4px;
+            width: parent.width;
+            height: parent.height - 8px;
+            for tip[i] in root.tips: Rectangle {
+                height: 44px;
+                background: tip_touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel;
+                border-radius: AppMetrics.radius_small;
+                animate background { duration: 80ms; easing: ease-out; }
+                Rectangle {
+                    x: 0; y: 0;
+                    width: 3px; height: parent.height;
+                    background: tip.accent;
+                }
+                Text {
+                    x: 12px; y: 0;
+                    width: 28px; height: parent.height;
+                    text: tip.icon;
+                    color: tip.accent;
+                    font-size: 13px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-family: AppMetrics.mono_font;
+                }
+                Text {
+                    x: 46px; y: 4px;
+                    width: parent.width - (root.show_tip_bytes ? 170px : 58px); height: 18px;
+                    text: tip.title;
+                    color: ThemePalette.text;
+                    font-size: 12.5px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    x: 46px; y: 22px;
+                    width: parent.width - (root.show_tip_bytes ? 170px : 58px); height: 18px;
+                    text: tip.detail;
+                    color: ThemePalette.text_muted;
+                    font-size: 10.5px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if tip.bytes_text != "" && root.show_tip_bytes: Text {
+                    x: parent.width - 118px; y: 0;
+                    width: 108px; height: parent.height;
+                    text: tip.bytes_text;
+                    color: ThemePalette.text;
+                    font-size: 13px;
+                    font-weight: 700;
+                    font-family: AppMetrics.mono_font;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+                tip_touch := TouchArea {
+                    mouse-cursor: tip.path != "" || tip.action != "" ? pointer : default;
+                    clicked => {
+                        if (tip.action != "") {
+                            root.tip_action(tip.action, tip.path);
+                        } else if (tip.path != "") {
+                            root.open_path(tip.path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component StorageLargestPanel inherits Rectangle {
+    in property <[StorageEntryUi]> top_items;
+    in property <bool> scanning;
+    in property <bool> show_bucket_label: true;
+    callback open_path(string);
+    // Row-level actions
+    callback open_more(string);
+    callback open_with(string);
+    background: ThemePalette.bg;
+
+    property <bool> compact: self.width < 660px;
+    property <bool> tiny: self.width < 430px;
+    property <length> category_w: self.compact ? 92px : 120px;
+    property <length> share_w: self.tiny ? 0px : (self.compact ? 78px : 140px);
+    property <length> size_w: self.tiny ? 82px : (self.compact ? 88px : 110px);
+
+    Text {
+        x: 6px; y: 0;
+        width: parent.width - 12px; height: 26px;
+        text: "Largest items";
+        color: ThemePalette.text_faint;
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.6px;
+        vertical-alignment: bottom;
+    }
+    Rectangle {
+        x: 0; y: 26px;
+        width: parent.width; height: parent.height - 26px;
+        background: ThemePalette.bg;
+        if root.top_items.length == 0: Text {
+            x: 12px; y: 14px;
+            width: parent.width - 24px;
+            text: root.scanning
+                ? "Largest items will appear once the scan completes."
+                : "Nothing to list yet. Click Rescan to start.";
+            color: ThemePalette.text_faint;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        ListView {
+            x: 0; y: 4px;
+            width: parent.width;
+            height: parent.height - 8px;
+            for entry[i] in root.top_items: StorageEntryRow {
+                width: parent.width;
+                entry: entry;
+                show_bucket_label: root.show_bucket_label && root.width >= 540px;
+                col_category_w: root.category_w;
+                col_share_w: root.share_w;
+                col_size_w: root.size_w;
+                open => { root.open_path(entry.path); }
+                more => { root.open_more(entry.path); }
+                open_with => { root.open_with(entry.path); }
+            }
+        }
     }
 }
 
@@ -1849,6 +2058,8 @@ component StorageOverview inherits Rectangle {
     callback show_full_list();
     callback open_path(string);
     callback tip_action(string, string);
+    callback open_more(string);
+    callback open_with(string);
     background: ThemePalette.bg;
 
     VerticalLayout {
@@ -2140,170 +2351,62 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // Recommendations section header.
-        Rectangle {
-            preferred-height: 26px;
-            min-height: 26px;
-            max-height: 26px;
-            vertical-stretch: 0;
-            background: ThemePalette.bg;
-            Text {
-                x: 18px; y: 0;
-                width: parent.width - 36px; height: parent.height;
-                text: "Recommendations";
-                color: ThemePalette.text_faint;
-                font-size: 10.5px;
-                font-weight: 700;
-                letter-spacing: 0.6px;
-                vertical-alignment: bottom;
-            }
-        }
-
-        // v0.9.17: recommendations are now intrinsically-sized
-        // (preferred-height = tip rows + padding, capped so a flood
-        // of tips still scrolls). The page no longer looks empty when
-        // there are only a few tips because the "Largest items"
-        // section below takes the remaining vertical space.
-        Rectangle {
-            property <length> needed_h: root.tips.length == 0
-                ? 70px
-                : min(8px + (root.tips.length * 50px), 460px);
-            preferred-height: self.needed_h;
-            min-height: self.needed_h;
-            max-height: self.needed_h;
-            vertical-stretch: 0;
-            background: ThemePalette.bg;
-            if root.tips.length == 0: Text {
-                x: 24px; y: 14px;
-                width: parent.width - 48px;
-                text: root.scanning
-                    ? "Recommendations will appear once the scan completes."
-                    : "Nothing pressing here. Click any category card above to drill into its largest items.";
-                color: ThemePalette.text_faint;
-                font-size: 12px;
-            }
-            // v0.9.13: tip rows trimmed to 44px so 4-5 fit in the
-            // visible panel at typical window heights without
-            // scrolling. Detail text collapsed onto one line; users
-            // can hover the row for the tooltip (todo) or read the
-            // truncated detail inline.
-            ListView {
-                x: 12px; y: 4px;
-                width: parent.width - 24px;
-                height: parent.height - 8px;
-                for tip[i] in root.tips: Rectangle {
-                    height: 44px;
-                    background: tip_touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel;
-                    border-radius: AppMetrics.radius_small;
-                    animate background { duration: 80ms; easing: ease-out; }
-                    Rectangle {
-                        x: 0; y: 0;
-                        width: 3px; height: parent.height;
-                        background: tip.accent;
-                    }
-                    Text {
-                        x: 12px; y: 0;
-                        width: 28px; height: parent.height;
-                        text: tip.icon;
-                        color: tip.accent;
-                        font-size: 13px;
-                        font-weight: 700;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        font-family: AppMetrics.mono_font;
-                    }
-                    Text {
-                        x: 46px; y: 4px;
-                        width: parent.width - 170px; height: 18px;
-                        text: tip.title;
-                        color: ThemePalette.text;
-                        font-size: 12.5px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                    Text {
-                        x: 46px; y: 22px;
-                        width: parent.width - 170px; height: 18px;
-                        text: tip.detail;
-                        color: ThemePalette.text_muted;
-                        font-size: 10.5px;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-                    if tip.bytes_text != "": Text {
-                        x: parent.width - 118px; y: 0;
-                        width: 108px; height: parent.height;
-                        text: tip.bytes_text;
-                        color: ThemePalette.text;
-                        font-size: 13px;
-                        font-weight: 700;
-                        font-family: AppMetrics.mono_font;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                    }
-                    tip_touch := TouchArea {
-                        mouse-cursor: tip.path != "" || tip.action != "" ? pointer : default;
-                        clicked => {
-                            if (tip.action != "") {
-                                root.tip_action(tip.action, tip.path);
-                            } else if (tip.path != "") {
-                                root.open_path(tip.path);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Largest items - fills whatever vertical space remains after
-        // recommendations. Shows top 30 folders/files from the scan
-        // sorted by size; click any row to open. Replaces the dead
-        // empty area at the bottom of the page when the rec list is
-        // short.
-        Rectangle {
-            preferred-height: 26px;
-            min-height: 26px;
-            max-height: 26px;
-            vertical-stretch: 0;
-            background: ThemePalette.bg;
-            Text {
-                x: 18px; y: 0;
-                width: parent.width - 36px; height: parent.height;
-                text: "Largest items - click any row to open";
-                color: ThemePalette.text_faint;
-                font-size: 10.5px;
-                font-weight: 700;
-                letter-spacing: 0.6px;
-                vertical-alignment: bottom;
-            }
-        }
-        Rectangle {
+        content_area := Rectangle {
             vertical-stretch: 1;
-            min-height: 120px;
+            min-height: 220px;
             background: ThemePalette.bg;
-            if root.top_items.length == 0: Text {
-                x: 24px; y: 14px;
-                width: parent.width - 48px;
-                text: root.scanning
-                    ? "Largest items will appear once the scan completes."
-                    : "Nothing to list yet. Click Rescan to start.";
-                color: ThemePalette.text_faint;
-                font-size: 12px;
+            property <bool> split: self.width >= 980px;
+            property <length> inner_w: self.width - 24px;
+            property <length> gap: 12px;
+            property <length> left_w: self.split
+                ? min(540px, max(360px, self.inner_w * 0.42))
+                : self.inner_w;
+            property <length> stacked_tips_h: min(
+                max(88px, 34px + (root.tips.length * 40px)),
+                max(96px, self.height * 0.28));
+            property <length> stacked_largest_h: max(
+                160px,
+                self.height - content_area.stacked_tips_h - content_area.gap);
+
+            if content_area.split: StorageTipsPanel {
+                x: 12px; y: 0;
+                width: content_area.left_w;
+                height: parent.height;
+                tips: root.tips;
+                scanning: root.scanning;
+                open_path(p) => { root.open_path(p); }
+                tip_action(action, path) => { root.tip_action(action, path); }
             }
-            ListView {
-                x: 12px; y: 4px;
-                width: parent.width - 24px;
-                height: parent.height - 12px;
-                for entry[i] in root.top_items: StorageEntryRow {
-                    width: parent.width;
-                    entry: entry;
-                    show_bucket_label: true;
-                    col_category_w: 120px;
-                    col_share_w: 140px;
-                    col_size_w: 110px;
-                    open => { root.open_path(entry.path); }
-                }
+            if content_area.split: StorageLargestPanel {
+                x: 12px + content_area.left_w + content_area.gap; y: 0;
+                width: content_area.inner_w - content_area.left_w - content_area.gap;
+                height: parent.height;
+                top_items: root.top_items;
+                scanning: root.scanning;
+                show_bucket_label: true;
+                open_path(p) => { root.open_path(p); }
+                open_more(p) => { root.open_more(p); }
+                open_with(p) => { root.open_with(p); }
+            }
+            if !content_area.split: StorageLargestPanel {
+                x: 12px; y: 0;
+                width: content_area.inner_w;
+                height: content_area.stacked_largest_h;
+                top_items: root.top_items;
+                scanning: root.scanning;
+                show_bucket_label: true;
+                open_path(p) => { root.open_path(p); }
+                open_more(p) => { root.open_more(p); }
+                open_with(p) => { root.open_with(p); }
+            }
+            if !content_area.split: StorageTipsPanel {
+                x: 12px; y: content_area.stacked_largest_h + content_area.gap;
+                width: content_area.inner_w;
+                height: content_area.stacked_tips_h;
+                tips: root.tips;
+                scanning: root.scanning;
+                open_path(p) => { root.open_path(p); }
+                tip_action(action, path) => { root.tip_action(action, path); }
             }
         }
     }
@@ -2322,6 +2425,9 @@ component StorageDrillIn inherits Rectangle {
     callback open_path(string);
     callback close();
     callback search_changed(string);
+    // Bubble up row-level actions
+    callback open_more(string);
+    callback open_with(string);
     background: ThemePalette.bg;
 
     // v0.9.13: widened to match the rebuilt StorageEntryRow which
@@ -2548,6 +2654,8 @@ component StorageDrillIn inherits Rectangle {
                 col_share_w: root.col_share_w;
                 col_size_w: root.col_size_w;
                 open => { root.open_path(entry.path); }
+                more => { root.open_more(entry.path); }
+                open_with => { root.open_with(entry.path); }
             }
         }
     }
@@ -2675,6 +2783,9 @@ export component MainWindow inherits Window {
     callback storage_clear_bucket();
     callback storage_switch_root(string);
     callback storage_tip_action(string, string);
+    // Entry context actions exposed for the storage panels.
+    callback storage_entry_more(string);
+    callback storage_entry_open_with(string);
     // Per-folder scroll memory. Rust saves the leaving folder's viewport-y and
     // restores the arriving folder's saved value on every navigate so back / up
     // / re-entering a folder land on the row the user was looking at, not the top.
@@ -3205,7 +3316,7 @@ export component MainWindow inherits Window {
             ToolButton { x: parent.width - 358px; y: root.is_simple ? 16px : 6px; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
             ToolButton { x: parent.width - 324px; y: root.is_simple ? 16px : 6px; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
             Rectangle { x: parent.width - 290px; y: root.is_simple ? 24px : 12px; width: 1px; height: root.is_simple ? 40px : 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 278px; y: root.is_simple ? 16px : 6px; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.rename_index = root.selected_index; } }
+            ToolButton { x: parent.width - 278px; y: root.is_simple ? 16px : 6px; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
             ToolButton { x: parent.width - 244px; y: root.is_simple ? 16px : 6px; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
             Rectangle { x: parent.width - 210px; y: root.is_simple ? 24px : 12px; width: 1px; height: root.is_simple ? 40px : 20px; background: ThemePalette.border; }
             ToolButton { x: parent.width - 198px; y: root.is_simple ? 16px : 6px; icon_data: "M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8 M16 6l-4-4-4 4 M12 2v13"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
@@ -4247,6 +4358,8 @@ export component MainWindow inherits Window {
                     open_path(p) => { root.storage_open_path(p); }
                     close => { root.storage_clear_bucket(); }
                     search_changed(q) => { root.storage_drill_search_changed(q); }
+                    open_more(p) => { root.storage_entry_more(p); }
+                    open_with(p) => { root.storage_entry_open_with(p); }
                 }
 
                 // Storage overview (bucket grid) when no drill-in is active.
@@ -4275,6 +4388,8 @@ export component MainWindow inherits Window {
                     show_full_list => { root.storage_toggle_show_all(); }
                     open_path(p) => { root.storage_open_path(p); }
                     tip_action(action, path) => { root.storage_tip_action(action, path); }
+                    open_more(p) => { root.storage_entry_more(p); }
+                    open_with(p) => { root.storage_entry_open_with(p); }
                 }
             }
 
@@ -4901,7 +5016,7 @@ export component MainWindow inherits Window {
 
             // -- Core actions (regular folders) ------------------------
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Open"; command_name: "open"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Rename"; command_name: "rename"; picked(_c) => { root.context_visible = false; root.rename_index = root.selected_index; } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Rename"; command_name: "rename"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Copy"; command_name: "copy"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Cut"; command_name: "cut"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Paste"; command_name: "paste"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -7271,7 +7386,7 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(F3); activated => { root.toggle_dual_pane(); } }
         KeyBinding { keys: @keys(F5); activated => { root.refresh(); } }
         KeyBinding { keys: @keys(Delete); activated => { root.command("delete"); } }
-        KeyBinding { keys: @keys(F2); activated => { root.rename_index = root.selected_index; } }
+        KeyBinding { keys: @keys(F2); activated => { root.command("rename"); } }
         KeyBinding { keys: @keys(Return); activated => { root.file_opened(root.selected_index); } }
         KeyBinding { keys: @keys(Space); activated => { root.toggle_preview(); } }
         KeyBinding { keys: @keys(Control+D); activated => { root.command("duplicates"); } }
