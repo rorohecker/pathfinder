@@ -1874,102 +1874,126 @@ component StorageEntryRow inherits Rectangle {
     }
 }
 
-component StorageTipsPanel inherits Rectangle {
+// Bottom recommendations strip on the storage overview. Uses a fixed-height
+// grid (no internal scroll) so every tip is visible above the window edge.
+component StorageTipsFooter inherits Rectangle {
     in property <[StorageTipUi]> tips;
     in property <bool> scanning;
     callback open_path(string);
     callback tip_action(string, string);
-    background: ThemePalette.bg;
-    property <bool> show_tip_bytes: self.width >= 520px;
+    background: ThemePalette.panel;
 
+    property <length> min_tip_w: 220px;
+    property <int> tips_per_row: root.tips.length == 0
+        ? 1
+        : Math.max(1, Math.min(
+            root.tips.length,
+            Math.floor((self.width - 24px) / root.min_tip_w)));
+    property <int> tip_rows: root.tips.length == 0
+        ? 1
+        : Math.ceil(root.tips.length / self.tips_per_row);
+    property <length> tip_w: root.tips.length == 0
+        ? 0px
+        : (self.width - 24px - (self.tips_per_row - 1) * 8px) / self.tips_per_row;
+    property <length> body_h: 38px + self.tip_rows * 48px;
+    property <bool> show_tip_bytes: self.tip_w >= 280px;
+
+    preferred-height: self.body_h;
+    min-height: self.body_h;
+    max-height: self.body_h;
+    vertical-stretch: 0;
+
+    Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: 1px;
+        background: ThemePalette.border;
+    }
     Text {
-        x: 6px; y: 0;
-        width: parent.width - 12px; height: 26px;
+        x: 18px; y: 8px;
+        width: parent.width - 36px; height: 18px;
         text: "Recommendations";
         color: ThemePalette.text_faint;
         font-size: 10.5px;
         font-weight: 700;
         letter-spacing: 0.6px;
-        vertical-alignment: bottom;
+        vertical-alignment: center;
     }
-    Rectangle {
-        x: 0; y: 26px;
-        width: parent.width; height: parent.height - 26px;
-        background: ThemePalette.bg;
-        if root.tips.length == 0: Text {
-            x: 12px; y: 14px;
-            width: parent.width - 24px;
-            text: root.scanning
-                ? "Recommendations will appear once the scan completes."
-                : "Nothing pressing here. Pick a category to drill into its largest items.";
-            color: ThemePalette.text_faint;
-            font-size: 12px;
-            wrap: word-wrap;
+    if root.tips.length == 0: Text {
+        x: 18px; y: 30px;
+        width: parent.width - 36px;
+        text: root.scanning
+            ? "Recommendations will appear once the scan completes."
+            : "Nothing pressing here. Pick a category above to drill into its largest items.";
+        color: ThemePalette.text_faint;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+    for tip[i] in root.tips: Rectangle {
+        property <int> tip_col: Math.mod(i, root.tips_per_row);
+        property <int> tip_row: Math.floor(i / root.tips_per_row);
+        x: 12px + self.tip_col * (root.tip_w + 8px);
+        y: 30px + self.tip_row * 48px;
+        width: root.tip_w;
+        height: 44px;
+        border-radius: AppMetrics.radius_small;
+        border-width: 1px;
+        border-color: ThemePalette.border;
+        background: tip_touch.has-hover ? ThemePalette.panel_alt : ThemePalette.bg;
+        animate background { duration: 80ms; easing: ease-out; }
+        Rectangle {
+            x: 0; y: 0;
+            width: 3px; height: parent.height;
+            border-radius: AppMetrics.radius_small;
+            background: tip.accent;
         }
-        ListView {
-            x: 0; y: 4px;
-            width: parent.width;
-            height: parent.height - 8px;
-            for tip[i] in root.tips: Rectangle {
-                height: 44px;
-                background: tip_touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel;
-                border-radius: AppMetrics.radius_small;
-                animate background { duration: 80ms; easing: ease-out; }
-                Rectangle {
-                    x: 0; y: 0;
-                    width: 3px; height: parent.height;
-                    background: tip.accent;
-                }
-                Text {
-                    x: 12px; y: 0;
-                    width: 28px; height: parent.height;
-                    text: tip.icon;
-                    color: tip.accent;
-                    font-size: 13px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    font-family: AppMetrics.mono_font;
-                }
-                Text {
-                    x: 46px; y: 4px;
-                    width: parent.width - (root.show_tip_bytes ? 170px : 58px); height: 18px;
-                    text: tip.title;
-                    color: ThemePalette.text;
-                    font-size: 12.5px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-                Text {
-                    x: 46px; y: 22px;
-                    width: parent.width - (root.show_tip_bytes ? 170px : 58px); height: 18px;
-                    text: tip.detail;
-                    color: ThemePalette.text_muted;
-                    font-size: 10.5px;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-                if tip.bytes_text != "" && root.show_tip_bytes: Text {
-                    x: parent.width - 118px; y: 0;
-                    width: 108px; height: parent.height;
-                    text: tip.bytes_text;
-                    color: ThemePalette.text;
-                    font-size: 13px;
-                    font-weight: 700;
-                    font-family: AppMetrics.mono_font;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
-                }
-                tip_touch := TouchArea {
-                    mouse-cursor: tip.path != "" || tip.action != "" ? pointer : default;
-                    clicked => {
-                        if (tip.action != "") {
-                            root.tip_action(tip.action, tip.path);
-                        } else if (tip.path != "") {
-                            root.open_path(tip.path);
-                        }
-                    }
+        Text {
+            x: 10px; y: 0;
+            width: 26px; height: parent.height;
+            text: tip.icon;
+            color: tip.accent;
+            font-size: 12px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            font-family: AppMetrics.mono_font;
+        }
+        Text {
+            x: 40px; y: 5px;
+            width: parent.width - (root.show_tip_bytes ? 118px : 48px); height: 16px;
+            text: tip.title;
+            color: ThemePalette.text;
+            font-size: 12px;
+            font-weight: 700;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            x: 40px; y: 22px;
+            width: parent.width - (root.show_tip_bytes ? 118px : 48px); height: 16px;
+            text: tip.detail;
+            color: ThemePalette.text_muted;
+            font-size: 10px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if tip.bytes_text != "" && root.show_tip_bytes: Text {
+            x: parent.width - 108px; y: 0;
+            width: 100px; height: parent.height;
+            text: tip.bytes_text;
+            color: ThemePalette.text;
+            font-size: 12px;
+            font-weight: 700;
+            font-family: AppMetrics.mono_font;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        tip_touch := TouchArea {
+            mouse-cursor: tip.path != "" || tip.action != "" ? pointer : default;
+            clicked => {
+                if (tip.action != "") {
+                    root.tip_action(tip.action, tip.path);
+                } else if (tip.path != "") {
+                    root.open_path(tip.path);
                 }
             }
         }
@@ -1995,7 +2019,9 @@ component StorageLargestPanel inherits Rectangle {
     Text {
         x: 6px; y: 0;
         width: parent.width - 12px; height: 26px;
-        text: "Largest items";
+        text: root.top_items.length > 0
+            ? ("Largest items · " + root.top_items.length)
+            : "Largest items";
         color: ThemePalette.text_faint;
         font-size: 10.5px;
         font-weight: 700;
@@ -2181,7 +2207,7 @@ component StorageOverview inherits Rectangle {
             }
             HorizontalLayout {
                 x: 18px; y: 10px;
-                width: parent.width - 36px;
+                width: parent.width - 100px;
                 height: 14px;
                 spacing: 2px;
                 for bucket[i] in root.buckets: Rectangle {
@@ -2194,6 +2220,16 @@ component StorageOverview inherits Rectangle {
                         clicked => { root.select_bucket(bucket.id); }
                     }
                 }
+            }
+            if root.disk_used_pct > 0: Text {
+                x: parent.width - 88px; y: 0;
+                width: 76px; height: parent.height;
+                text: round(root.disk_used_pct) + "% used";
+                color: ThemePalette.text_muted;
+                font-size: 11px;
+                font-weight: 600;
+                horizontal-alignment: right;
+                vertical-alignment: center;
             }
         }
 
@@ -2287,7 +2323,14 @@ component StorageOverview inherits Rectangle {
         // narrow. Cards are click targets for the bucket drill-in,
         // matching the rest of the app's "card = pane" affordance.
         if root.buckets.length > 0: bucket_strip := Rectangle {
-            property <int> cards_per_row: Math.max(1, Math.min(8, Math.floor((self.width - 24px) / 168px)));
+            // Wider minimum card width + cap at bucket count so one row
+            // fills the strip on typical desktop widths (no orphaned gap).
+            property <length> min_card_w: 132px;
+            property <int> cards_per_row: Math.max(
+                1,
+                Math.min(
+                    root.buckets.length,
+                    Math.floor((self.width - 24px) / self.min_card_w)));
             property <int> card_rows: Math.max(1, Math.ceil(root.buckets.length / self.cards_per_row));
             property <length> card_w: (self.width - 24px - (self.cards_per_row - 1) * 8px) / self.cards_per_row;
             property <length> needed_h: 8px + self.card_rows * 88px;
@@ -2384,63 +2427,30 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        content_area := Rectangle {
+        // Largest items fills all space between buckets and recommendations.
+        Rectangle {
             vertical-stretch: 1;
-            min-height: 220px;
+            min-height: 200px;
             background: ThemePalette.bg;
-            property <bool> split: self.width >= 980px;
-            property <length> inner_w: self.width - 24px;
-            property <length> gap: 12px;
-            property <length> left_w: self.split
-                ? min(540px, max(360px, self.inner_w * 0.42))
-                : self.inner_w;
-            property <length> stacked_tips_h: min(
-                max(88px, 34px + (root.tips.length * 40px)),
-                max(96px, self.height * 0.28));
-            property <length> stacked_largest_h: max(
-                160px,
-                self.height - content_area.stacked_tips_h - content_area.gap);
+            StorageLargestPanel {
+                x: 12px; y: 0;
+                width: parent.width - 24px;
+                height: parent.height;
+                top_items: root.top_items;
+                scanning: root.scanning;
+                show_bucket_label: true;
+                open_path(p) => { root.open_path(p); }
+                open_more(p) => { root.open_more(p); }
+                open_with(p) => { root.open_with(p); }
+            }
+        }
 
-            if content_area.split: StorageTipsPanel {
-                x: 12px; y: 0;
-                width: content_area.left_w;
-                height: parent.height;
-                tips: root.tips;
-                scanning: root.scanning;
-                open_path(p) => { root.open_path(p); }
-                tip_action(action, path) => { root.tip_action(action, path); }
-            }
-            if content_area.split: StorageLargestPanel {
-                x: 12px + content_area.left_w + content_area.gap; y: 0;
-                width: content_area.inner_w - content_area.left_w - content_area.gap;
-                height: parent.height;
-                top_items: root.top_items;
-                scanning: root.scanning;
-                show_bucket_label: true;
-                open_path(p) => { root.open_path(p); }
-                open_more(p) => { root.open_more(p); }
-                open_with(p) => { root.open_with(p); }
-            }
-            if !content_area.split: StorageLargestPanel {
-                x: 12px; y: 0;
-                width: content_area.inner_w;
-                height: content_area.stacked_largest_h;
-                top_items: root.top_items;
-                scanning: root.scanning;
-                show_bucket_label: true;
-                open_path(p) => { root.open_path(p); }
-                open_more(p) => { root.open_more(p); }
-                open_with(p) => { root.open_with(p); }
-            }
-            if !content_area.split: StorageTipsPanel {
-                x: 12px; y: content_area.stacked_largest_h + content_area.gap;
-                width: content_area.inner_w;
-                height: content_area.stacked_tips_h;
-                tips: root.tips;
-                scanning: root.scanning;
-                open_path(p) => { root.open_path(p); }
-                tip_action(action, path) => { root.tip_action(action, path); }
-            }
+        // Recommendations pinned to the bottom - grid layout, no scroll.
+        StorageTipsFooter {
+            tips: root.tips;
+            scanning: root.scanning;
+            open_path(p) => { root.open_path(p); }
+            tip_action(action, path) => { root.tip_action(action, path); }
         }
     }
 }
@@ -3002,6 +3012,7 @@ export component MainWindow inherits Window {
     callback toggle_dual_pane();
     callback toggle_hidden();
     callback command(string);
+    in-out property <int> toolbar_search_focus_nonce: 0;
     callback theme_selected(string);
     callback accent_selected(string);
     callback density_selected(string);
@@ -3416,7 +3427,7 @@ export component MainWindow inherits Window {
             ToolButton { x: parent.width - 278px; y: root.is_simple ? 16px : 6px; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
             ToolButton { x: parent.width - 244px; y: root.is_simple ? 16px : 6px; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
             Rectangle { x: parent.width - 210px; y: root.is_simple ? 24px : 12px; width: 1px; height: root.is_simple ? 40px : 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 198px; y: root.is_simple ? 16px : 6px; icon_data: "M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8 M16 6l-4-4-4 4 M12 2v13"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
+            ToolButton { x: parent.width - 198px; y: root.is_simple ? 16px : 6px; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
             ToolButton { x: parent.width - 164px; y: root.is_simple ? 16px : 6px; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
             ToolButton { x: parent.width - 130px; y: root.is_simple ? 16px : 6px; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
             // Clear selection button on the right edge
@@ -3659,12 +3670,18 @@ export component MainWindow inherits Window {
                 // and the wider captioned buttons would overlap the search field.
                 visible: toolbar.show_toolbar_search && !root.is_simple;
                 property <bool> semantic_available: root.semantic_search_available;
+                property <int> focus_nonce: root.toolbar_search_focus_nonce;
+                changed focus_nonce => {
+                    if (self.focus_nonce > 0) {
+                        search_input.focus();
+                    }
+                }
                 x: toolbar.show_toolbar_sort ? parent.width - 705px : parent.width - 524px;
                 y: 6px;
                 width: 208px;
                 height: 31px;
                 border-width: 1px;
-                border-color: search.has-focus ? ThemePalette.accent : ThemePalette.border;
+                border-color: search_input.has-focus ? ThemePalette.accent : ThemePalette.border;
                 border-radius: AppMetrics.radius_small;
                 background: AppMetrics.light_controls ? rgba(255, 255, 255, 0.50) : rgba(0, 0, 0, 0.12);
 
@@ -3709,7 +3726,7 @@ export component MainWindow inherits Window {
                     y: parent.height + 6px;
                     tip_text: root.search_semantic_mode ? "Semantic ranking on (embeddings)" : "Semantic ranking off - click to rank by name embeddings";
                 }
-                search := TextInput {
+                search_input := TextInput {
                     x: search_box.semantic_available ? 56px : 30px;
                     y: 0;
                     width: parent.width - (search_box.semantic_available ? 84px : 58px);
@@ -3734,8 +3751,8 @@ export component MainWindow inherits Window {
                 }
                 // Placeholder - only when BOTH the underlying TextInput and the
                 // bound property are empty AND the field isn't focused. Checking
-                // search.text explicitly prevents a flicker overlap when typing.
-                if root.search_text == "" && search.text == "" && !search.has-focus: Text {
+                // search_input.text explicitly prevents a flicker overlap when typing.
+                if root.search_text == "" && search_input.text == "" && !search_input.has-focus: Text {
                     x: search_box.semantic_available ? 56px : 30px;
                     y: 0;
                     width: parent.width - (search_box.semantic_available ? 84px : 58px);
@@ -7485,6 +7502,8 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(F3); activated => { root.toggle_dual_pane(); } }
         KeyBinding { keys: @keys(F5); activated => { root.refresh(); } }
         KeyBinding { keys: @keys(Delete); activated => { root.command("delete"); } }
+        KeyBinding { keys: @keys(Shift+Delete); activated => { if (root.in_recycle_bin) { root.command("purge"); } } }
+        KeyBinding { keys: @keys(Alt+Return); activated => { root.command("properties"); } }
         KeyBinding { keys: @keys(F2); activated => { root.command("rename"); } }
         KeyBinding { keys: @keys(Return); activated => { root.file_opened(root.selected_index); } }
         KeyBinding { keys: @keys(Space); activated => { root.toggle_preview(); } }

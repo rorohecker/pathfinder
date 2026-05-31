@@ -255,6 +255,7 @@ struct CachedPreview {
 struct DirectoryPage {
     entries: Vec<FileEntry>,
     partial: bool,
+    skipped_entries: u32,
 }
 
 #[derive(Clone)]
@@ -276,6 +277,8 @@ pub struct FileOp {
     pub kind: String,
     pub from: String,
     pub to: Option<String>,
+    #[serde(default)]
+    pub trash_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -537,6 +540,7 @@ struct AppState {
     operation_queue: Arc<Mutex<VecDeque<OperationQueueItem>>>,
     next_operation_id: Arc<AtomicU64>,
     queue_paused: Arc<Mutex<bool>>,
+    queue_cancel: Arc<std::sync::atomic::AtomicBool>,
     git_cache: Arc<Mutex<GitCacheMap>>,
     // Debounce map for file watcher indexing: tracks last index time per path
     // to avoid excessive indexing when rapid file system events occur.
@@ -555,6 +559,7 @@ impl Default for AppState {
             operation_queue: Arc::new(Mutex::new(VecDeque::new())),
             next_operation_id: Arc::new(AtomicU64::new(1)),
             queue_paused: Arc::new(Mutex::new(false)),
+            queue_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             git_cache: Arc::new(Mutex::new(HashMap::new())),
             index_debounce: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -1403,14 +1408,25 @@ fn path_to_entry(entry_path: &Path, metadata: &fs::Metadata) -> FileEntry {
     }
 }
 
-fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
+const OP_CANCELLED: &str = "Operation cancelled.";
+
+fn copy_dir_recursive(state: &AppState, from: &Path, to: &Path) -> Result<(), String> {
+    if state.queue_cancel_requested() {
+        return Err(OP_CANCELLED.to_string());
+    }
     if to.exists() {
         return Err(format!("Destination already exists: {}", to.display()));
     }
     fs::create_dir_all(to).map_err(|e| e.to_string())?;
     let mut stack: Vec<(PathBuf, PathBuf)> = vec![(from.to_path_buf(), to.to_path_buf())];
     while let Some((src_dir, dst_dir)) = stack.pop() {
+        if state.queue_cancel_requested() {
+            return Err(OP_CANCELLED.to_string());
+        }
         for entry in fs::read_dir(&src_dir).map_err(|e| e.to_string())? {
+            if state.queue_cancel_requested() {
+                return Err(OP_CANCELLED.to_string());
+            }
             let entry = entry.map_err(|e| e.to_string())?;
             let src = entry.path();
             let dst = dst_dir.join(entry.file_name());
@@ -1782,11 +1798,22 @@ impl AppState {
     }
 
     fn log_op(&self, kind: &str, from: &str, to: Option<&str>) {
+        self.log_op_with_trash(kind, from, to, None);
+    }
+
+    fn log_op_with_trash(
+        &self,
+        kind: &str,
+        from: &str,
+        to: Option<&str>,
+        trash_id: Option<&str>,
+    ) {
         if let Ok(mut log) = self.operation_log.lock() {
             log.push(FileOp {
                 kind: kind.to_string(),
                 from: from.to_string(),
                 to: to.map(|s| s.to_string()),
+                trash_id: trash_id.map(|s| s.to_string()),
             });
             if log.len() > 50 {
                 log.remove(0);
@@ -1887,6 +1914,21 @@ impl AppState {
             .lock()
             .map(|paused| *paused)
             .unwrap_or(false)
+    }
+
+    fn queue_cancel_requested(&self) -> bool {
+        self.queue_cancel
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn request_queue_cancel(&self) {
+        self.queue_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn clear_queue_cancel(&self) {
+        self.queue_cancel
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn invalidate_directory_path(&self, path: &Path) {
@@ -2305,23 +2347,40 @@ fn list_directory_chunk(dir: &Path, max_entries: usize) -> Result<DirectoryPage,
         return Err(format!("Not a directory: {}", dir.display()));
     }
 
-    let mut entries = Vec::with_capacity(max_entries.min(512));
-    let mut partial = false;
+    let mut dir_entries: Vec<fs::DirEntry> = Vec::new();
+    let mut skipped_entries = 0u32;
     for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        if entries.len() >= max_entries {
-            partial = true;
-            break;
-        }
-        let path = entry.path();
-        if let Ok(metadata) = entry.metadata() {
-            entries.push(path_to_entry(&path, &metadata));
+        match entry {
+            Ok(e) => dir_entries.push(e),
+            Err(_) => skipped_entries += 1,
         }
     }
+    dir_entries.sort_by(|a, b| {
+        a.file_name()
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .cmp(
+                &b.file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase(),
+            )
+    });
+    let partial = dir_entries.len() > max_entries;
+    let to_process: Vec<_> = dir_entries.into_iter().take(max_entries).collect();
+    let entries: Vec<FileEntry> = to_process
+        .par_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            entry.metadata().ok().map(|m| path_to_entry(&path, &m))
+        })
+        .collect();
+    let mut entries = entries;
     sort_entries(&mut entries);
-    Ok(DirectoryPage { entries, partial })
+    Ok(DirectoryPage {
+        entries,
+        partial,
+        skipped_entries,
+    })
 }
 
 #[tauri::command]
@@ -3418,7 +3477,7 @@ fn copy_file(state: State<'_, AppState>, from: String, to: String) -> Result<(),
     }
 
     let result = if src.is_dir() {
-        copy_dir_recursive(&src, &dst)
+        copy_dir_recursive(&state, &src, &dst)
     } else {
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -3447,7 +3506,7 @@ fn move_file(state: State<'_, AppState>, from: String, to: String) -> Result<(),
     }
 
     let result = if src.is_dir() {
-        copy_dir_recursive(&src, &dst)?;
+        copy_dir_recursive(&state, &src, &dst)?;
         fs::remove_dir_all(&src).map_err(|e| e.to_string())
     } else {
         if let Some(parent) = dst.parent() {
@@ -6673,6 +6732,10 @@ fn undo_last_operation(state: State<'_, AppState>) -> Result<String, String> {
             state.invalidate_path(dst);
             Ok(format!("Moved back to '{}'", dst.display()))
         }
+        "delete" => {
+            undo_delete_from_trash(op.trash_id.as_deref())?;
+            Ok(format!("Restored '{}'", op.from))
+        }
         _ => Err(format!("Cannot undo '{}'", op.kind)),
     }
 }
@@ -8365,7 +8428,7 @@ fn index_search_fts(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry
             SELECT f.path, f.name, f.is_dir, f.size, f.modified, f.extension
             FROM files f
             JOIN files_fts ON files_fts.path = f.path
-            WHERE f.path LIKE ?1 ESCAPE '\\'
+            WHERE LOWER(f.path) LIKE LOWER(?1) ESCAPE '\\'
               AND files_fts MATCH ?2
             ORDER BY rank, f.is_dir DESC, f.name COLLATE NOCASE ASC
             LIMIT ?3
@@ -8426,17 +8489,14 @@ fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, S
         (escaped.clone(), escaped, query.to_lowercase())
     };
 
-    // COLLATE NOCASE on the `name LIKE ?2` clause is critical - SQLite's
-    // default LIKE collation is BINARY which made the index search refuse to
-    // match `appdata` against the column value `AppData`. Path filter stays
-    // BINARY because Windows paths are stored in their actual case and the
-    // root prefix is already supplied in the right case by the caller.
+    // COLLATE NOCASE on name/path LIKE clauses; LOWER() on the path prefix
+    // filter so drive-wide searches match regardless of index path casing.
     let mut stmt = conn
         .prepare(
             "
             SELECT path, name, is_dir, size, modified, extension
             FROM files
-            WHERE path LIKE ?1 ESCAPE '\\'
+            WHERE LOWER(path) LIKE LOWER(?1) ESCAPE '\\'
               AND (
                 name LIKE ?2 ESCAPE '\\' COLLATE NOCASE
                 OR path LIKE ?3 ESCAPE '\\' COLLATE NOCASE
@@ -9594,6 +9654,7 @@ fn native_list_directory_page(state: &AppState, path: &str) -> Result<DirectoryP
         return Ok(DirectoryPage {
             entries,
             partial: false,
+            skipped_entries: 0,
         });
     }
     list_directory_chunk(Path::new(path), FIRST_DIRECTORY_CHUNK)
@@ -9726,6 +9787,9 @@ fn native_delete_inner(
     path: &str,
     measure_folder_bytes: bool,
 ) -> Result<(), String> {
+    if state.queue_cancel_requested() {
+        return Err(OP_CANCELLED.to_string());
+    }
     if state.queue_is_paused() {
         return Err("Operation queue is paused.".to_string());
     }
@@ -9743,8 +9807,17 @@ fn native_delete_inner(
     let op_id = state.queue_start("delete", path, None, total);
     let started = Instant::now();
     trash::delete(&path_buf).map_err(|e| e.to_string())?;
+    let trash_id = trash::os_limited::list().ok().and_then(|items| {
+        items.into_iter().find(|item| {
+            same_path_string(
+                &item.original_path().to_string_lossy(),
+                &path_buf.to_string_lossy(),
+            )
+        })
+    });
+    let trash_id_str = trash_id.map(|item| item.id.to_string_lossy().into_owned());
     state.invalidate_path(&path_buf);
-    state.log_op("delete", path, None);
+    state.log_op_with_trash("delete", path, None, trash_id_str.as_deref());
     state.queue_finish(
         op_id,
         "done",
@@ -9788,6 +9861,9 @@ fn native_create_file(state: &AppState, path: &str) -> Result<(), String> {
 }
 
 fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
+    if state.queue_cancel_requested() {
+        return Err(OP_CANCELLED.to_string());
+    }
     if state.queue_is_paused() {
         return Err("Operation queue is paused.".to_string());
     }
@@ -9802,7 +9878,7 @@ fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
     let op_id = state.queue_start("copy", from, Some(&dst.to_string_lossy()), total);
     let started = Instant::now();
     let result = if src.is_dir() {
-        copy_dir_recursive(&src, &dst)
+        copy_dir_recursive(state, &src, &dst)
     } else {
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -9820,6 +9896,9 @@ fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
 }
 
 fn native_move(state: &AppState, from: &str, to: &str) -> Result<(), String> {
+    if state.queue_cancel_requested() {
+        return Err(OP_CANCELLED.to_string());
+    }
     if state.queue_is_paused() {
         return Err("Operation queue is paused.".to_string());
     }
@@ -9835,7 +9914,7 @@ fn native_move(state: &AppState, from: &str, to: &str) -> Result<(), String> {
     let started = Instant::now();
     if fs::rename(&src, &dst).is_err() {
         if src.is_dir() {
-            copy_dir_recursive(&src, &dst)?;
+            copy_dir_recursive(state, &src, &dst)?;
             fs::remove_dir_all(&src).map_err(|e| e.to_string())?;
         } else {
             if let Some(parent) = dst.parent() {
@@ -11747,11 +11826,16 @@ impl NativeController {
                     "large" => entry.kind != FileKind::Directory && entry.size > 100 * 1024 * 1024,
                     "recent" => entry.modified >= now.saturating_sub(7 * 24 * 60 * 60),
                     "old-downloads" => {
+                        let in_downloads = dirs::download_dir()
+                            .map(|d| {
+                                same_path_string(
+                                    &self.current_path,
+                                    &d.to_string_lossy(),
+                                )
+                            })
+                            .unwrap_or(false);
                         entry.kind != FileKind::Directory
-                            && self.current_path
-                                == dirs::download_dir()
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or_default()
+                            && in_downloads
                             && entry.modified < now.saturating_sub(30 * 24 * 60 * 60)
                     }
                     "screenshots" => {
@@ -12500,6 +12584,7 @@ impl NativeController {
                 self.active_archive = None;
                 ui.set_in_recycle_bin(false);
                 let partial = page.partial;
+                let skipped_entries = page.skipped_entries;
                 let files = page.entries;
 
                 // Save scroll position of the folder we are leaving so back/up
@@ -12629,6 +12714,17 @@ impl NativeController {
                 self.update_models(ui);
                 self.update_preview(ui);
                 self.save_session();
+
+                if skipped_entries > 0 {
+                    self.show_toast_kind(
+                        ui,
+                        format!(
+                            "{skipped_entries} item{} could not be listed (access denied)",
+                            if skipped_entries == 1 { "" } else { "s" }
+                        ),
+                        "warning",
+                    );
+                }
 
                 // Restore scroll position for this folder. New folders default
                 // to 0; re-visited folders (back / up / re-navigation) get the
@@ -13380,70 +13476,42 @@ impl NativeController {
         self.select_anchor = -1;
         self.files_model = None;
         let trimmed = self.search_query.trim().to_string();
+        let trimmed_lower = trimmed.to_ascii_lowercase();
         let search_root = self.search_root();
         let drive_wide =
             self.search_all_scope || is_filesystem_root(std::path::Path::new(&search_root));
-        let semantic_enabled = self.settings.search_semantic_mode && local_ai_semantic_ready();
-        let clip_enabled = self.settings.clip_search_enabled && local_ai_image_search_ready();
-        let mut indexed = if trimmed.starts_with("tag:") || trimmed.starts_with("smart:") {
-            Vec::new()
-        } else {
-            index_search(&search_root, &trimmed, SEARCH_INDEX_LIMIT).unwrap_or_default()
-        };
 
-        // Whole-drive searches often miss on the first keystroke because the
-        // local index is still cold. Ask Windows Search synchronously so the
-        // first query can already show multiple matches.
-        if drive_wide
-            && trimmed.len() >= 2
-            && indexed.is_empty()
-            && !trimmed.starts_with("tag:")
-            && !trimmed.starts_with("smart:")
-        {
-            #[cfg(target_os = "windows")]
-            if let Ok(windows_results) =
-                windows_index_search_impl(&trimmed, &search_root, SEARCH_INDEX_LIMIT)
-            {
-                if !windows_results.is_empty() {
-                    let _ = upsert_index_entries(&windows_results);
-                    merge_search_entries(&mut indexed, windows_results, SEARCH_INDEX_LIMIT);
-                }
-            }
-        }
-
-        if (semantic_enabled || clip_enabled)
-            && trimmed.len() >= 2
-            && !indexed.is_empty()
-            && !trimmed.starts_with("tag:")
-            && !trimmed.starts_with("smart:")
-        {
-            apply_semantic_search_ranking_entries(
-                &search_root,
-                &trimmed,
-                semantic_enabled,
-                clip_enabled,
-                &mut indexed,
-            );
-        }
         if trimmed.is_empty() {
             self.apply_filter();
             ui.set_empty_state(ss(""));
-        } else if !indexed.is_empty() {
-            self.visible_files = indexed;
-            self.apply_sort();
-            ui.set_empty_state(ss(""));
-        } else if drive_wide {
-            self.visible_files.clear();
-            ui.set_empty_state(ss("Searching drive..."));
-        } else {
-            self.visible_files.clear();
-            ui.set_empty_state(ss(""));
+            self.update_models(ui);
+            return;
         }
-        self.update_models(ui);
 
-        if trimmed.len() >= 2 && !trimmed.starts_with("tag:") && !trimmed.starts_with("smart:") {
-            self.schedule_background_search(ui, trimmed);
+        if trimmed_lower.starts_with("tag:") || trimmed_lower.starts_with("smart:") {
+            self.apply_filter();
+            ui.set_empty_state(ss(""));
+            self.update_models(ui);
+            return;
         }
+
+        if trimmed.len() < 2 {
+            self.visible_files.clear();
+            ui.set_empty_state(ss(""));
+            self.update_models(ui);
+            return;
+        }
+
+        // Index / Windows Search / live scan run on a worker thread so typing
+        // in large folders or whole-drive queries never blocks the UI thread.
+        self.visible_files.clear();
+        ui.set_empty_state(ss(if drive_wide {
+            "Searching drive..."
+        } else {
+            "Searching..."
+        }));
+        self.update_models(ui);
+        self.schedule_background_search(ui, trimmed);
     }
 
     fn schedule_background_search(&mut self, ui: &MainWindow, query: String) {
@@ -13503,20 +13571,6 @@ impl NativeController {
 
             if state.search_generation.load(Ordering::SeqCst) != token {
                 return;
-            }
-
-            if !results.is_empty() {
-                sort_entries(&mut results);
-                let mut partial = results.clone();
-                apply_semantic_search_ranking_entries(&path, &query, semantic, clip, &mut partial);
-                publish_search_result(
-                    &pending,
-                    &ready,
-                    &path,
-                    &query,
-                    partial,
-                    format!("{source} + live scan"),
-                );
             }
 
             if results.len() < limit {
@@ -14011,9 +14065,14 @@ impl NativeController {
                 if let Ok(mut paused) = self.app_state.queue_paused.lock() {
                     *paused = false;
                 }
+                self.app_state.clear_queue_cancel();
                 self.show_toast(ui, "Queue resumed.");
             }
             "queue-cancel" => {
+                self.app_state.request_queue_cancel();
+                self.app_state
+                    .search_generation
+                    .fetch_add(1, Ordering::SeqCst);
                 if let Ok(mut queue) = self.app_state.operation_queue.lock() {
                     for item in queue.iter_mut().filter(|i| i.status == "running") {
                         item.status = "cancelled".to_string();
@@ -14021,7 +14080,7 @@ impl NativeController {
                         item.finished_at = Some(now_unix_secs());
                     }
                 }
-                self.show_toast(ui, "Running operations marked for cancellation.");
+                self.show_toast(ui, "Cancelling running operations...");
             }
             "locked-file" => self.show_locked_file(ui),
             "properties" => {
@@ -14289,7 +14348,10 @@ impl NativeController {
             },
             "shortcut-editor" => self.show_shortcuts(ui),
             "undo" => self.undo(ui),
-            "focus-search" => self.show_toast(ui, "Search is ready in the toolbar."),
+            "focus-search" => {
+                let n = ui.get_toolbar_search_focus_nonce();
+                ui.set_toolbar_search_focus_nonce(n.wrapping_add(1));
+            }
             "restore" => self.restore_from_recycle_bin(ui),
             "purge" => self.purge_from_recycle_bin(ui),
             "empty-trash" => self.empty_recycle_bin(ui),
@@ -15105,6 +15167,10 @@ impl NativeController {
             let mut first_error: Option<String> = None;
 
             for src in &paths {
+                if app_state.queue_cancel_requested() {
+                    first_error = Some(OP_CANCELLED.to_string());
+                    break;
+                }
                 let Some(name) = Path::new(src).file_name() else {
                     continue;
                 };
@@ -15861,7 +15927,7 @@ impl NativeController {
             .map(|(_, label, hint, command)| format!("{hint:14} {label} ({command})"))
             .collect::<Vec<_>>()
             .join("\n");
-        ui.set_preview_title(ss("Shortcut Editor"));
+        ui.set_preview_title(ss("Keyboard Shortcuts"));
         ui.set_preview_body(ss(body));
         ui.set_preview_meta(ss("Custom shortcut storage is ready for a UI editor without changing the default bindings."));
     }
@@ -16020,6 +16086,10 @@ impl NativeController {
             self.storage_progress
                 .cancelled
                 .store(true, Ordering::Relaxed);
+            // Let Rescan work immediately after leaving Storage instead of
+            // waiting for the background poll to clear the active flag.
+            self.storage_scan_active = false;
+            ui.set_storage_scanning(false);
         }
     }
 
@@ -16435,7 +16505,11 @@ impl NativeController {
         ui.set_storage_progress_percent(100.0);
         // Recommendations / explanations for the overview's bottom
         // panel. Pulled from this scan result + the live volume.
-        let tips = build_storage_tips(result);
+        // Overview footer fits ~6 tips without scrolling on typical layouts.
+        let tips: Vec<StorageTipUi> = build_storage_tips(result)
+            .into_iter()
+            .take(6)
+            .collect();
         ui.set_storage_tips(slint::ModelRc::new(slint::VecModel::from(tips)));
     }
 
@@ -16613,6 +16687,7 @@ impl NativeController {
                 .as_deref()
                 .map(native_delete_path)
                 .unwrap_or_else(|| Err("Missing copied path".to_string())),
+            "delete" => undo_delete_from_trash(op.trash_id.as_deref()),
             _ => Err(format!("Cannot undo '{}'", op.kind)),
         };
         match result {
@@ -16623,6 +16698,16 @@ impl NativeController {
             Err(error) => self.show_toast(ui, error),
         }
     }
+}
+
+fn undo_delete_from_trash(trash_id: Option<&str>) -> Result<(), String> {
+    let trash_id = trash_id.ok_or("Missing recycle metadata for undo")?;
+    let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+    let item = items
+        .into_iter()
+        .find(|i| i.id.to_string_lossy() == trash_id)
+        .ok_or("Item is no longer in the Recycle Bin")?;
+    trash::os_limited::restore_all(vec![item]).map_err(|e| e.to_string())
 }
 
 fn native_delete_path(path: &str) -> Result<(), String> {
@@ -17812,12 +17897,19 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                 if same_path_string(&ctrl.search_root(), &result.path)
                                     && ctrl.search_query == result.query
                                 {
+                                    let count = result.entries.len();
                                     ctrl.visible_files = result.entries;
                                     ctrl.apply_sort();
                                     ctrl.update_models(&ui);
+                                    ctrl.update_status(&ui);
                                     ctrl.show_toast_kind(
                                         &ui,
-                                        format!("Search refreshed from {}", result.source),
+                                        format!(
+                                            "{} match{} from {}",
+                                            count,
+                                            if count == 1 { "" } else { "es" },
+                                            result.source
+                                        ),
                                         "info",
                                     );
                                 }
@@ -18743,6 +18835,15 @@ unsafe fn enable_taskbar_iconic_thumbnail(hwnd: windows::Win32::Foundation::HWND
 }
 
 #[cfg(target_os = "windows")]
+fn startup_warning_toast(weak_ui: slint::Weak<MainWindow>, message: String) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak_ui.upgrade() {
+            ui.set_toast_text(ss(&message));
+            ui.set_toast_kind(ss("warning"));
+        }
+    });
+}
+
 fn install_mouse_nav(ui: &MainWindow) {
     // Defer the WindowProc subclass via a Slint Timer for the same reason the
     // IDropTarget registration is deferred: calling `with_winit_window` synchronously
@@ -18763,9 +18864,7 @@ fn install_mouse_nav(ui: &MainWindow) {
         slint::TimerMode::SingleShot,
         Duration::from_millis(150),
         move || {
-            eprintln!("[mouse_nav] deferred subclass starting");
             let Some(ui) = weak.upgrade() else {
-                eprintln!("[mouse_nav] UI gone before subclass");
                 return;
             };
             let hwnd_opt = ui
@@ -18778,12 +18877,13 @@ fn install_mouse_nav(ui: &MainWindow) {
                     Some(HWND(h.hwnd.get() as *mut core::ffi::c_void))
                 })
                 .flatten()
-                .or_else(|| {
-                    eprintln!("[mouse_nav] with_winit_window failed; using fallback");
-                    find_pathfinder_hwnd()
-                });
+                .or_else(find_pathfinder_hwnd);
             let Some(hwnd) = hwnd_opt else {
-                eprintln!("[mouse_nav] could not find HWND, side buttons disabled");
+                startup_warning_toast(
+                    weak.clone(),
+                    "Mouse back/forward buttons are unavailable (could not attach to the window)."
+                        .to_string(),
+                );
                 return;
             };
             unsafe {
@@ -19575,7 +19675,11 @@ pub fn run() {
                     find_pathfinder_hwnd()
                 });
                 let Some(hwnd) = hwnd_opt else {
-                    eprintln!("[file_drag] could not find HWND, drop target disabled");
+                    startup_warning_toast(
+                        weak_drop.clone(),
+                        "Drag-and-drop from Explorer is unavailable (could not attach to the window)."
+                            .to_string(),
+                    );
                     return;
                 };
                 // Seed the ghost-overlay label whenever a drag enters the window
