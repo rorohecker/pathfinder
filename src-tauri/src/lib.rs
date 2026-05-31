@@ -5981,6 +5981,32 @@ fn storage_apps_drill_rank(path: &str) -> u8 {
     0
 }
 
+/// Re-order the drill-in / largest list per the user-selected sort mode.
+/// "size" preserves the size-ranked behavior (with the apps bucket's
+/// game-launcher priority); "name" and "recent" let the user pivot the same
+/// data without a rescan.
+fn apply_storage_sort_mode(mode: &str, bucket_id: &str, entries: &mut [StorageEntry]) {
+    match mode {
+        "name" => entries.sort_unstable_by(|a, b| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+                .then_with(|| b.bytes.cmp(&a.bytes))
+        }),
+        "recent" => entries.sort_unstable_by(|a, b| {
+            b.modified
+                .cmp(&a.modified)
+                .then_with(|| b.bytes.cmp(&a.bytes))
+        }),
+        "oldest" => entries.sort_unstable_by(|a, b| {
+            a.modified
+                .cmp(&b.modified)
+                .then_with(|| b.bytes.cmp(&a.bytes))
+        }),
+        _ => sort_storage_drill_entries(bucket_id, entries),
+    }
+}
+
 fn sort_storage_drill_entries(bucket_id: &str, entries: &mut [StorageEntry]) {
     if bucket_id == "apps" {
         entries.sort_unstable_by(|a, b| {
@@ -7355,6 +7381,10 @@ struct NativeController {
     // Empty = no filter. Re-applied on every push_storage_top_items
     // call so the bound model and the input box stay in sync.
     storage_drill_search: String,
+    // v0.9.21: drill-in sort mode - "size" (default), "name", or "recent".
+    // Applied in push_storage_top_items after merge/filter so the user can
+    // re-order any bucket/full list without a rescan.
+    storage_sort_mode: String,
     // Snapshots of the preview pane's prior visibility + width so closing
     // the storage view restores the pane to exactly what the user had
     // before opening Storage. Captured in open_storage_view.
@@ -11113,6 +11143,7 @@ impl NativeController {
             storage_current_root: String::new(),
             storage_selected_bucket: String::new(),
             storage_drill_search: String::new(),
+            storage_sort_mode: "size".to_string(),
             storage_preview_visible_before: false,
             storage_preview_w_before: 326.0,
             storage_subtitle_last_update: Instant::now(),
@@ -16292,7 +16323,7 @@ impl NativeController {
         // selection so the user's "show me everything in this bucket"
         // input narrows what's already there, never widens the scope.
         let search_lower = self.storage_drill_search.trim().to_lowercase();
-        let filtered: Vec<StorageEntry> = if search_lower.is_empty() {
+        let mut filtered: Vec<StorageEntry> = if search_lower.is_empty() {
             entries_src
         } else {
             entries_src
@@ -16303,7 +16334,16 @@ impl NativeController {
                 })
                 .collect()
         };
-        let largest = filtered.first().map(|e| e.bytes).unwrap_or(0).max(1);
+        // Apply the user's chosen sort mode (size/name/recent). Default "size"
+        // keeps the size ranking + apps game-launcher priority.
+        apply_storage_sort_mode(
+            &self.storage_sort_mode,
+            &self.storage_selected_bucket,
+            &mut filtered,
+        );
+        // Share bar is relative to the LARGEST item, computed independently of
+        // the current sort order so the bar stays meaningful under name/recent.
+        let largest = filtered.iter().map(|e| e.bytes).max().unwrap_or(0).max(1);
         let limit = if self.storage_selected_bucket.is_empty() {
             STORAGE_TOP_ITEMS_LIMIT
         } else {
@@ -16328,8 +16368,18 @@ impl NativeController {
 
     fn push_storage_to_ui(&mut self, ui: &MainWindow, result: &StorageScanResult) {
         let total = result.total_bytes.max(1);
-        let buckets: Vec<StorageBucketUi> = result
-            .buckets
+        // Order the cards + breakdown bar by size so the biggest categories
+        // read first (left to right). "Other" is pinned last regardless of
+        // size - it's a catch-all, not an actionable category.
+        let mut sorted_buckets: Vec<&StorageBucket> = result.buckets.iter().collect();
+        sorted_buckets.sort_by(|a, b| {
+            let a_other = a.id == "other";
+            let b_other = b.id == "other";
+            a_other
+                .cmp(&b_other)
+                .then_with(|| b.bytes.cmp(&a.bytes))
+        });
+        let buckets: Vec<StorageBucketUi> = sorted_buckets
             .iter()
             .map(|b| {
                 let pct = (b.bytes as f64 / total as f64) * 100.0;
@@ -16469,6 +16519,9 @@ impl NativeController {
         // typed in one category doesn't silently narrow the next.
         self.storage_drill_search.clear();
         ui.set_storage_drill_search(ss(""));
+        // Reset sort to size so each drill-in opens on the biggest items.
+        self.storage_sort_mode = "size".to_string();
+        ui.set_storage_sort_mode(ss("size"));
         self.storage_selected_bucket = bucket_id.clone();
         ui.set_storage_selected_bucket(ss(&bucket_id));
         let name = self
@@ -16494,6 +16547,8 @@ impl NativeController {
         ui.set_storage_show_all(false);
         self.storage_drill_search.clear();
         ui.set_storage_drill_search(ss(""));
+        self.storage_sort_mode = "size".to_string();
+        ui.set_storage_sort_mode(ss("size"));
         // Return to the overview with the preview pane hidden. The user's
         // original preview visibility/width is restored when storage closes.
         ui.set_preview_visible(false);
@@ -17533,6 +17588,18 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             let mut ctrl = c.borrow_mut();
             ctrl.storage_drill_search = q.to_string();
+            if let Some(result) = ctrl.storage_cache.clone() {
+                ctrl.push_storage_top_items(&ui, &result);
+            }
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_storage_set_sort_mode(move |mode| {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.storage_sort_mode = mode.to_string();
+            ui.set_storage_sort_mode(ss(&mode));
             if let Some(result) = ctrl.storage_cache.clone() {
                 ctrl.push_storage_top_items(&ui, &result);
             }

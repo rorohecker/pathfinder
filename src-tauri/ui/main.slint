@@ -2164,6 +2164,39 @@ component StorageOverview inherits Rectangle {
         // the disk used/free text moved into the compact header so
         // the treemap + recommendations have more vertical room.
 
+        // v0.9.21: disk-breakdown bar. One segmented bar shows each
+        // category's share of scanned usage (sorted big -> small to
+        // match the cards). Each segment is a click target into the
+        // matching bucket drill-in.
+        if root.buckets.length > 0: Rectangle {
+            preferred-height: 34px;
+            min-height: 34px;
+            max-height: 34px;
+            vertical-stretch: 0;
+            background: ThemePalette.panel;
+            Rectangle {
+                x: 0; y: parent.height - 1px;
+                width: parent.width; height: 1px;
+                background: ThemePalette.border;
+            }
+            HorizontalLayout {
+                x: 18px; y: 10px;
+                width: parent.width - 36px;
+                height: 14px;
+                spacing: 2px;
+                for bucket[i] in root.buckets: Rectangle {
+                    horizontal-stretch: max(0.4, bucket.percent);
+                    border-radius: 3px;
+                    background: seg_touch.has-hover ? bucket.color : bucket.color.with-alpha(0.82);
+                    animate background { duration: 80ms; easing: ease-out; }
+                    seg_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.select_bucket(bucket.id); }
+                    }
+                }
+            }
+        }
+
         // Drive picker row.
         if root.drives.length > 1: Rectangle {
             preferred-height: 36px;
@@ -2422,9 +2455,11 @@ component StorageDrillIn inherits Rectangle {
     in property <string> selected_bucket_name;
     in property <bool> scanning;
     in-out property <string> search_text: "";
+    in property <string> sort_mode: "size";
     callback open_path(string);
     callback close();
     callback search_changed(string);
+    callback set_sort_mode(string);
     // Bubble up row-level actions
     callback open_more(string);
     callback open_with(string);
@@ -2449,6 +2484,9 @@ component StorageDrillIn inherits Rectangle {
     property <length> search_h: 40px;
     property <length> labels_h: root.top_items.length > 0 ? 28px : 0px;
     property <length> list_y: root.header_h + root.search_h + root.labels_h;
+    // Hide the sort segmented control on narrow panes so the search box keeps
+    // a usable width; sort still defaults to size in that case.
+    property <bool> show_sort_control: root.width >= 560px;
 
     // Header bar - back, title, close.
     Rectangle {
@@ -2523,7 +2561,7 @@ component StorageDrillIn inherits Rectangle {
         }
         Rectangle {
             x: 12px; y: 6px;
-            width: parent.width - 24px;
+            width: root.show_sort_control ? parent.width - 24px - 212px : parent.width - 24px;
             height: 28px;
             border-radius: 14px;
             border-width: 1px;
@@ -2575,6 +2613,61 @@ component StorageDrillIn inherits Rectangle {
                     }
                 }
             }
+        }
+    }
+
+    // Segmented sort control - overlaid at the right of the search row.
+    // Lets the user pivot the same scan data by Size / Name / Recent
+    // without a rescan (Rust re-sorts the bound model).
+    if root.show_sort_control: Rectangle {
+        x: parent.width - 12px - 206px;
+        y: root.header_h + 6px;
+        width: 206px;
+        height: 28px;
+        Rectangle {
+            x: 0; y: 0; width: 66px; height: parent.height;
+            border-radius: 14px;
+            background: root.sort_mode == "size" ? ThemePalette.accent_soft : (sort_size_t.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0));
+            border-width: 1px;
+            border-color: root.sort_mode == "size" ? ThemePalette.accent : ThemePalette.border;
+            Text {
+                width: parent.width; height: parent.height;
+                text: "Size";
+                font-size: 11px; font-weight: 600;
+                color: root.sort_mode == "size" ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+            sort_size_t := TouchArea { mouse-cursor: pointer; clicked => { root.set_sort_mode("size"); } }
+        }
+        Rectangle {
+            x: 70px; y: 0; width: 66px; height: parent.height;
+            border-radius: 14px;
+            background: root.sort_mode == "name" ? ThemePalette.accent_soft : (sort_name_t.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0));
+            border-width: 1px;
+            border-color: root.sort_mode == "name" ? ThemePalette.accent : ThemePalette.border;
+            Text {
+                width: parent.width; height: parent.height;
+                text: "Name";
+                font-size: 11px; font-weight: 600;
+                color: root.sort_mode == "name" ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+            sort_name_t := TouchArea { mouse-cursor: pointer; clicked => { root.set_sort_mode("name"); } }
+        }
+        Rectangle {
+            x: 140px; y: 0; width: 66px; height: parent.height;
+            border-radius: 14px;
+            background: root.sort_mode == "recent" ? ThemePalette.accent_soft : (sort_recent_t.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0));
+            border-width: 1px;
+            border-color: root.sort_mode == "recent" ? ThemePalette.accent : ThemePalette.border;
+            Text {
+                width: parent.width; height: parent.height;
+                text: "Recent";
+                font-size: 11px; font-weight: 600;
+                color: root.sort_mode == "recent" ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+            sort_recent_t := TouchArea { mouse-cursor: pointer; clicked => { root.set_sort_mode("recent"); } }
         }
     }
 
@@ -2770,6 +2863,10 @@ export component MainWindow inherits Window {
     // bounded even on huge buckets.
     in-out property <string> storage_drill_search: "";
     callback storage_drill_search_changed(string);
+    // Drill-in sort mode: "size" | "name" | "recent". Rust re-sorts the
+    // bound model so huge buckets never sort on the UI thread.
+    in-out property <string> storage_sort_mode: "size";
+    callback storage_set_sort_mode(string);
     // Disk-wide totals shown in the overview's hero bar.
     in-out property <string> storage_disk_summary: "";
     in-out property <float> storage_disk_used_pct: 0;
@@ -4355,9 +4452,11 @@ export component MainWindow inherits Window {
                     selected_bucket: root.storage_selected_bucket;
                     selected_bucket_name: root.storage_selected_bucket_name;
                     search_text <=> root.storage_drill_search;
+                    sort_mode: root.storage_sort_mode;
                     open_path(p) => { root.storage_open_path(p); }
                     close => { root.storage_clear_bucket(); }
                     search_changed(q) => { root.storage_drill_search_changed(q); }
+                    set_sort_mode(m) => { root.storage_set_sort_mode(m); }
                     open_more(p) => { root.storage_entry_more(p); }
                     open_with(p) => { root.storage_entry_open_with(p); }
                 }
