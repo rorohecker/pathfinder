@@ -5899,6 +5899,7 @@ fn scan_storage_with_progress(
         })
         .collect();
     let mut top_items: Vec<StorageEntry> = top_files.into_iter().chain(top_folders).collect();
+    top_items = refine_storage_largest_list(top_items);
     top_items.sort_unstable_by_key(|b| std::cmp::Reverse(b.bytes));
     top_items.truncate(top_n);
 
@@ -6015,6 +6016,166 @@ fn is_storage_apps_drill_noise(path: &str) -> bool {
     false
 }
 
+fn is_steam_common_container_path(path: &str) -> bool {
+    let lower = path.replace('/', "\\").to_ascii_lowercase();
+    lower.ends_with("\\steamapps\\common") || lower.ends_with("\\steamapps\\common\\")
+}
+
+/// Paths that should never appear in the global "Largest items" list.
+fn is_storage_largest_folder_skip(path: &str) -> bool {
+    let lower = path.replace('/', "\\").to_ascii_lowercase();
+    if is_steam_common_container_path(path) {
+        return true;
+    }
+    if is_storage_apps_drill_noise(path) {
+        return true;
+    }
+    if lower.contains("\\windows\\")
+        || lower.contains("\\winsxs\\")
+        || lower.ends_with("\\appdata\\local")
+        || lower.ends_with("\\appdata\\roaming")
+        || lower.ends_with("\\appdata\\locallow")
+    {
+        return true;
+    }
+    false
+}
+
+fn is_storage_largest_file_skip(path: &str) -> bool {
+    is_storage_apps_drill_noise(path)
+}
+
+/// Patch / content subfolders inside a game install (e.g. `0015`, `pak`).
+fn is_storage_noise_subfolder_name(name: &str) -> bool {
+    let n = name.trim();
+    if n.len() <= 4 && n.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    matches!(
+        n.to_ascii_lowercase().as_str(),
+        "content" | "data" | "pak" | "paks" | "binaries" | "bin" | "win64" | "win32" | "saved"
+    )
+}
+
+/// Prefer the deepest actionable folder (e.g. a Steam game) over parent
+/// containers (`steamapps\\common`, `Program Files`, etc.).
+fn refine_storage_folder_entries(
+    bucket_id: Option<&str>,
+    mut folders: Vec<StorageEntry>,
+) -> Vec<StorageEntry> {
+    folders.sort_unstable_by(|a, b| {
+        Path::new(&b.path)
+            .components()
+            .count()
+            .cmp(&Path::new(&a.path).components().count())
+            .then_with(|| b.bytes.cmp(&a.bytes))
+    });
+    let mut out: Vec<StorageEntry> = Vec::new();
+    for e in folders {
+        if is_default_storage_segment(&e.name) || is_storage_noise_subfolder_name(&e.name) {
+            continue;
+        }
+        if is_storage_largest_folder_skip(&e.path) {
+            continue;
+        }
+        if bucket_id == Some("apps") && is_storage_apps_drill_noise(&e.path) {
+            continue;
+        }
+        if out.iter().any(|k| {
+            path_is_strict_parent(&e.path, &k.path) && !is_storage_noise_subfolder_name(&k.name)
+        }) {
+            continue;
+        }
+        out.retain(|k| {
+            !path_is_strict_parent(&e.path, &k.path) || is_storage_noise_subfolder_name(&k.name)
+        });
+        out.push(e);
+    }
+    out
+}
+
+/// Collapse nested folder roll-ups and drop AppData / Steam container shells
+/// from the overview "Largest items" list.
+fn refine_storage_largest_list(entries: Vec<StorageEntry>) -> Vec<StorageEntry> {
+    let mut folders = Vec::new();
+    let mut files = Vec::new();
+    for e in entries {
+        if e.is_dir {
+            folders.push(e);
+        } else {
+            files.push(e);
+        }
+    }
+    let mut out = refine_storage_folder_entries(None, folders);
+    for f in files {
+        if is_storage_largest_file_skip(&f.path) {
+            continue;
+        }
+        if out
+            .iter()
+            .any(|fldr| path_is_strict_parent(&fldr.path, &f.path) || fldr.path == f.path)
+        {
+            continue;
+        }
+        out.push(f);
+    }
+    out.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
+    out
+}
+
+fn storage_path_summary(path: &str) -> String {
+    let norm = path.replace('/', "\\");
+    let lower = norm.to_ascii_lowercase();
+    for marker in [
+        "\\steamapps\\common\\",
+        "\\steamapps\\",
+        "\\program files (x86)\\",
+        "\\program files\\",
+        "\\users\\",
+    ] {
+        if let Some(idx) = lower.find(marker) {
+            let tail = norm[idx + 1..].trim_start_matches('\\');
+            if !tail.is_empty() {
+                return format!("…\\{tail}");
+            }
+        }
+    }
+    if norm.len() > 72 {
+        format!("…{}", &norm[norm.len().saturating_sub(68)..])
+    } else {
+        norm
+    }
+}
+
+fn storage_folder_display_title(path: &Path, fallback: &str) -> String {
+    let path_str = path.to_string_lossy();
+    let lower = path_str.to_ascii_lowercase();
+    if let Some(idx) = lower.find("\\steamapps\\common\\") {
+        let tail = &path_str[idx + "\\steamapps\\common\\".len()..];
+        if let Some(game) = tail.split('\\').next() {
+            if !game.is_empty() && !is_default_storage_segment(game) {
+                return game.to_string();
+            }
+        }
+    }
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if !is_default_storage_segment(name) {
+            return name.to_string();
+        }
+    }
+    fallback.to_string()
+}
+
+fn storage_entry_display_labels(entry: &StorageEntry) -> (String, String) {
+    let title = if entry.is_dir {
+        storage_folder_display_title(Path::new(&entry.path), &entry.name)
+    } else {
+        entry.name.clone()
+    };
+    let path_line = storage_path_summary(&entry.path);
+    (title, path_line)
+}
+
 fn storage_apps_drill_rank(path: &str) -> u8 {
     let lower = path.replace('/', "\\").to_ascii_lowercase();
     if lower.contains("\\steamapps\\common\\")
@@ -6091,25 +6252,8 @@ fn sort_storage_drill_entries(bucket_id: &str, entries: &mut [StorageEntry]) {
 /// hiding Epic/GOG/standalone installs and limiting users to ~5 entries.
 /// The generic dedup pass below already collapses nested duplicates;
 /// non-steam app folders sit alongside steam games naturally.
-fn refine_storage_drill_folders(
-    bucket_id: &str,
-    mut folders: Vec<StorageEntry>,
-) -> Vec<StorageEntry> {
-    folders.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
-    let mut out: Vec<StorageEntry> = Vec::new();
-    for e in folders {
-        if is_default_storage_segment(&e.name) {
-            continue;
-        }
-        if bucket_id == "apps" && is_storage_apps_drill_noise(&e.path) {
-            continue;
-        }
-        if out.iter().any(|k| path_is_strict_parent(&k.path, &e.path)) {
-            continue;
-        }
-        out.retain(|k| !path_is_strict_parent(&e.path, &k.path));
-        out.push(e);
-    }
+fn refine_storage_drill_folders(bucket_id: &str, folders: Vec<StorageEntry>) -> Vec<StorageEntry> {
+    let mut out = refine_storage_folder_entries(Some(bucket_id), folders);
     sort_storage_drill_entries(bucket_id, &mut out);
     out
 }
@@ -6177,6 +6321,40 @@ mod storage_tests {
         // Default container folders are ignored; the highest useful child wins.
         assert_eq!(refined.len(), 1);
         assert_eq!(refined[0].name, "GameA");
+    }
+
+    #[test]
+    fn storage_largest_list_prefers_game_over_steam_common() {
+        let raw = vec![
+            StorageEntry {
+                path: r"C:\Program Files (x86)\Steam\steamapps\common".to_string(),
+                name: "common".to_string(),
+                bytes: 191_000_000_000,
+                modified: 0,
+                is_dir: true,
+                bucket: "apps".to_string(),
+            },
+            StorageEntry {
+                path: r"C:\Program Files (x86)\Steam\steamapps\common\Crimson Desert".to_string(),
+                name: "Crimson Desert".to_string(),
+                bytes: 129_000_000_000,
+                modified: 0,
+                is_dir: true,
+                bucket: "apps".to_string(),
+            },
+            StorageEntry {
+                path: r"C:\Program Files (x86)\Steam\steamapps\common\Crimson Desert\0015"
+                    .to_string(),
+                name: "0015".to_string(),
+                bytes: 44_000_000_000,
+                modified: 0,
+                is_dir: true,
+                bucket: "apps".to_string(),
+            },
+        ];
+        let refined = refine_storage_largest_list(raw);
+        assert_eq!(refined.len(), 1);
+        assert_eq!(refined[0].name, "Crimson Desert");
     }
 
     #[test]
@@ -16339,7 +16517,7 @@ impl NativeController {
     fn push_storage_top_items(&self, ui: &MainWindow, result: &StorageScanResult) {
         let entries_src: Vec<StorageEntry> =
             if self.storage_show_all_state || self.storage_selected_bucket.is_empty() {
-                result.top_items.clone()
+                refine_storage_largest_list(result.top_items.clone())
             } else {
                 // Drill-in: merge folder roll-ups + individual files so
                 // users see EVERY app/folder/file in the bucket, sorted
@@ -16379,12 +16557,14 @@ impl NativeController {
                 // Last-resort fallback: filter top_items if both heaps
                 // produced nothing (rare for tiny buckets).
                 if merged.is_empty() {
-                    merged = result
-                        .top_items
-                        .iter()
-                        .filter(|e| e.bucket == self.storage_selected_bucket)
-                        .cloned()
-                        .collect();
+                    merged = refine_storage_largest_list(
+                        result
+                            .top_items
+                            .iter()
+                            .filter(|e| e.bucket == self.storage_selected_bucket)
+                            .cloned()
+                            .collect(),
+                    );
                 }
                 sort_storage_drill_entries(&self.storage_selected_bucket, &mut merged);
                 merged
@@ -16422,15 +16602,18 @@ impl NativeController {
         let entries: Vec<StorageEntryUi> = filtered
             .into_iter()
             .take(limit)
-            .map(|e| StorageEntryUi {
-                name: ss(&e.name),
-                path: ss(&e.path),
-                bytes_text: ss(format_size_short(e.bytes)),
-                modified_text: ss(format_storage_entry_age(e.modified)),
-                bucket: ss(bucket_display_name(&e.bucket)),
-                is_dir: e.is_dir,
-                bar_pct: ((e.bytes as f64 / largest as f64) * 100.0) as f32,
-                bucket_color: bucket_color_for(&e.bucket),
+            .map(|e| {
+                let (title, path_line) = storage_entry_display_labels(&e);
+                StorageEntryUi {
+                    name: ss(&title),
+                    path: ss(&path_line),
+                    bytes_text: ss(format_size_short(e.bytes)),
+                    modified_text: ss(format_storage_entry_age(e.modified)),
+                    bucket: ss(bucket_display_name(&e.bucket)),
+                    is_dir: e.is_dir,
+                    bar_pct: ((e.bytes as f64 / largest as f64) * 100.0) as f32,
+                    bucket_color: bucket_color_for(&e.bucket),
+                }
             })
             .collect();
         ui.set_storage_top_items(slint::ModelRc::new(slint::VecModel::from(entries)));

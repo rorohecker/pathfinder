@@ -1700,10 +1700,18 @@ component StorageEntryRow inherits Rectangle {
     // Action callbacks for context / extra actions
     callback more(string);
     callback open_with(string);
-    height: 48px;
+    height: 52px;
     background: touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
     animate background { duration: 60ms; easing: ease-out; }
     border-radius: AppMetrics.radius_small;
+
+    Rectangle {
+        x: 12px;
+        y: parent.height - 1px;
+        width: parent.width - 24px;
+        height: 1px;
+        background: ThemePalette.border.with-alpha(0.45);
+    }
 
     // Right-aligned column layout: from the right edge inward we
     // reserve size, share-bar, optional category; the name+path block
@@ -2018,19 +2026,28 @@ component StorageLargestPanel inherits Rectangle {
 
     Text {
         x: 6px; y: 0;
-        width: parent.width - 12px; height: 26px;
+        width: parent.width - 12px; height: 16px;
         text: root.top_items.length > 0
             ? ("Largest items · " + root.top_items.length)
             : "Largest items";
-        color: ThemePalette.text_faint;
-        font-size: 10.5px;
+        color: ThemePalette.text;
+        font-size: 11px;
         font-weight: 700;
-        letter-spacing: 0.6px;
+        letter-spacing: 0.4px;
         vertical-alignment: bottom;
     }
+    Text {
+        x: 6px; y: 16px;
+        width: parent.width - 12px; height: 14px;
+        text: "Apps, projects, and large files — not AppData shells or nested folders";
+        color: ThemePalette.text_faint;
+        font-size: 10px;
+        vertical-alignment: top;
+        overflow: elide;
+    }
     Rectangle {
-        x: 0; y: 26px;
-        width: parent.width; height: parent.height - 26px;
+        x: 0; y: 34px;
+        width: parent.width; height: parent.height - 34px;
         background: ThemePalette.bg;
         if root.top_items.length == 0: Text {
             x: 12px; y: 14px;
@@ -2043,9 +2060,9 @@ component StorageLargestPanel inherits Rectangle {
             wrap: word-wrap;
         }
         ListView {
-            x: 0; y: 4px;
+            x: 0; y: 2px;
             width: parent.width;
-            height: parent.height - 8px;
+            height: parent.height - 4px;
             for entry[i] in root.top_items: StorageEntryRow {
                 width: parent.width;
                 entry: entry;
@@ -2430,12 +2447,17 @@ component StorageOverview inherits Rectangle {
         // Largest items fills all space between buckets and recommendations.
         Rectangle {
             vertical-stretch: 1;
-            min-height: 200px;
+            min-height: 220px;
             background: ThemePalette.bg;
-            StorageLargestPanel {
+            Rectangle {
                 x: 12px; y: 0;
+                width: parent.width - 24px; height: 1px;
+                background: ThemePalette.border;
+            }
+            StorageLargestPanel {
+                x: 12px; y: 4px;
                 width: parent.width - 24px;
-                height: parent.height;
+                height: parent.height - 4px;
                 top_items: root.top_items;
                 scanning: root.scanning;
                 show_bucket_label: true;
