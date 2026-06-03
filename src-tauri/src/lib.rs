@@ -11437,10 +11437,7 @@ pub(crate) fn expand_path_query(raw: &str) -> String {
     {
         out = out.replace('\\', "/");
     }
-    loop {
-        let Some(start) = out.find('%') else {
-            break;
-        };
+    while let Some(start) = out.find('%') {
         let Some(rel_end) = out[start + 1..].find('%') else {
             break;
         };
@@ -11488,7 +11485,7 @@ fn index_search_paths(root: &str, pattern: &str, max: usize) -> Result<Vec<FileE
     }
     let conn = open_index_connection()?;
     let root_prefix = format!("{}%", root.trim_end_matches(['\\', '/']));
-    let path_like = format!("%{}%", like_escape(&pattern));
+    let path_like = format!("%{}%", like_escape(pattern));
     let mut stmt = conn
         .prepare(
             "
@@ -19973,6 +19970,7 @@ fn marquee_selection_grid(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn hit_test_list_rows(
     files: &[FileEntry],
     _left: f32,
@@ -20017,6 +20015,7 @@ fn hit_test_list_rows(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn hit_test_uniform_rows(
     files: &[FileEntry],
     _left: f32,
