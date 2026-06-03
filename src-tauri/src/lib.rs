@@ -154,7 +154,7 @@ const SEARCH_LIVE_SCAN_LIMIT: usize = 5_000;
 // Whole-drive live scans should surface a useful first page quickly. Asking the
 // walker for tens of thousands of matches delays the first visible refresh and
 // makes the second search feel faster only because the first one seeded the DB.
-const SEARCH_DRIVE_SCAN_LIMIT: usize = 8_000;
+const SEARCH_DRIVE_SCAN_LIMIT: usize = 25_000;
 const ARCHIVE_SCHEME: &str = "archive://";
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -3674,6 +3674,88 @@ fn merge_search_entries(target: &mut Vec<FileEntry>, incoming: Vec<FileEntry>, m
     }
 }
 
+/// Directories skipped during whole-drive live search (noise + extreme depth).
+fn should_skip_search_walk_dir(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    STORAGE_SKIP_DIRS
+        .iter()
+        .any(|skip| lower == skip.to_ascii_lowercase())
+        || matches!(
+            lower.as_str(),
+            "winsxs" | "installer" | "servicing" | "assembly" | "packages"
+        )
+}
+
+/// Whole-drive search: walk each top-level folder in parallel with a per-tree
+/// match budget so Users\\AppData\\... is not starved by shallow Program Files hits.
+fn live_search_drive_deep(
+    state: &AppState,
+    root: &Path,
+    query: &str,
+    max: usize,
+    token: u64,
+) -> Vec<FileEntry> {
+    let parsed = Arc::new(parse_query(query));
+    let generation = state.search_generation.clone();
+    let mut work_units: Vec<PathBuf> = fs::read_dir(root)
+        .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    work_units.sort_by_key(|p| {
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match name.as_str() {
+            "users" => 0u8,
+            "programdata" => 1,
+            _ => 2,
+        }
+    });
+    let per_tree = max.saturating_div(work_units.len().max(1)).max(512);
+    let chunks: Vec<Vec<FileEntry>> = work_units
+        .into_par_iter()
+        .map(|subtree| {
+            let parsed = Arc::clone(&parsed);
+            let generation = generation.clone();
+            WalkDir::new(subtree)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry({
+                    let generation = generation.clone();
+                    move |e| {
+                        if generation.load(Ordering::Relaxed) != token {
+                            return false;
+                        }
+                        if e.file_type().is_dir() {
+                            let name = e.file_name().to_string_lossy();
+                            return !should_skip_search_walk_dir(&name);
+                        }
+                        true
+                    }
+                })
+                .filter_map(move |e| {
+                    if generation.load(Ordering::Relaxed) != token {
+                        return None;
+                    }
+                    let e = e.ok()?;
+                    let path = e.path();
+                    let metadata = e.metadata().ok()?;
+                    if matches_query(path, &metadata, &parsed) {
+                        Some(path_to_entry(path, &metadata))
+                    } else {
+                        None
+                    }
+                })
+                .take(per_tree)
+                .collect()
+        })
+        .collect();
+    let mut output: Vec<FileEntry> = chunks.into_iter().flatten().take(max).collect();
+    sort_entries(&mut output);
+    output
+}
+
 fn live_search_scan(
     state: &AppState,
     root: &str,
@@ -3682,6 +3764,9 @@ fn live_search_scan(
     token: u64,
 ) -> Vec<FileEntry> {
     let dir = PathBuf::from(root);
+    if is_filesystem_root(&dir) {
+        return live_search_drive_deep(state, &dir, query, max, token);
+    }
     let parsed = Arc::new(parse_query(query));
     let generation = state.search_generation.clone();
     let is_drive_root = is_filesystem_root(&dir);
@@ -6286,6 +6371,27 @@ fn scan_storage_root(root: String, top_n: Option<usize>) -> Result<StorageScanRe
 }
 
 #[cfg(test)]
+mod path_query_tests {
+    use super::*;
+
+    #[test]
+    fn expand_path_query_expands_percent_vars() {
+        if std::env::var("USERPROFILE").is_err() {
+            return;
+        }
+        let expanded = expand_path_query("%USERPROFILE%\\Documents");
+        assert!(!expanded.contains('%'));
+        assert!(expanded.to_ascii_lowercase().contains("documents"));
+    }
+
+    #[test]
+    fn looks_like_path_query_detects_env_syntax() {
+        assert!(looks_like_path_query(r"%localappdata%\Pagoda"));
+        assert!(!looks_like_path_query("pagoda"));
+    }
+}
+
+#[cfg(test)]
 mod storage_tests {
     use super::*;
 
@@ -7561,6 +7667,13 @@ enum ActivePane {
     Secondary,
 }
 
+#[derive(Clone)]
+struct ArchiveExtractJob {
+    source: String,
+    dest: String,
+    selected: Vec<String>,
+}
+
 enum PendingPrompt {
     Rename(String),
     NewFolder,
@@ -7568,9 +7681,7 @@ enum PendingPrompt {
     Note(String),
     Archive,
     ArchivePassword {
-        archive_path: String,
-        dest: String,
-        selected: Vec<String>,
+        jobs: Vec<ArchiveExtractJob>,
         conflict: String,
     },
     NewTemplate(FileTemplate),
@@ -7709,6 +7820,9 @@ struct NativeOperationResult {
     message: String,
     kind: String,
     refresh: bool,
+    /// After a cut/move, refresh both dual-pane listings (source pane often still
+    /// showed moved files and looked like a copy).
+    refresh_both_panes: bool,
     secondary_refresh_path: Option<String>,
     clear_clipboard: bool,
 }
@@ -8720,7 +8834,7 @@ fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, S
 }
 
 fn suggest_paths(prefix: &str, max: usize) -> Vec<String> {
-    let prefix = prefix.trim();
+    let prefix = expand_path_query(prefix).trim().to_string();
     if prefix.len() < 2 {
         return Vec::new();
     }
@@ -8728,7 +8842,7 @@ fn suggest_paths(prefix: &str, max: usize) -> Vec<String> {
         return Vec::new();
     };
     // Match directories whose path starts with the typed prefix (case-insensitive)
-    let pattern = format!("{}%", like_escape(prefix));
+    let pattern = format!("{}%", like_escape(&prefix));
     let mut stmt = match conn.prepare(
         "SELECT path FROM files WHERE is_dir = 1 AND path LIKE ?1 ESCAPE '\\' ORDER BY path ASC LIMIT ?2",
     ) {
@@ -11273,6 +11387,146 @@ fn is_always_list_view_folder(lower: &str) -> bool {
     matches!(*last, "documents" | "downloads")
 }
 
+/// True when the search box input is meant as a filesystem path (not a
+/// filename/content query). Examples: `%localappdata%\Foo`, `C:\Games`,
+/// `Documents\Save`, `~/Downloads`.
+fn looks_like_path_query(query: &str) -> bool {
+    let q = query.trim();
+    if q.is_empty() {
+        return false;
+    }
+    if q.contains('%') || q.contains('\\') || q.contains('/') {
+        return true;
+    }
+    if q.starts_with('~') {
+        return true;
+    }
+    let bytes = q.as_bytes();
+    bytes.len() >= 2 && bytes[1] == b':'
+}
+
+fn env_var_value_ci(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return None;
+    }
+    if let Ok(v) = std::env::var(name) {
+        return Some(v);
+    }
+    let upper = name.to_ascii_uppercase();
+    std::env::var(&upper).ok()
+}
+
+/// Expand `%VAR%`, `~`, and normalize slashes for Windows path input.
+pub(crate) fn expand_path_query(raw: &str) -> String {
+    let mut out = raw.trim().to_string();
+    if out.starts_with('~') {
+        if let Some(home) = dirs::home_dir() {
+            let rest = out.trim_start_matches('~').trim_start_matches(['\\', '/']);
+            out = if rest.is_empty() {
+                home.to_string_lossy().into_owned()
+            } else {
+                home.join(rest).to_string_lossy().into_owned()
+            };
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        out = out.replace('/', "\\");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        out = out.replace('\\', "/");
+    }
+    loop {
+        let Some(start) = out.find('%') else {
+            break;
+        };
+        let Some(rel_end) = out[start + 1..].find('%') else {
+            break;
+        };
+        let end = start + 1 + rel_end;
+        let var_name = &out[start + 1..end];
+        let Some(value) = env_var_value_ci(var_name) else {
+            break;
+        };
+        out.replace_range(start..=end, &value);
+    }
+    out
+}
+
+/// Resolve a search-box path against `cwd` when the query is relative.
+fn resolve_path_query(query: &str, cwd: &str) -> PathBuf {
+    let expanded = expand_path_query(query);
+    let path = PathBuf::from(&expanded);
+    if path.is_absolute() {
+        path
+    } else {
+        PathBuf::from(cwd).join(path)
+    }
+}
+
+/// Deepest directory along `path` that exists on disk (walks upward from leaf).
+fn deepest_existing_directory(path: &Path) -> Option<PathBuf> {
+    let mut cur = Some(path);
+    while let Some(p) = cur {
+        if p.as_os_str().is_empty() {
+            break;
+        }
+        if p.is_dir() {
+            return Some(p.to_path_buf());
+        }
+        cur = p.parent();
+    }
+    None
+}
+
+fn index_search_paths(root: &str, pattern: &str, max: usize) -> Result<Vec<FileEntry>, String> {
+    let pattern = expand_path_query(pattern);
+    let pattern = pattern.trim_end_matches(['\\', '/']);
+    if pattern.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let conn = open_index_connection()?;
+    let root_prefix = format!("{}%", root.trim_end_matches(['\\', '/']));
+    let path_like = format!("%{}%", like_escape(&pattern));
+    let mut stmt = conn
+        .prepare(
+            "
+            SELECT path, name, is_dir, size, modified, extension
+            FROM files
+            WHERE LOWER(path) LIKE LOWER(?1) ESCAPE '\\'
+              AND LOWER(path) LIKE LOWER(?2) ESCAPE '\\'
+            ORDER BY is_dir DESC, length(path) ASC, name COLLATE NOCASE ASC
+            LIMIT ?3
+            ",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            params![root_prefix, path_like, sqlite_limit(max)],
+            |row| {
+                let is_dir = row.get::<_, i64>(2)? == 1;
+                let ext = row.get::<_, String>(5)?;
+                let name: String = row.get(1)?;
+                Ok(FileEntry {
+                    path: row.get(0)?,
+                    name_lower: name.to_lowercase(),
+                    name,
+                    kind: if is_dir {
+                        FileKind::Directory
+                    } else {
+                        FileKind::File
+                    },
+                    size: row.get::<_, i64>(3)?.max(0) as u64,
+                    modified: row.get::<_, i64>(4)?.max(0) as u64,
+                    extension: (!ext.is_empty()).then_some(ext),
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
 /// Attempt to coerce a bogus user-supplied path into a navigable
 /// folder. The common case this guards against: "Open With" or shell
 /// shortcuts that hand us a comma-joined multi-file string like
@@ -11880,37 +12134,50 @@ impl NativeController {
         None
     }
 
-    fn selected_paths(&self) -> Vec<String> {
+    fn active_selected_indices(&self) -> Vec<usize> {
         if self.active_pane == ActivePane::Secondary {
-            if self.secondary_selected_set.is_empty() {
-                return self
-                    .selected_entry()
-                    .map(|entry| vec![entry.path])
-                    .unwrap_or_default();
+            if !self.secondary_selected_set.is_empty() {
+                let mut sorted: Vec<usize> =
+                    self.secondary_selected_set.iter().copied().collect();
+                sorted.sort_unstable();
+                return sorted;
             }
+            if self.secondary_selected_index >= 0 {
+                return vec![self.secondary_selected_index as usize];
+            }
+            return Vec::new();
+        }
 
-            let mut sorted: Vec<usize> = self.secondary_selected_set.iter().copied().collect();
+        if !self.selected_set.is_empty() {
+            let mut sorted: Vec<usize> = self.selected_set.iter().copied().collect();
             sorted.sort_unstable();
-            return sorted
-                .into_iter()
-                .filter_map(|i| self.secondary_visible_files.get(i))
-                .map(|entry| entry.path.clone())
-                .collect();
+            return sorted;
         }
-
-        if self.selected_set.is_empty() {
-            return self
-                .selected_entry()
-                .map(|entry| vec![entry.path])
-                .unwrap_or_default();
+        if self.selected_index >= 0 {
+            return vec![self.selected_index as usize];
         }
+        Vec::new()
+    }
 
-        let mut sorted: Vec<usize> = self.selected_set.iter().copied().collect();
-        sorted.sort_unstable();
-        sorted
+    fn active_visible_files(&self) -> &[FileEntry] {
+        if self.active_pane == ActivePane::Secondary {
+            &self.secondary_visible_files
+        } else {
+            &self.visible_files
+        }
+    }
+
+    fn selected_entries(&self) -> Vec<FileEntry> {
+        self.active_selected_indices()
             .into_iter()
-            .filter_map(|i| self.visible_files.get(i))
-            .map(|entry| entry.path.clone())
+            .filter_map(|i| self.active_visible_files().get(i).cloned())
+            .collect()
+    }
+
+    fn selected_paths(&self) -> Vec<String> {
+        self.selected_entries()
+            .into_iter()
+            .map(|entry| entry.path)
             .collect()
     }
 
@@ -12135,13 +12402,17 @@ impl NativeController {
     /// Keep Slint `selected_count` aligned with the active pane's selection sets.
     /// Call after `update_models` / any path that clears or rebuilds selection
     /// without going through `update_selection_in_model`.
+    fn selection_has_archive(&self) -> bool {
+        if self.active_archive.is_some() {
+            return true;
+        }
+        !self.selected_disk_archives().is_empty()
+    }
+
     fn sync_selection_count_to_ui(&self, ui: &MainWindow) {
-        let sel_count = if self.active_pane == ActivePane::Secondary {
-            self.secondary_selected_set.len()
-        } else {
-            self.selected_set.len()
-        };
+        let sel_count = self.active_selected_indices().len();
         ui.set_selected_count(sel_count as i32);
+        ui.set_selection_has_archive(self.selection_has_archive());
     }
 
     fn update_models(&mut self, ui: &MainWindow) {
@@ -12386,7 +12657,54 @@ impl NativeController {
             // about grouping.
             date_group_text: SharedString::new(),
             show_date_group_header: false,
+            is_cut_pending: self.entry_is_cut_pending(&entry.path),
         }
+    }
+
+    fn entry_is_cut_pending(&self, path: &str) -> bool {
+        let Some(clip) = &self.clipboard else {
+            return false;
+        };
+        if !clip.cut {
+            return false;
+        }
+        clip.paths.iter().any(|p| same_path_string(p, path))
+    }
+
+    fn refresh_clipboard_visuals(&mut self, ui: &MainWindow) {
+        self.update_models(ui);
+        if ui.get_dual_pane() {
+            self.update_secondary_models(ui);
+        }
+    }
+
+    /// Reload the pane(s) that show pasted files after copy or move.
+    fn refresh_after_paste(&mut self, ui: &MainWindow, cut: bool) {
+        if cut {
+            self.clipboard = None;
+            #[cfg(target_os = "windows")]
+            let _ = file_drag::clear_shell_files_clipboard();
+            self.refresh_clipboard_visuals(ui);
+        }
+        if ui.get_dual_pane() {
+            self.invalidate_and_refresh_both_panes(ui);
+        } else if self.active_pane == ActivePane::Secondary {
+            let path = self.secondary_path.clone();
+            self.secondary_navigate(ui, path);
+        } else {
+            self.refresh(ui);
+        }
+    }
+
+    fn paste_skips_dest(&self, src: &str, dest: &Path, cut: bool) -> bool {
+        if !same_path_string(src, &dest.to_string_lossy()) {
+            return false;
+        }
+        cut
+    }
+
+    fn paste_has_real_conflict(&self, src: &str, dest: &Path) -> bool {
+        dest.exists() && !same_path_string(src, &dest.to_string_lossy())
     }
 
     fn rebuild_git_dir_status(&mut self) {
@@ -12718,6 +13036,10 @@ impl NativeController {
         self.active_pane = ActivePane::Primary;
         let path = if path.trim().is_empty() {
             self.current_path.clone()
+        } else if looks_like_path_query(&path) {
+            resolve_path_query(&path, &self.current_path)
+                .to_string_lossy()
+                .into_owned()
         } else {
             path
         };
@@ -13361,8 +13683,7 @@ impl NativeController {
             self.secondary_selected_index = 0;
             self.secondary_select_anchor = 0;
             let changed: Vec<usize> = (0..n).collect();
-            self.update_secondary_selection_in_model(&changed);
-            self.sync_selection_count_to_ui(ui);
+            self.update_secondary_selection_in_model(ui, &changed);
             self.update_status(ui);
             return;
         }
@@ -13414,6 +13735,79 @@ impl NativeController {
             self.open_archive_view(ui, entry.path, String::new(), true);
         } else if let Err(error) = open_file(entry.path) {
             self.show_toast(ui, error);
+        }
+    }
+
+    fn open_selected(&mut self, ui: &MainWindow) {
+        let entries = self.selected_entries();
+        if entries.is_empty() {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        }
+        if entries.len() == 1 {
+            if self.active_pane == ActivePane::Secondary {
+                self.secondary_file_opened(ui, self.secondary_selected_index);
+            } else {
+                self.open_index(ui, self.selected_index);
+            }
+            return;
+        }
+
+        let mut opened_files = 0usize;
+        let mut opened_dirs = 0usize;
+        let mut first_error: Option<String> = None;
+        for entry in entries {
+            if let Some(archive) = self.active_archive.clone() {
+                if entry.kind == FileKind::Directory {
+                    if let Some((_, prefix)) = parse_archive_virtual_path(&entry.path) {
+                        self.open_archive_view(ui, archive.archive_path, prefix, true);
+                        opened_dirs += 1;
+                    }
+                }
+                continue;
+            }
+            if entry.kind == FileKind::Directory {
+                if opened_dirs == 0 {
+                    if self.active_pane == ActivePane::Secondary {
+                        self.secondary_navigate(ui, entry.path);
+                    } else {
+                        self.navigate(ui, entry.path, true);
+                    }
+                    opened_dirs += 1;
+                }
+                continue;
+            }
+            if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
+                self.open_archive_view(ui, entry.path, String::new(), true);
+                opened_files += 1;
+                continue;
+            }
+            match open_file(entry.path) {
+                Ok(()) => opened_files += 1,
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+
+        if let Some(error) = first_error {
+            self.show_toast_kind(ui, error, "error");
+        } else if opened_files + opened_dirs > 0 {
+            self.show_toast_kind(
+                ui,
+                format!(
+                    "Opened {} item{}",
+                    opened_files + opened_dirs,
+                    if opened_files + opened_dirs == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+                "success",
+            );
         }
     }
 
@@ -13647,6 +14041,96 @@ impl NativeController {
         }
     }
 
+    /// Path search: expand env vars, navigate to folders, or match paths in
+    /// the index / current listing (not file names).
+    fn search_by_path(&mut self, ui: &MainWindow, query: &str, navigate_if_dir: bool) -> bool {
+        let resolved = resolve_path_query(query, &self.current_path);
+        let resolved_str = resolved.to_string_lossy().into_owned();
+
+        if navigate_if_dir && resolved.is_dir() {
+            self.search_query.clear();
+            ui.set_search_text(ss(""));
+            self.navigate(ui, resolved_str, true);
+            return true;
+        }
+
+        if navigate_if_dir && resolved.is_file() {
+            let file_path = resolved_str.clone();
+            if let Some(parent) = resolved.parent() {
+                let parent_str = parent.to_string_lossy().into_owned();
+                self.search_query.clear();
+                ui.set_search_text(ss(""));
+                self.navigate(ui, parent_str, true);
+                if let Some(idx) = self
+                    .visible_files
+                    .iter()
+                    .position(|e| same_path_string(&e.path, &file_path))
+                {
+                    self.selected_index = idx as i32;
+                    self.selected_set.clear();
+                    self.selected_set.insert(idx);
+                    self.update_models(ui);
+                }
+            }
+            return true;
+        }
+
+        if navigate_if_dir {
+            if let Some(existing) = deepest_existing_directory(&resolved) {
+                if !same_path_string(&existing.to_string_lossy(), &self.current_path) {
+                    self.navigate(
+                        ui,
+                        existing.to_string_lossy().into_owned(),
+                        true,
+                    );
+                    self.search_query = query.to_string();
+                    ui.set_search_text(ss(query));
+                }
+            }
+        }
+
+        let pattern = expand_path_query(query);
+        let pattern_lower = pattern.trim_end_matches(['\\', '/']).to_ascii_lowercase();
+
+        let mut matches: Vec<FileEntry> = self
+            .files
+            .iter()
+            .filter(|e| {
+                let p = e.path.to_ascii_lowercase();
+                p.contains(&pattern_lower)
+                    || pattern_lower
+                        .split('\\')
+                        .filter(|s| !s.is_empty())
+                        .all(|seg| p.contains(seg))
+            })
+            .cloned()
+            .collect();
+
+        if matches.is_empty() {
+            if let Ok(indexed) =
+                index_search_paths(&self.search_root(), query, SEARCH_INDEX_LIMIT)
+            {
+                matches = indexed;
+            }
+        }
+
+        if matches.is_empty() {
+            return false;
+        }
+
+        sort_entries(&mut matches);
+        self.visible_files = matches;
+        self.apply_sort();
+        ui.set_empty_state(ss(""));
+        self.update_models(ui);
+        self.update_status(ui);
+        ui.set_status_right(ss(format!(
+            "Path matches in {}",
+            compact_drive_label(&self.search_root())
+        )));
+        true
+    }
+
     fn search(&mut self, ui: &MainWindow, query: String) {
         self.search_query = query;
         self.selected_index = -1;
@@ -13673,7 +14157,36 @@ impl NativeController {
             return;
         }
 
-        if trimmed.len() < 2 {
+        if looks_like_path_query(&trimmed) {
+            let resolved = resolve_path_query(&trimmed, &self.current_path);
+            let ends_with_sep = trimmed.ends_with('\\') || trimmed.ends_with('/');
+            // Trailing slash means "open this folder" while typing.
+            if resolved.is_dir() && ends_with_sep {
+                self.search_by_path(ui, &trimmed, true);
+                return;
+            }
+            if self.search_by_path(ui, &trimmed, false) {
+                return;
+            }
+            if resolved.is_dir() {
+                ui.set_empty_state(ss(format!(
+                    "Press Enter to open {}",
+                    expand_path_query(&trimmed)
+                )));
+                self.visible_files.clear();
+                self.update_models(ui);
+                return;
+            }
+            ui.set_empty_state(ss(format!(
+                "No path matches for \"{}\"",
+                expand_path_query(&trimmed)
+            )));
+            self.visible_files.clear();
+            self.update_models(ui);
+            return;
+        }
+
+        if trimmed.len() < 2 && !self.search_all_scope && !drive_wide {
             self.visible_files.clear();
             ui.set_empty_state(ss(""));
             self.update_models(ui);
@@ -13981,13 +14494,19 @@ impl NativeController {
         self.secondary_selected_index = -1;
         self.secondary_selected_set.clear();
         self.secondary_select_anchor = -1;
+        if self.clipboard.as_ref().is_some_and(|c| c.cut) {
+            self.clipboard = None;
+            #[cfg(target_os = "windows")]
+            let _ = file_drag::clear_shell_files_clipboard();
+        }
         self.update_selection_in_model(ui, &changed);
-        self.update_secondary_selection_in_model(&secondary_changed);
+        self.update_secondary_selection_in_model(ui, &secondary_changed);
         ui.set_selected_index(-1);
         // The contextual action bar hides itself when selected_count returns
         // to zero. Push the new count so the X clear button and any other
         // path that ends up here drop the bar immediately.
-        ui.set_selected_count(0);
+        self.sync_selection_count_to_ui(ui);
+        self.refresh_clipboard_visuals(ui);
         self.update_status(ui);
     }
 
@@ -14004,7 +14523,7 @@ impl NativeController {
         self.secondary_files_model = Some(model);
     }
 
-    fn update_secondary_selection_in_model(&mut self, changed: &[usize]) {
+    fn update_secondary_selection_in_model(&mut self, ui: &MainWindow, changed: &[usize]) {
         if let Some(model) = &self.secondary_files_model {
             use slint::Model;
             for &i in changed {
@@ -14016,6 +14535,8 @@ impl NativeController {
                 }
             }
         }
+        ui.set_selected_index(self.secondary_selected_index);
+        self.sync_selection_count_to_ui(ui);
     }
 
     fn secondary_navigate(&mut self, ui: &MainWindow, path: String) {
@@ -14102,7 +14623,7 @@ impl NativeController {
             let hi = (self.secondary_select_anchor as usize).max(index as usize);
             let old = std::mem::take(&mut self.secondary_selected_set);
             for i in 0..n {
-                if i >= lo && i <= hi {
+                if (i >= lo && i <= hi) || i == self.secondary_select_anchor as usize {
                     self.secondary_selected_set.insert(i);
                     if !old.contains(&i) {
                         changed.push(i);
@@ -14133,8 +14654,7 @@ impl NativeController {
         }
 
         self.secondary_selected_index = index;
-        self.update_secondary_selection_in_model(&changed);
-        self.sync_selection_count_to_ui(ui);
+        self.update_secondary_selection_in_model(ui, &changed);
     }
 
     fn secondary_file_opened(&mut self, ui: &MainWindow, index: i32) {
@@ -14195,13 +14715,7 @@ impl NativeController {
                     self.secondary_navigate(ui, path);
                 }
             }
-            "open" => {
-                if self.active_pane == ActivePane::Secondary {
-                    self.secondary_file_opened(ui, self.secondary_selected_index);
-                } else {
-                    self.open_index(ui, self.selected_index);
-                }
-            }
+            "open" => self.open_selected(ui),
             "rename" => self.prompt_rename(ui),
             "delete" if self.active_path_is_recycle_bin() => self.purge_from_recycle_bin(ui),
             "delete" => self.prompt_delete(ui),
@@ -14262,13 +14776,24 @@ impl NativeController {
             }
             "locked-file" => self.show_locked_file(ui),
             "properties" => {
-                if let Some(entry) = self.selected_entry() {
-                    match open_windows_properties(&entry.path) {
-                        Ok(()) => self.show_toast(ui, "Opening Windows Properties"),
+                let paths = self.selected_paths();
+                if paths.is_empty() {
+                    self.show_toast(ui, "Select a file first.");
+                } else {
+                    match open_windows_properties(&paths[0]) {
+                        Ok(()) => {
+                            let msg = if paths.len() == 1 {
+                                "Opening Windows Properties".to_string()
+                            } else {
+                                format!(
+                                    "Opening Properties for first of {} items",
+                                    paths.len()
+                                )
+                            };
+                            self.show_toast(ui, msg);
+                        }
                         Err(error) => self.show_toast(ui, error),
                     }
-                } else {
-                    self.show_toast(ui, "Select a file first.");
                 }
             }
             "show-more-options" => {
@@ -14281,23 +14806,50 @@ impl NativeController {
                 }
             }
             "open-with" => {
-                if let Some(entry) = self.selected_entry() {
-                    match open_with_dialog(&entry.path, Some(ui)) {
+                let paths = self.selected_paths();
+                if paths.is_empty() {
+                    self.show_toast(ui, "Select a file first.");
+                } else if paths.len() > 1 {
+                    self.show_toast(
+                        ui,
+                        "Open With applies to one file — select a single item.",
+                    );
+                } else {
+                    match open_with_dialog(&paths[0], Some(ui)) {
                         Ok(()) => {}
                         Err(error) => self.show_toast_kind(ui, error, "error"),
                     }
-                } else {
-                    self.show_toast(ui, "Select a file first.");
                 }
             }
             "defender-scan" => {
-                if let Some(entry) = self.selected_entry() {
-                    match defender_scan_path(&entry.path) {
-                        Ok(()) => self.show_toast(ui, "Microsoft Defender scan started"),
-                        Err(error) => self.show_toast_kind(ui, error, "error"),
-                    }
-                } else {
+                let paths = self.selected_paths();
+                if paths.is_empty() {
                     self.show_toast(ui, "Select a file first.");
+                } else {
+                    let mut started = 0usize;
+                    let mut first_error: Option<String> = None;
+                    for path in &paths {
+                        match defender_scan_path(path) {
+                            Ok(()) => started += 1,
+                            Err(error) => {
+                                if first_error.is_none() {
+                                    first_error = Some(error);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(error) = first_error {
+                        self.show_toast_kind(ui, error, "error");
+                    } else {
+                        self.show_toast_kind(
+                            ui,
+                            format!(
+                                "Microsoft Defender scan started for {started} item{}",
+                                if started == 1 { "" } else { "s" }
+                            ),
+                            "success",
+                        );
+                    }
                 }
             }
             "shell-verbs" => {
@@ -14401,30 +14953,74 @@ impl NativeController {
             "libraries" => self.show_libraries(ui),
             "recent-locations" => self.show_recent_locations(ui),
             "copy-as-path" => {
-                if let Some(entry) = self.selected_entry() {
-                    match copy_text_to_clipboard(&entry.path) {
-                        Ok(()) => self.show_toast(ui, "Path copied"),
+                let paths = self.selected_paths();
+                if paths.is_empty() {
+                    self.show_toast(ui, "Select a file first.");
+                } else {
+                    let text = paths.join("\r\n");
+                    match copy_text_to_clipboard(&text) {
+                        Ok(()) => self.show_toast_kind(
+                            ui,
+                            format!(
+                                "Copied {} path{}",
+                                paths.len(),
+                                if paths.len() == 1 { "" } else { "s" }
+                            ),
+                            "success",
+                        ),
                         Err(error) => self.show_toast(ui, error),
                     }
                 }
             }
             "copy-as-powershell" => {
-                if let Some(entry) = self.selected_entry() {
-                    let text = format!("'{}'", entry.path.replace('\'', "''"));
+                let paths = self.selected_paths();
+                if paths.is_empty() {
+                    self.show_toast(ui, "Select a file first.");
+                } else {
+                    let text = paths
+                        .iter()
+                        .map(|path| format!("'{}'", path.replace('\'', "''")))
+                        .collect::<Vec<_>>()
+                        .join("\r\n");
                     match copy_text_to_clipboard(&text) {
-                        Ok(()) => self.show_toast(ui, "PowerShell path copied"),
+                        Ok(()) => self.show_toast_kind(
+                            ui,
+                            format!(
+                                "Copied {} PowerShell path{}",
+                                paths.len(),
+                                if paths.len() == 1 { "" } else { "s" }
+                            ),
+                            "success",
+                        ),
                         Err(error) => self.show_toast(ui, error),
                     }
                 }
             }
             "copy-as-uri" => {
-                if let Some(entry) = self.selected_entry() {
-                    let uri = format!(
-                        "file:///{}",
-                        entry.path.replace('\\', "/").replace(' ', "%20")
-                    );
-                    match copy_text_to_clipboard(&uri) {
-                        Ok(()) => self.show_toast(ui, "URI copied"),
+                let paths = self.selected_paths();
+                if paths.is_empty() {
+                    self.show_toast(ui, "Select a file first.");
+                } else {
+                    let text = paths
+                        .iter()
+                        .map(|path| {
+                            format!(
+                                "file:///{}",
+                                path.replace('\\', "/").replace(' ', "%20")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\r\n");
+                    match copy_text_to_clipboard(&text) {
+                        Ok(()) => self.show_toast_kind(
+                            ui,
+                            format!(
+                                "Copied {} URI{}",
+                                paths.len(),
+                                if paths.len() == 1 { "" } else { "s" }
+                            ),
+                            "success",
+                        ),
                         Err(error) => self.show_toast(ui, error),
                     }
                 }
@@ -14693,20 +15289,13 @@ impl NativeController {
                 self.update_models(ui);
                 self.show_toast_kind(ui, "Note saved", "success");
             }
-            Some(PendingPrompt::ArchivePassword {
-                archive_path,
-                dest,
-                selected,
-                conflict,
-            }) => {
-                self.start_archive_extract_async(
-                    ui,
-                    archive_path,
-                    dest,
-                    selected,
-                    Some(value),
-                    conflict,
-                );
+            Some(PendingPrompt::ArchivePassword { jobs, conflict }) => {
+                let password = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value)
+                };
+                self.start_bulk_archive_extract_async(ui, jobs, password, conflict);
             }
             Some(PendingPrompt::NewTemplate(template)) => {
                 let base = value.trim();
@@ -14864,7 +15453,7 @@ impl NativeController {
                 };
                 match result {
                     Ok(()) => {
-                        self.refresh(ui);
+                        self.refresh_after_paste(ui, cut);
                         self.show_toast_kind(ui, "Conflict resolved", "success");
                     }
                     Err(error) => self.show_toast_kind(ui, error, "error"),
@@ -14912,7 +15501,7 @@ impl NativeController {
         self.secondary_selected_index = -1;
         self.select_anchor = -1;
         self.secondary_select_anchor = -1;
-        ui.set_selected_count(0);
+        self.sync_selection_count_to_ui(ui);
         ui.set_selected_index(-1);
 
         ui.set_op_drawer_text(ss(if n == 1 {
@@ -14949,6 +15538,7 @@ impl NativeController {
                     },
                     kind: "error".to_string(),
                     refresh: errors < paths.len(),
+                    refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
                 }
@@ -14966,6 +15556,7 @@ impl NativeController {
                     message: msg,
                     kind: "success".to_string(),
                     refresh: true,
+                    refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
                 }
@@ -14984,7 +15575,14 @@ impl NativeController {
             return;
         }
         let n = paths.len();
-        self.clipboard = Some(NativeClipboard { paths, cut });
+        self.clipboard = Some(NativeClipboard {
+            paths: paths.clone(),
+            cut,
+        });
+        #[cfg(target_os = "windows")]
+        if let Err(error) = file_drag::set_shell_files_clipboard(&paths, cut) {
+            eprintln!("set_shell_files_clipboard: {error}");
+        }
         let msg = if n == 1 {
             if cut {
                 "Cut to clipboard".to_string()
@@ -14999,6 +15597,7 @@ impl NativeController {
             }
         };
         self.show_toast(ui, msg);
+        self.refresh_clipboard_visuals(ui);
     }
 
     fn paste(&mut self, ui: &MainWindow) {
@@ -15019,7 +15618,10 @@ impl NativeController {
                 continue;
             };
             let dest = PathBuf::from(&dest_dir).join(name);
-            if dest.exists() {
+            if self.paste_skips_dest(src, &dest, clipboard.cut) {
+                continue;
+            }
+            if self.paste_has_real_conflict(src, &dest) {
                 ui.set_op_drawer_visible(false);
                 let conflict = conflict_info(Path::new(src), &dest);
                 ui.set_preview_title(ss("Copy Conflict"));
@@ -15065,14 +15667,7 @@ impl NativeController {
             pasted += 1;
         }
         ui.set_op_drawer_visible(false);
-        if clipboard.cut {
-            self.clipboard = None;
-        }
-        if self.active_pane == ActivePane::Secondary {
-            self.secondary_navigate(ui, dest_dir);
-        } else {
-            self.refresh(ui);
-        }
+        self.refresh_after_paste(ui, clipboard.cut);
         let verb = if clipboard.cut { "Moved" } else { "Pasted" };
         let msg = if pasted == 1 {
             format!("{verb} 1 item")
@@ -15270,6 +15865,11 @@ impl NativeController {
     }
 
     fn paste_async(&mut self, ui: &MainWindow) {
+        // Prefer the shell clipboard so Explorer cut/copy stays in sync with paste.
+        #[cfg(target_os = "windows")]
+        if let Some((paths, cut)) = file_drag::try_read_shell_files_clipboard() {
+            self.clipboard = Some(NativeClipboard { paths, cut });
+        }
         let Some(clipboard) = self.clipboard.clone() else {
             self.show_toast(ui, "Clipboard is empty.");
             return;
@@ -15277,12 +15877,17 @@ impl NativeController {
 
         let dest_dir = self.active_directory().to_string();
         let dest_is_secondary = self.active_pane == ActivePane::Secondary;
+        let dual_pane = ui.get_dual_pane();
+        let cut = clipboard.cut;
         for src in &clipboard.paths {
             let Some(name) = Path::new(src).file_name() else {
                 continue;
             };
             let dest = PathBuf::from(&dest_dir).join(name);
-            if dest.exists() {
+            if self.paste_skips_dest(src, &dest, cut) {
+                continue;
+            }
+            if self.paste_has_real_conflict(src, &dest) {
                 let conflict = conflict_info(Path::new(src), &dest);
                 ui.set_preview_title(ss("Copy Conflict"));
                 ui.set_preview_body(ss(format!(
@@ -15322,13 +15927,25 @@ impl NativeController {
             }
         }
 
-        let n = clipboard.paths.len();
+        let paths_to_paste: Vec<String> = clipboard
+            .paths
+            .iter()
+            .filter(|src| {
+                let Some(name) = Path::new(src).file_name() else {
+                    return false;
+                };
+                let dest = PathBuf::from(&dest_dir).join(name);
+                !self.paste_skips_dest(src, &dest, cut)
+            })
+            .cloned()
+            .collect();
+        let n = paths_to_paste.len();
         if n == 0 {
-            self.show_toast(ui, "Clipboard is empty.");
+            self.show_toast(ui, "Nothing to paste here.");
             return;
         }
 
-        let verb = if clipboard.cut { "Moving" } else { "Copying" };
+        let verb = if cut { "Moving" } else { "Copying" };
         ui.set_op_drawer_text(ss(format!(
             "{verb} {n} item{}",
             if n == 1 { "" } else { "s" }
@@ -15338,13 +15955,11 @@ impl NativeController {
         let app_state = self.app_state.clone();
         let operation_ready = self.operation_ready.clone();
         let pending_result = self.pending_operation_result.clone();
-        let paths = clipboard.paths;
-        let cut = clipboard.cut;
         std::thread::spawn(move || {
             let mut completed = 0usize;
             let mut first_error: Option<String> = None;
 
-            for src in &paths {
+            for src in &paths_to_paste {
                 if app_state.queue_cancel_requested() {
                     first_error = Some(OP_CANCELLED.to_string());
                     break;
@@ -15369,16 +15984,14 @@ impl NativeController {
                 }
             }
 
+            let pasted = completed > 0;
             let result = if let Some(error) = first_error {
                 NativeOperationResult {
                     message: error,
                     kind: "error".to_string(),
-                    refresh: completed > 0 && !dest_is_secondary,
-                    secondary_refresh_path: if dest_is_secondary && completed > 0 {
-                        Some(dest_dir.clone())
-                    } else {
-                        None
-                    },
+                    refresh: pasted && !dual_pane && !dest_is_secondary,
+                    refresh_both_panes: pasted && dual_pane,
+                    secondary_refresh_path: None,
                     clear_clipboard: false,
                 }
             } else {
@@ -15389,8 +16002,9 @@ impl NativeController {
                         if completed == 1 { "" } else { "s" }
                     ),
                     kind: "success".to_string(),
-                    refresh: !dest_is_secondary,
-                    secondary_refresh_path: if dest_is_secondary {
+                    refresh: pasted && !dual_pane && !dest_is_secondary,
+                    refresh_both_panes: pasted && dual_pane,
+                    secondary_refresh_path: if pasted && !dual_pane && dest_is_secondary {
                         Some(dest_dir.clone())
                     } else {
                         None
@@ -15774,7 +16388,8 @@ impl NativeController {
 
         let label = action.label().to_string();
         let refresh_dir = self.active_directory().to_string();
-        let refresh_secondary = self.active_pane == ActivePane::Secondary;
+        let dual_pane = ui.get_dual_pane();
+        let dest_is_secondary = self.active_pane == ActivePane::Secondary;
         ui.set_op_drawer_text(ss(format!(
             "{} {} image{}",
             label,
@@ -15806,12 +16421,14 @@ impl NativeController {
                 }
             }
 
+            let pasted = !created.is_empty();
             let result = if let Some(error) = first_error {
                 NativeOperationResult {
                     message: error,
                     kind: "error".to_string(),
-                    refresh: !refresh_secondary && !created.is_empty(),
-                    secondary_refresh_path: if refresh_secondary && !created.is_empty() {
+                    refresh: pasted && !dual_pane && !dest_is_secondary,
+                    refresh_both_panes: pasted && dual_pane,
+                    secondary_refresh_path: if pasted && !dual_pane && dest_is_secondary {
                         Some(refresh_dir)
                     } else {
                         None
@@ -15828,8 +16445,9 @@ impl NativeController {
                         if count == 1 { "" } else { "s" }
                     ),
                     kind: "success".to_string(),
-                    refresh: !refresh_secondary,
-                    secondary_refresh_path: if refresh_secondary {
+                    refresh: pasted && !dual_pane && !dest_is_secondary,
+                    refresh_both_panes: pasted && dual_pane,
+                    secondary_refresh_path: if pasted && !dual_pane && dest_is_secondary {
                         Some(refresh_dir)
                     } else {
                         None
@@ -15860,25 +16478,35 @@ impl NativeController {
 
     fn selected_archive_items(&self) -> Vec<String> {
         let mut selected = Vec::new();
-        let indices: Vec<usize> = if self.selected_set.is_empty() {
-            (self.selected_index >= 0)
-                .then_some(self.selected_index as usize)
-                .into_iter()
-                .collect()
-        } else {
-            self.selected_set.iter().copied().collect()
-        };
-
-        for index in indices {
-            if let Some(entry) = self.visible_files.get(index) {
-                if let Some((_, prefix)) = parse_archive_virtual_path(&entry.path) {
-                    selected.push(prefix);
-                }
+        for entry in self.selected_entries() {
+            if let Some((_, prefix)) = parse_archive_virtual_path(&entry.path) {
+                selected.push(prefix);
             }
         }
         selected.sort_unstable();
         selected.dedup();
         selected
+    }
+
+    fn selected_disk_archives(&self) -> Vec<FileEntry> {
+        self.selected_entries()
+            .into_iter()
+            .filter(|entry| is_archive_ext(entry.extension.as_deref().unwrap_or("")))
+            .collect()
+    }
+
+    fn archive_extract_dest_for(&self, archive_name: &str) -> String {
+        keep_both_destination(
+            &PathBuf::from(self.active_directory()).join(
+                Path::new(archive_name)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+        )
+        .to_string_lossy()
+        .to_string()
     }
 
     fn start_archive_extract_async(
@@ -15890,40 +16518,101 @@ impl NativeController {
         password: Option<String>,
         conflict: String,
     ) {
-        ui.set_op_drawer_text(ss(format!(
-            "Extracting {}",
-            Path::new(&source)
+        self.start_bulk_archive_extract_async(
+            ui,
+            vec![ArchiveExtractJob {
+                source,
+                dest,
+                selected,
+            }],
+            password,
+            conflict,
+        );
+    }
+
+    fn start_bulk_archive_extract_async(
+        &mut self,
+        ui: &MainWindow,
+        jobs: Vec<ArchiveExtractJob>,
+        password: Option<String>,
+        conflict: String,
+    ) {
+        if jobs.is_empty() {
+            return;
+        }
+        let label = if jobs.len() == 1 {
+            Path::new(&jobs[0].source)
                 .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| source.clone())
-        )));
+                .map(|name| format!("Extracting {}", name.to_string_lossy()))
+                .unwrap_or_else(|| "Extracting archive".to_string())
+        } else {
+            format!("Extracting {} archives", jobs.len())
+        };
+        ui.set_op_drawer_text(ss(label));
         ui.set_op_drawer_visible(true);
+        let dual_pane = ui.get_dual_pane();
+        let dest_is_secondary = self.active_pane == ActivePane::Secondary;
         let state = self.app_state.clone();
         let ready = self.operation_ready.clone();
         let pending = self.pending_operation_result.clone();
         std::thread::spawn(move || {
-            let result = match extract_archive_impl(
-                &state,
-                &source,
-                &dest,
-                &selected,
-                password.as_deref(),
-                &conflict,
-            ) {
-                Ok(()) => NativeOperationResult {
-                    message: format!("Extracted to {dest}"),
-                    kind: "success".to_string(),
-                    refresh: true,
-                    secondary_refresh_path: None,
-                    clear_clipboard: false,
-                },
-                Err(error) => NativeOperationResult {
-                    message: error,
+            let mut completed = 0usize;
+            let mut first_error: Option<String> = None;
+            let mut last_dest = String::new();
+
+            for job in &jobs {
+                last_dest = job.dest.clone();
+                match extract_archive_impl(
+                    &state,
+                    &job.source,
+                    &job.dest,
+                    &job.selected,
+                    password.as_deref(),
+                    &conflict,
+                ) {
+                    Ok(()) => completed += 1,
+                    Err(error) => {
+                        first_error = Some(error);
+                        break;
+                    }
+                }
+            }
+
+            let pasted = completed > 0;
+            let result = if let Some(error) = first_error {
+                NativeOperationResult {
+                    message: if completed > 0 {
+                        format!("Extracted {completed} of {}: {error}", jobs.len())
+                    } else {
+                        error
+                    },
                     kind: "error".to_string(),
-                    refresh: false,
-                    secondary_refresh_path: None,
+                    refresh: pasted && !dual_pane && !dest_is_secondary,
+                    refresh_both_panes: pasted && dual_pane,
+                    secondary_refresh_path: if pasted && !dual_pane && dest_is_secondary {
+                        Some(last_dest)
+                    } else {
+                        None
+                    },
                     clear_clipboard: false,
-                },
+                }
+            } else {
+                NativeOperationResult {
+                    message: if jobs.len() == 1 {
+                        format!("Extracted to {last_dest}")
+                    } else {
+                        format!("Extracted {completed} archives")
+                    },
+                    kind: "success".to_string(),
+                    refresh: pasted && !dual_pane && !dest_is_secondary,
+                    refresh_both_panes: pasted && dual_pane,
+                    secondary_refresh_path: if pasted && !dual_pane && dest_is_secondary {
+                        Some(last_dest)
+                    } else {
+                        None
+                    },
+                    clear_clipboard: false,
+                }
             };
             if let Ok(mut lock) = pending.lock() {
                 *lock = Some(result);
@@ -15950,68 +16639,61 @@ impl NativeController {
                 ),
             );
             let dest = dest.to_string_lossy().to_string();
-            if archive_has_encrypted_entries(&archive.archive_path) {
+            let job = ArchiveExtractJob {
+                source: archive.archive_path,
+                dest,
+                selected,
+            };
+            if archive_has_encrypted_entries(&job.source) {
                 self.pending_prompt = Some(PendingPrompt::ArchivePassword {
-                    archive_path: archive.archive_path,
-                    dest,
-                    selected,
+                    jobs: vec![job],
                     conflict: "keep".to_string(),
                 });
                 ui.set_prompt_title(ss("Archive password"));
                 ui.set_prompt_value(ss(""));
                 ui.set_prompt_visible(true);
             } else {
-                self.start_archive_extract_async(
-                    ui,
-                    archive.archive_path,
-                    dest,
-                    selected,
-                    None,
-                    "keep".to_string(),
-                );
+                self.start_bulk_archive_extract_async(ui, vec![job], None, "keep".to_string());
             }
             return;
         }
 
-        let Some(entry) = self.selected_entry() else {
-            self.show_toast(ui, "Select an archive first.");
-            return;
-        };
-        let ext = entry.extension.clone().unwrap_or_default();
-        if !is_archive_ext(&ext) {
-            self.show_toast(ui, "Select an archive first.");
+        let archives = self.selected_disk_archives();
+        if archives.is_empty() {
+            self.show_toast(ui, "Select one or more archives.");
             return;
         }
-        let dest = keep_both_destination(
-            &PathBuf::from(self.active_directory()).join(
-                Path::new(&entry.name)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-        );
-        let source = entry.path.clone();
-        let dest = dest.to_string_lossy().to_string();
-        if archive_has_encrypted_entries(&source) {
-            self.pending_prompt = Some(PendingPrompt::ArchivePassword {
-                archive_path: source,
-                dest,
+
+        let jobs: Vec<ArchiveExtractJob> = archives
+            .iter()
+            .map(|entry| ArchiveExtractJob {
+                source: entry.path.clone(),
+                dest: self.archive_extract_dest_for(&entry.name),
                 selected: Vec::new(),
+            })
+            .collect();
+
+        let encrypted_count = jobs
+            .iter()
+            .filter(|job| archive_has_encrypted_entries(&job.source))
+            .count();
+        if encrypted_count > 0 {
+            self.pending_prompt = Some(PendingPrompt::ArchivePassword {
+                jobs,
                 conflict: "keep".to_string(),
             });
-            ui.set_prompt_title(ss("Archive password"));
+            ui.set_prompt_title(ss(if encrypted_count == 1 {
+                "Archive password".to_string()
+            } else {
+                format!(
+                    "Archive password ({} encrypted)",
+                    encrypted_count
+                )
+            }));
             ui.set_prompt_value(ss(""));
             ui.set_prompt_visible(true);
         } else {
-            self.start_archive_extract_async(
-                ui,
-                source,
-                dest,
-                Vec::new(),
-                None,
-                "keep".to_string(),
-            );
+            self.start_bulk_archive_extract_async(ui, jobs, None, "keep".to_string());
         }
     }
 
@@ -16040,6 +16722,7 @@ impl NativeController {
                     message: format!("Created {}", dest_string),
                     kind: "success".to_string(),
                     refresh: !dest_is_secondary,
+                    refresh_both_panes: false,
                     secondary_refresh_path: if dest_is_secondary {
                         Some(dest_dir.clone())
                     } else {
@@ -16051,6 +16734,7 @@ impl NativeController {
                     message: error,
                     kind: "error".to_string(),
                     refresh: false,
+                    refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
                 },
@@ -16956,17 +17640,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_file_context(move |index| {
         if let Some(ui) = weak.upgrade() {
-            let (should_select, is_archive) = {
+            let should_select = {
                 let ctrl = c.borrow();
-                let sel = index >= 0 && !ctrl.selected_set.contains(&(index as usize));
-                let arch = index >= 0
-                    && ctrl
-                        .visible_files
-                        .get(index as usize)
-                        .and_then(|e| e.extension.as_deref())
-                        .map(is_archive_ext)
-                        .unwrap_or(false);
-                (sel, arch)
+                index >= 0 && !ctrl.selected_set.contains(&(index as usize))
             };
             if should_select {
                 c.borrow_mut().select(&ui, index);
@@ -16989,6 +17665,11 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     ctrl.update_status(&ui);
                 }
             }
+            let is_archive = c
+                .borrow()
+                .selected_entries()
+                .iter()
+                .any(|entry| is_archive_ext(entry.extension.as_deref().unwrap_or("")));
             ui.set_context_on_file(index >= 0);
             ui.set_context_is_archive(is_archive);
             ui.set_context_visible(true);
@@ -16999,16 +17680,28 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     {
         let weak = ui.as_weak();
         let c = controller.clone();
-        ui.on_start_file_drag(move |index| {
+        ui.on_start_file_drag(move |index, pane| {
+            let pane = pane.to_string();
             let paths: Vec<String> = {
                 let ctrl = c.borrow();
-                if ctrl.selected_set.contains(&(index as usize)) && !ctrl.selected_set.is_empty() {
-                    ctrl.selected_set
+                let from_secondary = pane == "secondary";
+                let selected_set = if from_secondary {
+                    &ctrl.secondary_selected_set
+                } else {
+                    &ctrl.selected_set
+                };
+                let visible = if from_secondary {
+                    &ctrl.secondary_visible_files
+                } else {
+                    &ctrl.visible_files
+                };
+                if selected_set.contains(&(index as usize)) && !selected_set.is_empty() {
+                    selected_set
                         .iter()
-                        .filter_map(|&i| ctrl.visible_files.get(i).map(|e| e.path.clone()))
+                        .filter_map(|&i| visible.get(i).map(|e| e.path.clone()))
                         .collect()
                 } else if index >= 0 {
-                    ctrl.visible_files
+                    visible
                         .get(index as usize)
                         .map(|e| e.path.clone())
                         .into_iter()
@@ -17045,7 +17738,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     // If an external app moved the files, refresh so they disappear.
                     use windows::Win32::System::Ole::DROPEFFECT_MOVE;
                     if effect == DROPEFFECT_MOVE {
-                        c.borrow_mut().refresh(&ui);
+                        c.borrow_mut().invalidate_and_refresh_both_panes(&ui);
                     }
                 }
             }
@@ -17149,7 +17842,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_search_immediate(move |query| {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().search(&ui, query.to_string());
+            let q = query.to_string();
+            let mut ctrl = c.borrow_mut();
+            if looks_like_path_query(&q) {
+                let _ = ctrl.search_by_path(&ui, &q, true);
+            } else {
+                ctrl.search(&ui, q);
+            }
         }
     });
 
@@ -17294,16 +17993,27 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 ctrl.active_pane = ActivePane::Secondary;
                 if index >= 0 {
                     ctrl.secondary_selected_index = index;
+                    if !ctrl.secondary_selected_set.contains(&(index as usize)) {
+                        ctrl.secondary_selected_set.clear();
+                        ctrl.secondary_selected_set.insert(index as usize);
+                        ctrl.secondary_select_anchor = index;
+                    }
                     if let Some(entry) = ctrl.secondary_visible_files.get(index as usize) {
                         ui.set_selected_name(ss(&entry.name));
                     }
                     ui.set_selected_index(index);
-                    ctrl.sync_selection_count_to_ui(&ui);
+                    ctrl.update_secondary_selection_in_model(&ui, &[index as usize]);
                     ctrl.update_status(&ui);
                 }
             }
             c.borrow().update_preview(&ui);
+            let is_archive = c
+                .borrow()
+                .selected_entries()
+                .iter()
+                .any(|entry| is_archive_ext(entry.extension.as_deref().unwrap_or("")));
             ui.set_context_on_file(index >= 0);
+            ui.set_context_is_archive(is_archive);
             ui.set_context_visible(true);
         }
     });
@@ -18106,8 +18816,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                             if let Ok(mut ctrl) = c.try_borrow_mut() {
                                 if result.clear_clipboard {
                                     ctrl.clipboard = None;
+                                    #[cfg(target_os = "windows")]
+                                    let _ = file_drag::clear_shell_files_clipboard();
+                                    ctrl.refresh_clipboard_visuals(&ui);
                                 }
-                                if result.refresh {
+                                if result.refresh_both_panes {
+                                    ctrl.invalidate_and_refresh_both_panes(&ui);
+                                } else if result.refresh {
                                     ctrl.refresh(&ui);
                                 }
                                 if let Some(path) = result.secondary_refresh_path {
@@ -19105,6 +19820,7 @@ fn hit_test_list_folder_drop(
     lx: f32,
     ly: f32,
     list_top: f32,
+    scroll_y: f32,
     sort_by: &str,
 ) -> Option<String> {
     if files.is_empty() {
@@ -19120,8 +19836,8 @@ fn hit_test_list_folder_drop(
         return None;
     }
     match view_str {
-        "list" => hit_test_list_rows(files, left, right, lx, ly, list_top, sort_by),
-        "compact" => hit_test_uniform_rows(files, left, right, lx, ly, list_top, 32.0),
+        "list" => hit_test_list_rows(files, left, right, lx, ly, list_top, scroll_y, sort_by),
+        "compact" => hit_test_uniform_rows(files, left, right, lx, ly, list_top, scroll_y, 32.0),
         "grid" | "gallery" => {
             // Grid and gallery lay items out in a wrapping flexbox. Cells use
             // AppMetrics.grid_w / grid_h (or hard-coded 154 px for gallery).
@@ -19134,7 +19850,7 @@ fn hit_test_list_folder_drop(
             };
             let cols = ((pane_w - PAD * 2.0 - SCROLLBAR) / grid_w).floor().max(1.0) as usize;
             let col = ((lx - left) / grid_w).floor() as usize;
-            let row = ((ly - list_top) / grid_h).floor() as usize;
+            let row = ((ly - list_top + scroll_y) / grid_h).floor() as usize;
             if col >= cols {
                 return None;
             }
@@ -19264,12 +19980,13 @@ fn hit_test_list_rows(
     _lx: f32,
     ly: f32,
     list_top: f32,
+    scroll_y: f32,
     sort_by: &str,
 ) -> Option<String> {
     const ROW_H: f32 = 38.0;
     const GROUP_HEADER_H: f32 = 26.0;
     let with_groups = sort_by == "modified";
-    let target_y = ly - list_top;
+    let target_y = ly - list_top + scroll_y;
     let mut cursor = 0.0_f32;
     let mut last_group: &str = "";
     for entry in files {
@@ -19307,9 +20024,10 @@ fn hit_test_uniform_rows(
     _lx: f32,
     ly: f32,
     list_top: f32,
+    scroll_y: f32,
     row_h: f32,
 ) -> Option<String> {
-    let row = ((ly - list_top) / row_h).floor() as isize;
+    let row = ((ly - list_top + scroll_y) / row_h).floor() as isize;
     if row < 0 {
         return None;
     }
@@ -19470,22 +20188,40 @@ fn pick_drop_destination(
 
     // 2. File-pane drops. Determine which pane the cursor is over (primary or
     //    secondary in dual mode) and hit-test against folder rows there.
-    let (base_dir, pane_left, pane_w, files, list_top, pane_label): (
+    let pad = ui.global::<AppMetrics>().get_pad();
+    let list_header_h = if ui.get_view_mode().as_str() == "list" {
+        32.0
+    } else {
+        pad
+    };
+    let primary_list_top = content_top + pad + list_header_h;
+    let secondary_list_top = content_top + 38.0 + list_header_h;
+
+    let (base_dir, pane_left, pane_w, files, list_top, scroll_y, sort_by, pane_label): (
         String,
         f32,
         f32,
         &[FileEntry],
         f32,
+        f32,
+        String,
         &'static str,
     ) = if ui.get_dual_pane() {
-        let primary_right_edge = sidebar_w + primary_w + splitter_w / 2.0;
-        if lx < primary_right_edge {
+        let split_x = sidebar_w + primary_w + splitter_w;
+        if lx < split_x {
+            let scroll = if ui.get_view_mode().as_str() == "list" {
+                ui.get_primary_list_scroll_y()
+            } else {
+                ui.get_primary_grid_scroll_y()
+            };
             (
                 ctrl.current_path.clone(),
                 main_left,
                 primary_w,
                 &ctrl.visible_files[..],
-                content_top + 16.0 + 32.0,
+                primary_list_top,
+                scroll,
+                ctrl.sort_by.clone(),
                 "primary",
             )
         } else if !ctrl.secondary_path.is_empty() {
@@ -19496,26 +20232,42 @@ fn pick_drop_destination(
                 sec_left,
                 sec_w,
                 &ctrl.secondary_visible_files[..],
-                content_top + 38.0 + 32.0,
+                secondary_list_top,
+                ui.get_secondary_list_scroll_y(),
+                ctrl.secondary_sort_by.clone(),
                 "secondary",
             )
         } else {
+            let scroll = if ui.get_view_mode().as_str() == "list" {
+                ui.get_primary_list_scroll_y()
+            } else {
+                ui.get_primary_grid_scroll_y()
+            };
             (
                 ctrl.current_path.clone(),
                 main_left,
                 primary_w,
                 &ctrl.visible_files[..],
-                content_top + 16.0 + 32.0,
+                primary_list_top,
+                scroll,
+                ctrl.sort_by.clone(),
                 "primary",
             )
         }
     } else {
+        let scroll = if ui.get_view_mode().as_str() == "list" {
+            ui.get_primary_list_scroll_y()
+        } else {
+            ui.get_primary_grid_scroll_y()
+        };
         (
             ctrl.current_path.clone(),
             main_left,
             primary_w,
             &ctrl.visible_files[..],
-            content_top + 16.0 + 32.0,
+            primary_list_top,
+            scroll,
+            ctrl.sort_by.clone(),
             "primary",
         )
     };
@@ -19528,7 +20280,8 @@ fn pick_drop_destination(
         lx,
         ly,
         list_top,
-        &ctrl.sort_by,
+        scroll_y,
+        &sort_by,
     ) {
         file_drag::log(&format!(
             "pick_drop_destination: pane={} ROW -> '{}'",
@@ -19933,10 +20686,10 @@ pub fn run() {
                     ui.set_drag_cursor_x(logical_x.max(0.0));
                     ui.set_drag_cursor_y(logical_y.max(0.0));
                     let pane_label = if ui.get_dual_pane() {
-                        let primary_right_edge = ui.get_sidebar_w()
+                        let split_x = ui.get_sidebar_w()
                             + ui.get_primary_pane_w()
-                            + ui.get_pane_splitter_w() / 2.0;
-                        if logical_x < primary_right_edge {
+                            + ui.get_pane_splitter_w();
+                        if logical_x < split_x {
                             "primary"
                         } else {
                             "secondary"

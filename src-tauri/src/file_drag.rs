@@ -591,6 +591,118 @@ pub fn unregister_drop_target(hwnd: HWND) {
     }
 }
 
+// -- Shell file clipboard (Cut/Copy/Paste with Explorer) ---------------------
+
+fn preferred_drop_effect_format() -> u32 {
+    use std::sync::OnceLock;
+    static FORMAT: OnceLock<u32> = OnceLock::new();
+    *FORMAT.get_or_init(|| unsafe {
+        use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+        RegisterClipboardFormatW(windows::core::w!("Preferred DropEffect"))
+    })
+}
+
+/// Place file paths on the Windows clipboard (CF_HDROP + Preferred DropEffect).
+pub fn set_shell_files_clipboard(paths: &[String], cut: bool) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    unsafe {
+        use windows::Win32::Foundation::{GlobalFree, HANDLE};
+        use windows::Win32::System::DataExchange::{
+            CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+        };
+        use windows::Win32::System::Memory::{
+            GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
+        };
+
+        let hdrop = build_hdrop(paths).map_err(|e| e.to_string())?;
+        let effect = if cut {
+            DROPEFFECT_MOVE.0
+        } else {
+            DROPEFFECT_COPY.0
+        };
+        let effect_h = GlobalAlloc(GMEM_MOVEABLE, 4).map_err(|e| e.to_string())?;
+        let effect_ptr = GlobalLock(effect_h) as *mut u32;
+        if effect_ptr.is_null() {
+            let _ = GlobalFree(Some(hdrop));
+            let _ = GlobalFree(Some(effect_h));
+            return Err("GlobalLock failed for drop effect".to_string());
+        }
+        *effect_ptr = effect;
+        let _ = GlobalUnlock(effect_h);
+
+        OpenClipboard(None).map_err(|e| e.to_string())?;
+        if let Err(e) = EmptyClipboard() {
+            let _ = CloseClipboard();
+            let _ = GlobalFree(Some(hdrop));
+            let _ = GlobalFree(Some(effect_h));
+            return Err(e.to_string());
+        }
+        if let Err(e) = SetClipboardData(u32::from(CF_HDROP), Some(HANDLE(hdrop.0))) {
+            let _ = CloseClipboard();
+            let _ = GlobalFree(Some(hdrop));
+            let _ = GlobalFree(Some(effect_h));
+            return Err(e.to_string());
+        }
+        let fmt = preferred_drop_effect_format();
+        if let Err(e) = SetClipboardData(fmt, Some(HANDLE(effect_h.0))) {
+            let _ = CloseClipboard();
+            let _ = GlobalFree(Some(effect_h));
+            return Err(e.to_string());
+        }
+        CloseClipboard().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+/// Read CF_HDROP paths and whether the shell marked the operation as a move (cut).
+pub fn try_read_shell_files_clipboard() -> Option<(Vec<String>, bool)> {
+    unsafe {
+        use windows::Win32::Foundation::HGLOBAL;
+        use windows::Win32::System::DataExchange::{
+            CloseClipboard, GetClipboardData, OpenClipboard,
+        };
+        use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+
+        OpenClipboard(None).ok()?;
+        let hdrop = GetClipboardData(u32::from(CF_HDROP)).ok()?;
+        let paths = paths_from_hglobal(HGLOBAL(hdrop.0));
+        if paths.is_empty() {
+            let _ = CloseClipboard();
+            return None;
+        }
+        let cut = match GetClipboardData(preferred_drop_effect_format()) {
+            Ok(effect_h) => {
+                let ptr = GlobalLock(HGLOBAL(effect_h.0)) as *const u32;
+                if ptr.is_null() {
+                    false
+                } else {
+                    let effect = *ptr;
+                    let _ = GlobalUnlock(HGLOBAL(effect_h.0));
+                    effect == DROPEFFECT_MOVE.0
+                }
+            }
+            Err(_) => false,
+        };
+        let _ = CloseClipboard();
+        Some((paths, cut))
+    }
+}
+
+pub fn clear_shell_files_clipboard() -> Result<(), String> {
+    unsafe {
+        use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard};
+        OpenClipboard(None).map_err(|e| e.to_string())?;
+        if let Err(e) = EmptyClipboard() {
+            let _ = CloseClipboard();
+            return Err(e.to_string());
+        }
+        CloseClipboard().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
 /// Start a shell drag operation (blocks until drop or cancel).
 /// Returns the DROPEFFECT that the target performed (NONE = cancelled/rejected).
 ///

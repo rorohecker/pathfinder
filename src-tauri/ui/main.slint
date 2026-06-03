@@ -34,6 +34,8 @@ export struct FileItem {
     // row of a new bucket so the list view can draw a section divider above it.
     date_group_text: string,
     show_date_group_header: bool,
+    // True while the path is on the cut clipboard (Ctrl+X) and not yet pasted.
+    is_cut_pending: bool,
 }
 
 export struct SideItem {
@@ -1013,8 +1015,11 @@ component FileRow inherits Rectangle {
     // bucket (Today, Yesterday, This week, etc) when sorted by Date modified.
     property <bool> has_group_header: root.view_mode == "list" && root.item.show_date_group_header;
     property <length> group_header_h: root.has_group_header ? 26px : 0px;
+    // Explorer-style ghosting for cut items waiting to be pasted.
+    property <float> content_opacity: root.item.is_cut_pending ? 0.38 : 1.0;
 
     height: (root.view_mode == "list" ? AppMetrics.row_h : (root.view_mode == "gallery" ? 154px : (root.view_mode == "compact" ? 32px : AppMetrics.grid_h))) + root.group_header_h;
+    opacity: root.content_opacity;
 
     // Group header at the top of the row, only when this row starts a new bucket.
     if root.has_group_header: Rectangle {
@@ -2920,6 +2925,7 @@ export component MainWindow inherits Window {
     // / re-entering a folder land on the row the user was looking at, not the top.
     in-out property <length> primary_list_scroll_y: 0;
     in-out property <length> primary_grid_scroll_y: 0;
+    in-out property <length> secondary_list_scroll_y: 0;
     in-out property <string> drag_label: "";
     in-out property <bool> show_hidden: false;
     in-out property <bool> settings_visible: false;
@@ -2953,6 +2959,8 @@ export component MainWindow inherits Window {
     // its navigation chrome for a contextual action row (copy / cut / delete /
     // rename / share). The Rust controller pushes this on every selection change.
     in-out property <int> selected_count: 0;
+    // True when the current selection includes archive(s) — shows Extract Here in the selection bar.
+    in-out property <bool> selection_has_archive: false;
     in-out property <string> selected_name: "";
     in-out property <string> preview_title: "";
     in-out property <string> preview_body: "";
@@ -3079,7 +3087,7 @@ export component MainWindow inherits Window {
     callback filter_changed(string);
     callback set_ui_mode(string);
     callback ui_mode_prompt_choice(string);
-    callback start_file_drag(int);
+    callback start_file_drag(int, string);
 
     in-out property <string> ui_mode: "normal";
     in-out property <bool> ui_mode_prompt_visible: false;
@@ -3405,6 +3413,8 @@ export component MainWindow inherits Window {
         // or more files are selected. Pinned at toolbar height/position so the
         // page layout below stays exactly the same and there is no jump.
         if root.selected_count > 0: Rectangle {
+            property <length> sel_shift: (root.selection_has_archive && !root.in_recycle_bin) ? 72px : 0px;
+
             x: root.sidebar_w;
             y: root.title_h;
             width: parent.width - root.sidebar_w;
@@ -3449,9 +3459,20 @@ export component MainWindow inherits Window {
             ToolButton { x: parent.width - 278px; y: root.is_simple ? 16px : 6px; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
             ToolButton { x: parent.width - 244px; y: root.is_simple ? 16px : 6px; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
             Rectangle { x: parent.width - 210px; y: root.is_simple ? 24px : 12px; width: 1px; height: root.is_simple ? 40px : 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 198px; y: root.is_simple ? 16px : 6px; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
-            ToolButton { x: parent.width - 164px; y: root.is_simple ? 16px : 6px; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
-            ToolButton { x: parent.width - 130px; y: root.is_simple ? 16px : 6px; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
+            if root.selection_has_archive && !root.in_recycle_bin: ToolButton {
+                x: parent.width - 198px;
+                y: root.is_simple ? 16px : 6px;
+                button_width: root.is_simple ? 64px : 31px;
+                icon_data: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3";
+                text_label: "Extract";
+                show_caption: root.is_simple;
+                button_height: root.is_simple ? 56px : 31px;
+                tooltip: "Extract Here";
+                clicked => { root.command("extract-here"); }
+            }
+            ToolButton { x: parent.width - 198px - parent.sel_shift; y: root.is_simple ? 16px : 6px; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
+            ToolButton { x: parent.width - 164px - parent.sel_shift; y: root.is_simple ? 16px : 6px; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
+            ToolButton { x: parent.width - 130px - parent.sel_shift; y: root.is_simple ? 16px : 6px; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
             // Clear selection button on the right edge
             ToolButton { x: parent.width - 44px; y: root.is_simple ? 16px : 6px; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
         }
@@ -3779,7 +3800,9 @@ export component MainWindow inherits Window {
                     y: 0;
                     width: parent.width - (search_box.semantic_available ? 84px : 58px);
                     height: parent.height;
-                    text: root.search_scope_all ? "Search entire drive" : "Search this folder";
+                    text: root.search_scope_all
+                        ? "Path or name — e.g. %localappdata%\\App\\"
+                        : "Path or name in this folder";
                     color: ThemePalette.text_faint;
                     font-size: 12.5px;
                     vertical-alignment: center;
@@ -4126,7 +4149,7 @@ export component MainWindow inherits Window {
                             root.rename_index = -1;
                             if (val != "") { root.rename_file(i, val); }
                         }
-                        file_drag_requested(i) => { root.start_file_drag(i); }
+                        file_drag_requested(i) => { root.start_file_drag(i, "primary"); }
                         marquee_started(ax, ay) => {
                             // Translate absolute window coords into pane-local
                             // space so the existing marquee logic (which uses
@@ -4404,7 +4427,7 @@ export component MainWindow inherits Window {
                             root.rename_index = -1;
                             if (val != "") { root.rename_file(i, val); }
                         }
-                        file_drag_requested(i) => { root.start_file_drag(i); }
+                        file_drag_requested(i) => { root.start_file_drag(i, "primary"); }
                         marquee_started(ax, ay) => {
                             // Translate absolute window coords into pane-local
                             // space so the existing marquee logic (which uses
@@ -4775,6 +4798,7 @@ export component MainWindow inherits Window {
                     // and tag dot stay clear of the scroll handle.
                     width: parent.width - AppMetrics.pad * 2 - 14px;
                     height: parent.height - 38px - (root.view_mode == "list" ? 32px : AppMetrics.pad) - AppMetrics.pad;
+                    viewport-y <=> root.secondary_list_scroll_y;
                     for file[index] in root.secondary_files: FileRow {
                         width: parent.width;
                         item: file;
@@ -4791,7 +4815,7 @@ export component MainWindow inherits Window {
                             root.secondary_file_context(i);
                         }
                         rename_commit(i, val) => { }
-                        file_drag_requested(i) => { root.start_file_drag(i); }
+                        file_drag_requested(i) => { root.start_file_drag(i, "secondary"); }
                     }
                 }
 
