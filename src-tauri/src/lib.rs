@@ -19222,6 +19222,19 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
 
     let weak = ui.as_weak();
     let c = controller.clone();
+    ui.on_command_run_first(move |query| {
+        if let Some(ui) = weak.upgrade() {
+            use slint::Model;
+            let items = command_items_filtered(&query);
+            if let Some(item) = items.row_data(0) {
+                ui.set_command_visible(false);
+                c.borrow_mut().command(&ui, item.command.as_str());
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_crumb_navigate(move |index| {
         if let Some(ui) = weak.upgrade() {
             let path = {
@@ -19255,6 +19268,38 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     Ok(_) => {
                         let mut ctrl = c.borrow_mut();
                         ctrl.refresh(&ui);
+                        ctrl.show_toast_kind(&ui, "Renamed", "success");
+                    }
+                    Err(error) => c.borrow_mut().show_toast_kind(&ui, error, "error"),
+                }
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_secondary_rename_file(move |index, new_name| {
+        if let Some(ui) = weak.upgrade() {
+            let result = {
+                let ctrl = c.borrow();
+                ctrl.secondary_visible_files
+                    .get(index as usize)
+                    .map(|e| (e.path.clone(), e.name.clone(), ctrl.app_state.clone()))
+            };
+            if let Some((old_path, old_name, app_state)) = result {
+                let new_name = new_name.trim().to_string();
+                if new_name.is_empty() || new_name == old_name {
+                    return;
+                }
+                match native_rename(&app_state, &old_path, &new_name) {
+                    Ok(_) => {
+                        let mut ctrl = c.borrow_mut();
+                        if !ctrl.secondary_path.is_empty() {
+                            let path = ctrl.secondary_path.clone();
+                            ctrl.app_state
+                                .invalidate_directory_path(std::path::Path::new(&path));
+                            ctrl.secondary_navigate(&ui, path);
+                        }
                         ctrl.show_toast_kind(&ui, "Renamed", "success");
                     }
                     Err(error) => c.borrow_mut().show_toast_kind(&ui, error, "error"),

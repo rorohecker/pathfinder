@@ -206,11 +206,11 @@ component ToolButton inherits Rectangle {
         (touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0))));
 
     // Two captioned layouts:
-    //   - Wide button (width > height + 12 px): icon on the left, label to the
+    //   - Wide button (width >= 72 px): icon on the left, label to the
     //     right. Used by the simple-mode toolbar where each button is 88x38 and
     //     the caption needs to read like a normal button label.
-    //   - Tall button (default captioned form): icon on top, label beneath.
-    property <bool> caption_inline: root.show_caption && root.width > root.height + 12px;
+    //   - Tall button (narrower slots): icon on top, label beneath.
+    property <bool> caption_inline: root.show_caption && root.width >= 72px;
 
     SvgIcon {
         x: root.caption_inline ? 10px : (parent.width - 16px) / 2;
@@ -454,7 +454,7 @@ component SideRow inherits Rectangle {
     Text {
         visible: !root.item.is_header;
         x: 38px;
-        width: parent.width - 78px;
+        width: parent.width - 86px;
         height: parent.height;
         text: root.item.label;
         color: root.item.active ? ThemePalette.accent_strong : (touch.has-hover ? ThemePalette.text : ThemePalette.text_muted);
@@ -3031,6 +3031,7 @@ export component MainWindow inherits Window {
     in-out property <bool> secondary_addr_editing: false;
 
     callback filter_commands(string);
+    callback command_run_first(string);
     callback navigate(string);
     callback crumb_navigate(int);
     callback rename_file(int, string);
@@ -3095,6 +3096,7 @@ export component MainWindow inherits Window {
     callback secondary_file_opened(int);
     callback secondary_file_selected(int, bool, bool);
     callback secondary_file_context(int);
+    callback secondary_rename_file(int, string);
     callback secondary_go_up();
     callback secondary_go_back();
     callback secondary_sort_column(string);
@@ -3278,16 +3280,21 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                HorizontalLayout {
+                Rectangle {
+                    horizontal-stretch: 1;
                     height: 30px;
-                    spacing: 2px;
-                    alignment: start;
-                    for tab[index] in root.tabs: TabButton {
-                        tab: tab;
-                        index: index;
-                        drag_target_path: root.drag_target_path;
-                        activated(i) => { root.tab_activated(i); }
-                        closed(i) => { root.tab_closed(i); }
+                    clip: true;
+                    HorizontalLayout {
+                        height: 30px;
+                        spacing: 2px;
+                        alignment: start;
+                        for tab[index] in root.tabs: TabButton {
+                            tab: tab;
+                            index: index;
+                            drag_target_path: root.drag_target_path;
+                            activated(i) => { root.tab_activated(i); }
+                            closed(i) => { root.tab_closed(i); }
+                        }
                     }
                 }
 
@@ -3431,56 +3438,56 @@ export component MainWindow inherits Window {
         // or more files are selected. Pinned at toolbar height/position so the
         // page layout below stays exactly the same and there is no jump.
         if root.selected_count > 0: Rectangle {
-            property <length> sel_shift: (root.selection_has_archive && !root.in_recycle_bin) ? 72px : 0px;
+            property <int> sel_shift: (root.selection_has_archive && !root.in_recycle_bin) ? 1 : 0;
+            property <int> sel_btn_count: 10 + sel_shift;
+            property <length> sel_gap: 4px;
+            property <length> sel_label_w: min(200px, max(120px, self.width * 0.22));
+            property <length> sel_clear_w: root.is_simple ? 54px : 44px;
+            property <length> sel_btn_w: root.is_simple
+                ? min(root.simple_btn_w, max(54px, (self.width - sel_label_w - sel_clear_w - 24px - (sel_btn_count - 1) * sel_gap) / sel_btn_count))
+                : 31px;
+            property <length> sel_step: root.is_simple ? (sel_btn_w + sel_gap) : 34px;
+            property <length> sel_left: sel_label_w + 10px;
+            property <length> sel_right: self.width - 10px;
 
             x: root.sidebar_w;
             y: root.title_h;
             width: parent.width - root.sidebar_w;
             height: root.toolbar_h;
             z: 11;
-            // Solid panel background fully covers the toolbar underneath so
-            // nav and search controls do not bleed through. An accent_soft
-            // tint Rectangle sits on top to colour the bar without exposing
-            // the items below.
             background: ThemePalette.panel_solid;
+            clip: true;
             Rectangle {
                 x: 0; y: 0; width: parent.width; height: parent.height;
                 background: ThemePalette.accent_soft;
             }
-            // Block clicks so the toolbar's TouchAreas underneath cannot fire.
             TouchArea {
                 width: parent.width; height: parent.height;
                 clicked => {}
             }
-            // Accent left edge marker
             Rectangle { x: 0; y: 0; width: 3px; height: parent.height; background: ThemePalette.accent; }
             Text {
                 x: 18px;
-                width: 200px;
+                width: parent.sel_label_w - 8px;
                 height: parent.height;
                 text: root.selected_count == 1 ? "1 item selected" : (root.selected_count + " items selected");
                 color: ThemePalette.accent_strong;
                 font-size: 13px;
                 font-weight: 600;
                 vertical-alignment: center;
+                overflow: elide;
             }
-            // Selection action bar y offset. Normal mode anchors at y:6 inside a
-            // 44 px bar. Simple mode centres the captioned buttons inside the
-            // taller 88 px bar so the row doesn't sit awkwardly at the top.
-            // Captioned buttons render with icon-on-top + label-below in this
-            // bar because each is only 31 px wide.
-            // (sel_y, sel_div_y, btn_h) are inlined into every entry below.
-            ToolButton { x: parent.width - 392px; y: root.is_simple ? 16px : 6px; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
-            ToolButton { x: parent.width - 358px; y: root.is_simple ? 16px : 6px; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
-            ToolButton { x: parent.width - 324px; y: root.is_simple ? 16px : 6px; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
-            Rectangle { x: parent.width - 290px; y: root.is_simple ? 24px : 12px; width: 1px; height: root.is_simple ? 40px : 20px; background: ThemePalette.border; }
-            ToolButton { x: parent.width - 278px; y: root.is_simple ? 16px : 6px; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
-            ToolButton { x: parent.width - 244px; y: root.is_simple ? 16px : 6px; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
-            Rectangle { x: parent.width - 210px; y: root.is_simple ? 24px : 12px; width: 1px; height: root.is_simple ? 40px : 20px; background: ThemePalette.border; }
+            ToolButton { x: root.is_simple ? parent.sel_left : parent.width - 392px; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + parent.sel_step : parent.width - 358px; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.width - 324px; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
+            Rectangle { visible: !root.is_simple; x: parent.width - 290px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
+            ToolButton { x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.width - 278px; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.width - 244px; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
+            Rectangle { visible: !root.is_simple; x: parent.width - 210px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
             if root.selection_has_archive && !root.in_recycle_bin: ToolButton {
-                x: parent.width - 198px;
+                x: root.is_simple ? parent.sel_left + 5 * parent.sel_step : parent.width - 198px;
                 y: root.is_simple ? 16px : 6px;
-                button_width: root.is_simple ? 64px : 31px;
+                button_width: parent.sel_btn_w;
                 icon_data: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3";
                 text_label: "Extract";
                 show_caption: root.is_simple;
@@ -3488,11 +3495,10 @@ export component MainWindow inherits Window {
                 tooltip: "Extract Here";
                 clicked => { root.command("extract-here"); }
             }
-            ToolButton { x: parent.width - 198px - parent.sel_shift; y: root.is_simple ? 16px : 6px; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
-            ToolButton { x: parent.width - 164px - parent.sel_shift; y: root.is_simple ? 16px : 6px; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
-            ToolButton { x: parent.width - 130px - parent.sel_shift; y: root.is_simple ? 16px : 6px; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
-            // Clear selection button on the right edge
-            ToolButton { x: parent.width - 44px; y: root.is_simple ? 16px : 6px; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.width - 198px - parent.sel_shift * 34px; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.width - 164px - parent.sel_shift * 34px; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.width - 130px - parent.sel_shift * 34px; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
+            ToolButton { x: parent.sel_right - parent.sel_clear_w; y: root.is_simple ? 16px : 6px; button_width: parent.sel_clear_w; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
         }
 
         // Toolbar - z:10 so tooltip pop-overs render above the file area below
@@ -3503,8 +3509,45 @@ export component MainWindow inherits Window {
             height: root.toolbar_h;
             z: 10;
             background: ThemePalette.panel;
-            property <bool> show_toolbar_search: self.width >= 850px;
-            property <bool> show_toolbar_sort: self.width >= 1025px;
+            // Normal-mode toolbar layout is computed right-to-left so address,
+            // search, sort, and view controls never overlap at narrow widths.
+            property <length> tb_gap: 8px;
+            property <length> tb_search_w: 208px;
+            property <length> tb_sort_w: 168px;
+            property <length> tb_view_x: self.width - 306px;
+            property <length> tb_min_w_search: 167px + 80px + tb_gap + tb_search_w + tb_gap + 306px;
+            property <length> tb_min_w_sort: tb_min_w_search + tb_gap + tb_sort_w;
+            property <bool> show_toolbar_search: !root.is_simple && self.width >= tb_min_w_search;
+            property <bool> show_toolbar_sort: !root.is_simple && self.width >= tb_min_w_sort;
+            property <length> tb_sort_x: tb_view_x - tb_gap - tb_sort_w;
+            property <length> tb_search_x: (show_toolbar_sort ? tb_sort_x : tb_view_x) - tb_gap - tb_search_w;
+            property <length> tb_addr_x: 167px;
+            property <length> tb_addr_right: show_toolbar_search
+                ? tb_search_x
+                : (show_toolbar_sort ? tb_sort_x : tb_view_x);
+            property <length> tb_addr_w: max(80px, tb_addr_right - tb_addr_x - tb_gap);
+            property <bool> tb_clear_sort: show_toolbar_sort && (root.sort_by != "name" || root.sort_dir != "asc");
+            // Simple-mode layout math. Row 2 packs six equal slots (five view
+            // modes + Actions). Slot width shrinks on narrow toolbars so the
+            // captioned buttons stop overlapping each other.
+            property <length> simple_row_gap: 4px;
+            property <int> simple_row2_slots: 6;
+            property <length> simple_row2_slot_w: min(
+                root.simple_btn_w,
+                max(54px, (self.width - 20px - (self.simple_row2_slots - 1) * self.simple_row_gap) / self.simple_row2_slots));
+            property <length> simple_row2_step: self.simple_row2_slot_w + self.simple_row_gap;
+            property <int> simple_row1_slots: 4;
+            property <length> simple_row1_budget: min(380px, max(240px, self.width * 0.42));
+            property <length> simple_row1_slot_w: min(
+                root.simple_btn_w,
+                max(54px, (self.simple_row1_budget - 10px - (self.simple_row1_slots - 1) * self.simple_row_gap) / self.simple_row1_slots));
+            property <length> simple_row1_step: self.simple_row1_slot_w + self.simple_row_gap;
+            property <length> simple_addr_x: 10px + self.simple_row1_slots * self.simple_row1_step + 8px;
+            property <bool> simple_show_search: root.is_simple && self.width >= 560px;
+            property <length> simple_search_w: min(176px, max(120px, self.width - self.simple_addr_x - 20px - 80px));
+            property <length> simple_addr_w: self.simple_show_search
+                ? max(100px, self.width - self.simple_addr_x - self.simple_search_w - 12px)
+                : max(120px, self.width - self.simple_addr_x - 10px);
 
             // Navigation cluster. Normal mode: compact 31x31 icons on a 44 px bar.
             // Simple mode: 88x38 buttons with an inline label, on row 1 of an 88 px bar.
@@ -3514,40 +3557,40 @@ export component MainWindow inherits Window {
                 icon_data: "M15 18l-6-6 6-6";
                 text_label: "Back";
                 show_caption: root.is_simple;
-                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_width: root.is_simple ? toolbar.simple_row1_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
                 tooltip: "Back";
                 clicked => { root.go_back(); }
             }
             ToolButton {
-                x: root.is_simple ? 102px : 45px;
+                x: root.is_simple ? 10px + toolbar.simple_row1_step : 45px;
                 y: root.is_simple ? root.simple_row1_y : 6px;
                 icon_data: "M9 18l6-6-6-6";
                 text_label: "Forward";
                 show_caption: root.is_simple;
-                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_width: root.is_simple ? toolbar.simple_row1_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
                 tooltip: "Forward";
                 clicked => { root.go_forward(); }
             }
             ToolButton {
-                x: root.is_simple ? 194px : 80px;
+                x: root.is_simple ? 10px + 2 * toolbar.simple_row1_step : 80px;
                 y: root.is_simple ? root.simple_row1_y : 6px;
                 icon_data: "M12 19V5 M5 12l7-7 7 7";
                 text_label: "Up";
                 show_caption: root.is_simple;
-                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_width: root.is_simple ? toolbar.simple_row1_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
                 tooltip: "Up one level";
                 clicked => { root.go_up(); }
             }
             ToolButton {
-                x: root.is_simple ? 286px : 115px;
+                x: root.is_simple ? 10px + 3 * toolbar.simple_row1_step : 115px;
                 y: root.is_simple ? root.simple_row1_y : 6px;
                 icon_data: "M3 12a9 9 0 0 1 15-6.7L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15 6.7L3 16 M3 21v-5h5";
                 text_label: "Refresh";
                 show_caption: root.is_simple;
-                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_width: root.is_simple ? toolbar.simple_row1_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
                 tooltip: "Refresh";
                 clicked => { root.refresh(); }
@@ -3555,7 +3598,7 @@ export component MainWindow inherits Window {
 
             // Subtle divider between the navigation cluster and the address bar.
             Rectangle {
-                x: root.is_simple ? 380px : 156px;
+                x: root.is_simple ? toolbar.simple_addr_x - 6px : 156px;
                 y: root.is_simple ? 8px : 12px;
                 width: 1px;
                 height: root.is_simple ? 30px : 20px;
@@ -3563,15 +3606,11 @@ export component MainWindow inherits Window {
             }
 
             Rectangle {
-                x: root.is_simple ? 390px : 167px;
+                x: root.is_simple ? toolbar.simple_addr_x : toolbar.tb_addr_x;
                 y: root.is_simple ? 8px : 6px;
                 width: root.is_simple
-                    ? Math.max(120px, parent.width - 480px)
-                    : (toolbar.show_toolbar_sort
-                        ? Math.max(80px, parent.width - 880px)
-                        : (toolbar.show_toolbar_search
-                            ? Math.max(80px, parent.width - 708px)
-                            : Math.max(80px, parent.width - 492px)));
+                    ? toolbar.simple_addr_w
+                    : toolbar.tb_addr_w;
                 height: root.is_simple ? 30px : 31px;
                 border-width: 1px;
                 border-color: ThemePalette.border;
@@ -3726,10 +3765,71 @@ export component MainWindow inherits Window {
                 }
             }
 
+            if toolbar.simple_show_search: Rectangle {
+                property <int> focus_nonce: root.toolbar_search_focus_nonce;
+                changed focus_nonce => {
+                    if (self.focus_nonce > 0) {
+                        simple_search_input.focus();
+                    }
+                }
+                x: toolbar.simple_addr_x + toolbar.simple_addr_w + 8px;
+                y: 8px;
+                width: toolbar.simple_search_w;
+                height: 30px;
+                border-width: 1px;
+                border-color: simple_search_input.has-focus ? ThemePalette.accent : ThemePalette.border;
+                border-radius: AppMetrics.radius_small;
+                background: AppMetrics.light_controls ? rgba(255, 255, 255, 0.50) : rgba(0, 0, 0, 0.12);
+                SvgIcon { x: 8px; y: 7px; icon_size: 15px; data: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3"; tint: ThemePalette.text_faint; }
+                simple_search_input := TextInput {
+                    x: 30px;
+                    y: 0;
+                    width: parent.width - 58px;
+                    height: parent.height;
+                    text: root.search_text;
+                    font-size: 12px;
+                    color: ThemePalette.text;
+                    vertical-alignment: center;
+                    edited => {
+                        root.search_text = self.text;
+                        root.search_requested(self.text);
+                    }
+                    accepted => { root.search_immediate(self.text); }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            self.text = "";
+                            root.search_text = "";
+                            root.search_requested("");
+                            accept
+                        } else { reject }
+                    }
+                }
+                if root.search_text == "" && simple_search_input.text == "" && !simple_search_input.has-focus: Text {
+                    x: 30px;
+                    y: 0;
+                    width: parent.width - 58px;
+                    height: parent.height;
+                    text: "Search folder";
+                    color: ThemePalette.text_faint;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+                if root.search_text != "": ToolButton {
+                    x: parent.width - 26px;
+                    y: 4px;
+                    button_width: 22px;
+                    button_height: 22px;
+                    icon_data: "M18 6L6 18 M6 6l12 12";
+                    clicked => {
+                        root.search_text = "";
+                        root.search_requested("");
+                    }
+                }
+            }
+
             search_box := Rectangle {
-                // Hidden in simple mode because row 2 is dedicated to view modes
-                // and the wider captioned buttons would overlap the search field.
-                visible: toolbar.show_toolbar_search && !root.is_simple;
+                // Hidden in simple mode - simple search lives on row 1 instead.
+                visible: toolbar.show_toolbar_search;
                 property <bool> semantic_available: root.semantic_search_available;
                 property <int> focus_nonce: root.toolbar_search_focus_nonce;
                 changed focus_nonce => {
@@ -3737,7 +3837,7 @@ export component MainWindow inherits Window {
                         search_input.focus();
                     }
                 }
-                x: toolbar.show_toolbar_sort ? parent.width - 705px : parent.width - 524px;
+                x: toolbar.tb_search_x;
                 y: 6px;
                 width: 208px;
                 height: 31px;
@@ -3840,10 +3940,8 @@ export component MainWindow inherits Window {
             }
 
             Rectangle {
-                // Hidden in simple mode for the same reason as the search box -
-                // the simple-mode row 2 occupies this region.
-                visible: toolbar.show_toolbar_sort && !root.is_simple;
-                x: parent.width - 489px;
+                visible: toolbar.show_toolbar_sort;
+                x: toolbar.tb_sort_x;
                 y: 6px;
                 width: 168px;
                 height: 31px;
@@ -3897,7 +3995,7 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Rectangle { x: parent.width - 317px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
+            Rectangle { visible: !root.is_simple; x: toolbar.tb_view_x - 11px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
             // View-mode cluster. Normal mode: compact 31x31 icons right-aligned on
             // row 1. Simple mode: 88x38 captioned buttons left-aligned on row 2,
             // forming the second visual bar the user asked for.
@@ -3907,55 +4005,55 @@ export component MainWindow inherits Window {
                 icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z";
                 text_label: "Icons";
                 show_caption: root.is_simple;
-                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
                 tooltip: "Icon view";
                 active: root.view_mode == "grid";
                 clicked => { root.set_view("grid"); }
             }
             ToolButton {
-                x: root.is_simple ? 102px : parent.width - 272px;
+                x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 272px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12";
                 text_label: "Compact";
                 show_caption: root.is_simple;
-                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
                 tooltip: "Compact view";
                 active: root.view_mode == "compact";
                 clicked => { root.set_view("compact"); }
             }
             ToolButton {
-                x: root.is_simple ? 194px : parent.width - 238px;
+                x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 238px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01";
                 text_label: "Details";
                 show_caption: root.is_simple;
-                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
                 tooltip: "Details view";
                 active: root.view_mode == "list";
                 clicked => { root.set_view("list"); }
             }
             ToolButton {
-                x: root.is_simple ? 286px : parent.width - 204px;
+                x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 204px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01";
                 text_label: "Gallery";
                 show_caption: root.is_simple;
-                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
                 tooltip: "Gallery view";
                 active: root.view_mode == "gallery";
                 clicked => { root.set_view("gallery"); }
             }
             ToolButton {
-                x: root.is_simple ? 378px : parent.width - 170px;
+                x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 170px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 icon_data: "M3 4h18v16H3z M14 4v16";
                 text_label: "Preview";
                 show_caption: root.is_simple;
-                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
                 tooltip: "Preview pane";
                 active: root.preview_visible;
@@ -3965,7 +4063,7 @@ export component MainWindow inherits Window {
             // Clear-sort button - appears in the gap between Dual Pane and Command Palette
             // when any non-default sort is active. Resets to Name ^ (natural order).
             ToolButton {
-                visible: toolbar.show_toolbar_sort && (root.sort_by != "name" || root.sort_dir != "asc");
+                visible: toolbar.tb_clear_sort;
                 x: parent.width - 101px;
                 y: 6px;
                 button_width: 26px;
@@ -3975,12 +4073,12 @@ export component MainWindow inherits Window {
                 clicked => { root.sort_column("reset"); }
             }
             ToolButton {
-                x: root.is_simple ? parent.width - root.simple_btn_w - 10px : parent.width - 68px;
+                x: root.is_simple ? 10px + 5 * toolbar.simple_row2_step : parent.width - 68px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z";
                 text_label: "Actions";
                 show_caption: root.is_simple;
-                button_width: root.is_simple ? root.simple_btn_w : 31px;
+                button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
                 tooltip: "Command palette";
                 clicked => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; }
@@ -4832,7 +4930,10 @@ export component MainWindow inherits Window {
                             root.context_visible = true;
                             root.secondary_file_context(i);
                         }
-                        rename_commit(i, val) => { }
+                        rename_commit(i, val) => {
+                            root.rename_index = -1;
+                            if (val != "") { root.secondary_rename_file(i, val); }
+                        }
                         file_drag_requested(i) => { root.start_file_drag(i, "secondary"); }
                     }
                 }
@@ -4863,7 +4964,10 @@ export component MainWindow inherits Window {
                             root.context_visible = true;
                             root.secondary_file_context(i);
                         }
-                        rename_commit(i, val) => { }
+                        rename_commit(i, val) => {
+                            root.rename_index = -1;
+                            if (val != "") { root.secondary_rename_file(i, val); }
+                        }
                         file_drag_requested(i) => { root.start_file_drag(i, "secondary"); }
                     }
                 }
@@ -5533,10 +5637,10 @@ export component MainWindow inherits Window {
         TouchArea { mouse-cursor: pointer; clicked => { root.command_visible = false; } }
 
         Rectangle {
-            x: (parent.width - 620px) / 2;
-            y: 82px;
-            width: 620px;
-            height: 512px;
+            x: max(16px, (parent.width - min(620px, parent.width - 32px)) / 2);
+            y: max(16px, min(82px, (parent.height - min(512px, parent.height - 32px)) / 2));
+            width: min(620px, parent.width - 32px);
+            height: min(512px, parent.height - 32px);
             border-width: 1px;
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
@@ -5563,7 +5667,7 @@ export component MainWindow inherits Window {
                     placeholder-text: "Type a command...";
                     font-size: 14px;
                     edited(value) => { root.command_filter = value; root.filter_commands(value); }
-                    accepted(value) => { }
+                    accepted(value) => { root.command_run_first(value); }
                     key-pressed(event) => {
                         if (event.text == Key.Escape) {
                             root.command_visible = false;
@@ -5612,10 +5716,10 @@ export component MainWindow inherits Window {
         TouchArea { clicked => { root.settings_visible = false; } }
 
         Rectangle {
-            x: (parent.width - 780px) / 2;
-            y: (parent.height - 680px) / 2;
-            width: 780px;
-            height: 680px;
+            x: (parent.width - min(780px, parent.width - 32px)) / 2;
+            y: (parent.height - min(680px, parent.height - 32px)) / 2;
+            width: min(780px, parent.width - 32px);
+            height: min(680px, parent.height - 32px);
             border-width: 1px;
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
@@ -5624,16 +5728,17 @@ export component MainWindow inherits Window {
             drop-shadow-color: rgba(0, 0, 0, 0.45);
             TouchArea {}
 
-            Text { x: 20px; y: 18px; width: 120px; height: 28px; text: "Settings"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            Text { x: 20px; y: 18px; width: 100px; height: 28px; text: "Settings"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
             // Version label tucked next to the heading. Reads the value the
             // controller pushes from env!("CARGO_PKG_VERSION") at startup.
             Text {
-                x: 110px; y: 22px; width: 200px; height: 22px;
+                x: 124px; y: 22px; width: parent.width - 180px; height: 22px;
                 text: "v" + root.app_version;
                 color: ThemePalette.text_faint;
                 font-size: 12px;
                 font-family: AppMetrics.mono_font;
                 vertical-alignment: center;
+                overflow: elide;
             }
             ToolButton { x: parent.width - 46px; y: 14px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: "Close settings"; clicked => { root.settings_visible = false; } }
 
@@ -5662,6 +5767,7 @@ export component MainWindow inherits Window {
                         font-weight: parent.is_active ? 600 : 400;
                         horizontal-alignment: center;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                     Rectangle {
                         y: parent.height - 2px;
@@ -5826,8 +5932,10 @@ export component MainWindow inherits Window {
                     Text { text: "INTERFACE MODE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     HorizontalLayout {
                         spacing: 6px;
-                        height: AppMetrics.row_h;
+                        width: parent.width;
                         for mode_label[mi] in ["Simple", "Normal"]: Rectangle {
+                            width: (parent.width - 6px) / 2;
+                            height: AppMetrics.row_h;
                             property <string> mode_id: mi == 0 ? "simple" : "normal";
                             border-width: 1px;
                             border-color: root.ui_mode == self.mode_id ? ThemePalette.accent : ThemePalette.border;
@@ -5841,6 +5949,7 @@ export component MainWindow inherits Window {
                                 font-size: 13px;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
+                                overflow: elide;
                             }
                             mode_touch := TouchArea {
                                 mouse-cursor: pointer;
@@ -5879,9 +5988,11 @@ export component MainWindow inherits Window {
                 }
                 HorizontalLayout {
                     spacing: 8px;
-                    height: AppMetrics.row_h;
-                    for vm_label[vi] in ["Grid", "List", "Gallery"]: Rectangle {
-                        property <string> vm_id: vi == 0 ? "grid" : (vi == 1 ? "list" : "gallery");
+                    width: parent.width;
+                    for vm_label[vi] in ["Grid", "Compact", "List", "Gallery"]: Rectangle {
+                        width: (parent.width - 24px) / 4;
+                        height: AppMetrics.row_h;
+                        property <string> vm_id: vi == 0 ? "grid" : (vi == 1 ? "compact" : (vi == 2 ? "list" : "gallery"));
                         border-width: 1px;
                         border-color: root.view_mode == self.vm_id ? ThemePalette.accent : ThemePalette.border;
                         border-radius: AppMetrics.radius;
@@ -5895,6 +6006,7 @@ export component MainWindow inherits Window {
                             font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
+                            overflow: elide;
                         }
                         TouchArea { mouse-cursor: pointer; clicked => { root.set_view(vm_id); } }
                     }
@@ -7056,10 +7168,10 @@ export component MainWindow inherits Window {
 
         // Conflict-resolution dialog - three explicit buttons, no text input.
         if root.prompt_kind == "conflict": Rectangle {
-            x: (parent.width - 460px) / 2;
-            y: (parent.height - 220px) / 2;
-            width: 460px;
-            height: 220px;
+            x: (parent.width - min(460px, parent.width - 32px)) / 2;
+            y: (parent.height - min(220px, parent.height - 32px)) / 2;
+            width: min(460px, parent.width - 32px);
+            height: min(220px, parent.height - 32px);
             border-width: 1px;
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
@@ -7080,10 +7192,10 @@ export component MainWindow inherits Window {
 
         // Standard text-input prompt (rename / new folder / etc.)
         if root.prompt_kind != "conflict": Rectangle {
-            x: (parent.width - 420px) / 2;
-            y: (parent.height - 190px) / 2;
-            width: 420px;
-            height: 190px;
+            x: (parent.width - min(420px, parent.width - 32px)) / 2;
+            y: (parent.height - min(190px, parent.height - 32px)) / 2;
+            width: min(420px, parent.width - 32px);
+            height: min(190px, parent.height - 32px);
             border-width: 1px;
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
@@ -7104,9 +7216,9 @@ export component MainWindow inherits Window {
     }
 
     if root.op_drawer_visible: Rectangle {
-        x: (parent.width - 420px) / 2;
-        y: parent.height - 124px;
-        width: 420px;
+        x: (parent.width - min(420px, parent.width - 32px)) / 2;
+        y: parent.height - root.status_h - 76px;
+        width: min(420px, parent.width - 32px);
         height: 60px;
         border-width: 1px;
         border-color: ThemePalette.border_strong;
@@ -7197,10 +7309,10 @@ export component MainWindow inherits Window {
         }
 
         Rectangle {
-            x: (parent.width - 600px) / 2;
-            y: (parent.height - 580px) / 2;
-            width: 600px;
-            height: 580px;
+            x: (parent.width - min(600px, parent.width - 32px)) / 2;
+            y: (parent.height - min(580px, parent.height - 32px)) / 2;
+            width: min(600px, parent.width - 32px);
+            height: min(580px, parent.height - 32px);
             border-radius: AppMetrics.radius;
             border-width: 1px;
             border-color: ThemePalette.border_strong;
@@ -7484,10 +7596,10 @@ export component MainWindow inherits Window {
         z: 120;
 
         Rectangle {
-            x: (parent.width - 500px) / 2;
-            y: (parent.height - 310px) / 2;
-            width: 500px;
-            height: 310px;
+            x: (parent.width - min(500px, parent.width - 32px)) / 2;
+            y: (parent.height - min(310px, parent.height - 32px)) / 2;
+            width: min(500px, parent.width - 32px);
+            height: min(310px, parent.height - 32px);
             border-width: 1px;
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
@@ -7606,7 +7718,17 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(Control+Shift+C); activated => { root.command("checksum"); } }
         KeyBinding { keys: @keys(UpArrow); activated => { root.file_selected(max(0, root.selected_index - 1), false, false); } }
         KeyBinding { keys: @keys(DownArrow); activated => { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } }
-        KeyBinding { keys: @keys(Escape); activated => { root.context_visible = false; root.image_tools_visible = false; root.command_visible = false; root.settings_visible = false; root.confirm_visible = false; root.prompt_visible = false; root.address_editing = false; root.addr_suggestions = []; root.clear_selection(); if (root.search_text != "") { root.search_text = ""; root.search_requested(""); } } }
+        KeyBinding { keys: @keys(Escape); activated => {
+            if (root.command_visible) { root.command_visible = false; }
+            else if (root.settings_visible) { root.settings_visible = false; }
+            else if (root.confirm_visible) { root.confirm_visible = false; }
+            else if (root.prompt_visible) { root.prompt_visible = false; }
+            else if (root.image_tools_visible) { root.image_tools_visible = false; }
+            else if (root.context_visible) { root.context_visible = false; }
+            else if (root.address_editing) { root.address_editing = false; root.addr_suggestions = []; }
+            else if (root.search_text != "") { root.search_text = ""; root.search_requested(""); }
+            else if (root.selected_count > 0) { root.clear_selection(); }
+        } }
     }
 }
 
