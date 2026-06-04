@@ -1115,18 +1115,22 @@ component FileRow inherits Rectangle {
         system_icon: root.item.system_icon;
     }
 
-    // List view responsive layout - three breakpoints:
-    //   < 360px: name only (size/modified/type all hidden; name fills the row)
-    //   < 480px: name + modified
-    //   < 600px: name + size + modified
-    //   >= 600px: name + size + modified + type
-    property <bool> show_list_size: root.width >= 360px;
-    property <bool> show_list_modified: root.width >= 480px;
-    property <bool> show_list_type: root.width >= 600px;
+    // List view responsive layout - proportional columns so dual-pane halved
+    // width never stacks name into size/modified/type. Fixed 320px right zones
+    // overlapped filenames in panes narrower than ~520px.
+    property <length> col_size_w: min(76px, max(52px, root.width * 0.17));
+    property <length> col_modified_w: min(118px, max(68px, root.width * 0.26));
+    property <length> col_type_w: min(68px, max(44px, root.width * 0.13));
+    property <length> col_gap: 8px;
+    property <bool> show_list_size: root.width >= 300px;
+    property <bool> show_list_modified: root.width >= 400px;
+    property <bool> show_list_type: root.width >= 520px;
     property <length> list_right_zone:
-        root.show_list_type ? 320px :
-        (root.show_list_modified ? (root.show_list_size ? 220px : 140px) :
-        (root.show_list_size ? 90px : 0px));
+        root.show_list_type ? (root.col_size_w + root.col_gap + root.col_modified_w + root.col_gap + root.col_type_w) :
+        (root.show_list_modified ? (root.col_size_w + root.col_gap + root.col_modified_w) :
+        (root.show_list_size ? root.col_size_w : 0px));
+    property <length> list_name_font: root.width < 340px ? 11px : (root.width < 460px ? 11.5px : 12.5px);
+    property <length> list_meta_font: root.width < 340px ? 10px : 11px;
 
     if root.view_mode == "list" && !root.is_renaming: Text {
         x: 44px;
@@ -1136,7 +1140,7 @@ component FileRow inherits Rectangle {
         height: parent.height - root.group_header_h;
         text: root.item.name;
         color: root.item.is_selected ? ThemePalette.text : ThemePalette.text_muted;
-        font-size: 12.5px;
+        font-size: root.list_name_font;
         overflow: elide;
         vertical-alignment: center;
     }
@@ -1148,7 +1152,7 @@ component FileRow inherits Rectangle {
         width: max(80px, parent.width - 48px - root.list_right_zone - 16px);
         height: parent.height - root.group_header_h - 8px;
         text: root.item.name;
-        font-size: 12.5px;
+        font-size: root.list_name_font;
         accepted(val) => { root.rename_commit(root.index, val); }
         key-pressed(event) => {
             if (event.text == Key.Escape) { root.rename_commit(root.index, ""); accept }
@@ -1160,12 +1164,12 @@ component FileRow inherits Rectangle {
     if root.view_mode == "list" && root.show_list_size: Text {
         x: parent.width - root.list_right_zone;
         y: root.group_header_h;
-        width: 80px;
+        width: root.col_size_w;
         height: parent.height - root.group_header_h;
         text: root.item.size_text;
         color: ThemePalette.text_faint;
         font-family: AppMetrics.mono_font;
-        font-size: 11.5px;
+        font-size: root.list_meta_font;
         overflow: elide;
         vertical-alignment: center;
         horizontal-alignment: right;
@@ -1173,27 +1177,27 @@ component FileRow inherits Rectangle {
 
     // MODIFIED column
     if root.view_mode == "list" && root.show_list_modified: Text {
-        x: parent.width - root.list_right_zone + (root.show_list_size ? 88px : 0px);
+        x: parent.width - root.list_right_zone + root.col_size_w + root.col_gap;
         y: root.group_header_h;
-        width: 130px;
+        width: root.col_modified_w;
         height: parent.height - root.group_header_h;
         text: root.item.modified_text;
         color: ThemePalette.text_faint;
         font-family: AppMetrics.mono_font;
-        font-size: 11.5px;
+        font-size: root.list_meta_font;
         overflow: elide;
         vertical-alignment: center;
     }
 
     // TYPE column
     if root.view_mode == "list" && root.show_list_type: Text {
-        x: parent.width - root.list_right_zone + (root.show_list_size ? 88px : 0px) + 138px;
+        x: parent.width - root.list_right_zone + root.col_size_w + root.col_gap + root.col_modified_w + root.col_gap;
         y: root.group_header_h;
-        width: 80px;
+        width: root.col_type_w;
         height: parent.height - root.group_header_h;
         text: root.item.type_text;
         color: ThemePalette.text_faint;
-        font-size: 11.5px;
+        font-size: root.list_meta_font;
         overflow: elide;
         vertical-alignment: center;
     }
@@ -1242,6 +1246,12 @@ component FileRow inherits Rectangle {
         system_icon: root.item.system_icon;
     }
 
+    // Grid/gallery: scale caption with cell width so dual-pane columns stay readable.
+    property <length> grid_name_font:
+        root.width < 96px ? 9.5px :
+        (root.width < 120px ? 10.5px :
+        (root.width < 150px ? 11px : 12px));
+
     // Grid/gallery: name as text (not renaming)
     if root.view_mode != "list" && root.view_mode != "compact" && !root.is_renaming: Text {
         x: 18px;
@@ -1250,9 +1260,10 @@ component FileRow inherits Rectangle {
         height: 30px;
         text: root.item.name;
         color: root.item.is_selected ? ThemePalette.text : ThemePalette.text_muted;
-        font-size: 12px;
-        wrap: word-wrap;
+        font-size: root.grid_name_font;
+        overflow: elide;
         horizontal-alignment: center;
+        vertical-alignment: center;
     }
 
     // Grid/gallery: inline rename input
@@ -1321,7 +1332,7 @@ component FileRow inherits Rectangle {
         height: parent.height;
         text: root.item.name;
         color: root.item.is_selected ? ThemePalette.text : ThemePalette.text_muted;
-        font-size: 12px;
+        font-size: root.width < 180px ? 10.5px : 12px;
         overflow: elide;
         vertical-alignment: center;
     }
@@ -1425,13 +1436,17 @@ component ListHeader inherits Rectangle {
     callback sort_col(string);
 
     // Match FileRow's responsive layout exactly.
-    property <bool> show_size: root.width >= 360px;
-    property <bool> show_modified: root.width >= 480px;
-    property <bool> show_type: root.width >= 600px;
+    property <length> col_size_w: min(76px, max(52px, root.width * 0.17));
+    property <length> col_modified_w: min(118px, max(68px, root.width * 0.26));
+    property <length> col_type_w: min(68px, max(44px, root.width * 0.13));
+    property <length> col_gap: 8px;
+    property <bool> show_size: root.width >= 300px;
+    property <bool> show_modified: root.width >= 400px;
+    property <bool> show_type: root.width >= 520px;
     property <length> right_zone:
-        root.show_type ? 320px :
-        (root.show_modified ? (root.show_size ? 220px : 140px) :
-        (root.show_size ? 90px : 0px));
+        root.show_type ? (root.col_size_w + root.col_gap + root.col_modified_w + root.col_gap + root.col_type_w) :
+        (root.show_modified ? (root.col_size_w + root.col_gap + root.col_modified_w) :
+        (root.show_size ? root.col_size_w : 0px));
 
     height: 32px;
     background: ThemePalette.panel_solid;
@@ -1450,7 +1465,7 @@ component ListHeader inherits Rectangle {
     // SIZE - right-aligned to align with file size text
     if root.show_size: Rectangle {
         x: parent.width - root.right_zone;
-        width: 80px;
+        width: root.col_size_w;
         height: parent.height;
         background: sh.has-hover ? rgba(255,255,255,0.04) : transparent;
         Text { x: 0; width: parent.width - 14px; height: parent.height; text: "SIZE"; color: root.sort_by == "size" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; horizontal-alignment: right; vertical-alignment: center; }
@@ -1459,8 +1474,8 @@ component ListHeader inherits Rectangle {
     }
     // MODIFIED
     if root.show_modified: Rectangle {
-        x: parent.width - root.right_zone + (root.show_size ? 88px : 0px);
-        width: 130px;
+        x: parent.width - root.right_zone + root.col_size_w + root.col_gap;
+        width: root.col_modified_w;
         height: parent.height;
         background: mh.has-hover ? rgba(255,255,255,0.04) : transparent;
         Text { x: 0; width: parent.width - 14px; height: parent.height; text: "MODIFIED"; color: root.sort_by == "modified" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
@@ -1469,8 +1484,8 @@ component ListHeader inherits Rectangle {
     }
     // TYPE
     if root.show_type: Rectangle {
-        x: parent.width - root.right_zone + (root.show_size ? 88px : 0px) + 138px;
-        width: 80px;
+        x: parent.width - root.right_zone + root.col_size_w + root.col_gap + root.col_modified_w + root.col_gap;
+        width: root.col_type_w;
         height: parent.height;
         background: th.has-hover ? rgba(255,255,255,0.04) : transparent;
         Text { x: 0; width: parent.width - 14px; height: parent.height; text: "TYPE"; color: root.sort_by == "type" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
@@ -3188,13 +3203,16 @@ export component MainWindow inherits Window {
     property <length> file_area_w: root.primary_pane_w - AppMetrics.pad * 2 - 14px;
     property <length> secondary_file_area_w: root.secondary_pane_w - AppMetrics.pad * 2 - 14px;
     property <int> grid_columns: Math.max(1, Math.floor(root.file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
-    property <int> secondary_grid_columns: Math.max(1, Math.floor(root.secondary_file_area_w / 200px));
+    property <int> secondary_grid_columns: Math.max(1, Math.floor(root.secondary_file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
     property <length> grid_cell_w: root.file_area_w / root.grid_columns;
     property <length> secondary_grid_cell_w: root.secondary_file_area_w / root.secondary_grid_columns;
     property <length> grid_item_h: root.view_mode == "gallery" ? 154px : (root.view_mode == "compact" ? 32px : AppMetrics.grid_h);
+    property <length> secondary_grid_item_h: root.grid_item_h;
     property <int> grid_rows: (root.files.length + root.grid_columns - 1) / root.grid_columns;
+    property <int> secondary_grid_rows: (root.secondary_files.length + root.secondary_grid_columns - 1) / root.secondary_grid_columns;
     // gap on each side of each grid cell for uniform spacing
     property <length> grid_gap: root.view_mode == "compact" ? 2px : 8px;
+    property <length> secondary_grid_gap: root.grid_gap;
 
     in-out property <float> nav_opacity: 1.0;
 
@@ -4790,20 +4808,51 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                ListView {
+                if root.view_mode == "list": ListView {
                     x: AppMetrics.pad;
-                    y: 38px + (root.view_mode == "list" ? 32px : AppMetrics.pad);
+                    y: 38px + 32px;
                     // Reserve 14px on the right for the scroll bar - matches
                     // the primary pane's list view so the rightmost column
                     // and tag dot stay clear of the scroll handle.
                     width: parent.width - AppMetrics.pad * 2 - 14px;
-                    height: parent.height - 38px - (root.view_mode == "list" ? 32px : AppMetrics.pad) - AppMetrics.pad;
+                    height: parent.height - 38px - 32px - AppMetrics.pad;
                     viewport-y <=> root.secondary_list_scroll_y;
                     for file[index] in root.secondary_files: FileRow {
                         width: parent.width;
                         item: file;
                         index: index;
-                        view_mode: root.view_mode == "gallery" ? "compact" : root.view_mode;
+                        view_mode: root.view_mode;
+                        rename_index: -1;
+                        drag_target_path: root.drag_target_path;
+                        selected(i, ctrl, shift) => { root.secondary_file_selected(i, ctrl, shift); }
+                        opened(i) => { root.secondary_file_opened(i); }
+                        context(i, cx, cy) => {
+                            root.context_x = cx.clamp(0px, root.width - 240px);
+                            root.context_y = cy.clamp(0px, root.height - 440px);
+                            root.context_visible = true;
+                            root.secondary_file_context(i);
+                        }
+                        rename_commit(i, val) => { }
+                        file_drag_requested(i) => { root.start_file_drag(i, "secondary"); }
+                    }
+                }
+
+                if root.view_mode != "list": ScrollView {
+                    x: AppMetrics.pad;
+                    y: 38px + AppMetrics.pad;
+                    width: parent.width - AppMetrics.pad * 2;
+                    height: parent.height - 38px - AppMetrics.pad * 2;
+                    viewport-y <=> root.secondary_list_scroll_y;
+                    viewport-width: parent.width - AppMetrics.pad * 2;
+                    viewport-height: Math.max(parent.height - 38px - AppMetrics.pad * 2, root.secondary_grid_rows * (root.secondary_grid_item_h + root.secondary_grid_gap));
+
+                    for file[index] in root.secondary_files: FileRow {
+                        x: Math.mod(index, root.secondary_grid_columns) * root.secondary_grid_cell_w + root.secondary_grid_gap / 2;
+                        y: Math.floor(index / root.secondary_grid_columns) * (root.secondary_grid_item_h + root.secondary_grid_gap);
+                        width: root.secondary_grid_cell_w - root.secondary_grid_gap;
+                        item: file;
+                        index: index;
+                        view_mode: root.view_mode;
                         rename_index: -1;
                         drag_target_path: root.drag_target_path;
                         selected(i, ctrl, shift) => { root.secondary_file_selected(i, ctrl, shift); }
