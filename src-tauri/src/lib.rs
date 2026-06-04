@@ -262,6 +262,16 @@ struct DirectoryPage {
 struct NativeDirectoryResult {
     path: String,
     entries: Vec<FileEntry>,
+    /// Matches `NativeController::nav_generation` when the worker finished.
+    /// Stale results from a superseded navigation are ignored.
+    generation: u64,
+    partial: bool,
+    skipped_entries: u32,
+}
+
+enum SidebarActivateAction {
+    None,
+    Navigate(String),
 }
 
 #[derive(Clone)]
@@ -7750,9 +7760,14 @@ struct NativeController {
     storage_preview_visible_before: bool,
     storage_preview_w_before: f32,
     storage_subtitle_last_update: Instant,
-    // v0.9.20: debounce timestamp for sidebar clicks. Used by
-    // side_activated to drop redundant clicks fired within 120ms.
-    side_last_activated: Instant,
+    // Incremented on every folder navigation. Background directory workers
+    // stamp results with the generation they started under; stale loads are
+    // dropped so rapid sidebar clicks don't queue blocking I/O on the UI thread.
+    nav_generation: Arc<AtomicU64>,
+    // Coalesced sidebar navigation target. A short debounce timer collapses
+    // rapid sidebar clicks into a single navigate() call (last click wins).
+    sidebar_nav_pending: Option<String>,
+    sidebar_nav_timer: Option<slint::Timer>,
     // Total used bytes on the current scan root (from GetDiskFreeSpaceExW).
     // Used as the progress-bar denominator so % shown is real progress vs.
     // the actual amount of data on the drive, not just "bytes seen so far".
@@ -11700,7 +11715,9 @@ impl NativeController {
             storage_preview_visible_before: false,
             storage_preview_w_before: 326.0,
             storage_subtitle_last_update: Instant::now(),
-            side_last_activated: Instant::now() - Duration::from_secs(1),
+            nav_generation: Arc::new(AtomicU64::new(0)),
+            sidebar_nav_pending: None,
+            sidebar_nav_timer: None,
             storage_disk_used: 0,
             drive_space_cache: HashMap::new(),
             tabs,
@@ -12457,7 +12474,12 @@ impl NativeController {
         ui.set_selection_has_archive(self.selection_has_archive());
     }
 
-    fn update_models(&mut self, ui: &MainWindow) {
+    fn sync_sidebar_models(&self, ui: &MainWindow) {
+        ui.set_side_items(model_from_vec(self.side_items()));
+        ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
+    }
+
+    fn update_file_models(&mut self, ui: &MainWindow) {
         // Populate the shell-icon cache for visible entries. Per-extension
         // entries are cheap (one SHGetFileInfo per extension regardless of
         // file count). Per-path entries are reserved for .exe / .lnk / .ico
@@ -12524,8 +12546,6 @@ impl NativeController {
         let model = model_from_vec(items);
         ui.set_files(model.clone());
         self.files_model = Some(model);
-        ui.set_side_items(model_from_vec(self.side_items()));
-        ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
         let tabs = self.tab_items();
         #[cfg(target_os = "windows")]
         sync_titlebar_hit_regions(&tabs);
@@ -12548,6 +12568,15 @@ impl NativeController {
                 .unwrap_or_else(|| build_breadcrumbs(&self.current_path)),
         ));
         self.update_status(ui);
+    }
+
+    fn update_models(&mut self, ui: &MainWindow) {
+        self.update_file_models(ui);
+        self.sync_sidebar_models(ui);
+    }
+
+    fn bump_nav_generation(&mut self) -> u64 {
+        self.nav_generation.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     fn update_selection_in_model(&mut self, ui: &MainWindow, changed: &[usize]) {
@@ -13098,6 +13127,353 @@ impl NativeController {
         }
     }
 
+    fn prepare_navigate_loading(&mut self, ui: &MainWindow, path: &str, push_history: bool) {
+        self.active_archive = None;
+        ui.set_in_recycle_bin(false);
+        let prev_path = self.current_path.clone();
+        if !prev_path.is_empty() {
+            let y = ui.get_primary_list_scroll_y();
+            self.path_scroll.insert(prev_path.clone(), y);
+            self.folder_views
+                .insert(format!("{prev_path}:view"), ui.get_view_mode().to_string());
+            self.folder_views
+                .insert(format!("{prev_path}:sort_by"), self.sort_by.clone());
+            self.folder_views
+                .insert(format!("{prev_path}:sort_dir"), self.sort_dir.clone());
+        }
+        self.current_path = path.to_string();
+        self.thumbnail_memory.retain(|k, _| k.starts_with(path));
+        self.recent_locations
+            .retain(|p| !same_path_string(p, path));
+        self.recent_locations.insert(0, path.to_string());
+        if self.recent_locations.len() > 12 {
+            self.recent_locations.truncate(12);
+        }
+        write_native_json_async("recent_locations.json", &self.recent_locations);
+        if push_history {
+            self.history.truncate(self.history_index + 1);
+            self.history.push(path.to_string());
+            self.history_index = self.history.len().saturating_sub(1);
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.path = path.to_string();
+        }
+        self.files.clear();
+        self.visible_files.clear();
+        self.search_query.clear();
+        self.selected_index = -1;
+        self.selected_set.clear();
+        self.select_anchor = -1;
+        self.files_model = None;
+        ui.set_empty_state(ss("Loading folder..."));
+        ui.set_primary_list_scroll_y(0.0);
+        self.update_file_models(ui);
+        self.sync_sidebar_models(ui);
+    }
+
+    fn apply_directory_listing(
+        &mut self,
+        ui: &MainWindow,
+        path: String,
+        page: DirectoryPage,
+        push_history: bool,
+        path_already_committed: bool,
+    ) {
+        self.active_archive = None;
+        ui.set_in_recycle_bin(false);
+        let partial = page.partial;
+        let skipped_entries = page.skipped_entries;
+        let files = page.entries;
+
+        if !path_already_committed {
+            let prev_path = self.current_path.clone();
+            if !prev_path.is_empty() {
+                let y = ui.get_primary_list_scroll_y();
+                self.path_scroll.insert(prev_path.clone(), y);
+                self.folder_views
+                    .insert(format!("{prev_path}:view"), ui.get_view_mode().to_string());
+                self.folder_views
+                    .insert(format!("{prev_path}:sort_by"), self.sort_by.clone());
+                self.folder_views
+                    .insert(format!("{prev_path}:sort_dir"), self.sort_dir.clone());
+            }
+            self.current_path = path.clone();
+            self.thumbnail_memory.retain(|k, _| k.starts_with(&path));
+            self.recent_locations
+                .retain(|p| !same_path_string(p, &path));
+            self.recent_locations.insert(0, path.clone());
+            if self.recent_locations.len() > 12 {
+                self.recent_locations.truncate(12);
+            }
+            write_native_json_async("recent_locations.json", &self.recent_locations);
+            if push_history {
+                self.history.truncate(self.history_index + 1);
+                self.history.push(path.clone());
+                self.history_index = self.history.len().saturating_sub(1);
+            }
+            if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                tab.path = path.clone();
+            }
+        }
+
+        let lower = path.to_ascii_lowercase();
+        let force_list = is_always_list_view_folder(&lower);
+        if force_list {
+            ui.set_view_mode(ss("list"));
+            self.folder_views
+                .insert(format!("{path}:view"), "list".to_string());
+        } else if let Some(view) = self.folder_views.get(&format!("{path}:view")).cloned() {
+            ui.set_view_mode(ss(&view));
+        } else {
+            let is_media_folder = lower.contains("\\pictures")
+                || lower.contains("/pictures")
+                || lower.contains("\\videos")
+                || lower.contains("/videos")
+                || lower.contains("\\camera roll")
+                || lower.contains("/camera roll")
+                || lower.contains("\\screenshots")
+                || lower.contains("/screenshots");
+            let default_view = if is_media_folder { "gallery" } else { "list" };
+            ui.set_view_mode(ss(default_view));
+            self.folder_views
+                .insert(format!("{path}:view"), default_view.to_string());
+        }
+        if let Some(sb) = self.folder_views.get(&format!("{path}:sort_by")).cloned() {
+            self.sort_by = sb;
+        }
+        if let Some(sd) = self.folder_views.get(&format!("{path}:sort_dir")).cloned() {
+            self.sort_dir = sd;
+        }
+
+        self.files = files;
+        self.search_query.clear();
+        self.selected_index = -1;
+        self.selected_set.clear();
+        self.select_anchor = -1;
+        self.files_model = None;
+        if self.files.len() <= LARGE_DIRECTORY_GIT_CAP
+            && is_inside_git_worktree(Path::new(&path))
+        {
+            let ready = self.git_status_ready.clone();
+            let pending = self.pending_git_status.clone();
+            let state = self.app_state.clone();
+            let p = path.clone();
+            std::thread::spawn(move || {
+                let status = native_git_status(&state, &p);
+                if let Ok(mut lock) = pending.lock() {
+                    *lock = Some(status);
+                }
+                ready.store(true, Ordering::Release);
+            });
+        } else {
+            self.git_status = Arc::new(GitStatusMap::new());
+            self.rebuild_git_dir_status();
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.view = ui.get_view_mode().to_string();
+        }
+
+        ui.set_empty_state(ss(if partial {
+            format!(
+                "Showing the first {} items while the full folder loads.",
+                self.files.len()
+            )
+        } else {
+            String::new()
+        }));
+
+        self.apply_filter();
+        self.update_models(ui);
+        self.update_preview(ui);
+        self.save_session();
+
+        if skipped_entries > 0 {
+            self.show_toast_kind(
+                ui,
+                format!(
+                    "{skipped_entries} item{} could not be listed (access denied)",
+                    if skipped_entries == 1 { "" } else { "s" }
+                ),
+                "warning",
+            );
+        }
+
+        let restore_y = self.path_scroll.get(&path).copied().unwrap_or(0.0);
+        ui.set_primary_list_scroll_y(restore_y);
+
+        if partial {
+            self.schedule_full_directory_load(path.clone());
+        }
+
+        let image_entries: Vec<(String, u64)> = self
+            .visible_files
+            .iter()
+            .filter(|e| is_thumbnail_image_ext(e.extension.as_deref().unwrap_or("")))
+            .take(64)
+            .map(|e| (e.path.clone(), e.modified))
+            .collect();
+        if !image_entries.is_empty() {
+            let ready_flag = self.thumbnail_ready.clone();
+            THUMBNAIL_POOL.spawn(move || {
+                for (path, mtime) in image_entries {
+                    let pb = PathBuf::from(&path);
+                    let ck = thumbnail_cache_key(&pb, mtime, 160);
+                    let thumb = thumbnail_cache_dir().join(format!("{ck}.jpg"));
+                    if thumb.exists() {
+                        continue;
+                    }
+                    if let Ok(img) = image::open(&pb) {
+                        if img.width() <= 8192 && img.height() <= 8192 {
+                            let t = img.thumbnail(160, 160);
+                            let mut buf = Vec::new();
+                            if t
+                                .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+                                .is_ok()
+                            {
+                                let _ = store_thumbnail_on_disk(
+                                    &pb,
+                                    mtime,
+                                    160,
+                                    &buf,
+                                    THUMBNAIL_CACHE_LIMIT_BYTES,
+                                );
+                            }
+                        }
+                    }
+                }
+                ready_flag.store(true, Ordering::Release);
+            });
+        }
+
+        let subdir_paths: Vec<String> = self
+            .visible_files
+            .iter()
+            .filter(|e| e.kind == FileKind::Directory)
+            .take(12)
+            .map(|e| e.path.clone())
+            .collect();
+        if !subdir_paths.is_empty() {
+            let preload_state = self.app_state.clone();
+            std::thread::spawn(move || {
+                for dir_path in subdir_paths {
+                    if preload_state.cached_directory(&dir_path).is_some() {
+                        continue;
+                    }
+                    let pb = PathBuf::from(&dir_path);
+                    if let Ok(entries) = list_directory_uncached(&pb) {
+                        preload_state.store_directory(&dir_path, entries.clone());
+                        let _ = index_directory_entries(&dir_path, &entries);
+                    }
+                }
+            });
+        }
+    }
+
+    fn start_async_directory_load(&mut self, ui: &MainWindow, path: String, push_history: bool) {
+        self.prepare_navigate_loading(ui, &path, push_history);
+        let token = self.nav_generation.load(Ordering::SeqCst);
+        let state = self.app_state.clone();
+        let ready = self.directory_ready.clone();
+        let pending = self.pending_directory_result.clone();
+        let generation = self.nav_generation.clone();
+        std::thread::spawn(move || {
+            let page = match list_directory_chunk(Path::new(&path), FIRST_DIRECTORY_CHUNK) {
+                Ok(page) => page,
+                Err(_) => return,
+            };
+            if generation.load(Ordering::SeqCst) != token {
+                return;
+            }
+            if !page.partial {
+                state.store_directory(&path, page.entries.clone());
+                schedule_index_directory(path.clone(), page.entries.clone());
+            }
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(NativeDirectoryResult {
+                    path: path.clone(),
+                    entries: page.entries,
+                    generation: token,
+                    partial: page.partial,
+                    skipped_entries: page.skipped_entries,
+                });
+            }
+            ready.store(true, Ordering::Release);
+        });
+    }
+
+    fn queue_sidebar_navigate(
+        &mut self,
+        ui: &MainWindow,
+        path: String,
+        controller: Rc<RefCell<NativeController>>,
+    ) {
+        if same_path_string(&self.current_path, &path) {
+            return;
+        }
+        self.sidebar_nav_pending = Some(path);
+        let weak = ui.as_weak();
+        if self.sidebar_nav_timer.is_none() {
+            self.sidebar_nav_timer = Some(slint::Timer::default());
+        }
+        let timer = self
+            .sidebar_nav_timer
+            .as_ref()
+            .expect("sidebar_nav_timer just initialized");
+        timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(90),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    let path = controller.borrow_mut().sidebar_nav_pending.take();
+                    if let Some(path) = path {
+                        controller.borrow_mut().navigate(&ui, path, true);
+                    }
+                }
+            },
+        );
+    }
+
+    fn side_activate_action(&mut self, ui: &MainWindow, index: i32) -> SidebarActivateAction {
+        let items = if ui.get_ui_mode().as_str() == "simple" {
+            self.side_items_simple()
+        } else {
+            self.side_items()
+        };
+        let Some(item) = items.get(index as usize) else {
+            return SidebarActivateAction::None;
+        };
+        let path = item.path.to_string();
+        if let Some(tag) = path.strip_prefix("tag:") {
+            self.search_query = format!("tag:{tag}");
+            self.apply_filter();
+            self.selected_index = -1;
+            self.update_models(ui);
+            return SidebarActivateAction::None;
+        }
+        if let Some(smart) = path.strip_prefix("smart:") {
+            if smart == "old-downloads" {
+                if let Some(downloads) = dirs::download_dir() {
+                    let target = downloads.to_string_lossy().to_string();
+                    if !same_path_string(&self.current_path, &target) {
+                        return SidebarActivateAction::Navigate(target);
+                    }
+                }
+            }
+            self.search_query = format!("smart:{smart}");
+            self.apply_filter();
+            self.selected_index = -1;
+            self.update_models(ui);
+            return SidebarActivateAction::None;
+        }
+        if path.is_empty() {
+            return SidebarActivateAction::None;
+        }
+        if same_path_string(&self.current_path, &path) {
+            return SidebarActivateAction::None;
+        }
+        SidebarActivateAction::Navigate(path)
+    }
+
     fn navigate(&mut self, ui: &MainWindow, path: String, push_history: bool) {
         self.active_pane = ActivePane::Primary;
         let raw = if path.trim().is_empty() {
@@ -13161,238 +13537,19 @@ impl NativeController {
             ui.set_empty_state(ss(format!("Cannot open \"{}\"", path)));
             return;
         }
-        match native_list_directory_page(&self.app_state, &path) {
-            Ok(page) => {
-                self.active_archive = None;
-                ui.set_in_recycle_bin(false);
-                let partial = page.partial;
-                let skipped_entries = page.skipped_entries;
-                let files = page.entries;
-
-                // Save scroll position of the folder we are leaving so back/up
-                // returns to the same row instead of the top.
-                let prev_path = self.current_path.clone();
-                if !prev_path.is_empty() {
-                    let y = ui.get_primary_list_scroll_y();
-                    self.path_scroll.insert(prev_path.clone(), y);
-                }
-                // Save view+sort for the folder we are leaving
-                if !prev_path.is_empty() {
-                    let view_key = format!("{}|{}|{}", prev_path, ui.get_view_mode(), "");
-                    let sort_key = format!("{}|sort_by|{}", prev_path, self.sort_by);
-                    let sort_dir_key = format!("{}|sort_dir|{}", prev_path, self.sort_dir);
-                    self.folder_views
-                        .insert(format!("{prev_path}:view"), ui.get_view_mode().to_string());
-                    self.folder_views
-                        .insert(format!("{prev_path}:sort_by"), self.sort_by.clone());
-                    self.folder_views
-                        .insert(format!("{prev_path}:sort_dir"), self.sort_dir.clone());
-                    let _ = (view_key, sort_key, sort_dir_key); // suppress unused warning
-                }
-
-                self.current_path = path.clone();
-                // Clear thumbnails from the previous folder to free memory
-                self.thumbnail_memory.retain(|k, _| k.starts_with(&path));
-                // Update recent_locations cheaply: dedup the existing entry,
-                // push the new path to the front, truncate to 12. The previous
-                // implementation rebuilt the list via condense_recent_locations
-                // which stat()s every path on disk for existence - a dozen sync
-                // I/O ops on every folder change. Stale entries are pruned at
-                // startup instead; runtime keeps it allocation-light.
-                self.recent_locations
-                    .retain(|p| !same_path_string(p, &path));
-                self.recent_locations.insert(0, path.clone());
-                if self.recent_locations.len() > 12 {
-                    self.recent_locations.truncate(12);
-                }
-                write_native_json_async("recent_locations.json", &self.recent_locations);
-
-                // Restore view+sort for the new folder. First time visiting a
-                // folder picks a sensible default based on what's likely in it:
-                // Pictures, Videos, and Camera Roll folders open in Gallery view
-                // (large thumbnails make sense for media). Everything else opens
-                // in Details (list) so columns and metadata are visible.
-                // v0.9.11: Documents, Downloads, and drive roots
-                // ALWAYS open in list (detail) view. Users expect
-                // table-style columns for those navigation hubs;
-                // saved per-folder preferences are ignored here so
-                // accidentally toggling once doesn't permanently
-                // override them.
-                let lower = path.to_ascii_lowercase();
-                let force_list = is_always_list_view_folder(&lower);
-                if force_list {
-                    ui.set_view_mode(ss("list"));
-                    self.folder_views
-                        .insert(format!("{path}:view"), "list".to_string());
-                } else if let Some(view) = self.folder_views.get(&format!("{path}:view")).cloned() {
-                    ui.set_view_mode(ss(&view));
-                } else {
-                    let is_media_folder = lower.contains("\\pictures")
-                        || lower.contains("/pictures")
-                        || lower.contains("\\videos")
-                        || lower.contains("/videos")
-                        || lower.contains("\\camera roll")
-                        || lower.contains("/camera roll")
-                        || lower.contains("\\screenshots")
-                        || lower.contains("/screenshots");
-                    let default_view = if is_media_folder { "gallery" } else { "list" };
-                    ui.set_view_mode(ss(default_view));
-                    self.folder_views
-                        .insert(format!("{path}:view"), default_view.to_string());
-                }
-                if let Some(sb) = self.folder_views.get(&format!("{path}:sort_by")).cloned() {
-                    self.sort_by = sb;
-                }
-                if let Some(sd) = self.folder_views.get(&format!("{path}:sort_dir")).cloned() {
-                    self.sort_dir = sd;
-                }
-
-                self.files = files;
-                self.search_query.clear();
-                self.selected_index = -1;
-                self.selected_set.clear();
-                self.select_anchor = -1;
-                self.files_model = None;
-                // Fetch git status in the background to avoid blocking UI
-                if self.files.len() <= LARGE_DIRECTORY_GIT_CAP
-                    && is_inside_git_worktree(Path::new(&path))
-                {
-                    let ready = self.git_status_ready.clone();
-                    let pending = self.pending_git_status.clone();
-                    let state = self.app_state.clone();
-                    let p = path.clone();
-                    std::thread::spawn(move || {
-                        let status = native_git_status(&state, &p);
-                        if let Ok(mut lock) = pending.lock() {
-                            *lock = Some(status);
-                        }
-                        ready.store(true, Ordering::Release);
-                    });
-                } else {
-                    self.git_status = Arc::new(GitStatusMap::new());
-                    self.rebuild_git_dir_status();
-                }
-                if push_history {
-                    self.history.truncate(self.history_index + 1);
-                    self.history.push(path.clone());
-                    self.history_index = self.history.len().saturating_sub(1);
-                }
-                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-                    tab.path = path.clone();
-                    tab.view = ui.get_view_mode().to_string();
-                }
-
-                // Set empty state message
-                ui.set_empty_state(ss(if partial {
-                    format!(
-                        "Showing the first {} items while the full folder loads.",
-                        self.files.len()
-                    )
-                } else {
-                    String::new()
-                }));
-
-                self.apply_filter();
-                self.update_models(ui);
-                self.update_preview(ui);
-                self.save_session();
-
-                if skipped_entries > 0 {
-                    self.show_toast_kind(
-                        ui,
-                        format!(
-                            "{skipped_entries} item{} could not be listed (access denied)",
-                            if skipped_entries == 1 { "" } else { "s" }
-                        ),
-                        "warning",
-                    );
-                }
-
-                // Restore scroll position for this folder. New folders default
-                // to 0; re-visited folders (back / up / re-navigation) get the
-                // y we captured on leave. Slint clamps automatically if the
-                // saved value exceeds the new content height.
-                let restore_y = self.path_scroll.get(&path).copied().unwrap_or(0.0);
-                ui.set_primary_list_scroll_y(restore_y);
-
-                if partial {
-                    self.schedule_full_directory_load(path.clone());
-                }
-
-                // Background thumbnail generation for image files
-                let image_entries: Vec<(String, u64)> = self
-                    .visible_files
-                    .iter()
-                    .filter(|e| is_thumbnail_image_ext(e.extension.as_deref().unwrap_or("")))
-                    .take(64)
-                    .map(|e| (e.path.clone(), e.modified))
-                    .collect();
-                if !image_entries.is_empty() {
-                    let ready_flag = self.thumbnail_ready.clone();
-                    THUMBNAIL_POOL.spawn(move || {
-                        for (path, mtime) in image_entries {
-                            let pb = PathBuf::from(&path);
-                            let ck = thumbnail_cache_key(&pb, mtime, 160);
-                            let thumb = thumbnail_cache_dir().join(format!("{ck}.jpg"));
-                            if thumb.exists() {
-                                continue;
-                            }
-                            if let Ok(img) = image::open(&pb) {
-                                if img.width() <= 8192 && img.height() <= 8192 {
-                                    let t = img.thumbnail(160, 160);
-                                    let mut buf = Vec::new();
-                                    if t.write_to(
-                                        &mut Cursor::new(&mut buf),
-                                        image::ImageFormat::Jpeg,
-                                    )
-                                    .is_ok()
-                                    {
-                                        let _ = store_thumbnail_on_disk(
-                                            &pb,
-                                            mtime,
-                                            160,
-                                            &buf,
-                                            THUMBNAIL_CACHE_LIMIT_BYTES,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        ready_flag.store(true, Ordering::Release);
-                    });
-                }
-
-                // Preload subdirectories into cache in the background
-                let subdir_paths: Vec<String> = self
-                    .visible_files
-                    .iter()
-                    .filter(|e| e.kind == FileKind::Directory)
-                    .take(12)
-                    .map(|e| e.path.clone())
-                    .collect();
-                if !subdir_paths.is_empty() {
-                    let preload_state = self.app_state.clone();
-                    std::thread::spawn(move || {
-                        for dir_path in subdir_paths {
-                            if preload_state.cached_directory(&dir_path).is_some() {
-                                continue;
-                            }
-                            let pb = PathBuf::from(&dir_path);
-                            if let Ok(entries) = list_directory_uncached(&pb) {
-                                preload_state.store_directory(&dir_path, entries.clone());
-                                let _ = index_directory_entries(&dir_path, &entries);
-                            }
-                        }
-                    });
-                }
-
-                // No fade - content snaps in instantly for File-Explorer-level responsiveness.
-            }
-            Err(error) => {
-                ui.set_empty_state(ss(format!("Cannot read folder: {error}")));
-                self.show_toast(ui, error);
-            }
+        if !same_path_string(&self.current_path, &path) {
+            self.bump_nav_generation();
         }
+        if let Some(entries) = self.app_state.cached_directory(&path) {
+            let page = DirectoryPage {
+                entries,
+                partial: false,
+                skipped_entries: 0,
+            };
+            self.apply_directory_listing(ui, path, page, push_history, false);
+            return;
+        }
+        self.start_async_directory_load(ui, path, push_history);
     }
 
     /// Switch the primary view to a virtual listing of the OS recycle bin.
@@ -13533,6 +13690,7 @@ impl NativeController {
         let state = self.app_state.clone();
         let ready = self.directory_ready.clone();
         let pending = self.pending_directory_result.clone();
+        let generation = self.nav_generation.load(Ordering::SeqCst);
         std::thread::spawn(move || {
             // Stream the load: read DirEntries first (fast), then fetch metadata
             // in parallel chunks of 2000, publishing each chunk to the UI so very
@@ -13561,6 +13719,9 @@ impl NativeController {
                     *lock = Some(NativeDirectoryResult {
                         path: path.clone(),
                         entries: accumulated.clone(),
+                        generation,
+                        partial: true,
+                        skipped_entries: 0,
                     });
                 }
                 ready.store(true, Ordering::Release);
@@ -13996,51 +14157,6 @@ impl NativeController {
             Err(error) => {
                 ui.set_preview_body(ss("Preview unavailable"));
                 ui.set_preview_meta(ss(error));
-            }
-        }
-    }
-
-    fn side_activated(&mut self, ui: &MainWindow, index: i32) {
-        // v0.9.20: cheap debounce + same-target skip so rapid double-
-        // or triple-clicks on a sidebar entry don't queue a stack of
-        // navigate() calls (each doing synchronous directory I/O).
-        // Previously hammering the sidebar on a huge folder produced
-        // a visible UI freeze while the queued nav calls drained.
-        let now = Instant::now();
-        if now.duration_since(self.side_last_activated).as_millis() < 120 {
-            return;
-        }
-        self.side_last_activated = now;
-        let items = if ui.get_ui_mode().as_str() == "simple" {
-            self.side_items_simple()
-        } else {
-            self.side_items()
-        };
-        if let Some(item) = items.get(index as usize) {
-            let path = item.path.to_string();
-            if let Some(tag) = path.strip_prefix("tag:") {
-                self.search_query = format!("tag:{tag}");
-                self.apply_filter();
-                self.selected_index = -1;
-                self.update_models(ui);
-            } else if let Some(smart) = path.strip_prefix("smart:") {
-                if smart == "old-downloads" {
-                    if let Some(downloads) = dirs::download_dir() {
-                        let target = downloads.to_string_lossy().to_string();
-                        if !same_path_string(&self.current_path, &target) {
-                            self.navigate(ui, target, true);
-                        }
-                    }
-                }
-                self.search_query = format!("smart:{smart}");
-                self.apply_filter();
-                self.selected_index = -1;
-                self.update_models(ui);
-            } else if !path.is_empty() {
-                if same_path_string(&self.current_path, &path) {
-                    return;
-                }
-                self.navigate(ui, path, true);
             }
         }
     }
@@ -17739,7 +17855,11 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_side_activated(move |index| {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().side_activated(&ui, index);
+            let action = c.borrow_mut().side_activate_action(&ui, index);
+            if let SidebarActivateAction::Navigate(path) = action {
+                c.borrow_mut()
+                    .queue_sidebar_navigate(&ui, path, c.clone());
+            }
         }
     });
 
@@ -18914,11 +19034,33 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         let result = pending_dir.lock().ok().and_then(|mut lock| lock.take());
                         if let Some(result) = result {
                             if let Ok(mut ctrl) = c.try_borrow_mut() {
-                                if same_path_string(&ctrl.current_path, &result.path) {
+                                if ctrl.nav_generation.load(Ordering::SeqCst) != result.generation {
+                                    return;
+                                }
+                                if !same_path_string(&ctrl.current_path, &result.path) {
+                                    return;
+                                }
+                                if ctrl.files.is_empty() {
+                                    let page = DirectoryPage {
+                                        entries: result.entries,
+                                        partial: result.partial,
+                                        skipped_entries: result.skipped_entries,
+                                    };
+                                    ctrl.apply_directory_listing(
+                                        &ui,
+                                        result.path,
+                                        page,
+                                        false,
+                                        true,
+                                    );
+                                } else {
                                     ctrl.files = result.entries;
                                     ctrl.apply_filter();
-                                    ctrl.update_models(&ui);
-                                    ui.set_empty_state(ss(""));
+                                    ctrl.update_file_models(&ui);
+                                    ui.set_empty_state(ss(format!(
+                                        "Showing the first {} items while the full folder loads.",
+                                        ctrl.files.len()
+                                    )));
                                 }
                             }
                         }
@@ -18974,7 +19116,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     }
                     if thumb_fired || git_fired {
                         if let Ok(mut ctrl) = c.try_borrow_mut() {
-                            ctrl.update_models(&ui);
+                            ctrl.update_file_models(&ui);
                         }
                     }
                 }
