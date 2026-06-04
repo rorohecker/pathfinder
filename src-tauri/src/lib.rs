@@ -6389,6 +6389,13 @@ mod path_query_tests {
         assert!(looks_like_path_query(r"%localappdata%\Pagoda"));
         assert!(!looks_like_path_query("pagoda"));
     }
+
+    #[test]
+    fn looks_like_path_query_skips_virtual_nav_paths() {
+        assert!(!looks_like_path_query("recycle://"));
+        assert!(!looks_like_path_query("storage://"));
+        assert!(!looks_like_path_query("archive://Zm9v!/%2F"));
+    }
 }
 
 #[cfg(test)]
@@ -9746,6 +9753,22 @@ fn model_from_vec<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
 }
 
 fn build_breadcrumbs(path: &str) -> Vec<ChoiceItem> {
+    if path == "recycle://" {
+        return vec![ChoiceItem {
+            id: ss("recycle://"),
+            label: ss("Recycle Bin"),
+            description: ss(""),
+            color: slint::Color::from_argb_u8(0, 0, 0, 0),
+        }];
+    }
+    if path == "storage://" {
+        return vec![ChoiceItem {
+            id: ss("storage://"),
+            label: ss("Storage"),
+            description: ss(""),
+            color: slint::Color::from_argb_u8(0, 0, 0, 0),
+        }];
+    }
     let mut crumbs = Vec::new();
     let mut accumulated = String::with_capacity(path.len() + 1);
     for part in path.split(['/', '\\']) {
@@ -11387,12 +11410,34 @@ fn is_always_list_view_folder(lower: &str) -> bool {
     matches!(*last, "documents" | "downloads")
 }
 
+/// App-internal navigation targets (not filesystem paths). These often contain
+/// `/` and must never go through `resolve_path_query`.
+fn is_virtual_nav_path(path: &str) -> bool {
+    path == "recycle://"
+        || path == "storage://"
+        || path.starts_with(ARCHIVE_SCHEME)
+}
+
+fn navigation_display_path(current_path: &str, archive: Option<&ArchiveView>) -> String {
+    if let Some(archive) = archive {
+        return archive_display_path(&archive.archive_path, &archive.prefix);
+    }
+    match current_path {
+        "recycle://" => "Recycle Bin".to_string(),
+        "storage://" => "Storage".to_string(),
+        _ => current_path.to_string(),
+    }
+}
+
 /// True when the search box input is meant as a filesystem path (not a
 /// filename/content query). Examples: `%localappdata%\Foo`, `C:\Games`,
 /// `Documents\Save`, `~/Downloads`.
 fn looks_like_path_query(query: &str) -> bool {
     let q = query.trim();
     if q.is_empty() {
+        return false;
+    }
+    if is_virtual_nav_path(q) {
         return false;
     }
     if q.contains('%') || q.contains('\\') || q.contains('/') {
@@ -12489,11 +12534,10 @@ impl NativeController {
         self.sync_selection_count_to_ui(ui);
         self.sync_search_scope(ui);
         self.sync_tag_names(ui);
-        let shown_path = self
-            .active_archive
-            .as_ref()
-            .map(|archive| archive_display_path(&archive.archive_path, &archive.prefix))
-            .unwrap_or_else(|| self.current_path.clone());
+        let shown_path = navigation_display_path(
+            &self.current_path,
+            self.active_archive.as_ref(),
+        );
         ui.set_current_path(ss(&shown_path));
         ui.set_address_text(ss(&shown_path));
         ui.set_search_text(ss(&self.search_query));
@@ -12963,6 +13007,24 @@ impl NativeController {
                 active: self.current_path.starts_with(&drive.path),
             });
         }
+        items.push(SideItem {
+            label: ss("Recycle Bin"),
+            path: ss("recycle://"),
+            icon: ss("trash"),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: false,
+            active: self.current_path == "recycle://",
+        });
+        items.push(SideItem {
+            label: ss("Storage"),
+            path: ss("storage://"),
+            icon: ss("storage"),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: false,
+            active: self.current_path == "storage://",
+        });
         items
     }
 
@@ -12970,14 +13032,21 @@ impl NativeController {
         self.tabs
             .iter()
             .enumerate()
-            .map(|(index, tab)| TabItem {
-                title: ss(Path::new(&tab.path)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| tab.path.clone())),
-                path: ss(&tab.path),
-                active: index == self.active_tab,
+            .map(|(index, tab)| {
+                let title = match tab.path.as_str() {
+                    "recycle://" => "Recycle Bin".to_string(),
+                    "storage://" => "Storage".to_string(),
+                    _ => Path::new(&tab.path)
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| tab.path.clone()),
+                };
+                TabItem {
+                    title: ss(title),
+                    path: ss(&tab.path),
+                    active: index == self.active_tab,
+                }
             })
             .collect()
     }
@@ -13031,18 +13100,34 @@ impl NativeController {
 
     fn navigate(&mut self, ui: &MainWindow, path: String, push_history: bool) {
         self.active_pane = ActivePane::Primary;
-        let path = if path.trim().is_empty() {
+        let raw = if path.trim().is_empty() {
             self.current_path.clone()
-        } else if looks_like_path_query(&path) {
-            resolve_path_query(&path, &self.current_path)
-                .to_string_lossy()
-                .into_owned()
         } else {
             path
         };
+        // Virtual namespaces must be handled before path-query resolution.
+        // `storage://` and `recycle://` contain `/` and would otherwise be
+        // joined against the current folder as bogus relative paths.
+        if raw == "recycle://" {
+            if ui.get_is_storage_view() {
+                self.close_storage_view(ui);
+            }
+            self.open_recycle_bin_view(ui, push_history);
+            return;
+        }
+        if raw == "storage://" {
+            self.open_storage_view(ui, push_history);
+            return;
+        }
+        let path = if looks_like_path_query(&raw) {
+            resolve_path_query(&raw, &self.current_path)
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            raw
+        };
         // Virtual recycle-bin namespace - content comes from trash::os_limited.
         if path == "recycle://" {
-            // Leaving the storage view if we were in it.
             if ui.get_is_storage_view() {
                 self.close_storage_view(ui);
             }
@@ -13051,7 +13136,7 @@ impl NativeController {
         }
         // Virtual storage-analyzer namespace.
         if path == "storage://" {
-            self.open_storage_view(ui);
+            self.open_storage_view(ui, push_history);
             return;
         }
         // Any non-storage navigation closes the storage view if it was open.
@@ -13316,6 +13401,9 @@ impl NativeController {
     fn open_recycle_bin_view(&mut self, ui: &MainWindow, push_history: bool) {
         let entries = list_recycle_bin_entries();
         self.active_archive = None;
+        if ui.get_is_storage_view() {
+            self.close_storage_view(ui);
+        }
         self.current_path = "recycle://".to_string();
         self.files = entries;
         self.search_query.clear();
@@ -13488,6 +13576,14 @@ impl NativeController {
         if self.active_pane == ActivePane::Secondary {
             let path = self.secondary_path.clone();
             self.secondary_navigate(ui, path);
+            return;
+        }
+        if self.current_path == "storage://" && ui.get_is_storage_view() {
+            self.rescan_storage(ui);
+            return;
+        }
+        if self.current_path == "recycle://" {
+            self.open_recycle_bin_view(ui, false);
             return;
         }
         if let Some(archive) = self.active_archive.clone() {
@@ -13915,7 +14011,11 @@ impl NativeController {
             return;
         }
         self.side_last_activated = now;
-        let items = self.side_items();
+        let items = if ui.get_ui_mode().as_str() == "simple" {
+            self.side_items_simple()
+        } else {
+            self.side_items()
+        };
         if let Some(item) = items.get(index as usize) {
             let path = item.path.to_string();
             if let Some(tag) = path.strip_prefix("tag:") {
@@ -13957,6 +14057,39 @@ impl NativeController {
                     true,
                 );
             }
+            return;
+        }
+        if self.current_path == "storage://" {
+            if !self.storage_selected_bucket.is_empty() || self.storage_show_all_state {
+                self.clear_storage_bucket_filter(ui);
+                return;
+            }
+            let target = if !self.storage_path_before.is_empty() {
+                self.storage_path_before.clone()
+            } else {
+                dirs::home_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "/".to_string())
+            };
+            self.navigate(ui, target, true);
+            return;
+        }
+        if self.current_path == "recycle://" {
+            let target = if self.history_index > 0 {
+                self.history
+                    .get(self.history_index.saturating_sub(1))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        dirs::home_dir()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "/".to_string())
+                    })
+            } else {
+                dirs::home_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "/".to_string())
+            };
+            self.navigate(ui, target, true);
             return;
         }
         if let Some(parent) = Path::new(&self.current_path).parent() {
@@ -16872,7 +17005,7 @@ impl NativeController {
         }
     }
 
-    fn open_storage_view(&mut self, ui: &MainWindow) {
+    fn open_storage_view(&mut self, ui: &MainWindow, push_history: bool) {
         if self.current_path != "storage://" {
             self.storage_path_before = self.current_path.clone();
             // Storage owns the preview pane while it is active. Save the
@@ -16891,9 +17024,18 @@ impl NativeController {
         ui.set_storage_selected_bucket_name(ss(""));
         self.storage_show_all_state = false;
         self.current_path = "storage://".to_string();
+        ui.set_in_recycle_bin(false);
         ui.set_is_storage_view(true);
         ui.set_preview_visible(false);
         ui.set_storage_show_all(false);
+        if push_history {
+            self.history.truncate(self.history_index + 1);
+            self.history.push("storage://".to_string());
+            self.history_index = self.history.len().saturating_sub(1);
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.path = "storage://".to_string();
+        }
         self.push_drive_choices(ui);
         if self.storage_current_root.is_empty() {
             self.storage_current_root = self.storage_default_root();
@@ -16916,6 +17058,7 @@ impl NativeController {
             self.storage_subtitle_last_update = Instant::now();
             self.start_storage_scan(ui);
         }
+        self.update_models(ui);
         ui.set_side_items(model_from_vec(self.side_items()));
     }
 
