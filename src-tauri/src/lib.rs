@@ -8931,6 +8931,13 @@ fn common_index_roots() -> Vec<String> {
 }
 
 fn index_roots_for_mode(settings: &NativeSettings) -> Vec<String> {
+    index_roots_for_mode_with_drives(settings, None)
+}
+
+fn index_roots_for_mode_with_drives(
+    settings: &NativeSettings,
+    drives: Option<&[DriveInfo]>,
+) -> Vec<String> {
     match settings.index_mode.as_str() {
         "balanced" => common_index_roots(),
         "fast" => {
@@ -8940,11 +8947,14 @@ fn index_roots_for_mode(settings: &NativeSettings) -> Vec<String> {
                 settings.index_roots.clone()
             }
         }
-        "max" => get_drives()
-            .into_iter()
-            .filter(|drive| drive.kind == "local")
-            .map(|drive| drive.path)
-            .collect(),
+        "max" => {
+            let drives = drives.map(|d| d.to_vec()).unwrap_or_else(get_drives);
+            drives
+                .into_iter()
+                .filter(|drive| drive.kind == "local")
+                .map(|drive| drive.path)
+                .collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -8970,8 +8980,11 @@ fn estimate_index_storage(roots: &[String], mode: &str) -> String {
     }
 }
 
-fn index_status_for_settings(settings: &NativeSettings) -> IndexStatus {
-    let roots = index_roots_for_mode(settings);
+fn index_status_for_settings_with_drives(
+    settings: &NativeSettings,
+    drives: Option<&[DriveInfo]>,
+) -> IndexStatus {
+    let roots = index_roots_for_mode_with_drives(settings, drives);
     let mut status = index_stats();
     status.mode = settings.index_mode.clone();
     status.estimated_storage = estimate_index_storage(&roots, &settings.index_mode);
@@ -8981,6 +8994,10 @@ fn index_status_for_settings(settings: &NativeSettings) -> IndexStatus {
         .max(1)
         .saturating_mul(1024 * 1024);
     status
+}
+
+fn index_status_for_settings(settings: &NativeSettings) -> IndexStatus {
+    index_status_for_settings_with_drives(settings, None)
 }
 
 fn file_size_or_zero(path: &Path) -> u64 {
@@ -11915,24 +11932,22 @@ impl NativeController {
             ("max", "Max", "All fixed drives, highest storage", "#d98a24"),
         ]));
         ui.set_command_items(command_items());
-        ui.set_ai_install_size_mb(local_ai::approx_total_install_mb() as i32);
+        ui.set_ai_install_size_mb(0);
+        ui.set_index_status(ss("Loading index statistics..."));
+        ui.set_performance_footprint(ss("Measuring disk usage..."));
+        ui.set_performance_intro(ss(concat!(
+            "Pathfinder keeps a small local database of the files in folders you visit so the search bar can return matches instantly without rescanning your disk every time. ",
+            "Indexing modes change how aggressively that database is grown in the background:\n",
+            "\u{2022} Low - only the folders you actually open get added. Lightest on disk and CPU.\n",
+            "\u{2022} Balanced - also indexes Desktop, Documents, Downloads, Pictures, and common project folders.\n",
+            "\u{2022} Fast - indexes roots you choose, with common folders as fallback.\n",
+            "\u{2022} Max - all fixed drives. Best search coverage, uses the most disk while it catches up.\n",
+            "Thumbnails are stored separately and the cache is automatically pruned when it hits the budget below."
+        )));
+        apply_theme(ui, &self.settings);
         ui.set_ai_device(ss(&self.ai.reason));
         ui.set_ai_gpu_status(ss(&self.ai.gpu_summary));
         ui.set_ai_label(ss(ai_status_label(&self.ai)));
-        self.sync_performance_status(ui);
-        apply_theme(ui, &self.settings);
-
-        // Initialize custom theme editor with defaults or active custom theme
-        let init_def = if let Some(name) = &self.settings.custom_theme {
-            load_custom_theme_def(name).unwrap_or_default()
-        } else {
-            ThemeDefinition::default()
-        };
-        sync_editor_state(ui, &init_def);
-        let saved = list_custom_themes();
-        ui.set_ce_saved_themes(model_from_vec(
-            saved.into_iter().map(SharedString::from).collect(),
-        ));
 
         if self.settings.ui_mode.is_empty() {
             ui.set_ui_mode_prompt_visible(true);
@@ -11961,9 +11976,89 @@ impl NativeController {
         ui.set_semantic_search_available(local_ai_semantic_ready());
         ui.set_search_semantic_mode(self.settings.search_semantic_mode);
         ui.set_clip_search_enabled(self.settings.clip_search_enabled);
+    }
 
+    /// Work deferred until after the first frame is painted so startup feels
+    /// instant. Heavy disk/SQLite stats and theme-editor setup run here or on
+    /// background threads spawned from here.
+    fn finish_startup(&mut self, ui: &MainWindow) {
         let path = self.current_path.clone();
         self.navigate(ui, path, false);
+        self.spawn_performance_status(ui);
+        let custom_theme = self.settings.custom_theme.clone();
+        let weak_editor = ui.as_weak();
+        let editor_timer = slint::Timer::default();
+        editor_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(120),
+            move || {
+                if let Some(ui) = weak_editor.upgrade() {
+                    let init_def = if let Some(name) = &custom_theme {
+                        load_custom_theme_def(name).unwrap_or_default()
+                    } else {
+                        ThemeDefinition::default()
+                    };
+                    sync_editor_state(&ui, &init_def);
+                    let saved = list_custom_themes();
+                    ui.set_ce_saved_themes(model_from_vec(
+                        saved.into_iter().map(SharedString::from).collect(),
+                    ));
+                }
+            },
+        );
+        let weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let mb = local_ai::approx_total_install_mb() as i32;
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_ai_install_size_mb(mb);
+                }
+            });
+        });
+    }
+
+    fn spawn_performance_status(&self, ui: &MainWindow) {
+        let settings = self.settings.clone();
+        let drives = self.drives.clone();
+        let weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let status = index_status_for_settings_with_drives(&settings, Some(&drives));
+            let ram_line = match process_memory_stats() {
+                Some((ws, private_mb)) => {
+                    format!("Memory in use right now: {ws} MB working set ({private_mb} MB private)")
+                }
+                None => "Memory in use: not available on this platform".to_string(),
+            };
+            let footprint = format!(
+                "{ram_line}\nIndex database: {} on disk\nThumbnail cache: {} of {} budget\n\nLocations:\n  {}\n  {}",
+                format_size_short(status.index_bytes),
+                format_size_short(status.thumbnail_bytes),
+                format_size_short(status.thumbnail_limit),
+                native_index_file().display(),
+                thumbnail_cache_dir().display(),
+            );
+            let index_line = format!(
+                "{} files indexed | {} on disk | thumbnails {} of {} cap | {}",
+                status.indexed_files,
+                format_size_short(status.index_bytes),
+                format_size_short(status.thumbnail_bytes),
+                format_size_short(status.thumbnail_limit),
+                status.estimated_storage
+            );
+            let thumb_line = format!(
+                "Thumbnail cache is capped at {} and old thumbnails are removed automatically.",
+                format_size_short(status.thumbnail_limit)
+            );
+            let mode = settings.index_mode.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_active_index_mode(ss(&mode));
+                    ui.set_index_status(ss(index_line));
+                    ui.set_thumbnail_status(ss(thumb_line));
+                    ui.set_performance_footprint(ss(footprint));
+                }
+            });
+        });
     }
 
     fn show_toast(&mut self, ui: &MainWindow, message: impl Into<String>) {
@@ -12038,9 +12133,10 @@ impl NativeController {
             "Pathfinder keeps a small local database of the files in folders you visit so the search bar can return matches instantly without rescanning your disk every time. ",
             "Indexing modes change how aggressively that database is grown in the background:\n",
             "\u{2022} Low - only the folders you actually open get added. Lightest on disk and CPU.\n",
-            "\u{2022} Balanced - same as Low but also walks Documents, Pictures, Desktop, and Downloads on startup.\n",
-            "\u{2022} High - adds every fixed drive root. Best search coverage, uses the most disk while it catches up.\n",
-            "Thumbnails are stored separately and the cache is automatically pruned when it hits the budget below, so previews never quietly fill your drive."
+            "\u{2022} Balanced - also indexes Desktop, Documents, Downloads, Pictures, and common project folders.\n",
+            "\u{2022} Fast - indexes roots you choose, with common folders as fallback.\n",
+            "\u{2022} Max - all fixed drives. Best search coverage, uses the most disk while it catches up.\n",
+            "Thumbnails are stored separately and the cache is automatically pruned when it hits the budget below."
         );
         ui.set_performance_intro(ss(intro));
 
@@ -13168,7 +13264,6 @@ impl NativeController {
         ui.set_empty_state(ss("Loading folder..."));
         ui.set_primary_list_scroll_y(0.0);
         self.update_file_models(ui);
-        self.sync_sidebar_models(ui);
     }
 
     fn apply_directory_listing(
@@ -18932,13 +19027,11 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let timer = slint::Timer::default();
         let prev_ai_install = Rc::new(Cell::new(local_ai::InstallState::NotInstalled));
         let prev_ai_cell = prev_ai_install.clone();
-        // 100ms tick instead of 350 - when a large directory finishes loading
-        // in the background, the full result is merged into the UI within 100ms
-        // of the worker thread setting the ready flag. Cost is negligible: each
-        // tick is a swap + branch on five atomics with nothing to do most ticks.
+        // 200ms tick: merges background work without waking the UI loop ten
+        // times per second while idle.
         timer.start(
             slint::TimerMode::Repeated,
-            Duration::from_millis(100),
+            Duration::from_millis(200),
             move || {
                 let thumb_fired = ready_flag.swap(false, Ordering::AcqRel);
                 let git_fired = git_ready.swap(false, Ordering::AcqRel);
@@ -20882,6 +20975,7 @@ pub fn run() {
     });
 
     ui.show().expect("failed to show Pathfinder window");
+    controller.borrow_mut().finish_startup(&ui);
     apply_mica(&ui);
     register_winit_mouse_side_button_navigation(&ui);
     install_mouse_nav(&ui);
