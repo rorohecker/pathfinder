@@ -7713,6 +7713,13 @@ enum PendingPrompt {
     RenameTag(String),
 }
 
+/// Sidebar drives + storage scan cache loaded on a background thread after
+/// the first frame. Applied on the UI thread via the poll timer (Send-safe).
+struct DeferredStartupData {
+    drives: Vec<DriveInfo>,
+    storage_cache: Option<StorageScanResult>,
+}
+
 struct NativeController {
     app_state: AppState,
     current_path: String,
@@ -7835,6 +7842,7 @@ struct NativeController {
     pending_directory_result: Arc<Mutex<Option<NativeDirectoryResult>>>,
     search_ready: Arc<std::sync::atomic::AtomicBool>,
     pending_search_result: Arc<Mutex<Option<NativeSearchResult>>>,
+    pending_deferred_startup: Arc<Mutex<Option<DeferredStartupData>>>,
 }
 
 #[derive(Clone)]
@@ -11719,7 +11727,7 @@ impl NativeController {
             history: vec![current_path.clone()],
             history_index: 0,
             path_scroll: HashMap::new(),
-            storage_cache: read_storage_scan_cache(),
+            storage_cache: None,
             storage_scan_pending: Arc::new(Mutex::new(None)),
             storage_scan_ready: Arc::new(AtomicBool::new(false)),
             storage_scan_generation: Arc::new(AtomicU64::new(0)),
@@ -11742,7 +11750,7 @@ impl NativeController {
             tabs,
             active_tab: 0,
             known_folders,
-            drives: get_drives(),
+            drives: Vec::new(),
             user_pins: native_user_pins(),
             recent_locations: condense_recent_locations(recent_raw, 12),
             folder_views: folder_views_raw,
@@ -11814,6 +11822,7 @@ impl NativeController {
             pending_directory_result: Arc::new(Mutex::new(None)),
             search_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_search_result: Arc::new(Mutex::new(None)),
+            pending_deferred_startup: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -11987,6 +11996,7 @@ impl NativeController {
         let path = self.current_path.clone();
         self.navigate(ui, path, false);
         self.spawn_performance_status(ui);
+        self.spawn_deferred_startup_data();
         let custom_theme = self.settings.custom_theme.clone();
         let weak_editor = ui.as_weak();
         let editor_timer = slint::Timer::default();
@@ -12017,6 +12027,37 @@ impl NativeController {
                 }
             });
         });
+    }
+
+    /// Load sidebar drives and the storage scan cache off the critical startup
+    /// path so the window can paint before WSL/network drive enumeration finishes.
+    fn spawn_deferred_startup_data(&self) {
+        let pending = self.pending_deferred_startup.clone();
+        std::thread::spawn(move || {
+            let data = DeferredStartupData {
+                drives: get_drives(),
+                storage_cache: read_storage_scan_cache(),
+            };
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(data);
+            }
+        });
+    }
+
+    fn apply_deferred_startup_if_ready(&mut self, ui: &MainWindow) {
+        let data = match self.pending_deferred_startup.lock() {
+            Ok(mut lock) => lock.take(),
+            Err(_) => None,
+        };
+        let Some(data) = data else {
+            return;
+        };
+        self.drives = data.drives;
+        self.storage_cache = data.storage_cache;
+        self.sync_sidebar_models(ui);
+        // First performance snapshot ran with an empty drive list; refresh now
+        // that sidebar enumeration has finished.
+        self.spawn_performance_status(ui);
     }
 
     fn spawn_performance_status(&self, ui: &MainWindow) {
@@ -17861,6 +17902,9 @@ impl NativeController {
     /// string update for the cached-but-static case so the subtitle ticks
     /// while the storage view is visible.
     fn pump_storage_progress(&mut self, ui: &MainWindow) {
+        if !ui.get_is_storage_view() && !self.storage_scan_active {
+            return;
+        }
         // Tick the "scanned X ago" subtitle while the storage view is open
         // and there's a cached result. Keep this coarse; doing string format
         // and property writes on every 100ms poll made the idle storage view
@@ -18207,12 +18251,15 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     ui.global::<ThemePalette>().set_drag_count(count);
                     ui.global::<ThemePalette>().set_is_dragging(true);
                     ui.set_drag_label(SharedString::from(label));
+                    seed_drag_ghost_from_paths(&ui, &paths);
+                    ui.window().request_redraw();
                 }
                 let effect = file_drag::start(paths);
                 if let Some(ui) = weak.upgrade() {
                     ui.global::<ThemePalette>().set_is_dragging(false);
                     ui.global::<ThemePalette>().set_drag_count(0);
                     ui.set_drag_label(SharedString::from(""));
+                    clear_drag_ghost_ui(&ui);
                     ui.set_drag_target_path(SharedString::from(""));
                     ui.set_drag_over_pane(SharedString::from(""));
                     // If an external app moved the files, refresh so they disappear.
@@ -19165,10 +19212,22 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let git_fired = git_ready.swap(false, Ordering::AcqRel);
                 let op_fired = op_ready.swap(false, Ordering::AcqRel);
 
+                if let Some(ui) = weak.upgrade() {
+                    c.borrow_mut().apply_deferred_startup_if_ready(&ui);
+                }
+
                 // Storage scan completion: drain the pending result, cache it,
                 // and push to the UI if the storage view is currently active.
                 if let Some(ui) = weak.upgrade() {
-                    c.borrow_mut().poll_storage_scan(&ui);
+                    let needs_storage_poll = {
+                        let ctrl = c.borrow();
+                        ctrl.storage_scan_active
+                            || ui.get_is_storage_view()
+                            || ctrl.storage_scan_ready.load(Ordering::Acquire)
+                    };
+                    if needs_storage_poll {
+                        c.borrow_mut().poll_storage_scan(&ui);
+                    }
                 }
 
                 // Push live progress for any currently running archive op into
@@ -19192,31 +19251,35 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         }
                     }
 
-                    // Mirror local AI installer state into the Slint
-                    // properties so the AI tab updates live during downloads.
-                    let state = ai_progress_for_ui
+                    // Mirror local AI installer state into the Slint properties
+                    // only while Settings is open or a download is active.
+                    let ai_state = ai_progress_for_ui
                         .state
                         .lock()
                         .map(|s| *s)
                         .unwrap_or(local_ai::InstallState::NotInstalled);
-                    ui.set_ai_install_state(SharedString::from(state.as_slint_str()));
-                    let downloaded = ai_progress_for_ui
-                        .bytes_downloaded
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    let total = ai_progress_for_ui
-                        .bytes_total
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    let frac = if total > 0 {
-                        (downloaded as f64 / total as f64).clamp(0.0, 1.0) as f32
-                    } else {
-                        0.0
-                    };
-                    ui.set_ai_download_progress(frac);
-                    if let Ok(msg) = ai_progress_for_ui.message.lock() {
-                        ui.set_ai_install_message(SharedString::from(msg.as_str()));
+                    if ui.get_settings_visible()
+                        || ai_state == local_ai::InstallState::Downloading
+                    {
+                        ui.set_ai_install_state(SharedString::from(ai_state.as_slint_str()));
+                        let downloaded = ai_progress_for_ui
+                            .bytes_downloaded
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        let total = ai_progress_for_ui
+                            .bytes_total
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        let frac = if total > 0 {
+                            (downloaded as f64 / total as f64).clamp(0.0, 1.0) as f32
+                        } else {
+                            0.0
+                        };
+                        ui.set_ai_download_progress(frac);
+                        if let Ok(msg) = ai_progress_for_ui.message.lock() {
+                            ui.set_ai_install_message(SharedString::from(msg.as_str()));
+                        }
                     }
                     let prev_st = prev_ai_cell.get();
-                    if state == local_ai::InstallState::Installed
+                    if ai_state == local_ai::InstallState::Installed
                         && prev_st != local_ai::InstallState::Installed
                     {
                         {
@@ -19236,7 +19299,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                             ui.set_semantic_search_available(local_ai_semantic_ready());
                         }
                     }
-                    prev_ai_cell.set(state);
+                    prev_ai_cell.set(ai_state);
                 }
                 let dir_fired = dir_ready.swap(false, Ordering::AcqRel);
                 let search_fired = search_ready.swap(false, Ordering::AcqRel);
@@ -20361,6 +20424,94 @@ fn install_mouse_nav(_ui: &MainWindow) {}
 // `screen_x`/`screen_y` are raw screen pixels from IDropTarget::Drop.
 // We convert to client pixels via ScreenToClient, then to Slint logical
 // pixels by dividing by the window's scale factor.
+#[cfg(target_os = "windows")]
+fn drag_cursor_logical_from_screen(ui: &MainWindow) -> Option<(f32, f32)> {
+    use i_slint_backend_winit::WinitWindowAccessor;
+    use i_slint_backend_winit::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::{HWND, POINT};
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    let hwnd = ui
+        .window()
+        .with_winit_window(|window| {
+            let handle = window.window_handle().ok()?;
+            let RawWindowHandle::Win32(h) = handle.as_raw() else {
+                return None;
+            };
+            Some(HWND(h.hwnd.get() as *mut core::ffi::c_void))
+        })
+        .flatten()
+        .or_else(find_pathfinder_hwnd)?;
+    unsafe {
+        let _ = ScreenToClient(hwnd, &mut pt);
+    }
+    let scale = ui.window().scale_factor().max(0.1);
+    Some(((pt.x as f32) / scale, (pt.y as f32) / scale))
+}
+
+#[cfg(target_os = "windows")]
+fn drag_cursor_logical_from_screen_pt(
+    ui: &MainWindow,
+    hwnd: windows::Win32::Foundation::HWND,
+    screen_x: i32,
+    screen_y: i32,
+) -> (f32, f32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+
+    let mut p = POINT {
+        x: screen_x,
+        y: screen_y,
+    };
+    unsafe {
+        let _ = ScreenToClient(hwnd, &mut p);
+    }
+    let scale = ui.window().scale_factor().max(0.1);
+    ((p.x as f32) / scale, (p.y as f32) / scale)
+}
+
+#[cfg(target_os = "windows")]
+fn seed_drag_ghost_from_paths(ui: &MainWindow, paths: &[String]) {
+    if let Some(path) = paths.first() {
+        let p = Path::new(path);
+        ui.set_drag_ghost_is_dir(p.is_dir());
+        ui.set_drag_ghost_ext(SharedString::from(
+            p.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_string(),
+        ));
+    }
+    if let Some((x, y)) = drag_cursor_logical_from_screen(ui) {
+        ui.set_drag_cursor_x(x.max(0.0));
+        ui.set_drag_cursor_y(y.max(0.0));
+    }
+    ui.window().request_redraw();
+}
+
+#[cfg(target_os = "windows")]
+fn clear_drag_ghost_ui(ui: &MainWindow) {
+    ui.set_drag_ghost_ext(SharedString::from(""));
+    ui.set_drag_ghost_is_dir(false);
+    ui.window().request_redraw();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn seed_drag_ghost_from_paths(_ui: &MainWindow, _paths: &[String]) {}
+
+#[cfg(not(target_os = "windows"))]
+fn clear_drag_ghost_ui(_ui: &MainWindow) {}
+
+#[cfg(not(target_os = "windows"))]
+fn drag_cursor_logical_from_screen_pt(_ui: &MainWindow, _hwnd: (), _x: i32, _y: i32) -> (f32, f32) {
+    (0.0, 0.0)
+}
+
 /// Toolbar address-bar X offset (relative to toolbar left edge) in simple mode.
 /// Mirrors `toolbar.simple_addr_x` in main.slint.
 #[cfg(target_os = "windows")]
@@ -21255,6 +21406,7 @@ pub fn run() {
                         ui.set_drag_label(SharedString::from(""));
                         ui.global::<ThemePalette>().set_is_dragging(false);
                         ui.global::<ThemePalette>().set_drag_count(0);
+                        clear_drag_ghost_ui(&ui);
                         return;
                     }
                     let first_name = std::path::Path::new(&paths[0])
@@ -21270,6 +21422,7 @@ pub fn run() {
                     ui.global::<ThemePalette>()
                         .set_drag_count(paths.len() as i32);
                     ui.global::<ThemePalette>().set_is_dragging(true);
+                    seed_drag_ghost_from_paths(&ui, &paths);
                 });
 
                 // Highlight the destination pane AND the exact target folder
@@ -21287,26 +21440,10 @@ pub fn run() {
                     if !is_active {
                         ui.set_drag_over_pane(SharedString::from(""));
                         ui.set_drag_target_path(SharedString::from(""));
-                        ui.set_drag_label(SharedString::from(""));
                         return;
                     }
-                    use windows::Win32::Foundation::POINT;
-                    use windows::Win32::Graphics::Gdi::ScreenToClient;
-                    let mut p = POINT {
-                        x: screen_x,
-                        y: screen_y,
-                    };
-                    unsafe {
-                        let _ = ScreenToClient(hwnd, &mut p);
-                    }
-                    let scale = ui.window().scale_factor().max(0.1);
-                    let logical_x = (p.x as f32) / scale;
-                    let logical_y = (p.y as f32) / scale;
-                    // Update the ghost-overlay position. The slint overlay is
-                    // gated on is_dragging so this is only painted during real
-                    // drags. Coordinates clamped to the window so the ghost
-                    // doesn't render off-screen when the cursor drifts to an
-                    // edge.
+                    let (logical_x, logical_y) =
+                        drag_cursor_logical_from_screen_pt(&ui, hwnd, screen_x, screen_y);
                     ui.set_drag_cursor_x(logical_x.max(0.0));
                     ui.set_drag_cursor_y(logical_y.max(0.0));
                     let pane_label = if ui.get_dual_pane() {
@@ -21331,6 +21468,9 @@ pub fn run() {
                         let target = pick_drop_destination(&ui, &ctrl, hwnd, screen_x, screen_y);
                         ui.set_drag_target_path(SharedString::from(target));
                     }
+                    // DoDragDrop blocks the Slint event loop; nudge a redraw so
+                    // the ghost overlay and drop highlights track the cursor.
+                    ui.window().request_redraw();
                 });
 
                 if let Some(dt) = file_drag::register_drop_target(

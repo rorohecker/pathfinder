@@ -31,6 +31,12 @@ const DRAGDROP_S_DROP: HRESULT = HRESULT(0x00040100_u32 as i32);
 const DRAGDROP_S_CANCEL: HRESULT = HRESULT(0x00040101_u32 as i32);
 const DRAGDROP_S_USEDEFAULTCURSORS: HRESULT = HRESULT(0x00040102_u32 as i32);
 
+thread_local! {
+    /// Set while IDragSourceHelper owns the drag bitmap so GiveFeedback returns
+    /// S_OK and the shell keeps our preview instead of the tiny default glyph.
+    static CUSTOM_DRAG_IMAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 const CF_HDROP: u16 = 15;
 const MK_CONTROL: u32 = 0x0008; // Ctrl key in MODIFIERKEYS_FLAGS
 
@@ -351,7 +357,11 @@ impl IDropSource_Impl for DropSrc_Impl {
     }
 
     fn GiveFeedback(&self, _dweffect: DROPEFFECT) -> HRESULT {
-        DRAGDROP_S_USEDEFAULTCURSORS
+        if CUSTOM_DRAG_IMAGE.get() {
+            S_OK
+        } else {
+            DRAGDROP_S_USEDEFAULTCURSORS
+        }
     }
 }
 
@@ -734,11 +744,15 @@ pub fn start(paths: Vec<String>) -> DROPEFFECT {
         // a real preview at the cursor. Failure is non-fatal - DoDragDrop still
         // runs and the OS falls back to the default cursor change.
         match attach_drag_image(&data, &paths) {
-            Ok(()) => log("IDragSourceHelper attached"),
+            Ok(()) => {
+                CUSTOM_DRAG_IMAGE.set(true);
+                log("IDragSourceHelper attached");
+            }
             Err(e) => log(&format!("IDragSourceHelper failed (non-fatal): {e}")),
         }
 
         let r = DoDragDrop(&data, &src, DROPEFFECT_COPY | DROPEFFECT_MOVE, &mut effect);
+        CUSTOM_DRAG_IMAGE.set(false);
         log(&format!("DoDragDrop -> {:?}, effect=0x{:x}", r, effect.0));
         effect
     }

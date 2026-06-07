@@ -2944,6 +2944,8 @@ export component MainWindow inherits Window {
     in-out property <length> primary_grid_scroll_y: 0;
     in-out property <length> secondary_list_scroll_y: 0;
     in-out property <string> drag_label: "";
+    in-out property <string> drag_ghost_ext: "";
+    in-out property <bool> drag_ghost_is_dir: false;
     in-out property <bool> show_hidden: false;
     in-out property <bool> settings_visible: false;
     in-out property <string> settings_tab: "appearance";
@@ -7493,104 +7495,55 @@ export component MainWindow inherits Window {
         }
     }
 
-    // -- DRAG INDICATOR -----------------------------------------------
-    if ThemePalette.is_dragging: Rectangle {
-        x: parent.width - 168px;
-        y: parent.height - 96px;
-        width: 152px;
-        height: 52px;
-        border-radius: AppMetrics.radius;
-        background: ThemePalette.accent;
-        drop-shadow-blur: 18px;
-        drop-shadow-color: rgba(0, 0, 0, 0.50);
-        z: 60;
+    // -- DRAG GHOST OVERLAY -------------------------------------------
+    // Explorer-style drag preview that tracks the cursor during in-window
+    // drags. Outgoing drags also use IDragSourceHelper (Win32 shell image);
+    // this overlay covers internal moves and Explorer -> Pathfinder drops.
+    if ThemePalette.is_dragging && root.drag_label != "": Rectangle {
+        x: root.drag_cursor_x + 12px;
+        y: root.drag_cursor_y + 12px;
+        width: Math.min(340px, Math.max(220px, drag_ghost_label.preferred-width + 88px));
+        height: ThemePalette.drag_count > 1 ? 58px : 52px;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: rgba(255, 255, 255, 0.14);
+        background: rgba(24, 24, 26, 0.94);
+        drop-shadow-blur: 28px;
+        drop-shadow-color: rgba(0, 0, 0, 0.55);
+        z: 200;
 
-        // left icon strip
-        Rectangle {
-            x: 0; y: 0; width: 44px; height: parent.height;
-            border-radius: AppMetrics.radius;
-            background: rgba(0, 0, 0, 0.18);
-            Text {
-                width: parent.width; height: parent.height;
-                text: ThemePalette.drag_count > 1 ? "[][]" : "[]";
-                color: rgba(255, 255, 255, 0.90);
-                font-size: ThemePalette.drag_count > 1 ? 11px : 14px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
+        NodeVisual {
+            x: 10px;
+            y: (parent.height - self.height) / 2;
+            visual_width: 36px;
+            visual_height: root.drag_ghost_is_dir ? 30px : 36px;
+            is_dir: root.drag_ghost_is_dir;
+            extension: root.drag_ghost_ext;
+            has_system_icon: false;
+            system_icon: @image-url("");
         }
 
-        Text {
-            x: 52px; y: 0;
-            width: parent.width - 60px; height: parent.height;
-            text: ThemePalette.drag_count == 1
-                ? "1 item"
-                : ThemePalette.drag_count + " items";
+        drag_ghost_label := Text {
+            x: 54px;
+            y: ThemePalette.drag_count > 1 ? 10px : 0px;
+            width: parent.width - 62px;
+            height: ThemePalette.drag_count > 1 ? 22px : parent.height;
+            text: root.drag_label;
             color: rgba(255, 255, 255, 0.96);
             font-size: 13px;
             font-weight: 600;
             vertical-alignment: center;
+            overflow: elide;
         }
-        Text {
-            x: 52px; y: 16px;
-            width: parent.width - 60px; height: parent.height - 20px;
-            text: "dragging...";
-            color: rgba(255, 255, 255, 0.68);
-            font-size: 10.5px;
-            vertical-alignment: center;
-        }
-    }
 
-    // -- DRAG GHOST OVERLAY -------------------------------------------
-    // Holographic preview of the dragged file(s) that follows the cursor while
-    // an OLE drag operation is in flight inside the Pathfinder window. The
-    // IDropTarget DragOver handler in lib.rs updates root.drag_cursor_x/y
-    // every tick (screen coords -> ScreenToClient -> /scale_factor -> logical),
-    // and root.drag_label is seeded from the dragged file names on DragEnter.
-    // For drag-outs to another app the OS provides its own preview so this
-    // overlay only shows when the cursor is inside the Pathfinder window.
-    if ThemePalette.is_dragging && root.drag_label != "": Rectangle {
-        // Offset slightly to the right and below the cursor so the ghost
-        // doesn't sit directly under the mouse pointer.
-        x: root.drag_cursor_x + 14px;
-        y: root.drag_cursor_y + 14px;
-        width: Math.min(280px, drag_ghost_label.preferred-width + 56px);
-        height: 44px;
-        border-radius: AppMetrics.radius;
-        border-width: 1px;
-        border-color: ThemePalette.accent_strong;
-        background: ThemePalette.accent_soft;
-        drop-shadow-blur: 22px;
-        drop-shadow-color: rgba(0, 0, 0, 0.45);
-        z: 200;
-        // Pill on the left with the count and a glyph hint.
-        Rectangle {
-            x: 4px;
-            y: 4px;
-            width: 36px;
-            height: parent.height - 8px;
-            border-radius: AppMetrics.radius_small;
-            background: ThemePalette.accent;
-            Text {
-                width: parent.width;
-                height: parent.height;
-                text: ThemePalette.drag_count <= 1 ? "1" : ThemePalette.drag_count;
-                color: white;
-                font-size: ThemePalette.drag_count > 99 ? 11px : 13px;
-                font-weight: 700;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-        drag_ghost_label := Text {
-            x: 46px;
-            y: 0;
-            width: parent.width - 54px;
-            height: parent.height;
-            text: root.drag_label;
-            color: ThemePalette.accent_strong;
-            font-size: 12.5px;
-            font-weight: 600;
+        if ThemePalette.drag_count > 1: Text {
+            x: 54px;
+            y: 32px;
+            width: parent.width - 62px;
+            height: 20px;
+            text: ThemePalette.drag_count + " items";
+            color: rgba(255, 255, 255, 0.62);
+            font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
         }
