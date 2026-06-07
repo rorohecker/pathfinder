@@ -191,6 +191,7 @@ component ToolButton inherits Rectangle {
     // In simple mode the main window sets this true so every toolbar button
     // shows its label under the icon at all times instead of only on hover.
     in property <bool> show_caption;
+    in property <bool> tooltip_above;
     in property <length> button_width: 31px;
     in property <length> button_height: 31px;
     callback clicked();
@@ -271,13 +272,13 @@ component ToolButton inherits Rectangle {
     }
 
     if root.tooltip != "" && touch.has-hover: Rectangle {
-        // Anchor the tooltip so its right edge lines up with the button's
-        // right edge. Tooltip always extends to the left from there. For
-        // buttons near the right edge of the window this keeps the tooltip
-        // inside the visible area; for buttons elsewhere the tooltip is
-        // wider than the button anyway so the slight left-shift is fine.
-        x: parent.width - (tip_text.preferred-width + 16px);
-        y: parent.height + 6px;
+        z: 100;
+        // Selection bar and bottom toolbar rows clip or cover downward
+        // tooltips; flip above the button when requested.
+        x: root.tooltip_above
+            ? Math.max(0px, (parent.width - (tip_text.preferred-width + 16px)) / 2)
+            : (parent.width - (tip_text.preferred-width + 16px));
+        y: root.tooltip_above ? -32px : parent.height + 6px;
         width: tip_text.preferred-width + 16px;
         height: 26px;
         border-radius: AppMetrics.radius_small;
@@ -295,6 +296,7 @@ component ToolButton inherits Rectangle {
             color: ThemePalette.text;
             font-size: 11.5px;
             vertical-alignment: center;
+            overflow: elide;
         }
     }
 }
@@ -359,7 +361,7 @@ component TabButton inherits Rectangle {
 
     if touch.has-hover && root.tab.path != "": HoverTip {
         x: 4px;
-        y: parent.height + 6px;
+        y: -32px;
         tip_max_width: 420px;
         tip_text: root.tab.path;
     }
@@ -3450,14 +3452,14 @@ export component MainWindow inherits Window {
             property <length> sel_step: root.is_simple ? (sel_btn_w + sel_gap) : sel_norm_step;
             property <length> sel_left: sel_label_w + 10px;
             property <length> sel_right: self.width - 10px;
+            property <bool> sel_tooltip_above: true;
 
             x: root.sidebar_w;
             y: root.title_h;
             width: parent.width - root.sidebar_w;
             height: root.toolbar_h;
-            z: 11;
+            z: 15;
             background: ThemePalette.panel_solid;
-            clip: true;
             Rectangle {
                 x: 0; y: 0; width: parent.width; height: parent.height;
                 background: ThemePalette.accent_soft;
@@ -3478,15 +3480,15 @@ export component MainWindow inherits Window {
                 vertical-alignment: center;
                 overflow: elide;
             }
-            ToolButton { x: root.is_simple ? parent.sel_left : parent.sel_right - parent.sel_clear_w - (8 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + parent.sel_step : parent.sel_right - parent.sel_clear_w - (7 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (6 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (5 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (4 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left : parent.sel_right - parent.sel_clear_w - (8 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + parent.sel_step : parent.sel_right - parent.sel_clear_w - (7 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (6 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (5 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (4 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
             if root.selection_has_archive && !root.in_recycle_bin: ToolButton {
                 x: root.is_simple ? parent.sel_left + 5 * parent.sel_step : parent.sel_right - parent.sel_clear_w - 4 * parent.sel_norm_step;
                 y: root.is_simple ? 16px : 6px;
-                button_width: parent.sel_btn_w;
+                button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above;
                 icon_data: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3";
                 text_label: "Extract";
                 show_caption: root.is_simple;
@@ -3494,10 +3496,10 @@ export component MainWindow inherits Window {
                 tooltip: "Extract Here";
                 clicked => { root.command("extract-here"); }
             }
-            ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 3 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 2 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 1 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
-            ToolButton { x: parent.sel_right - parent.sel_clear_w; y: root.is_simple ? 16px : 6px; button_width: parent.sel_clear_w; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 3 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 2 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 1 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
+            ToolButton { x: parent.sel_right - parent.sel_clear_w; y: root.is_simple ? 16px : 6px; button_width: parent.sel_clear_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
         }
 
         // Toolbar - hidden while the selection bar is visible.
@@ -4002,6 +4004,7 @@ export component MainWindow inherits Window {
             ToolButton {
                 x: root.is_simple ? 10px : parent.width - 306px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
+                tooltip_above: root.is_simple;
                 icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z";
                 text_label: "Icons";
                 show_caption: root.is_simple;
@@ -4014,6 +4017,7 @@ export component MainWindow inherits Window {
             ToolButton {
                 x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 272px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
+                tooltip_above: root.is_simple;
                 icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12";
                 text_label: "Compact";
                 show_caption: root.is_simple;
@@ -4026,6 +4030,7 @@ export component MainWindow inherits Window {
             ToolButton {
                 x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 238px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
+                tooltip_above: root.is_simple;
                 icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01";
                 text_label: "Details";
                 show_caption: root.is_simple;
@@ -4038,6 +4043,7 @@ export component MainWindow inherits Window {
             ToolButton {
                 x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 204px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
+                tooltip_above: root.is_simple;
                 icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01";
                 text_label: "Gallery";
                 show_caption: root.is_simple;
@@ -4050,6 +4056,7 @@ export component MainWindow inherits Window {
             ToolButton {
                 x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 170px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
+                tooltip_above: root.is_simple;
                 icon_data: "M3 4h18v16H3z M14 4v16";
                 text_label: "Preview";
                 show_caption: root.is_simple;
@@ -4075,6 +4082,7 @@ export component MainWindow inherits Window {
             ToolButton {
                 x: root.is_simple ? 10px + 5 * toolbar.simple_row2_step : parent.width - 68px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
+                tooltip_above: root.is_simple;
                 icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z";
                 text_label: "Actions";
                 show_caption: root.is_simple;
@@ -5335,6 +5343,9 @@ export component MainWindow inherits Window {
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Copy"; command_name: "copy"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Cut"; command_name: "cut"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Paste"; command_name: "paste"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_is_archive && !root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
+            if root.context_is_archive && !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Archive Browser"; command_name: "archive-browser"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_is_archive && !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Extract Here"; command_name: "extract-here"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: "Batch Rename"; command_name: "batch-rename"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: "Checksum"; command_name: "checksum"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -5426,9 +5437,6 @@ export component MainWindow inherits Window {
             }
 
             // -- Advanced items (hidden by default, never shown in simple mode) --------------------
-            if root.context_is_archive: Rectangle { height: 1px; background: ThemePalette.border; }
-            if root.context_is_archive: ChoiceMenuRow { width: parent.width; label: "Archive Browser"; command_name: "archive-browser"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_is_archive: ChoiceMenuRow { width: parent.width; label: "Extract Here"; command_name: "extract-here"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.context_advanced && !root.is_simple: Rectangle { height: 1px; background: ThemePalette.border; }
             if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Copy as PowerShell Path"; command_name: "copy-as-powershell"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Locked File Inspector"; command_name: "locked-file"; picked(c) => { root.context_visible = false; root.command(c); } }

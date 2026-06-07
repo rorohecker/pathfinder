@@ -7847,6 +7847,8 @@ struct NativeOperationResult {
     refresh_both_panes: bool,
     secondary_refresh_path: Option<String>,
     clear_clipboard: bool,
+    /// Directory paths whose listing cache must be dropped after paste/move.
+    invalidate_dirs: Vec<String>,
 }
 
 struct PaletteSpec {
@@ -12837,6 +12839,53 @@ impl NativeController {
         clip.paths.iter().any(|p| same_path_string(p, path))
     }
 
+    fn is_clipboardable_path(path: &str) -> bool {
+        !path.is_empty()
+            && !path.starts_with("recycle://")
+            && !is_virtual_nav_path(path)
+            && Path::new(path).exists()
+    }
+
+    fn paste_invalidate_dirs(dest_dir: &str, sources: &[String], cut: bool) -> Vec<String> {
+        let mut dirs = vec![dest_dir.to_string()];
+        if cut {
+            for src in sources {
+                if let Some(parent) = Path::new(src).parent() {
+                    let parent = parent.to_string_lossy().to_string();
+                    if !parent.is_empty()
+                        && !dirs.iter().any(|d| same_path_string(d, &parent))
+                    {
+                        dirs.push(parent);
+                    }
+                }
+            }
+        }
+        dirs.retain(|d| !is_virtual_nav_path(d) && Path::new(d).is_dir());
+        dirs
+    }
+
+    fn invalidate_paste_directories(&self, dirs: &[String]) {
+        for dir in dirs {
+            self.app_state
+                .invalidate_directory_path(Path::new(dir));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn sync_shell_clipboard_if_needed(&mut self) {
+        if self.clipboard.is_some() {
+            return;
+        }
+        if let Some((paths, cut)) = file_drag::try_read_shell_files_clipboard() {
+            if !paths.is_empty() {
+                self.clipboard = Some(NativeClipboard { paths, cut });
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn sync_shell_clipboard_if_needed(&mut self) {}
+
     fn refresh_clipboard_visuals(&mut self, ui: &MainWindow) {
         self.update_models(ui);
         if ui.get_dual_pane() {
@@ -12845,7 +12894,16 @@ impl NativeController {
     }
 
     /// Reload the pane(s) that show pasted files after copy or move.
-    fn refresh_after_paste(&mut self, ui: &MainWindow, cut: bool) {
+    fn refresh_after_paste(
+        &mut self,
+        ui: &MainWindow,
+        cut: bool,
+        pasted_sources: &[String],
+    ) {
+        let dest_dir = self.active_directory().to_string();
+        let invalidate_dirs = Self::paste_invalidate_dirs(&dest_dir, pasted_sources, cut);
+        self.invalidate_paste_directories(&invalidate_dirs);
+
         if cut {
             self.clipboard = None;
             #[cfg(target_os = "windows")]
@@ -15054,6 +15112,9 @@ impl NativeController {
                 if !was_dual {
                     let path = self.default_secondary_path();
                     self.secondary_navigate(ui, path);
+                } else {
+                    self.active_pane = ActivePane::Primary;
+                    self.sync_active_pane(ui);
                 }
             }
             "open" => self.open_selected(ui),
@@ -15794,7 +15855,7 @@ impl NativeController {
                 };
                 match result {
                     Ok(()) => {
-                        self.refresh_after_paste(ui, cut);
+                        self.refresh_after_paste(ui, cut, std::slice::from_ref(&src));
                         self.show_toast_kind(ui, "Conflict resolved", "success");
                     }
                     Err(error) => self.show_toast_kind(ui, error, "error"),
@@ -15882,6 +15943,7 @@ impl NativeController {
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
                 }
             } else {
                 let msg = if n == 1 {
@@ -15900,6 +15962,7 @@ impl NativeController {
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
                 }
             };
             if let Ok(mut lock) = pending_result.lock() {
@@ -15910,7 +15973,22 @@ impl NativeController {
     }
 
     fn copy_selected(&mut self, cut: bool, ui: &MainWindow) {
-        let paths = self.selected_paths();
+        if self.active_path_is_recycle_bin() || is_virtual_nav_path(self.active_directory()) {
+            self.show_toast(
+                ui,
+                if cut {
+                    "Cut is not available here."
+                } else {
+                    "Copy is not available here."
+                },
+            );
+            return;
+        }
+        let paths: Vec<String> = self
+            .selected_paths()
+            .into_iter()
+            .filter(|p| Self::is_clipboardable_path(p))
+            .collect();
         if paths.is_empty() {
             self.show_toast(ui, "Select a file first.");
             return;
@@ -15923,6 +16001,11 @@ impl NativeController {
         #[cfg(target_os = "windows")]
         if let Err(error) = file_drag::set_shell_files_clipboard(&paths, cut) {
             eprintln!("set_shell_files_clipboard: {error}");
+            self.show_toast_kind(
+                ui,
+                "Clipboard sync failed — paste may not work in Explorer.".to_string(),
+                "error",
+            );
         }
         let msg = if n == 1 {
             if cut {
@@ -16008,7 +16091,7 @@ impl NativeController {
             pasted += 1;
         }
         ui.set_op_drawer_visible(false);
-        self.refresh_after_paste(ui, clipboard.cut);
+        self.refresh_after_paste(ui, clipboard.cut, &clipboard.paths);
         let verb = if clipboard.cut { "Moved" } else { "Pasted" };
         let msg = if pasted == 1 {
             format!("{verb} 1 item")
@@ -16029,6 +16112,14 @@ impl NativeController {
             "drop_files_from_drag: dest_dir='{}', is_move={}, paths={:?}",
             dest_dir, is_move, paths
         ));
+
+        if dest_dir.is_empty() || is_virtual_nav_path(&dest_dir) {
+            file_drag::log(&format!(
+                "drop_files_from_drag: invalid destination '{}', ignoring",
+                dest_dir
+            ));
+            return;
+        }
 
         // Dropping onto the Recycle Bin sidebar entry sends every source path
         // to the OS trash, matching what File Explorer does when you drag onto
@@ -16206,17 +16297,24 @@ impl NativeController {
     }
 
     fn paste_async(&mut self, ui: &MainWindow) {
-        // Prefer the shell clipboard so Explorer cut/copy stays in sync with paste.
-        #[cfg(target_os = "windows")]
-        if let Some((paths, cut)) = file_drag::try_read_shell_files_clipboard() {
-            self.clipboard = Some(NativeClipboard { paths, cut });
-        }
+        // Prefer Explorer's shell clipboard only when Pathfinder has nothing queued.
+        // Reading shell on every paste overwrote a fresh internal cut/copy when
+        // set_shell_files_clipboard failed or Explorer still held stale CF_HDROP data.
+        self.sync_shell_clipboard_if_needed();
         let Some(clipboard) = self.clipboard.clone() else {
             self.show_toast(ui, "Clipboard is empty.");
             return;
         };
 
         let dest_dir = self.active_directory().to_string();
+        if is_virtual_nav_path(&dest_dir) {
+            self.show_toast(ui, "Paste is not available here.");
+            return;
+        }
+        if !Path::new(&dest_dir).is_dir() {
+            self.show_toast(ui, "No folder open to paste into.");
+            return;
+        }
         let dest_is_secondary = self.active_pane == ActivePane::Secondary;
         let dual_pane = ui.get_dual_pane();
         let cut = clipboard.cut;
@@ -16272,11 +16370,14 @@ impl NativeController {
             .paths
             .iter()
             .filter(|src| {
+                if src.starts_with("recycle://") || is_virtual_nav_path(src) {
+                    return false;
+                }
                 let Some(name) = Path::new(src).file_name() else {
                     return false;
                 };
                 let dest = PathBuf::from(&dest_dir).join(name);
-                !self.paste_skips_dest(src, &dest, cut)
+                !self.paste_skips_dest(src, &dest, cut) && Path::new(src).exists()
             })
             .cloned()
             .collect();
@@ -16296,6 +16397,8 @@ impl NativeController {
         let app_state = self.app_state.clone();
         let operation_ready = self.operation_ready.clone();
         let pending_result = self.pending_operation_result.clone();
+        let invalidate_dirs_on_success =
+            Self::paste_invalidate_dirs(&dest_dir, &paths_to_paste, cut);
         std::thread::spawn(move || {
             let mut completed = 0usize;
             let mut first_error: Option<String> = None;
@@ -16326,14 +16429,29 @@ impl NativeController {
             }
 
             let pasted = completed > 0;
+            let moved_sources: Vec<String> = paths_to_paste
+                .iter()
+                .take(completed)
+                .cloned()
+                .collect();
+            let invalidate_dirs = if pasted {
+                NativeController::paste_invalidate_dirs(&dest_dir, &moved_sources, cut)
+            } else {
+                Vec::new()
+            };
             let result = if let Some(error) = first_error {
                 NativeOperationResult {
                     message: error,
                     kind: "error".to_string(),
                     refresh: pasted && !dual_pane && !dest_is_secondary,
                     refresh_both_panes: pasted && dual_pane,
-                    secondary_refresh_path: None,
+                    secondary_refresh_path: if pasted && !dual_pane && dest_is_secondary {
+                        Some(dest_dir.clone())
+                    } else {
+                        None
+                    },
                     clear_clipboard: false,
+                    invalidate_dirs,
                 }
             } else {
                 let verb_done = if cut { "Moved" } else { "Pasted" };
@@ -16351,6 +16469,7 @@ impl NativeController {
                         None
                     },
                     clear_clipboard: cut,
+                    invalidate_dirs: invalidate_dirs_on_success,
                 }
             };
 
@@ -16775,6 +16894,7 @@ impl NativeController {
                         None
                     },
                     clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
                 }
             } else {
                 let count = created.len();
@@ -16794,6 +16914,7 @@ impl NativeController {
                         None
                     },
                     clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
                 }
             };
 
@@ -16936,6 +17057,7 @@ impl NativeController {
                         None
                     },
                     clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
                 }
             } else {
                 NativeOperationResult {
@@ -16953,6 +17075,7 @@ impl NativeController {
                         None
                     },
                     clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
                 }
             };
             if let Ok(mut lock) = pending.lock() {
@@ -17070,6 +17193,7 @@ impl NativeController {
                         None
                     },
                     clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
                 },
                 Err(error) => NativeOperationResult {
                     message: error,
@@ -17078,6 +17202,7 @@ impl NativeController {
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
                 },
             };
             if let Ok(mut lock) = pending.lock() {
@@ -18261,6 +18386,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             if !was_dual {
                 let path = c.borrow().default_secondary_path();
                 c.borrow_mut().secondary_navigate(&ui, path);
+            } else {
+                c.borrow_mut().active_pane = ActivePane::Primary;
+                c.borrow().sync_active_pane(&ui);
             }
         }
     });
@@ -19189,6 +19317,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         ui.set_op_drawer_visible(false);
                         if let Some(result) = result {
                             if let Ok(mut ctrl) = c.try_borrow_mut() {
+                                if !result.invalidate_dirs.is_empty() {
+                                    ctrl.invalidate_paste_directories(&result.invalidate_dirs);
+                                }
                                 if result.clear_clipboard {
                                     ctrl.clipboard = None;
                                     #[cfg(target_os = "windows")]
@@ -20230,6 +20361,103 @@ fn install_mouse_nav(_ui: &MainWindow) {}
 // `screen_x`/`screen_y` are raw screen pixels from IDropTarget::Drop.
 // We convert to client pixels via ScreenToClient, then to Slint logical
 // pixels by dividing by the window's scale factor.
+/// Toolbar address-bar X offset (relative to toolbar left edge) in simple mode.
+/// Mirrors `toolbar.simple_addr_x` in main.slint.
+#[cfg(target_os = "windows")]
+fn toolbar_simple_addr_x(toolbar_width: f32) -> f32 {
+    const SIMPLE_BTN_W: f32 = 88.0;
+    const SIMPLE_ROW_GAP: f32 = 4.0;
+    const SIMPLE_ROW1_SLOTS: f32 = 4.0;
+    let simple_row1_budget = (toolbar_width * 0.42).clamp(240.0, 380.0);
+    let simple_row1_slot_w = SIMPLE_BTN_W.min(
+        ((simple_row1_budget - 10.0 - (SIMPLE_ROW1_SLOTS - 1.0) * SIMPLE_ROW_GAP) / SIMPLE_ROW1_SLOTS)
+            .max(54.0),
+    );
+    let simple_row1_step = simple_row1_slot_w + SIMPLE_ROW_GAP;
+    10.0 + SIMPLE_ROW1_SLOTS * simple_row1_step + 8.0
+}
+
+#[cfg(target_os = "windows")]
+struct PaneGridGeom {
+    cols: usize,
+    grid_cell_w: f32,
+    grid_item_h: f32,
+    grid_gap: f32,
+}
+
+#[cfg(target_os = "windows")]
+fn pane_grid_geometry(pane_w: f32, view_mode: &str, grid_w: f32, grid_h: f32) -> PaneGridGeom {
+    const PAD: f32 = 16.0;
+    const SCROLLBAR: f32 = 14.0;
+    let file_area_w = (pane_w - PAD * 2.0 - SCROLLBAR).max(1.0);
+    let compact = view_mode == "compact";
+    let cell_w_target = if compact { 200.0 } else { grid_w.max(96.0) };
+    let cols = (file_area_w / cell_w_target).floor().max(1.0) as usize;
+    let grid_cell_w = file_area_w / cols as f32;
+    let grid_item_h = match view_mode {
+        "gallery" => 154.0_f32,
+        "compact" => 32.0_f32,
+        _ => grid_h.max(96.0),
+    };
+    let grid_gap = if compact { 2.0 } else { 8.0 };
+    PaneGridGeom {
+        cols,
+        grid_cell_w,
+        grid_item_h,
+        grid_gap,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn pane_scroll_y(ui: &MainWindow, is_secondary: bool, view_mode: &str) -> f32 {
+    if is_secondary {
+        ui.get_secondary_list_scroll_y()
+    } else if view_mode == "list" {
+        ui.get_primary_list_scroll_y()
+    } else {
+        ui.get_primary_grid_scroll_y()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn hit_test_grid_folder_drop(
+    files: &[FileEntry],
+    lx: f32,
+    ly: f32,
+    list_top: f32,
+    scroll_y: f32,
+    left: f32,
+    geom: &PaneGridGeom,
+) -> Option<String> {
+    let rel_x = lx - left;
+    let rel_y = ly - list_top + scroll_y;
+    if rel_y < 0.0 {
+        return None;
+    }
+    let row_stride = geom.grid_item_h + geom.grid_gap;
+    let row = (rel_y / row_stride).floor() as isize;
+    if row < 0 {
+        return None;
+    }
+    let col = ((rel_x - geom.grid_gap / 2.0) / geom.grid_cell_w).floor() as isize;
+    if col < 0 || col as usize >= geom.cols {
+        return None;
+    }
+    let cell_x1 = col as f32 * geom.grid_cell_w + geom.grid_gap / 2.0;
+    let cell_y1 = row as f32 * row_stride;
+    let cell_x2 = cell_x1 + (geom.grid_cell_w - geom.grid_gap);
+    let cell_y2 = cell_y1 + geom.grid_item_h;
+    if rel_x < cell_x1 || rel_x >= cell_x2 || rel_y < cell_y1 || rel_y >= cell_y2 {
+        return None;
+    }
+    let idx = row as usize * geom.cols + col as usize;
+    let entry = files.get(idx)?;
+    if entry.kind != FileKind::Directory || entry.path.is_empty() {
+        return None;
+    }
+    Some(entry.path.clone())
+}
+
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 fn hit_test_list_folder_drop(
@@ -20257,29 +20485,15 @@ fn hit_test_list_folder_drop(
     }
     match view_str {
         "list" => hit_test_list_rows(files, left, right, lx, ly, list_top, scroll_y, sort_by),
-        "compact" => hit_test_uniform_rows(files, left, right, lx, ly, list_top, scroll_y, 32.0),
-        "grid" | "gallery" => {
-            // Grid and gallery lay items out in a wrapping flexbox. Cells use
-            // AppMetrics.grid_w / grid_h (or hard-coded 154 px for gallery).
+        "compact" | "grid" | "gallery" => {
             let metrics = ui.global::<AppMetrics>();
-            let grid_w = metrics.get_grid_w().max(96.0);
-            let grid_h = if view_str == "gallery" {
-                154.0
-            } else {
-                metrics.get_grid_h().max(96.0)
-            };
-            let cols = ((pane_w - PAD * 2.0 - SCROLLBAR) / grid_w).floor().max(1.0) as usize;
-            let col = ((lx - left) / grid_w).floor() as usize;
-            let row = ((ly - list_top + scroll_y) / grid_h).floor() as usize;
-            if col >= cols {
-                return None;
-            }
-            let idx = row * cols + col;
-            let entry = files.get(idx)?;
-            if entry.kind != FileKind::Directory || entry.path.is_empty() {
-                return None;
-            }
-            Some(entry.path.clone())
+            let geom = pane_grid_geometry(
+                pane_w,
+                view_str,
+                metrics.get_grid_w(),
+                metrics.get_grid_h(),
+            );
+            hit_test_grid_folder_drop(files, lx, ly, list_top, scroll_y, left, &geom)
         }
         _ => None,
     }
@@ -20438,26 +20652,13 @@ fn hit_test_list_rows(
     None
 }
 
-#[allow(clippy::too_many_arguments)]
-fn hit_test_uniform_rows(
-    files: &[FileEntry],
-    _left: f32,
-    _right: f32,
-    _lx: f32,
-    ly: f32,
-    list_top: f32,
-    scroll_y: f32,
-    row_h: f32,
-) -> Option<String> {
-    let row = ((ly - list_top + scroll_y) / row_h).floor() as isize;
-    if row < 0 {
-        return None;
+#[cfg(target_os = "windows")]
+fn preview_pane_width(ui: &MainWindow) -> f32 {
+    if ui.get_preview_visible() {
+        ui.get_preview_w_user().clamp(220.0, 640.0)
+    } else {
+        0.0
     }
-    let entry = files.get(row as usize)?;
-    if entry.kind != FileKind::Directory || entry.path.is_empty() {
-        return None;
-    }
-    Some(entry.path.clone())
 }
 
 #[cfg(target_os = "windows")]
@@ -20493,6 +20694,28 @@ fn pick_drop_destination(
     let toolbar_h: f32 = if is_simple { 88.0 } else { 44.0 };
     let content_top = title_h + toolbar_h;
     let main_left = sidebar_w;
+    let window_logical_w = (ui.window().size().width as f32) / scale;
+    let file_area_right = window_logical_w - preview_pane_width(ui);
+
+    // Drops on the preview pane (right strip) land in the active pane's folder,
+    // matching Explorer where the details/preview strip is not a subfolder target.
+    if ui.get_preview_visible() && lx >= file_area_right && ly >= content_top {
+        let dest = if ctrl.active_pane == ActivePane::Secondary && !ctrl.secondary_path.is_empty()
+        {
+            ctrl.secondary_path.clone()
+        } else {
+            ctrl.current_path.clone()
+        };
+        if is_virtual_nav_path(&dest) {
+            file_drag::log("pick_drop_destination: preview pane over virtual path");
+            return String::new();
+        }
+        file_drag::log(&format!(
+            "pick_drop_destination: PREVIEW STRIP -> '{}'",
+            dest
+        ));
+        return dest;
+    }
 
     // 0a. Tab strip drops route into that tab's folder. Tabs live in the title
     //     bar at y in [6, 36], starting at x = 10. Each TabButton is a min of
@@ -20543,7 +20766,8 @@ fn pick_drop_destination(
         title_h + 37.0
     };
     let addr_x_start = if is_simple {
-        sidebar_w + 390.0
+        let toolbar_w = (ui.window().size().width as f32 / scale - sidebar_w).max(1.0);
+        sidebar_w + toolbar_simple_addr_x(toolbar_w)
     } else {
         sidebar_w + 167.0
     };
@@ -20631,22 +20855,20 @@ fn pick_drop_destination(
     ) = if ui.get_dual_pane() {
         let split_x = sidebar_w + primary_w + splitter_w;
         if lx < split_x {
-            let scroll = if ui.get_view_mode().as_str() == "list" {
-                ui.get_primary_list_scroll_y()
-            } else {
-                ui.get_primary_grid_scroll_y()
-            };
             (
                 ctrl.current_path.clone(),
                 main_left,
                 primary_w,
                 &ctrl.visible_files[..],
                 primary_list_top,
-                scroll,
+                pane_scroll_y(ui, false, ui.get_view_mode().as_str()),
                 ctrl.sort_by.clone(),
                 "primary",
             )
-        } else if !ctrl.secondary_path.is_empty() {
+        } else if ctrl.secondary_path.is_empty() {
+            file_drag::log("pick_drop_destination: secondary pane has no folder open");
+            return String::new();
+        } else {
             let sec_left = sidebar_w + primary_w + splitter_w;
             let sec_w = ui.get_secondary_pane_w();
             (
@@ -20655,40 +20877,19 @@ fn pick_drop_destination(
                 sec_w,
                 &ctrl.secondary_visible_files[..],
                 secondary_list_top,
-                ui.get_secondary_list_scroll_y(),
+                pane_scroll_y(ui, true, ui.get_view_mode().as_str()),
                 ctrl.secondary_sort_by.clone(),
                 "secondary",
             )
-        } else {
-            let scroll = if ui.get_view_mode().as_str() == "list" {
-                ui.get_primary_list_scroll_y()
-            } else {
-                ui.get_primary_grid_scroll_y()
-            };
-            (
-                ctrl.current_path.clone(),
-                main_left,
-                primary_w,
-                &ctrl.visible_files[..],
-                primary_list_top,
-                scroll,
-                ctrl.sort_by.clone(),
-                "primary",
-            )
         }
     } else {
-        let scroll = if ui.get_view_mode().as_str() == "list" {
-            ui.get_primary_list_scroll_y()
-        } else {
-            ui.get_primary_grid_scroll_y()
-        };
         (
             ctrl.current_path.clone(),
             main_left,
             primary_w,
             &ctrl.visible_files[..],
             primary_list_top,
-            scroll,
+            pane_scroll_y(ui, false, ui.get_view_mode().as_str()),
             ctrl.sort_by.clone(),
             "primary",
         )
