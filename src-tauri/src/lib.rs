@@ -267,6 +267,7 @@ struct NativeDirectoryResult {
     generation: u64,
     partial: bool,
     skipped_entries: u32,
+    error: Option<String>,
 }
 
 enum SidebarActivateAction {
@@ -1564,13 +1565,58 @@ fn cache_key_str(path: &str) -> String {
     cache_key(Path::new(path))
 }
 
-fn sort_entries(entries: &mut [FileEntry]) {
-    entries.sort_by(|a, b| match (&a.kind, &b.kind) {
+fn entry_sort_cmp(a: &FileEntry, b: &FileEntry) -> std::cmp::Ordering {
+    match (&a.kind, &b.kind) {
         (FileKind::Directory, FileKind::Directory) => natural_cmp(&a.name_lower, &b.name_lower),
         (FileKind::Directory, _) => std::cmp::Ordering::Less,
         (_, FileKind::Directory) => std::cmp::Ordering::Greater,
         _ => natural_cmp(&a.name_lower, &b.name_lower),
-    });
+    }
+}
+
+fn sort_entries(entries: &mut [FileEntry]) {
+    entries.sort_by(entry_sort_cmp);
+}
+
+fn merge_sorted_file_entries(left: Vec<FileEntry>, mut right: Vec<FileEntry>) -> Vec<FileEntry> {
+    if left.is_empty() {
+        sort_entries(&mut right);
+        return right;
+    }
+    if right.is_empty() {
+        return left;
+    }
+    sort_entries(&mut right);
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    let mut li = 0usize;
+    let mut ri = 0usize;
+    while li < left.len() && ri < right.len() {
+        if entry_sort_cmp(&left[li], &right[ri]) != std::cmp::Ordering::Greater {
+            merged.push(left[li].clone());
+            li += 1;
+        } else {
+            merged.push(right[ri].clone());
+            ri += 1;
+        }
+    }
+    if li < left.len() {
+        merged.extend_from_slice(&left[li..]);
+    }
+    if ri < right.len() {
+        merged.extend(right.drain(ri..));
+    }
+    merged
+}
+
+fn dir_entry_name_cmp(a: &fs::DirEntry, b: &fs::DirEntry) -> std::cmp::Ordering {
+    a.file_name()
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .cmp(
+            &b.file_name()
+                .to_string_lossy()
+                .to_ascii_lowercase(),
+        )
 }
 
 fn sort_entries_by(entries: &mut [FileEntry], sort_by: &str, sort_dir: &str) {
@@ -2365,18 +2411,14 @@ fn list_directory_chunk(dir: &Path, max_entries: usize) -> Result<DirectoryPage,
             Err(_) => skipped_entries += 1,
         }
     }
-    dir_entries.sort_by(|a, b| {
-        a.file_name()
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .cmp(
-                &b.file_name()
-                    .to_string_lossy()
-                    .to_ascii_lowercase(),
-            )
-    });
     let partial = dir_entries.len() > max_entries;
-    let to_process: Vec<_> = dir_entries.into_iter().take(max_entries).collect();
+    if partial {
+        // O(n) partial selection instead of sorting every name in huge folders.
+        dir_entries.select_nth_unstable_by(max_entries - 1, dir_entry_name_cmp);
+        dir_entries.truncate(max_entries);
+    }
+    dir_entries.sort_by(dir_entry_name_cmp);
+    let to_process = dir_entries;
     let entries: Vec<FileEntry> = to_process
         .par_iter()
         .filter_map(|entry| {
@@ -2391,6 +2433,87 @@ fn list_directory_chunk(dir: &Path, max_entries: usize) -> Result<DirectoryPage,
         partial,
         skipped_entries,
     })
+}
+
+/// Instant folder listing from the SQLite index (visited folders). Used on
+/// startup and navigation so hot/cold starts paint the last folder without
+/// waiting for a full `read_dir` pass; a background refresh replaces stale rows.
+fn list_directory_from_index(parent: &str) -> Option<Vec<FileEntry>> {
+    let conn = open_index_connection().ok()?;
+    let parent_key = cache_key_str(parent);
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, name, extension, is_dir, size, modified
+             FROM files WHERE parent = ?1 OR parent = ?2",
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map(params![parent_key, parent], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .ok()?;
+    let mut entries = Vec::new();
+    for row in rows.flatten() {
+        let (path, name, ext, is_dir, size, modified) = row;
+        let name_lower = name.to_lowercase();
+        entries.push(FileEntry {
+            path,
+            name_lower,
+            name,
+            kind: if is_dir != 0 {
+                FileKind::Directory
+            } else {
+                FileKind::File
+            },
+            size: size.max(0) as u64,
+            modified: modified.max(0) as u64,
+            extension: if ext.is_empty() {
+                None
+            } else {
+                Some(ext)
+            },
+        });
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    sort_entries(&mut entries);
+    Some(entries)
+}
+
+static APP_STARTED: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+static LOCAL_AI_SEMANTIC_READY: LazyLock<Mutex<Option<bool>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+fn local_ai_semantic_ready_cached() -> bool {
+    if let Ok(lock) = LOCAL_AI_SEMANTIC_READY.lock() {
+        if let Some(v) = *lock {
+            return v;
+        }
+    }
+    let v = local_ai_semantic_ready();
+    if let Ok(mut lock) = LOCAL_AI_SEMANTIC_READY.lock() {
+        *lock = Some(v);
+    }
+    v
+}
+
+fn invalidate_local_ai_ready_cache() {
+    if let Ok(mut lock) = LOCAL_AI_SEMANTIC_READY.lock() {
+        *lock = None;
+    }
+}
+
+fn local_ai_image_search_ready_cached() -> bool {
+    local_ai_semantic_ready_cached() && crate::inference::image_classifier_available()
 }
 
 #[tauri::command]
@@ -7276,12 +7399,25 @@ fn thumbnail_cache_key(path: &Path, modified: u64, px: u32) -> String {
 }
 
 fn thumbnail_cache_size() -> u64 {
-    fs::read_dir(thumbnail_cache_dir())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| entry.metadata().ok().map(|m| m.len()))
-        .sum()
+    open_index_connection()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT COALESCE(SUM(byte_len), 0) FROM thumbnail_cache",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()
+            .map(|n| n.max(0) as u64)
+        })
+        .unwrap_or_else(|| {
+            fs::read_dir(thumbnail_cache_dir())
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| entry.metadata().ok().map(|m| m.len()))
+                .sum()
+        })
 }
 
 fn thumbnail_data_url(bytes: &[u8]) -> String {
@@ -7718,6 +7854,8 @@ enum PendingPrompt {
 struct DeferredStartupData {
     drives: Vec<DriveInfo>,
     storage_cache: Option<StorageScanResult>,
+    user_pins: Vec<UserPin>,
+    recent_locations: Vec<String>,
 }
 
 struct NativeController {
@@ -7843,6 +7981,8 @@ struct NativeController {
     search_ready: Arc<std::sync::atomic::AtomicBool>,
     pending_search_result: Arc<Mutex<Option<NativeSearchResult>>>,
     pending_deferred_startup: Arc<Mutex<Option<DeferredStartupData>>>,
+    /// Deferred shell-icon + thumbnail disk reads after the first file list paints.
+    enrich_visible_pending: bool,
 }
 
 #[derive(Clone)]
@@ -8259,6 +8399,7 @@ fn schedule_index_directory_debounced(state: &AppState, parent: String, entries:
 }
 
 fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), String> {
+    let parent = cache_key_str(parent);
     let mut conn = open_index_connection()?;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -9940,27 +10081,33 @@ fn default_user_pins() -> Vec<UserPin> {
         .collect()
 }
 
-fn native_user_pins() -> Vec<UserPin> {
+fn load_user_pins_raw() -> Vec<UserPin> {
     let saved: Vec<UserPin> = read_native_json("user_pins.json", Vec::new());
     if !saved.is_empty() {
-        return saved
-            .into_iter()
-            .filter(|pin| Path::new(&pin.path).exists())
-            .collect();
+        return saved;
     }
 
     let legacy: Vec<Bookmark> = read_native_json("bookmarks.json", Vec::new());
     if !legacy.is_empty() {
-        let pins = legacy
-            .into_iter()
-            .filter(|bookmark| Path::new(&bookmark.path).exists())
-            .map(bookmark_to_pin)
-            .collect::<Vec<_>>();
+        let pins = legacy.into_iter().map(bookmark_to_pin).collect::<Vec<_>>();
         let _ = write_native_json("user_pins.json", &pins);
         return pins;
     }
 
     default_user_pins()
+}
+
+fn native_user_pins() -> Vec<UserPin> {
+    load_user_pins_raw()
+        .into_iter()
+        .filter(|pin| Path::new(&pin.path).exists())
+        .collect()
+}
+
+fn validate_user_pins(pins: Vec<UserPin>) -> Vec<UserPin> {
+    pins.into_iter()
+        .filter(|pin| Path::new(&pin.path).exists())
+        .collect()
 }
 
 fn save_native_user_pins(pins: &[UserPin]) -> Result<(), String> {
@@ -9979,10 +10126,25 @@ fn pin_name_for_path(path: &Path, explicit_name: Option<String>) -> String {
 }
 
 fn condense_recent_locations(paths: Vec<String>, max_items: usize) -> Vec<String> {
+    condense_recent_locations_inner(paths, max_items, true)
+}
+
+fn condense_recent_locations_fast(paths: Vec<String>, max_items: usize) -> Vec<String> {
+    condense_recent_locations_inner(paths, max_items, false)
+}
+
+fn condense_recent_locations_inner(
+    paths: Vec<String>,
+    max_items: usize,
+    require_exists: bool,
+) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut condensed = Vec::new();
     for path in paths {
-        if path.trim().is_empty() || !Path::new(&path).exists() {
+        if path.trim().is_empty() {
+            continue;
+        }
+        if require_exists && !Path::new(&path).exists() {
             continue;
         }
         let key = cache_key(Path::new(&path));
@@ -9994,6 +10156,10 @@ fn condense_recent_locations(paths: Vec<String>, max_items: usize) -> Vec<String
         }
     }
     condensed
+}
+
+fn validate_recent_locations(paths: Vec<String>, max_items: usize) -> Vec<String> {
+    condense_recent_locations(paths, max_items)
 }
 
 fn native_list_directory(state: &AppState, path: &str) -> Result<Vec<FileEntry>, String> {
@@ -11666,9 +11832,9 @@ impl NativeController {
         // a few KB on disk but the sequential I/O latency adds up over 7 reads.
         // join lets the OS file cache stream them concurrently and cuts the
         // total startup wall-clock by roughly the number of cores serving I/O.
-        let ((tabs_raw, recent_raw), (folder_views_raw, (tags_raw, (tag_labels_raw, notes_raw)))): (
+        let ((tabs_raw, recent_raw), (folder_views_raw, (tags_raw, (tag_labels_raw, (notes_raw, user_pins_raw))))): (
             (Vec<SessionTab>, Vec<String>),
-            (HashMap<String, String>, (HashMap<String, String>, (HashMap<String, String>, HashMap<String, String>))),
+            (HashMap<String, String>, (HashMap<String, String>, (HashMap<String, String>, (HashMap<String, String>, Vec<UserPin>)))),
         ) = rayon::join(
             || {
                 rayon::join(
@@ -11685,7 +11851,12 @@ impl NativeController {
                             || {
                                 rayon::join(
                                     || read_native_json::<HashMap<String, String>>("tag_labels.json", HashMap::new()),
-                                    || read_native_json::<HashMap<String, String>>("notes.json", HashMap::new()),
+                                    || {
+                                        rayon::join(
+                                            || read_native_json::<HashMap<String, String>>("notes.json", HashMap::new()),
+                                            || read_native_json::<Vec<UserPin>>("user_pins.json", Vec::new()),
+                                        )
+                                    },
                                 )
                             },
                         )
@@ -11704,8 +11875,9 @@ impl NativeController {
         }
         let cli_resolved = cli_folder.and_then(resolve_cli_folder_to_string);
         let session_first = tabs[0].path.clone();
-        let from_session = (!session_first.is_empty() && Path::new(&session_first).is_dir())
-            .then_some(session_first);
+        // Trust the saved session path; `navigate` validates asynchronously so
+        // a slow/network `is_dir()` probe does not block the first paint.
+        let from_session = (!session_first.is_empty()).then_some(session_first);
         let current_path = cli_resolved
             .clone()
             .or(from_session)
@@ -11751,8 +11923,12 @@ impl NativeController {
             active_tab: 0,
             known_folders,
             drives: Vec::new(),
-            user_pins: native_user_pins(),
-            recent_locations: condense_recent_locations(recent_raw, 12),
+            user_pins: if user_pins_raw.is_empty() {
+                load_user_pins_raw()
+            } else {
+                user_pins_raw
+            },
+            recent_locations: condense_recent_locations_fast(recent_raw, 12),
             folder_views: folder_views_raw,
             show_hidden: false,
             ai_progress: {
@@ -11823,6 +11999,7 @@ impl NativeController {
             search_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_search_result: Arc::new(Mutex::new(None)),
             pending_deferred_startup: Arc::new(Mutex::new(None)),
+            enrich_visible_pending: false,
         }
     }
 
@@ -11978,13 +12155,15 @@ impl NativeController {
             .map(|s| *s)
             .unwrap_or(local_ai::InstallState::NotInstalled);
         ui.set_ai_install_state(SharedString::from(ai_install_state.as_slint_str()));
-        if !local_ai_semantic_ready() {
+        let semantic_ready = local_ai_semantic_ready_cached();
+        let image_ready = local_ai_image_search_ready_cached();
+        if !semantic_ready {
             self.settings.search_semantic_mode = false;
         }
-        if !local_ai_image_search_ready() {
+        if !image_ready {
             self.settings.clip_search_enabled = false;
         }
-        ui.set_semantic_search_available(local_ai_semantic_ready());
+        ui.set_semantic_search_available(semantic_ready);
         ui.set_search_semantic_mode(self.settings.search_semantic_mode);
         ui.set_clip_search_enabled(self.settings.clip_search_enabled);
     }
@@ -11995,7 +12174,6 @@ impl NativeController {
     fn finish_startup(&mut self, ui: &MainWindow) {
         let path = self.current_path.clone();
         self.navigate(ui, path, false);
-        self.spawn_performance_status(ui);
         self.spawn_deferred_startup_data();
         let custom_theme = self.settings.custom_theme.clone();
         let weak_editor = ui.as_weak();
@@ -12033,10 +12211,14 @@ impl NativeController {
     /// path so the window can paint before WSL/network drive enumeration finishes.
     fn spawn_deferred_startup_data(&self) {
         let pending = self.pending_deferred_startup.clone();
+        let pins_to_validate = self.user_pins.clone();
+        let recents_to_validate = self.recent_locations.clone();
         std::thread::spawn(move || {
             let data = DeferredStartupData {
                 drives: get_drives(),
                 storage_cache: read_storage_scan_cache(),
+                user_pins: validate_user_pins(pins_to_validate),
+                recent_locations: validate_recent_locations(recents_to_validate, 12),
             };
             if let Ok(mut lock) = pending.lock() {
                 *lock = Some(data);
@@ -12054,9 +12236,9 @@ impl NativeController {
         };
         self.drives = data.drives;
         self.storage_cache = data.storage_cache;
+        self.user_pins = data.user_pins;
+        self.recent_locations = data.recent_locations;
         self.sync_sidebar_models(ui);
-        // First performance snapshot ran with an empty drive list; refresh now
-        // that sidebar enumeration has finished.
         self.spawn_performance_status(ui);
     }
 
@@ -12619,14 +12801,26 @@ impl NativeController {
     }
 
     fn update_file_models(&mut self, ui: &MainWindow) {
-        // Populate the shell-icon cache for visible entries. Per-extension
-        // entries are cheap (one SHGetFileInfo per extension regardless of
-        // file count). Per-path entries are reserved for .exe / .lnk / .ico
-        // / .msi where the file body carries an embedded icon.
-        #[cfg(target_os = "windows")]
-        self.populate_system_icons(32);
+        self.update_file_models_inner(ui, true);
+    }
+
+    /// Rebuild the file list without shell-icon probes or thumbnail disk I/O
+    /// so the first paint after navigation stays responsive.
+    fn update_file_models_quick(&mut self, ui: &MainWindow) {
+        self.update_file_models_inner(ui, false);
+    }
+
+    fn update_file_models_inner(&mut self, ui: &MainWindow, enrich_visible: bool) {
+        if enrich_visible {
+            // Populate the shell-icon cache for visible entries. Per-extension
+            // entries are cheap (one SHGetFileInfo per extension regardless of
+            // file count). Per-path entries are reserved for .exe / .lnk / .ico
+            // / .msi where the file body carries an embedded icon.
+            #[cfg(target_os = "windows")]
+            self.populate_system_icons(32);
+        }
         // Pre-load any thumbnails that are cached on disk but not yet in memory
-        if ui.get_view_mode() != "list" {
+        if enrich_visible && ui.get_view_mode() != "list" {
             for entry in self.visible_files.iter().take(12) {
                 let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
                 if !is_thumbnail_image_ext(&ext) || self.thumbnail_memory.contains_key(&entry.path)
@@ -12707,6 +12901,39 @@ impl NativeController {
                 .unwrap_or_else(|| build_breadcrumbs(&self.current_path)),
         ));
         self.update_status(ui);
+    }
+
+    fn sync_nav_chrome(&mut self, ui: &MainWindow) {
+        let tabs = self.tab_items();
+        #[cfg(target_os = "windows")]
+        sync_titlebar_hit_regions(&tabs);
+        ui.set_tabs(model_from_vec(tabs));
+        ui.set_selected_index(self.selected_index);
+        self.sync_selection_count_to_ui(ui);
+        self.sync_search_scope(ui);
+        self.sync_tag_names(ui);
+        let shown_path = navigation_display_path(
+            &self.current_path,
+            self.active_archive.as_ref(),
+        );
+        ui.set_current_path(ss(&shown_path));
+        ui.set_address_text(ss(&shown_path));
+        ui.set_search_text(ss(&self.search_query));
+        ui.set_breadcrumbs(model_from_vec(
+            self.active_archive
+                .as_ref()
+                .map(|archive| archive_breadcrumbs(&archive.archive_path, &archive.prefix))
+                .unwrap_or_else(|| build_breadcrumbs(&self.current_path)),
+        ));
+        self.update_status(ui);
+    }
+
+    fn pump_visible_enrichment(&mut self, ui: &MainWindow) {
+        if !self.enrich_visible_pending {
+            return;
+        }
+        self.enrich_visible_pending = false;
+        self.update_file_models(ui);
     }
 
     fn update_models(&mut self, ui: &MainWindow) {
@@ -13362,7 +13589,9 @@ impl NativeController {
         self.files_model = None;
         ui.set_empty_state(ss("Loading folder..."));
         ui.set_primary_list_scroll_y(0.0);
-        self.update_file_models(ui);
+        ui.set_files(model_from_vec(Vec::<FileItem>::new()));
+        self.sync_nav_chrome(ui);
+        self.sync_sidebar_models(ui);
     }
 
     fn apply_directory_listing(
@@ -13445,14 +13674,15 @@ impl NativeController {
         self.selected_set.clear();
         self.select_anchor = -1;
         self.files_model = None;
-        if self.files.len() <= LARGE_DIRECTORY_GIT_CAP
-            && is_inside_git_worktree(Path::new(&path))
-        {
+        if self.files.len() <= LARGE_DIRECTORY_GIT_CAP {
             let ready = self.git_status_ready.clone();
             let pending = self.pending_git_status.clone();
             let state = self.app_state.clone();
             let p = path.clone();
             std::thread::spawn(move || {
+                if !is_inside_git_worktree(Path::new(&p)) {
+                    return;
+                }
                 let status = native_git_status(&state, &p);
                 if let Ok(mut lock) = pending.lock() {
                     *lock = Some(status);
@@ -13477,7 +13707,9 @@ impl NativeController {
         }));
 
         self.apply_filter();
-        self.update_models(ui);
+        self.update_file_models_quick(ui);
+        self.sync_sidebar_models(ui);
+        self.enrich_visible_pending = true;
         self.update_preview(ui);
         self.save_session();
 
@@ -13543,10 +13775,14 @@ impl NativeController {
             .visible_files
             .iter()
             .filter(|e| e.kind == FileKind::Directory)
-            .take(12)
+            .take(if APP_STARTED.elapsed() < Duration::from_secs(5) {
+                4
+            } else {
+                8
+            })
             .map(|e| e.path.clone())
             .collect();
-        if !subdir_paths.is_empty() {
+        if !subdir_paths.is_empty() && APP_STARTED.elapsed() >= Duration::from_secs(2) {
             let preload_state = self.app_state.clone();
             std::thread::spawn(move || {
                 for dir_path in subdir_paths {
@@ -13573,7 +13809,23 @@ impl NativeController {
         std::thread::spawn(move || {
             let page = match list_directory_chunk(Path::new(&path), FIRST_DIRECTORY_CHUNK) {
                 Ok(page) => page,
-                Err(_) => return,
+                Err(err) => {
+                    if generation.load(Ordering::SeqCst) != token {
+                        return;
+                    }
+                    if let Ok(mut lock) = pending.lock() {
+                        *lock = Some(NativeDirectoryResult {
+                            path: path.clone(),
+                            entries: Vec::new(),
+                            generation: token,
+                            partial: false,
+                            skipped_entries: 0,
+                            error: Some(err),
+                        });
+                    }
+                    ready.store(true, Ordering::Release);
+                    return;
+                }
             };
             if generation.load(Ordering::SeqCst) != token {
                 return;
@@ -13589,6 +13841,7 @@ impl NativeController {
                     generation: token,
                     partial: page.partial,
                     skipped_entries: page.skipped_entries,
+                    error: None,
                 });
             }
             ready.store(true, Ordering::Release);
@@ -13717,19 +13970,18 @@ impl NativeController {
             self.open_archive_view(ui, archive_path, prefix, push_history);
             return;
         }
-        let is_accessible = Path::new(&path).is_dir();
-        if !is_accessible && !path.is_empty() {
-            // Recover gracefully from common bogus paths: "Open With"
-            // multi-selections that get joined as
-            // "C:\\Downloads\\f1.txt,f2.txt,f3.txt..." or paste-mangled
-            // address-bar input. Try the parent of the first segment;
-            // if that's a real directory, navigate there silently.
+        // Only synchronously probe comma-joined paste mistakes. Normal folder
+        // opens validate on a worker thread so slow/network paths never block
+        // the UI thread during startup.
+        if !path.is_empty() && path.contains(',') {
             if let Some(target) = recover_navigable_path(&path) {
                 self.navigate(ui, target, push_history);
                 return;
             }
-            ui.set_empty_state(ss(format!("Cannot open \"{}\"", path)));
-            return;
+            if !Path::new(&path).is_dir() {
+                ui.set_empty_state(ss(format!("Cannot open \"{}\"", path)));
+                return;
+            }
         }
         if !same_path_string(&self.current_path, &path) {
             self.bump_nav_generation();
@@ -13738,6 +13990,15 @@ impl NativeController {
             let page = DirectoryPage {
                 entries,
                 partial: false,
+                skipped_entries: 0,
+            };
+            self.apply_directory_listing(ui, path, page, push_history, false);
+            return;
+        }
+        if let Some(entries) = list_directory_from_index(&path) {
+            let page = DirectoryPage {
+                entries,
+                partial: true,
                 skipped_entries: 0,
             };
             self.apply_directory_listing(ui, path, page, push_history, false);
@@ -13900,15 +14161,14 @@ impl NativeController {
             let chunk_size = 2000usize;
             let mut accumulated: Vec<FileEntry> = Vec::with_capacity(total);
             for chunk in dir_entries.chunks(chunk_size) {
-                let mut entries: Vec<FileEntry> = chunk
+                let entries: Vec<FileEntry> = chunk
                     .par_iter()
                     .filter_map(|entry| {
                         let path = entry.path();
                         entry.metadata().ok().map(|m| path_to_entry(&path, &m))
                     })
                     .collect();
-                accumulated.append(&mut entries);
-                sort_entries(&mut accumulated);
+                accumulated = merge_sorted_file_entries(accumulated, entries);
                 if let Ok(mut lock) = pending.lock() {
                     *lock = Some(NativeDirectoryResult {
                         path: path.clone(),
@@ -13916,6 +14176,7 @@ impl NativeController {
                         generation,
                         partial: true,
                         skipped_entries: 0,
+                        error: None,
                     });
                 }
                 ready.store(true, Ordering::Release);
@@ -15141,7 +15402,10 @@ impl NativeController {
             "new-tab" => self.new_tab(ui),
             "close-tab" => self.close_tab(ui, -1),
             "refresh" => self.refresh(ui),
-            "settings" => ui.set_settings_visible(true),
+            "settings" => {
+                ui.set_settings_visible(true);
+                self.spawn_performance_status(ui);
+            }
             "command-palette" => ui.set_command_visible(true),
             "view-grid" => self.set_view(ui, "grid"),
             "view-list" => self.set_view(ui, "list"),
@@ -15539,6 +15803,7 @@ impl NativeController {
             "performance-settings" => {
                 ui.set_settings_tab(ss("performance"));
                 ui.set_settings_visible(true);
+                self.spawn_performance_status(ui);
             }
             "privacy-storage" => self.show_privacy_storage(ui),
             "open-releases" => {
@@ -19202,18 +19467,47 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let timer = slint::Timer::default();
         let prev_ai_install = Rc::new(Cell::new(local_ai::InstallState::NotInstalled));
         let prev_ai_cell = prev_ai_install.clone();
-        // 200ms tick: merges background work without waking the UI loop ten
-        // times per second while idle.
+        let idle_poll_skips = Rc::new(Cell::new(0u8));
+        let idle_skips_cell = idle_poll_skips.clone();
+        // 200ms tick when work is pending; skips every other tick when idle.
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(200),
             move || {
+                if let Some(ui) = weak.upgrade() {
+                    if let Ok(mut ctrl) = c.try_borrow_mut() {
+                        ctrl.apply_deferred_startup_if_ready(&ui);
+                        ctrl.pump_visible_enrichment(&ui);
+                    }
+                }
+
                 let thumb_fired = ready_flag.swap(false, Ordering::AcqRel);
                 let git_fired = git_ready.swap(false, Ordering::AcqRel);
                 let op_fired = op_ready.swap(false, Ordering::AcqRel);
-
-                if let Some(ui) = weak.upgrade() {
-                    c.borrow_mut().apply_deferred_startup_if_ready(&ui);
+                let dir_pending = dir_ready.load(Ordering::Acquire);
+                let search_pending = search_ready.load(Ordering::Acquire);
+                let storage_pending = {
+                    if let Ok(ctrl) = c.try_borrow() {
+                        ctrl.storage_scan_ready.load(Ordering::Acquire)
+                            || ctrl.storage_scan_active
+                    } else {
+                        false
+                    }
+                };
+                let work_pending = thumb_fired
+                    || git_fired
+                    || op_fired
+                    || dir_pending
+                    || search_pending
+                    || storage_pending;
+                if !work_pending {
+                    let skips = idle_skips_cell.get();
+                    idle_skips_cell.set(skips.wrapping_add(1));
+                    if skips.is_multiple_of(2) {
+                        return;
+                    }
+                } else {
+                    idle_skips_cell.set(0);
                 }
 
                 // Storage scan completion: drain the pending result, cache it,
@@ -19296,7 +19590,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                             ui.set_ai_device(ss(&caps.reason));
                             ui.set_ai_gpu_status(ss(&caps.gpu_summary));
                             ui.set_ai_label(ss(ai_status_label(&caps)));
-                            ui.set_semantic_search_available(local_ai_semantic_ready());
+                            invalidate_local_ai_ready_cache();
+                            ui.set_semantic_search_available(local_ai_semantic_ready_cached());
                         }
                     }
                     prev_ai_cell.set(ai_state);
@@ -19322,6 +19617,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                     return;
                                 }
                                 if !same_path_string(&ctrl.current_path, &result.path) {
+                                    return;
+                                }
+                                if let Some(err) = result.error {
+                                    ui.set_empty_state(ss(format!(
+                                        "Cannot open \"{}\"",
+                                        result.path
+                                    )));
+                                    ctrl.show_toast_kind(&ui, err, "error");
                                     return;
                                 }
                                 if ctrl.files.is_empty() {
