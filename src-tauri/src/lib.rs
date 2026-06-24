@@ -281,6 +281,7 @@ struct NativeSearchResult {
     query: String,
     entries: Vec<FileEntry>,
     source: String,
+    partial: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -290,6 +291,9 @@ pub struct FileOp {
     pub to: Option<String>,
     #[serde(default)]
     pub trash_id: Option<String>,
+    /// Populated for `batch_rename` — reversed as one undo step.
+    #[serde(default)]
+    pub batch: Option<Vec<RenameOp>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -639,18 +643,132 @@ fn parse_hex_color(hex: &str) -> slint::Color {
 }
 
 fn bucket_display_name(id: &str) -> &'static str {
-    match id {
+    match storage_canonical_bucket(id) {
         "apps" => "Apps",
-        "documents" => "Docs",
-        "pictures" => "Pictures",
-        "videos" => "Videos",
-        "music" => "Music",
+        "documents" => "Documents",
+        "media" => "Media",
         "downloads" => "Downloads",
         "desktop" => "Desktop",
-        "temp" => "Temp",
+        "cache" => "Cache",
         "system" => "System",
         _ => "Other",
     }
+}
+
+/// Map legacy bucket ids from older scans/cache files into the current taxonomy.
+fn storage_canonical_bucket(id: &str) -> &'static str {
+    match id {
+        "pictures" | "videos" | "music" => "media",
+        "temp" => "cache",
+        "apps" => "apps",
+        "documents" => "documents",
+        "media" => "media",
+        "downloads" => "downloads",
+        "desktop" => "desktop",
+        "cache" => "cache",
+        "system" => "system",
+        "other" => "other",
+        _ => "other",
+    }
+}
+
+fn users_profile_rest(path_bytes: &[u8]) -> Option<&[u8]> {
+    const USERS: &[u8] = br"\users\";
+    let pos = path_bytes.windows(USERS.len()).position(|window| {
+        window
+            .iter()
+            .zip(USERS)
+            .all(|(a, b)| ascii_byte_eq_ci(*a, *b))
+    })?;
+    let after = &path_bytes[pos + USERS.len()..];
+    let sep = after.iter().position(|&b| b == b'\\' || b == b'/')?;
+    Some(&after[sep + 1..])
+}
+
+fn profile_bucket_for_rest(rest: &[u8]) -> Option<&'static str> {
+    if rest.is_empty() {
+        return None;
+    }
+    if rest.starts_with(b"downloads\\") || rest == b"downloads" {
+        return Some("downloads");
+    }
+    if rest.starts_with(b"desktop\\") || rest == b"desktop" {
+        return Some("desktop");
+    }
+    if rest.starts_with(b"documents\\") || rest == b"documents" {
+        return Some("documents");
+    }
+    if rest.starts_with(b"pictures\\")
+        || rest == b"pictures"
+        || rest.starts_with(b"videos\\")
+        || rest == b"videos"
+        || rest.starts_with(b"music\\")
+        || rest == b"music"
+    {
+        return Some("media");
+    }
+    None
+}
+
+fn storage_is_app_path(path_bytes: &[u8]) -> bool {
+    path_bytes_contains_ci(path_bytes, br"\program files\")
+        || path_bytes_contains_ci(path_bytes, br"\program files (x86)\")
+        || path_bytes_contains_ci(path_bytes, br"\programdata\")
+        || path_bytes_contains_ci(path_bytes, br"\appdata\local\programs\")
+        || path_bytes_contains_ci(
+            path_bytes,
+            br"\appdata\roaming\microsoft\windows\start menu\programs\",
+        )
+        || path_bytes_contains_ci(path_bytes, br"\steamapps\")
+        || path_bytes_contains_ci(path_bytes, br"\epic games\")
+        || path_bytes_contains_ci(path_bytes, br"\xboxgames\")
+        || path_bytes_contains_ci(path_bytes, br"\riot games\")
+        || path_bytes_contains_ci(path_bytes, br"\gog games\")
+        || path_bytes_contains_ci(path_bytes, br"\gog galaxy\")
+        || path_bytes_contains_ci(path_bytes, br"\ea games\")
+        || path_bytes_contains_ci(path_bytes, br"\origin games\")
+        || path_bytes_contains_ci(path_bytes, br"\ubisoft game launcher\")
+        || path_bytes_contains_ci(path_bytes, br"\battle.net\")
+        || path_bytes_contains_ci(path_bytes, br"\bethesda.net launcher\")
+        || path_bytes_contains_ci(path_bytes, br"\rockstar games\")
+        || path_bytes_contains_ci(path_bytes, br"\steamlibrary\")
+        || path_bytes_contains_ci(path_bytes, br"\steam library\")
+}
+
+fn temp_path_depth_after_root(path_bytes: &[u8]) -> Option<usize> {
+    for marker in [br"\appdata\local\temp\" as &[u8], br"\windows\temp\"] {
+        if let Some(pos) = path_bytes.windows(marker.len()).position(|window| {
+            window
+                .iter()
+                .zip(marker.iter())
+                .all(|(a, b)| ascii_byte_eq_ci(*a, *b))
+        }) {
+            let rest = &path_bytes[pos + marker.len()..];
+            let depth = rest
+                .split(|&b| b == b'\\' || b == b'/')
+                .filter(|seg| !seg.is_empty())
+                .count();
+            return Some(depth);
+        }
+    }
+    None
+}
+
+fn storage_is_cache_path(path_bytes: &[u8], file_name: &str) -> bool {
+    if path_bytes_contains_ci(path_bytes, br"\inetcache\") {
+        return true;
+    }
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".tmp") || lower.ends_with(".temp") {
+        return true;
+    }
+    // Only shallow temp files count as cache. Deep trees under %TEMP%
+    // (installers, extracted archives, dev sandboxes) stay in their
+    // real category instead of being lumped into "Cache & temp".
+    if let Some(depth) = temp_path_depth_after_root(path_bytes) {
+        return depth <= 2;
+    }
+    false
 }
 
 fn bucket_color_for(id: &str) -> slint::Color {
@@ -779,16 +897,12 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
         &mut tips,
         result,
         "TM",
-        "Temp / cache",
-        "Temporary files - safe to clear",
+        "Temp / cache files",
+        "Temporary files and browser caches you can usually clear safely",
         &[
             "\\appdata\\local\\temp\\",
             "\\windows\\temp\\",
-            "\\cache\\",
-            "\\caches\\",
-            "/cache/",
-            "/caches/",
-            "\\packagecache\\",
+            "\\inetcache\\",
         ],
         TIP_ACCENT_TIP,
         "",
@@ -850,25 +964,20 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
                 "Click the Documents card to surface the biggest folders. Archives, project \
                  backups, and downloads pile up here.",
             ),
-            "media" | "pictures" => (
-                "PX",
-                "Pictures dominate this drive. Drill in to find duplicates or originals you \
-                 already exported.",
+            "media" => (
+                "MD",
+                "Media files dominate this drive. Drill in to find large photos, videos, \
+                 or music you can archive or remove.",
             ),
-            "videos" => (
-                "VD",
-                "Video files dominate this drive. Drill in to find large recordings you no \
-                 longer need.",
+            "cache" => (
+                "TC",
+                "Temporary and cache files add up quickly. These are usually safe to clear \
+                 from Settings > System > Storage.",
             ),
             "system" => (
                 "SY",
                 "System data is large. Windows Update files, driver packages, and component \
                  stores accumulate over time.",
-            ),
-            "temp" => (
-                "TC",
-                "Temporary files dominate the scan. Safe to clear via Settings > System > \
-                 Storage > Temporary files.",
             ),
             _ => continue,
         };
@@ -1466,6 +1575,73 @@ fn same_destination(left: &Path, right: &Path) -> bool {
     }
 }
 
+fn names_same_for_rename(old_name: &str, new_name: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        old_name.eq_ignore_ascii_case(new_name)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        old_name == new_name
+    }
+}
+
+/// Merge the inline-rename stem the user typed with the original extension.
+fn finalize_inline_rename_name(old_name: &str, typed: &str, is_dir: bool) -> String {
+    let typed = typed.trim();
+    if typed.is_empty() || is_dir {
+        return typed.to_string();
+    }
+    let old = Path::new(old_name);
+    if old
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with('.') && !n[1..].contains('.'))
+    {
+        return typed.to_string();
+    }
+    let Some(ext) = old.extension() else {
+        return typed.to_string();
+    };
+    let ext = ext.to_string_lossy();
+    if typed.contains('.') {
+        return typed.to_string();
+    }
+    format!("{typed}.{ext}")
+}
+
+#[cfg(target_os = "windows")]
+fn today_yyyy_mm_dd() -> String {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    let st = unsafe { GetLocalTime() };
+    format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn today_yyyy_mm_dd() -> String {
+    "1970-01-01".to_string()
+}
+
+fn apply_rename_preset(preset: &str, file_name: &str) -> Option<String> {
+    match preset {
+        "lowercase extensions" => {
+            if let Some(pos) = file_name.rfind('.') {
+                Some(format!(
+                    "{}{}",
+                    &file_name[..pos],
+                    file_name[pos..].to_ascii_lowercase()
+                ))
+            } else {
+                Some(file_name.to_string())
+            }
+        }
+        "replace spaces with dashes" => Some(file_name.replace(' ', "-")),
+        "prefix date" => Some(format!("{}_{file_name}", today_yyyy_mm_dd())),
+        "number sequence" => None,
+        _ => None,
+    }
+}
+
 fn quick_sha256(path: &Path, max_bytes: u64) -> Option<String> {
     let mut file = File::open(path).ok()?;
     let mut hasher = Sha256::new();
@@ -1742,6 +1918,112 @@ fn apply_rename_template(template: &str, src: &std::path::Path, n: usize) -> Str
     out
 }
 
+#[derive(Debug, Clone)]
+struct BatchRenameParams {
+    find: String,
+    replace: String,
+    prefix: String,
+    suffix: String,
+    template: String,
+}
+
+fn apply_batch_rename_advanced(
+    params: &BatchRenameParams,
+    src: &std::path::Path,
+    n: usize,
+) -> Result<String, String> {
+    let template = params.template.trim();
+    let mut name = if template.is_empty() {
+        src.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        apply_rename_template(template, src, n)
+    };
+
+    if !params.find.trim().is_empty() {
+        let re = regex::Regex::new(params.find.trim())
+            .map_err(|e| format!("Invalid find pattern: {e}"))?;
+        name = re
+            .replace_all(&name, params.replace.as_str())
+            .into_owned();
+    }
+
+    if !params.prefix.is_empty() {
+        name = format!("{}{name}", params.prefix);
+    }
+
+    if !params.suffix.is_empty() {
+        if let Some(dot) = name.rfind('.') {
+            if dot > 0 {
+                name = format!("{}{}{}", &name[..dot], params.suffix, &name[dot..]);
+            } else {
+                name.push_str(&params.suffix);
+            }
+        } else {
+            name.push_str(&params.suffix);
+        }
+    }
+
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Produced empty filename".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("Name cannot contain path separators".to_string());
+    }
+    Ok(name.to_string())
+}
+
+fn batch_rename_preview_lines(paths: &[String], params: &BatchRenameParams, limit: usize) -> String {
+    let mut lines = Vec::new();
+    for (i, path) in paths.iter().take(limit).enumerate() {
+        let src = Path::new(path);
+        let original = src
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+        match apply_batch_rename_advanced(params, src, i + 1) {
+            Ok(renamed) => lines.push(format!("{original}  ->  {renamed}")),
+            Err(error) => return format!("Preview error: {error}"),
+        }
+    }
+    lines.join("\n")
+}
+
+fn native_rename_replace(state: &AppState, path: &str, new_name: &str) -> Result<String, String> {
+    let src = PathBuf::from(path);
+    let parent = src.parent().ok_or("No parent directory")?;
+    let dst = parent.join(new_name.trim());
+    if dst.exists() && !same_destination(&src, &dst) {
+        if dst.is_dir() {
+            return Err("Cannot replace a folder with a file rename".to_string());
+        }
+        fs::remove_file(&dst).map_err(|e| e.to_string())?;
+    }
+    native_rename(state, path, new_name)
+}
+
+fn pdf_first_page_preview(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() > 12 * 1024 * 1024 {
+        return None;
+    }
+    let text = pdf_extract::extract_text_from_mem(&bytes).ok()?;
+    let preview: String = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(48)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if preview.is_empty() {
+        None
+    } else {
+        Some(preview)
+    }
+}
+
 /// Natural / "Windows Explorer" string comparison: numeric runs are compared
 /// as numbers so `file2.txt` sorts before `file10.txt` instead of after.
 /// Both inputs should already be lowercase if you want case-insensitive ordering.
@@ -1857,6 +2139,24 @@ impl AppState {
         self.log_op_with_trash(kind, from, to, None);
     }
 
+    fn log_op_batch_rename(&self, ops: Vec<RenameOp>) {
+        if ops.is_empty() {
+            return;
+        }
+        if let Ok(mut log) = self.operation_log.lock() {
+            log.push(FileOp {
+                kind: "batch_rename".to_string(),
+                from: String::new(),
+                to: None,
+                trash_id: None,
+                batch: Some(ops),
+            });
+            if log.len() > 50 {
+                log.remove(0);
+            }
+        }
+    }
+
     fn log_op_with_trash(
         &self,
         kind: &str,
@@ -1870,6 +2170,7 @@ impl AppState {
                 from: from.to_string(),
                 to: to.map(|s| s.to_string()),
                 trash_id: trash_id.map(|s| s.to_string()),
+                batch: None,
             });
             if log.len() > 50 {
                 log.remove(0);
@@ -3373,6 +3674,7 @@ fn open_with_dialog(path: &str, ui: Option<&MainWindow>) -> Result<(), String> {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
         use windows::Win32::UI::Shell::{SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, ShellExecuteExW};
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
         use windows::core::PCWSTR;
 
         let path_wide: Vec<u16> = OsStr::new(path)
@@ -3380,7 +3682,10 @@ fn open_with_dialog(path: &str, ui: Option<&MainWindow>) -> Result<(), String> {
             .chain(std::iter::once(0))
             .collect();
         let verb_wide: Vec<u16> = "openas\0".encode_utf16().collect();
-        let hwnd = main_window_hwnd(ui);
+        let mut hwnd = main_window_hwnd(ui);
+        if hwnd.0.is_null() {
+            hwnd = unsafe { GetForegroundWindow() };
+        }
         let mut info = SHELLEXECUTEINFOW {
             cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
             fMask: SEE_MASK_INVOKEIDLIST,
@@ -3394,7 +3699,7 @@ fn open_with_dialog(path: &str, ui: Option<&MainWindow>) -> Result<(), String> {
         };
 
         unsafe {
-            if ShellExecuteExW(&mut info).is_ok() {
+            if ShellExecuteExW(&mut info).is_ok() && info.hInstApp.0 as isize > 32 {
                 return Ok(());
             }
         }
@@ -4003,6 +4308,7 @@ fn publish_search_result(
     query: &str,
     entries: Vec<FileEntry>,
     source: String,
+    partial: bool,
 ) {
     if let Ok(mut lock) = pending.lock() {
         *lock = Some(NativeSearchResult {
@@ -4010,6 +4316,7 @@ fn publish_search_result(
             query: query.to_string(),
             entries,
             source,
+            partial,
         });
     }
     ready.store(true, Ordering::Release);
@@ -4380,10 +4687,13 @@ fn read_preview_uncached(
     }
 
     if ext == "pdf" {
+        let text = pdf_first_page_preview(path_buf).unwrap_or_else(|| {
+            generic_metadata_preview(path_buf, metadata, "PDF document")
+        });
         return Ok(PreviewContent {
             kind: "pdf".to_string(),
             mime: Some("application/pdf".to_string()),
-            text: Some(generic_metadata_preview(path_buf, metadata, "PDF document")),
+            text: Some(text),
             data_url: None,
             truncated: false,
         });
@@ -4400,10 +4710,18 @@ fn read_preview_uncached(
     }
 
     if is_media_ext(&ext) {
+        let kind_label = if matches!(
+            ext.as_str(),
+            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a"
+        ) {
+            "Audio"
+        } else {
+            "Video"
+        };
         return Ok(PreviewContent {
             kind: "media".to_string(),
-            mime: None,
-            text: Some(generic_metadata_preview(path_buf, metadata, "Media file")),
+            mime: mime_for_ext(&ext).map(|s| s.to_string()),
+            text: Some(generic_metadata_preview(path_buf, metadata, kind_label)),
             data_url: None,
             truncated: false,
         });
@@ -5646,59 +5964,25 @@ fn storage_rollup_folder_for_file(file_path: &Path, root_components: usize) -> O
 
 fn storage_bucket_for(path: &Path, ctx: &StorageScanCtx) -> &'static str {
     let path_bytes = path.as_os_str().as_encoded_bytes();
-    // v0.9.14: any .sys file is OS-managed (drivers, paging files,
-    // hibernation, etc.) - never classify as "apps" even when the
-    // extension lookup would otherwise place it there. Also catches
-    // pagefile.sys / hiberfil.sys / swapfile.sys at the drive root,
-    // which previously fell through to "apps" via the .sys ext rule.
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
     if file_name.to_ascii_lowercase().ends_with(".sys") {
         return "system";
-    }
-    if path_bytes_contains_ci(path_bytes, br"\program files\")
-        || path_bytes_contains_ci(path_bytes, br"\program files (x86)\")
-        || path_bytes_contains_ci(path_bytes, br"\programdata\")
-        || path_bytes_contains_ci(path_bytes, br"\appdata\local\programs\")
-        || path_bytes_contains_ci(
-            path_bytes,
-            br"\appdata\roaming\microsoft\windows\start menu\programs\",
-        )
-        || path_bytes_contains_ci(path_bytes, br"\steamapps\")
-        || path_bytes_contains_ci(path_bytes, br"\epic games\")
-        || path_bytes_contains_ci(path_bytes, br"\xboxgames\")
-        || path_bytes_contains_ci(path_bytes, br"\riot games\")
-        || path_bytes_contains_ci(path_bytes, br"\gog games\")
-        || path_bytes_contains_ci(path_bytes, br"\gog galaxy\")
-        || path_bytes_contains_ci(path_bytes, br"\ea games\")
-        || path_bytes_contains_ci(path_bytes, br"\origin games\")
-        || path_bytes_contains_ci(path_bytes, br"\ubisoft game launcher\")
-        || path_bytes_contains_ci(path_bytes, br"\battle.net\")
-        || path_bytes_contains_ci(path_bytes, br"\bethesda.net launcher\")
-        || path_bytes_contains_ci(path_bytes, br"\rockstar games\")
-        || path_bytes_contains_ci(path_bytes, br"\games\")
-        || path_bytes_contains_ci(path_bytes, br"\game library\")
-        || path_bytes_contains_ci(path_bytes, br"\steamlibrary\")
-        || path_bytes_contains_ci(path_bytes, br"\steam library\")
-    {
-        return "apps";
     }
     if path_bytes_contains_ci(path_bytes, br"\windows\")
         || path_bytes_contains_ci(path_bytes, br"\winsxs\")
     {
         return "system";
     }
-    if path_bytes_contains_ci(path_bytes, br"\appdata\local\temp\")
-        || path_bytes_contains_ci(path_bytes, br"\windows\temp\")
-        || path_bytes_contains_ci(path_bytes, br"\cache\")
-        || path_bytes_contains_ci(path_bytes, br"\caches\")
-    {
-        return "temp";
+    if storage_is_cache_path(path_bytes, file_name) {
+        return "cache";
     }
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if file_name.len() >= 4 {
-        let lower = file_name.as_bytes();
-        if lower.ends_with(b".tmp") || lower.ends_with(b".log") {
-            return "temp";
+    if storage_is_app_path(path_bytes) {
+        return "apps";
+    }
+    if let Some(rest) = users_profile_rest(path_bytes) {
+        if let Some(bucket) = profile_bucket_for_rest(rest) {
+            return bucket;
         }
     }
     if let Some(home) = ctx.home_lower.as_ref() {
@@ -5710,45 +5994,37 @@ fn storage_bucket_for(path: &Path, ctx: &StorageScanCtx) -> &'static str {
             let rest = &path_bytes[home.len()..];
             let rest = rest.strip_prefix(b"\\").or_else(|| rest.strip_prefix(b"/"));
             if let Some(rest) = rest {
-                if rest.starts_with(b"downloads\\") || rest == b"downloads" {
-                    return "downloads";
-                }
-                if rest.starts_with(b"desktop\\") || rest == b"desktop" {
-                    return "desktop";
-                }
-                if rest.starts_with(b"documents\\") || rest == b"documents" {
-                    return "documents";
-                }
-                if rest.starts_with(b"pictures\\") || rest == b"pictures" {
-                    return "pictures";
-                }
-                if rest.starts_with(b"videos\\") || rest == b"videos" {
-                    return "videos";
-                }
-                if rest.starts_with(b"music\\") || rest == b"music" {
-                    return "music";
+                if let Some(bucket) = profile_bucket_for_rest(rest) {
+                    return bucket;
                 }
             }
         }
     }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    storage_bucket_for_ext(ext)
+    storage_bucket_for_ext(ext, path_bytes)
 }
 
-fn storage_bucket_for_ext(ext: &str) -> &'static str {
-    match ext {
+fn storage_bucket_for_ext(ext: &str, path_bytes: &[u8]) -> &'static str {
+    let ext = ext.to_ascii_lowercase();
+    match ext.as_str() {
         "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "heic" | "raw"
-        | "cr2" | "nef" | "arw" | "svg" | "JPG" | "JPEG" | "PNG" | "GIF" | "WEBP" | "BMP"
-        | "TIF" | "TIFF" | "HEIC" | "RAW" | "CR2" | "NEF" | "ARW" | "SVG" => "pictures",
-        "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" | "flv" | "m4v" | "mpg" | "mpeg" | "MP4"
-        | "MOV" | "MKV" | "AVI" | "WEBM" | "WMV" | "FLV" | "M4V" | "MPG" | "MPEG" => "videos",
-        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" | "opus" | "MP3" | "WAV"
-        | "FLAC" | "AAC" | "OGG" | "M4A" | "WMA" | "OPUS" => "music",
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "rtf" | "odt"
-        | "epub" | "PDF" | "DOC" | "DOCX" | "XLS" | "XLSX" | "PPT" | "PPTX" | "TXT" | "MD"
-        | "RTF" | "ODT" | "EPUB" => "documents",
-        "exe" | "msi" | "msix" | "appx" | "dll" | "EXE" | "MSI" | "MSIX" | "APPX" | "DLL" => "apps",
-        "sys" | "SYS" => "system",
+        | "cr2" | "nef" | "arw" | "svg" | "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv"
+        | "flv" | "m4v" | "mpg" | "mpeg" | "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a"
+        | "wma" | "opus" => "media",
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "rtf"
+        | "odt" | "epub" | "zip" | "7z" | "rar" | "tar" | "gz" | "bz2" | "xz" | "cab" => {
+            "documents"
+        }
+        "exe" | "msi" | "msix" | "appx" if storage_is_app_path(path_bytes) => "apps",
+        "exe" | "msi" | "msix" | "appx" => "other",
+        "dll"
+            if storage_is_app_path(path_bytes)
+                || path_bytes_contains_ci(path_bytes, br"\windows\") =>
+        {
+            "apps"
+        }
+        "dll" => "other",
+        "sys" => "system",
         _ => "other",
     }
 }
@@ -5769,22 +6045,10 @@ fn storage_bucket_meta() -> Vec<(&'static str, &'static str, &'static str, &'sta
             "#185FA5",
         ),
         (
-            "pictures",
-            "Pictures",
+            "media",
+            "Media",
             "M21 15V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2z M8 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z M21 19l-6-6-9 9",
             "#A87EF8",
-        ),
-        (
-            "videos",
-            "Videos",
-            "M22 8l-6 4 6 4V8z M14 6H4a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2z",
-            "#F472B6",
-        ),
-        (
-            "music",
-            "Music",
-            "M9 18V5l12-2v13 M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0z M21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
-            "#0F6E6E",
         ),
         (
             "downloads",
@@ -5799,8 +6063,8 @@ fn storage_bucket_meta() -> Vec<(&'static str, &'static str, &'static str, &'sta
             "#8A5A00",
         ),
         (
-            "temp",
-            "Temporary",
+            "cache",
+            "Cache & temp",
             "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
             "#C04870",
         ),
@@ -5817,6 +6081,67 @@ fn storage_bucket_meta() -> Vec<(&'static str, &'static str, &'static str, &'sta
             "#4A6A20",
         ),
     ]
+}
+
+fn remap_storage_entry_bucket(entry: &mut StorageEntry) {
+    entry.bucket = storage_canonical_bucket(&entry.bucket).to_string();
+}
+
+fn migrate_storage_scan_result(result: &mut StorageScanResult) {
+    for entry in &mut result.top_items {
+        remap_storage_entry_bucket(entry);
+    }
+    for items in result.bucket_items.values_mut() {
+        for entry in items {
+            remap_storage_entry_bucket(entry);
+        }
+    }
+    for items in result.bucket_folder_items.values_mut() {
+        for entry in items {
+            remap_storage_entry_bucket(entry);
+        }
+    }
+
+    let meta = storage_bucket_meta();
+    let mut merged: HashMap<String, StorageBucket> = HashMap::new();
+    for b in result.buckets.drain(..) {
+        let id = storage_canonical_bucket(&b.id).to_string();
+        let entry = merged.entry(id.clone()).or_insert_with(|| {
+            let (_, name, icon, color) = meta
+                .iter()
+                .find(|(bid, _, _, _)| *bid == id.as_str())
+                .copied()
+                .unwrap_or(("other", "Other", "", "#4A6A20"));
+            StorageBucket {
+                id: id.clone(),
+                name: name.to_string(),
+                icon: icon.to_string(),
+                bytes: 0,
+                file_count: 0,
+                color: color.to_string(),
+            }
+        });
+        entry.bytes = entry.bytes.saturating_add(b.bytes);
+        entry.file_count = entry.file_count.saturating_add(b.file_count);
+    }
+    result.buckets = meta
+        .iter()
+        .filter_map(|(id, _, _, _)| merged.remove(*id))
+        .collect();
+
+    let mut merged_items: HashMap<String, Vec<StorageEntry>> = HashMap::new();
+    for (key, items) in result.bucket_items.drain() {
+        let canon = storage_canonical_bucket(&key).to_string();
+        merged_items.entry(canon).or_default().extend(items);
+    }
+    result.bucket_items = merged_items;
+
+    let mut merged_folders: HashMap<String, Vec<StorageEntry>> = HashMap::new();
+    for (key, items) in result.bucket_folder_items.drain() {
+        let canon = storage_canonical_bucket(&key).to_string();
+        merged_folders.entry(canon).or_default().extend(items);
+    }
+    result.bucket_folder_items = merged_folders;
 }
 
 /// Whole-drive storage scan, optimized for throughput.
@@ -6536,6 +6861,39 @@ mod storage_tests {
     use super::*;
 
     #[test]
+    fn storage_bucket_classifies_profile_media() {
+        let ctx = StorageScanCtx::new();
+        let path = Path::new(r"C:\Users\Someone\Pictures\vacation.jpg");
+        assert_eq!(storage_bucket_for(path, &ctx), "media");
+    }
+
+    #[test]
+    fn storage_bucket_classifies_documents_and_archives() {
+        let ctx = StorageScanCtx::new();
+        assert_eq!(
+            storage_bucket_for(Path::new(r"C:\Data\backup.zip"), &ctx),
+            "documents"
+        );
+    }
+
+    #[test]
+    fn storage_bucket_narrow_cache_not_browser_cache() {
+        let ctx = StorageScanCtx::new();
+        let browser = Path::new(
+            r"C:\Users\a\AppData\Local\Google\Chrome\User Data\Default\Cache\f_001",
+        );
+        assert_ne!(storage_bucket_for(browser, &ctx), "cache");
+        let temp = Path::new(r"C:\Users\a\AppData\Local\Temp\setup.tmp");
+        assert_eq!(storage_bucket_for(temp, &ctx), "cache");
+    }
+
+    #[test]
+    fn storage_canonical_bucket_merges_legacy_ids() {
+        assert_eq!(storage_canonical_bucket("pictures"), "media");
+        assert_eq!(storage_canonical_bucket("temp"), "cache");
+    }
+
+    #[test]
     fn storage_drill_folders_drop_nested_subfolders() {
         let folders = vec![
             StorageEntry {
@@ -7159,6 +7517,24 @@ fn undo_last_operation(state: State<'_, AppState>) -> Result<String, String> {
         "delete" => {
             undo_delete_from_trash(op.trash_id.as_deref())?;
             Ok(format!("Restored '{}'", op.from))
+        }
+        "batch_rename" => {
+            let ops = op.batch.ok_or("Missing batch rename metadata")?;
+            for item in ops.iter().rev() {
+                let old_name = Path::new(&item.from)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| item.from.clone());
+                let src = Path::new(&item.to);
+                let dst = src.parent().map(|p| p.join(&old_name)).ok_or("No parent")?;
+                if dst.exists() {
+                    return Err(format!("'{}' already exists", dst.display()));
+                }
+                fs::rename(src, &dst).map_err(|e| e.to_string())?;
+                state.invalidate_path(src);
+                state.invalidate_path(&dst);
+            }
+            Ok(format!("Undid batch rename ({} items)", ops.len()))
         }
         _ => Err(format!("Cannot undo '{}'", op.kind)),
     }
@@ -7840,6 +8216,8 @@ enum PendingPrompt {
     NewTemplate(FileTemplate),
     CompareFolder(String),
     BatchRename(Vec<String>),
+    RenamePreset(Vec<String>),
+    RenameConflict { path: String, new_name: String },
     ConflictPaste {
         src: String,
         dest: String,
@@ -8035,9 +8413,11 @@ fn native_data_file(name: &str) -> PathBuf {
 
 fn read_storage_scan_cache() -> Option<StorageScanResult> {
     let path = native_data_file("storage_scan_cache.json");
-    fs::read_to_string(path)
+    let mut result = fs::read_to_string(path)
         .ok()
-        .and_then(|data| serde_json::from_str::<StorageScanResult>(&data).ok())
+        .and_then(|data| serde_json::from_str::<StorageScanResult>(&data).ok())?;
+    migrate_storage_scan_result(&mut result);
+    Some(result)
 }
 
 fn write_storage_scan_cache(result: &StorageScanResult) -> Result<(), String> {
@@ -12514,6 +12894,30 @@ impl NativeController {
         None
     }
 
+    fn secondary_rename_index(&self) -> Option<i32> {
+        if !self.secondary_selected_set.is_empty() {
+            if self.secondary_selected_set.len() != 1 {
+                return None;
+            }
+            return self
+                .secondary_selected_set
+                .iter()
+                .next()
+                .copied()
+                .map(|i| i as i32);
+        }
+        if self.secondary_selected_index >= 0 {
+            return Some(self.secondary_selected_index);
+        }
+        None
+    }
+
+    fn cancel_inline_rename(&self, ui: &MainWindow) {
+        if ui.get_rename_index() >= 0 {
+            ui.set_rename_index(-1);
+        }
+    }
+
     fn active_selected_indices(&self) -> Vec<usize> {
         if self.active_pane == ActivePane::Secondary {
             if !self.secondary_selected_set.is_empty() {
@@ -12812,16 +13216,13 @@ impl NativeController {
 
     fn update_file_models_inner(&mut self, ui: &MainWindow, enrich_visible: bool) {
         if enrich_visible {
-            // Populate the shell-icon cache for visible entries. Per-extension
-            // entries are cheap (one SHGetFileInfo per extension regardless of
-            // file count). Per-path entries are reserved for .exe / .lnk / .ico
-            // / .msi where the file body carries an embedded icon.
+            // Populate the shell-icon cache for visible entries.
             #[cfg(target_os = "windows")]
             self.populate_system_icons(32);
         }
-        // Pre-load any thumbnails that are cached on disk but not yet in memory
-        if enrich_visible && ui.get_view_mode() != "list" {
-            for entry in self.visible_files.iter().take(12) {
+        // Pre-load cached thumbnails for the first visible image files in any view.
+        if enrich_visible {
+            for entry in self.visible_files.iter().take(24) {
                 let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
                 if !is_thumbnail_image_ext(&ext) || self.thumbnail_memory.contains_key(&entry.path)
                 {
@@ -13047,6 +13448,19 @@ impl NativeController {
         };
         #[cfg(not(target_os = "windows"))]
         let (has_system_icon, system_icon) = (false, slint::Image::default());
+        let rename_label = if entry.kind == FileKind::Directory {
+            entry.name.clone()
+        } else {
+            let p = std::path::Path::new(&entry.name);
+            if entry.name.starts_with('.') && entry.name.matches('.').count() <= 1 {
+                entry.name.clone()
+            } else {
+                p.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| entry.name.clone())
+            }
+        };
         FileItem {
             name: ss(&entry.name),
             file_path: ss(&entry.path),
@@ -13094,6 +13508,7 @@ impl NativeController {
             date_group_text: SharedString::new(),
             show_date_group_header: false,
             is_cut_pending: self.entry_is_cut_pending(&entry.path),
+            rename_label: ss(&rename_label),
         }
     }
 
@@ -13735,7 +14150,7 @@ impl NativeController {
             .visible_files
             .iter()
             .filter(|e| is_thumbnail_image_ext(e.extension.as_deref().unwrap_or("")))
-            .take(64)
+            .take(96)
             .map(|e| (e.path.clone(), e.modified))
             .collect();
         if !image_entries.is_empty() {
@@ -13922,6 +14337,7 @@ impl NativeController {
     }
 
     fn navigate(&mut self, ui: &MainWindow, path: String, push_history: bool) {
+        self.cancel_inline_rename(ui);
         self.active_pane = ActivePane::Primary;
         let raw = if path.trim().is_empty() {
             self.current_path.clone()
@@ -14329,6 +14745,9 @@ impl NativeController {
     }
 
     fn select_with_modifiers(&mut self, ui: &MainWindow, index: i32, ctrl: bool, shift: bool) {
+        if ui.get_rename_index() >= 0 && index >= 0 && index != ui.get_rename_index() {
+            self.cancel_inline_rename(ui);
+        }
         self.active_pane = ActivePane::Primary;
         let n = self.visible_files.len();
         let mut changed: Vec<usize> = Vec::new();
@@ -14531,6 +14950,9 @@ impl NativeController {
             ui.set_preview_meta(ss(""));
             ui.set_preview_is_image(false);
             ui.set_preview_is_html(false);
+            ui.set_preview_is_media(false);
+            ui.set_preview_is_pdf(false);
+            ui.set_quick_look_path(ss(""));
             return;
         };
 
@@ -14566,6 +14988,9 @@ impl NativeController {
 
         // Try to load image preview from thumbnail cache
         let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
+        ui.set_preview_is_pdf(ext == "pdf");
+        ui.set_preview_is_media(is_media_ext(&ext));
+        ui.set_quick_look_path(ss(&entry.path));
         let is_image = is_thumbnail_image_ext(&ext);
         if is_image {
             let disk_key = thumbnail_cache_key(Path::new(&entry.path), entry.modified, 160);
@@ -14739,6 +15164,23 @@ impl NativeController {
         ui.set_preview_visible(visible);
         if visible {
             self.update_preview(ui);
+        }
+    }
+
+    fn toggle_quick_look(&mut self, ui: &MainWindow) {
+        let visible = !ui.get_quick_look_visible();
+        if visible {
+            if self.selected_entry().is_none() {
+                self.show_toast(ui, "Select a file first.");
+                return;
+            }
+            if !ui.get_preview_visible() {
+                ui.set_preview_visible(true);
+            }
+            self.update_preview(ui);
+            ui.set_quick_look_visible(true);
+        } else {
+            ui.set_quick_look_visible(false);
         }
     }
 
@@ -14933,13 +15375,56 @@ impl NativeController {
         } else {
             SEARCH_LIVE_SCAN_LIMIT
         };
+        let prefer_live_first = self.search_all_scope || is_drive_root;
         std::thread::spawn(move || {
-            let mut results = index_search(&path, &query, limit).unwrap_or_default();
-            let mut source = if results.is_empty() {
-                "live scan".to_string()
-            } else {
-                "Pathfinder index".to_string()
+            let mut results = Vec::new();
+            let mut source = String::new();
+
+            let emit = |entries: &[FileEntry], source: &str, partial: bool| {
+                if entries.is_empty() && partial {
+                    return;
+                }
+                let mut snapshot = entries.to_vec();
+                sort_entries(&mut snapshot);
+                publish_search_result(
+                    &pending,
+                    &ready,
+                    &path,
+                    &query,
+                    snapshot,
+                    source.to_string(),
+                    partial,
+                );
             };
+
+            if prefer_live_first {
+                let live = live_search_scan(&state, &path, &query, limit, token);
+                if state.search_generation.load(Ordering::SeqCst) != token {
+                    return;
+                }
+                if !live.is_empty() {
+                    let _ = upsert_index_entries(&live);
+                    merge_search_entries(&mut results, live, limit);
+                    source = "live scan".to_string();
+                    emit(&results, &source, true);
+                }
+            }
+
+            if results.len() < limit {
+                if let Ok(indexed) =
+                    index_search(&path, &query, limit.saturating_sub(results.len()))
+                {
+                    if !indexed.is_empty() {
+                        merge_search_entries(&mut results, indexed, limit);
+                        source = if source.is_empty() {
+                            "Pathfinder index".to_string()
+                        } else {
+                            format!("{source} + Pathfinder index")
+                        };
+                        emit(&results, &source, true);
+                    }
+                }
+            }
 
             if state.search_generation.load(Ordering::SeqCst) != token {
                 return;
@@ -14951,13 +15436,19 @@ impl NativeController {
                         let _ = upsert_index_entries(&windows_results);
                         merge_search_entries(&mut results, windows_results, limit);
                         source = "Windows Search".to_string();
+                        emit(&results, &source, true);
                     }
                 }
             } else if let Ok(windows_results) = windows_index_search_impl(&query, &path, limit) {
                 if !windows_results.is_empty() {
                     let _ = upsert_index_entries(&windows_results);
                     merge_search_entries(&mut results, windows_results, limit);
-                    source = "Pathfinder index + Windows Search".to_string();
+                    source = if source.is_empty() {
+                        "Windows Search".to_string()
+                    } else {
+                        format!("{source} + Windows Search")
+                    };
+                    emit(&results, &source, true);
                 }
             }
 
@@ -14965,7 +15456,7 @@ impl NativeController {
                 return;
             }
 
-            if results.len() < limit {
+            if results.len() < limit && !prefer_live_first {
                 let live = live_search_scan(
                     &state,
                     &path,
@@ -14981,9 +15472,12 @@ impl NativeController {
                     merge_search_entries(&mut results, live, limit);
                     source = if source.contains("Windows") {
                         "Pathfinder index + Windows Search + live scan".to_string()
+                    } else if source.is_empty() {
+                        "live scan".to_string()
                     } else {
-                        "Pathfinder index + live scan".to_string()
+                        format!("{source} + live scan")
                     };
+                    emit(&results, &source, true);
                 }
             }
 
@@ -14992,7 +15486,7 @@ impl NativeController {
             }
             sort_entries(&mut results);
             apply_semantic_search_ranking_entries(&path, &query, semantic, clip, &mut results);
-            publish_search_result(&pending, &ready, &path, &query, results, source);
+            publish_search_result(&pending, &ready, &path, &query, results, source, false);
         });
     }
 
@@ -15315,6 +15809,9 @@ impl NativeController {
     }
 
     fn secondary_file_selected(&mut self, ui: &MainWindow, index: i32, ctrl: bool, shift: bool) {
+        if ui.get_rename_index() >= 0 && index >= 0 && index != ui.get_rename_index() {
+            self.cancel_inline_rename(ui);
+        }
         self.active_pane = ActivePane::Secondary;
         let n = self.secondary_visible_files.len();
         let mut changed: Vec<usize> = Vec::new();
@@ -15842,20 +16339,20 @@ impl NativeController {
     }
 
     fn prompt_rename(&mut self, ui: &MainWindow) {
-        if self.active_pane == ActivePane::Secondary {
-            if let Some(entry) = self.selected_entry() {
-                self.pending_prompt = Some(PendingPrompt::Rename(entry.path));
-                ui.set_prompt_title(ss("Rename"));
-                ui.set_prompt_value(ss(entry.name));
-                ui.set_prompt_visible(true);
-            } else {
-                self.show_toast(ui, "Select a file first.");
-            }
-            return;
-        }
+        let index = if self.active_pane == ActivePane::Secondary {
+            self.secondary_rename_index()
+        } else {
+            self.primary_rename_index()
+        };
 
-        let Some(index) = self.primary_rename_index() else {
-            if !self.selected_set.is_empty() {
+        let Some(index) = index else {
+            if self.active_pane == ActivePane::Secondary {
+                if !self.secondary_selected_set.is_empty() {
+                    self.show_toast(ui, "Select a single item to rename.");
+                } else {
+                    self.show_toast(ui, "Select a file first.");
+                }
+            } else if !self.selected_set.is_empty() {
                 self.show_toast(ui, "Select a single item to rename.");
             } else {
                 self.show_toast(ui, "Select a file first.");
@@ -15890,36 +16387,213 @@ impl NativeController {
         ui.set_prompt_visible(true);
     }
 
+    fn batch_rename_params_from_ui(&self, ui: &MainWindow) -> BatchRenameParams {
+        BatchRenameParams {
+            find: ui.get_batch_rename_find().to_string(),
+            replace: ui.get_batch_rename_replace().to_string(),
+            prefix: ui.get_batch_rename_prefix().to_string(),
+            suffix: ui.get_batch_rename_suffix().to_string(),
+            template: ui.get_batch_rename_template().to_string(),
+        }
+    }
+
+    fn sync_batch_rename_preview(&self, ui: &MainWindow, paths: &[String]) {
+        let params = self.batch_rename_params_from_ui(ui);
+        let preview = batch_rename_preview_lines(paths, &params, 12);
+        let suffix = if paths.len() > 12 {
+            format!("\n... and {} more", paths.len() - 12)
+        } else {
+            String::new()
+        };
+        ui.set_batch_rename_preview(ss(format!("{preview}{suffix}")));
+    }
+
+    fn execute_batch_rename(
+        &mut self,
+        ui: &MainWindow,
+        paths: Vec<String>,
+        mut params: BatchRenameParams,
+    ) -> Result<usize, String> {
+        let template = params.template.trim();
+        if template.is_empty()
+            && params.find.trim().is_empty()
+            && params.prefix.is_empty()
+            && params.suffix.is_empty()
+        {
+            return Err("Enter a template, find/replace pattern, or prefix/suffix.".to_string());
+        }
+
+        if !template.is_empty()
+            && paths.len() > 1
+            && !template.contains("{n}")
+            && !template.contains("{n:")
+        {
+            let width = paths.len().to_string().len().max(2);
+            let pad = format!("{{n:0{width}}}");
+            params.template = if template.contains("{ext}") {
+                template.replace("{ext}", &format!("_{pad}.{{ext}}"))
+            } else {
+                format!("{template}_{pad}")
+            };
+        }
+
+        let mut plan: Vec<(String, String)> = Vec::with_capacity(paths.len());
+        let mut seen_names = std::collections::HashSet::<String>::new();
+
+        for (index, from) in paths.iter().enumerate() {
+            let src = Path::new(from);
+            let Some(parent) = src.parent() else {
+                continue;
+            };
+            let new_name = apply_batch_rename_advanced(&params, src, index + 1)?;
+            if !seen_names.insert(new_name.clone()) {
+                return Err(format!(
+                    "Duplicate name '{new_name}'. Add {{n}} to the template."
+                ));
+            }
+            let to = parent.join(&new_name);
+            if to.exists() && !same_destination(src, &to) {
+                return Err(format!("'{}' already exists", to.display()));
+            }
+            plan.push((from.clone(), new_name));
+        }
+
+        let mut applied: Vec<(String, String)> = Vec::with_capacity(plan.len());
+        for (from, new_name) in &plan {
+            match native_rename(&self.app_state, from, new_name) {
+                Ok(_) => applied.push((from.clone(), new_name.clone())),
+                Err(error) => {
+                    for (original_from, renamed) in applied.iter().rev() {
+                        let src = Path::new(original_from);
+                        let Some(parent) = src.parent() else {
+                            continue;
+                        };
+                        let current = parent.join(renamed);
+                        let old_name = src
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let _ = native_rename(
+                            &self.app_state,
+                            &current.to_string_lossy(),
+                            &old_name,
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
+        let log_ops: Vec<RenameOp> = plan
+            .iter()
+            .map(|(from, new_name)| {
+                let to = Path::new(from).parent().unwrap().join(new_name);
+                RenameOp {
+                    from: from.clone(),
+                    to: to.to_string_lossy().into_owned(),
+                }
+            })
+            .collect();
+        self.app_state.log_op_batch_rename(log_ops);
+
+        self.refresh(ui);
+        Ok(plan.len())
+    }
+
+    fn cancel_prompt(&mut self, ui: &MainWindow) {
+        self.pending_prompt = None;
+        ui.set_prompt_visible(false);
+        ui.set_prompt_kind(ss("text"));
+        ui.set_rename_presets_visible(false);
+    }
+
+    fn prompt_rename_conflict(&mut self, ui: &MainWindow, path: String, new_name: String) {
+        self.pending_prompt = Some(PendingPrompt::RenameConflict { path, new_name: new_name.clone() });
+        ui.set_prompt_kind(ss("rename-conflict"));
+        ui.set_prompt_title(ss("Name already exists"));
+        ui.set_prompt_value(ss(new_name));
+        ui.set_prompt_visible(true);
+    }
+
+    fn commit_rename(
+        &mut self,
+        ui: &MainWindow,
+        old_path: &str,
+        old_name: &str,
+        final_name: &str,
+        is_dir: bool,
+    ) {
+        let final_name = finalize_inline_rename_name(old_name, final_name, is_dir);
+        if final_name.is_empty() || names_same_for_rename(old_name, &final_name) {
+            return;
+        }
+        let src = Path::new(old_path);
+        let parent = match src.parent() {
+            Some(p) => p,
+            None => {
+                self.show_toast_kind(ui, "No parent directory", "error");
+                return;
+            }
+        };
+        let dst = parent.join(&final_name);
+        if dst.exists() && !same_destination(src, &dst) {
+            self.prompt_rename_conflict(ui, old_path.to_string(), final_name);
+            return;
+        }
+        match native_rename(&self.app_state, old_path, &final_name) {
+            Ok(_) => {
+                if self.active_pane == ActivePane::Secondary && !self.secondary_path.is_empty() {
+                    let path = self.secondary_path.clone();
+                    self.app_state
+                        .invalidate_directory_path(std::path::Path::new(&path));
+                    self.secondary_navigate(ui, path);
+                } else {
+                    self.refresh(ui);
+                }
+                self.show_toast_kind(ui, "Renamed", "success");
+            }
+            Err(error) => self.show_toast_kind(ui, error, "error"),
+        }
+    }
+
+    fn reorder_tab(&mut self, ui: &MainWindow, from: i32, to: i32) {
+        if from < 0 || to < 0 {
+            return;
+        }
+        let from = from as usize;
+        let to = to as usize;
+        if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
+            return;
+        }
+        let active_path = self.tabs.get(self.active_tab).map(|t| t.path.clone());
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        if let Some(path) = active_path {
+            self.active_tab = self
+                .tabs
+                .iter()
+                .position(|t| t.path == path)
+                .unwrap_or(0);
+        }
+        self.update_models(ui);
+        self.save_session();
+    }
+
     fn prompt_batch_rename(&mut self, ui: &MainWindow) {
         let paths = self.selected_paths();
         if paths.len() < 2 {
             self.show_toast(ui, "Select at least two items for batch rename.");
             return;
         }
-        let default_template = "Renamed_{n:03}.{ext}".to_string();
-        let preview = paths
-            .iter()
-            .take(8)
-            .enumerate()
-            .map(|(i, path)| {
-                let p = Path::new(path);
-                let original = p
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.clone());
-                let renamed = apply_rename_template(&default_template, p, i + 1);
-                format!("{original}  ->  {renamed}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        ui.set_preview_title(ss("Batch Rename - template syntax"));
-        ui.set_preview_body(ss(format!(
-            "{preview}\n\nTokens:\n  {{n}}      sequence number (1-based)\n  {{n:04}}   zero-padded to N digits\n  {{name}}   original filename without extension\n  {{ext}}    original extension (no dot)\n\nExample: IMG_{{n:04}}.{{ext}}"
-        )));
-        ui.set_preview_meta(ss(format!("{} selected", paths.len())));
-        self.pending_prompt = Some(PendingPrompt::BatchRename(paths));
-        ui.set_prompt_title(ss("Batch rename template"));
-        ui.set_prompt_value(ss(default_template));
+        ui.set_prompt_kind(ss("batch-rename"));
+        ui.set_batch_rename_find(ss(""));
+        ui.set_batch_rename_replace(ss(""));
+        ui.set_batch_rename_prefix(ss(""));
+        ui.set_batch_rename_suffix(ss(""));
+        ui.set_batch_rename_template(ss("Renamed_{n:03}.{ext}"));
+        self.pending_prompt = Some(PendingPrompt::BatchRename(paths.clone()));
+        ui.set_prompt_title(ss("Batch rename"));
+        self.sync_batch_rename_preview(ui, &paths);
         ui.set_prompt_visible(true);
     }
 
@@ -16033,74 +16707,84 @@ impl NativeController {
                 }
             }
             Some(PendingPrompt::BatchRename(paths)) => {
-                let template = value.trim();
-                if template.is_empty() {
-                    self.show_toast(ui, "Template cannot be empty.");
+                let params = self.batch_rename_params_from_ui(ui);
+                let paths_for_retry = paths.clone();
+                match self.execute_batch_rename(ui, paths, params) {
+                    Ok(count) => {
+                        self.show_toast_kind(ui, format!("Renamed {count} items"), "success");
+                    }
+                    Err(error) => {
+                        self.pending_prompt = Some(PendingPrompt::BatchRename(paths_for_retry.clone()));
+                        ui.set_prompt_kind(ss("batch-rename"));
+                        self.sync_batch_rename_preview(ui, &paths_for_retry);
+                        ui.set_prompt_visible(true);
+                        self.show_toast_kind(ui, error, "error");
+                    }
+                }
+            }
+            Some(PendingPrompt::RenameConflict { path, new_name }) => {
+                match value.as_str() {
+                    "skip" => {}
+                    "keep" => {
+                        let src = Path::new(&path);
+                        let Some(parent) = src.parent() else {
+                            return;
+                        };
+                        let dst = keep_both_destination(&parent.join(&new_name));
+                        let kept_name = dst
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or(new_name);
+                        match native_rename(&self.app_state, &path, &kept_name) {
+                            Ok(_) => {
+                                self.refresh(ui);
+                                self.show_toast_kind(ui, "Renamed (kept both)", "success");
+                            }
+                            Err(error) => self.show_toast_kind(ui, error, "error"),
+                        }
+                    }
+                    "replace" => match native_rename_replace(&self.app_state, &path, &new_name) {
+                        Ok(_) => {
+                            self.refresh(ui);
+                            self.show_toast_kind(ui, "Renamed (replaced)", "success");
+                        }
+                        Err(error) => self.show_toast_kind(ui, error, "error"),
+                    },
+                    _ => {}
+                }
+                ui.set_prompt_kind(ss("text"));
+            }
+            Some(PendingPrompt::RenamePreset(paths)) => {
+                let preset = value.trim();
+                if preset.is_empty() {
+                    self.show_toast(ui, "Enter a preset name.");
                     return;
                 }
-                // If template has no {n} token but we have multiple files, auto-append
-                // a counter so renames don't all collapse to the same name.
-                let needs_counter =
-                    paths.len() > 1 && !template.contains("{n}") && !template.contains("{n:");
-                let width = paths.len().to_string().len().max(2);
-                let effective = if needs_counter {
-                    let pad = format!("{{n:0{width}}}");
-                    if template.contains("{ext}") {
-                        // Insert counter before extension token to keep ext at the end.
-                        template.replace("{ext}", &format!("_{pad}.{{ext}}"))
-                    } else {
-                        format!("{template}_{pad}")
-                    }
-                } else {
-                    template.to_string()
+                if preset == "number sequence" || paths.len() >= 2 {
+                    self.sync_batch_rename_preview(ui, &paths);
+                    self.pending_prompt = Some(PendingPrompt::BatchRename(paths));
+                    ui.set_prompt_kind(ss("batch-rename"));
+                    ui.set_batch_rename_template(ss("Renamed_{n:03}.{ext}"));
+                    ui.set_prompt_title(ss("Batch rename"));
+                    ui.set_prompt_visible(true);
+                    return;
+                }
+                let from = &paths[0];
+                let file_name = Path::new(from)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let Some(renamed) = apply_rename_preset(preset, &file_name) else {
+                    self.show_toast_kind(ui, format!("Unknown preset: {preset}"), "error");
+                    return;
                 };
-
-                let mut ops = Vec::with_capacity(paths.len());
-                let mut seen_names = std::collections::HashSet::<String>::new();
-                for (index, from) in paths.iter().enumerate() {
-                    let src = Path::new(from);
-                    let Some(parent) = src.parent() else {
-                        continue;
-                    };
-                    let new_name = apply_rename_template(&effective, src, index + 1);
-                    if new_name.is_empty() {
-                        self.show_toast_kind(ui, "Template produced empty name.", "error");
-                        return;
-                    }
-                    if !seen_names.insert(new_name.clone()) {
-                        self.show_toast_kind(
-                            ui,
-                            format!("Template produces duplicate name '{new_name}'. Use {{n}} or {{n:04}}."),
-                            "error",
-                        );
-                        return;
-                    }
-                    let to = parent.join(&new_name);
-                    if to.exists() && to != src {
-                        self.show_toast_kind(
-                            ui,
-                            format!("'{}' already exists", to.display()),
-                            "error",
-                        );
-                        return;
-                    }
-                    ops.push((from.clone(), to));
-                }
-
-                for (from, to) in &ops {
-                    let src = Path::new(from);
-                    if let Err(error) = fs::rename(src, to) {
-                        self.show_toast_kind(ui, format!("{from}: {error}"), "error");
+                match native_rename(&self.app_state, from, &renamed) {
+                    Ok(_) => {
                         self.refresh(ui);
-                        return;
+                        self.show_toast_kind(ui, format!("Renamed to {renamed}"), "success");
                     }
-                    self.app_state.invalidate_path(src);
-                    self.app_state.invalidate_path(to);
-                    self.app_state
-                        .log_op("rename", from, Some(&to.to_string_lossy()));
+                    Err(error) => self.show_toast_kind(ui, error, "error"),
                 }
-                self.refresh(ui);
-                self.show_toast_kind(ui, format!("Renamed {} items", ops.len()), "success");
             }
             Some(PendingPrompt::CompareFolder(left)) => {
                 let right = value.trim();
@@ -17086,11 +17770,58 @@ impl NativeController {
                 "number sequence".to_string(),
             ],
         );
-        ui.set_preview_title(ss("Power Rename Presets"));
-        ui.set_preview_body(ss(presets.join("\n")));
-        ui.set_preview_meta(ss(
-            "Batch rename keeps preview and undo through the operation log.",
-        ));
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            ui.set_preview_title(ss("Power Rename Presets"));
+            ui.set_preview_body(ss(format!(
+                "{}\n\nSelect files, then run this command again.",
+                presets.join("\n")
+            )));
+            ui.set_preview_meta(ss("Click a preset to apply it."));
+            return;
+        }
+
+        self.pending_prompt = Some(PendingPrompt::RenamePreset(paths.clone()));
+        let model: Vec<slint::SharedString> = presets.into_iter().map(ss).collect();
+        ui.set_rename_preset_names(std::rc::Rc::new(slint::VecModel::from(model)).into());
+        ui.set_rename_presets_visible(true);
+    }
+
+    fn apply_rename_preset_choice(&mut self, ui: &MainWindow, preset: String) {
+        ui.set_rename_presets_visible(false);
+        let paths = match self.pending_prompt.take() {
+            Some(PendingPrompt::RenamePreset(paths)) => paths,
+            _ => self.selected_paths(),
+        };
+        if paths.is_empty() {
+            self.show_toast(ui, "Select files first.");
+            return;
+        }
+        if preset == "number sequence" || paths.len() >= 2 {
+            ui.set_prompt_kind(ss("batch-rename"));
+            ui.set_batch_rename_template(ss("Renamed_{n:03}.{ext}"));
+            self.pending_prompt = Some(PendingPrompt::BatchRename(paths.clone()));
+            self.sync_batch_rename_preview(ui, &paths);
+            ui.set_prompt_title(ss("Batch rename"));
+            ui.set_prompt_visible(true);
+            return;
+        }
+        let from = &paths[0];
+        let file_name = Path::new(from)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let Some(renamed) = apply_rename_preset(&preset, &file_name) else {
+            self.show_toast_kind(ui, format!("Unknown preset: {preset}"), "error");
+            return;
+        };
+        match native_rename(&self.app_state, from, &renamed) {
+            Ok(_) => {
+                self.refresh(ui);
+                self.show_toast_kind(ui, format!("Renamed to {renamed}"), "success");
+            }
+            Err(error) => self.show_toast_kind(ui, error, "error"),
+        }
     }
 
     fn selected_image_paths(&self) -> Result<Vec<String>, String> {
@@ -18027,7 +18758,10 @@ impl NativeController {
                         result
                             .top_items
                             .iter()
-                            .filter(|e| e.bucket == self.storage_selected_bucket)
+                            .filter(|e| {
+                                storage_canonical_bucket(&e.bucket)
+                                    == self.storage_selected_bucket
+                            })
                             .cloned()
                             .collect(),
                     );
@@ -18120,7 +18854,7 @@ impl NativeController {
             result.scanned_files
         )));
         ui.set_storage_subtitle(ss(format!(
-            "Scanned {} ago in {:.1}s - click any bucket to drill in",
+            "8 categories · scanned {} ago in {:.1}s",
             format_relative_time(result.scanned_at),
             (result.elapsed_ms as f64) / 1000.0
         )));
@@ -18330,6 +19064,23 @@ impl NativeController {
             return;
         };
         let result = match op.kind.as_str() {
+            "batch_rename" => match op.batch {
+                None => Err("Missing batch rename metadata".to_string()),
+                Some(ops) => {
+                    let mut outcome = Ok(());
+                    for item in ops.iter().rev() {
+                        let old_name = Path::new(&item.from)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| item.from.clone());
+                        if let Err(error) = native_rename(&self.app_state, &item.to, &old_name) {
+                            outcome = Err(error);
+                            break;
+                        }
+                    }
+                    outcome
+                }
+            }
             "rename" | "move" => {
                 let from = op.to.as_deref().unwrap_or("");
                 native_move(&self.app_state, from, &op.from)
@@ -18686,6 +19437,61 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             let visible = !ui.get_preview_visible();
             c.borrow().set_preview_visible(&ui, visible);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_toggle_quick_look(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().toggle_quick_look(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    ui.on_quick_look_play(move || {
+        if let Some(ui) = weak.upgrade() {
+            let path = ui.get_quick_look_path().to_string();
+            if !path.is_empty() {
+                let _ = open::that(&path);
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+  ui.on_quick_look_close(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_quick_look_visible(false);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_tab_reordered(move |from, to| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().reorder_tab(&ui, from, to);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_rename_preset_picked(move |preset| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut()
+                .apply_rename_preset_choice(&ui, preset.to_string());
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_batch_rename_preview_refresh(move || {
+        if let Some(ui) = weak.upgrade() {
+            let ctrl = c.borrow();
+            if let Some(PendingPrompt::BatchRename(paths)) = &ctrl.pending_prompt {
+                let paths = paths.clone();
+                drop(ctrl);
+                c.borrow().sync_batch_rename_preview(&ui, &paths);
+            }
         }
     });
 
@@ -19664,16 +20470,26 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                     ctrl.apply_sort();
                                     ctrl.update_models(&ui);
                                     ctrl.update_status(&ui);
-                                    ctrl.show_toast_kind(
-                                        &ui,
-                                        format!(
-                                            "{} match{} from {}",
-                                            count,
-                                            if count == 1 { "" } else { "es" },
-                                            result.source
-                                        ),
-                                        "info",
-                                    );
+                                    ui.set_status_right(ss(format!(
+                                        "{} | {}{} ({} {})",
+                                        result.path,
+                                        result.source,
+                                        if result.partial { " — still searching" } else { "" },
+                                        count,
+                                        if count == 1 { "match" } else { "matches" }
+                                    )));
+                                    if !result.partial {
+                                        ctrl.show_toast_kind(
+                                            &ui,
+                                            format!(
+                                                "{} match{} from {}",
+                                                count,
+                                                if count == 1 { "" } else { "es" },
+                                                result.source
+                                            ),
+                                            "info",
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -19797,6 +20613,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
 
     let weak = ui.as_weak();
     let c = controller.clone();
+    ui.on_prompt_cancel(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().cancel_prompt(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_sort_column(move |col| {
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut().sort_column(&ui, &col);
@@ -19847,21 +20671,11 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let ctrl = c.borrow();
                 ctrl.visible_files
                     .get(index as usize)
-                    .map(|e| (e.path.clone(), e.name.clone(), ctrl.app_state.clone()))
+                    .map(|e| (e.path.clone(), e.name.clone(), e.kind == FileKind::Directory))
             };
-            if let Some((old_path, old_name, app_state)) = result {
-                let new_name = new_name.trim().to_string();
-                if new_name.is_empty() || new_name == old_name {
-                    return;
-                }
-                match native_rename(&app_state, &old_path, &new_name) {
-                    Ok(_) => {
-                        let mut ctrl = c.borrow_mut();
-                        ctrl.refresh(&ui);
-                        ctrl.show_toast_kind(&ui, "Renamed", "success");
-                    }
-                    Err(error) => c.borrow_mut().show_toast_kind(&ui, error, "error"),
-                }
+            if let Some((old_path, old_name, is_dir)) = result {
+                c.borrow_mut()
+                    .commit_rename(&ui, &old_path, &old_name, &new_name, is_dir);
             }
         }
     });
@@ -19874,26 +20688,11 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let ctrl = c.borrow();
                 ctrl.secondary_visible_files
                     .get(index as usize)
-                    .map(|e| (e.path.clone(), e.name.clone(), ctrl.app_state.clone()))
+                    .map(|e| (e.path.clone(), e.name.clone(), e.kind == FileKind::Directory))
             };
-            if let Some((old_path, old_name, app_state)) = result {
-                let new_name = new_name.trim().to_string();
-                if new_name.is_empty() || new_name == old_name {
-                    return;
-                }
-                match native_rename(&app_state, &old_path, &new_name) {
-                    Ok(_) => {
-                        let mut ctrl = c.borrow_mut();
-                        if !ctrl.secondary_path.is_empty() {
-                            let path = ctrl.secondary_path.clone();
-                            ctrl.app_state
-                                .invalidate_directory_path(std::path::Path::new(&path));
-                            ctrl.secondary_navigate(&ui, path);
-                        }
-                        ctrl.show_toast_kind(&ui, "Renamed", "success");
-                    }
-                    Err(error) => c.borrow_mut().show_toast_kind(&ui, error, "error"),
-                }
+            if let Some((old_path, old_name, is_dir)) = result {
+                c.borrow_mut()
+                    .commit_rename(&ui, &old_path, &old_name, &new_name, is_dir);
             }
         }
     });

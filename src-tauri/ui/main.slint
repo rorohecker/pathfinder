@@ -36,6 +36,8 @@ export struct FileItem {
     show_date_group_header: bool,
     // True while the path is on the cut clipboard (Ctrl+X) and not yet pasted.
     is_cut_pending: bool,
+    // Filename stem shown in the inline rename box (extension omitted for files).
+    rename_label: string,
 }
 
 export struct SideItem {
@@ -305,13 +307,16 @@ component TabButton inherits Rectangle {
     in property <TabItem> tab;
     in property <int> index;
     in property <string> drag_target_path;
+    in property <int> tab_drag_from: -1;
+    in property <int> tab_drag_over: -1;
     callback activated(int);
     callback closed(int);
+    callback tab_drag_start(int);
+    callback tab_drag_hover(int);
+    callback tab_drag_end(int, int);
 
-    // True when the cursor is hovering this tab during a drag-and-drop. We
-    // light the tab up with an accent border so the user can see exactly
-    // which tab the drop will route into before they release.
-    property <bool> is_drop_target: root.drag_target_path != "" && root.drag_target_path == root.tab.path;
+    property <bool> is_drop_target: (root.tab_drag_from >= 0 && root.tab_drag_over == root.index && root.tab_drag_from != root.index)
+        || (root.drag_target_path != "" && root.drag_target_path == root.tab.path);
 
     // Use preferred-width + min/max-width (not `width`) so HorizontalLayout's
     // sizing pass and the rendered visual stay in sync. Setting `width`
@@ -345,7 +350,32 @@ component TabButton inherits Rectangle {
 
     touch := TouchArea {
         mouse-cursor: pointer;
-        clicked => { root.activated(root.index); }
+        property <length> press_x: 0;
+        property <bool> dragging: false;
+        clicked => {
+            if (!self.dragging) { root.activated(root.index); }
+        }
+        moved => {
+            if (self.pressed && !self.dragging && abs(self.mouse-x - self.press_x) > 8px) {
+                self.dragging = true;
+                root.tab_drag_start(root.index);
+            }
+            if (self.pressed && self.dragging) {
+                root.tab_drag_hover(root.index);
+            }
+        }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                self.press_x = self.mouse-x;
+                self.dragging = false;
+            }
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                if (self.dragging) {
+                    root.tab_drag_end(root.tab_drag_from, root.tab_drag_over >= 0 ? root.tab_drag_over : root.index);
+                }
+                self.dragging = false;
+            }
+        }
     }
 
     ToolButton {
@@ -1008,6 +1038,11 @@ component FileRow inherits Rectangle {
     property <bool> ctrl_held: false;
     property <bool> shift_held: false;
     property <bool> is_renaming: root.rename_index == root.index;
+    // Bumped when rename mode starts so the LineEdit can grab keyboard focus.
+    property <int> rename_focus_nonce: 0;
+    changed is_renaming => {
+        if (root.is_renaming) { root.rename_focus_nonce += 1; }
+    }
     property <bool> drag_started: false;
     property <bool> is_drop_target: root.item.is_dir
         && root.drag_target_path != ""
@@ -1147,21 +1182,6 @@ component FileRow inherits Rectangle {
         vertical-alignment: center;
     }
 
-    // List view: inline rename input
-    if root.view_mode == "list" && root.is_renaming: rename_list := LineEdit {
-        x: 44px;
-        y: root.group_header_h + 4px;
-        width: max(80px, parent.width - 48px - root.list_right_zone - 16px);
-        height: parent.height - root.group_header_h - 8px;
-        text: root.item.name;
-        font-size: root.list_name_font;
-        accepted(val) => { root.rename_commit(root.index, val); }
-        key-pressed(event) => {
-            if (event.text == Key.Escape) { root.rename_commit(root.index, ""); accept }
-            else { reject }
-        }
-    }
-
     // SIZE column - right-aligned, monospaced
     if root.view_mode == "list" && root.show_list_size: Text {
         x: parent.width - root.list_right_zone;
@@ -1268,22 +1288,6 @@ component FileRow inherits Rectangle {
         vertical-alignment: center;
     }
 
-    // Grid/gallery: inline rename input
-    if root.view_mode != "list" && root.view_mode != "compact" && root.is_renaming: rename_grid := LineEdit {
-        x: 8px;
-        y: parent.height - 40px;
-        width: parent.width - 16px;
-        height: 32px;
-        text: root.item.name;
-        font-size: 12px;
-        horizontal-alignment: center;
-        accepted(val) => { root.rename_commit(root.index, val); }
-        key-pressed(event) => {
-            if (event.text == Key.Escape) { root.rename_commit(root.index, ""); accept }
-            else { reject }
-        }
-    }
-
     Rectangle {
         visible: root.item.has_tag && root.view_mode != "list";
         x: parent.width - 22px;
@@ -1339,20 +1343,6 @@ component FileRow inherits Rectangle {
         vertical-alignment: center;
     }
 
-    if root.view_mode == "compact" && root.is_renaming: rename_compact := LineEdit {
-        x: 30px;
-        y: 3px;
-        width: parent.width - 38px;
-        height: parent.height - 6px;
-        text: root.item.name;
-        font-size: 12px;
-        accepted(val) => { root.rename_commit(root.index, val); }
-        key-pressed(event) => {
-            if (event.text == Key.Escape) { root.rename_commit(root.index, ""); accept }
-            else { reject }
-        }
-    }
-
     Rectangle {
         visible: root.item.has_note;
         x: parent.width - 15px;
@@ -1384,6 +1374,7 @@ component FileRow inherits Rectangle {
         y: root.group_header_h;
         width: parent.width;
         height: parent.height - root.group_header_h;
+        enabled: !root.is_renaming;
         mouse-cursor: pointer;
         clicked => { root.selected(root.index, root.ctrl_held, root.shift_held); }
         double-clicked => { root.opened(root.index); }
@@ -1427,6 +1418,60 @@ component FileRow inherits Rectangle {
                     self.absolute-position.x + self.mouse-x,
                     self.absolute-position.y + self.mouse-y);
             }
+        }
+    }
+
+    // Inline rename inputs sit above the row TouchArea so clicks and keyboard
+    // focus reach the editor (otherwise F2 rename appears but cannot be edited).
+    if root.view_mode == "list" && root.is_renaming: rename_list := LineEdit {
+        z: 2;
+        x: 44px;
+        y: root.group_header_h + 4px;
+        width: max(80px, parent.width - 48px - root.list_right_zone - 16px);
+        height: parent.height - root.group_header_h - 8px;
+        text: root.item.rename_label;
+        font-size: root.list_name_font;
+        property <int> focus_nonce: root.rename_focus_nonce;
+        changed focus_nonce => { if (root.is_renaming) { self.focus(); } }
+        accepted(val) => { root.rename_commit(root.index, val); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { root.rename_commit(root.index, ""); accept }
+            else { reject }
+        }
+    }
+
+    if root.view_mode != "list" && root.view_mode != "compact" && root.is_renaming: rename_grid := LineEdit {
+        z: 2;
+        x: 8px;
+        y: parent.height - 40px;
+        width: parent.width - 16px;
+        height: 32px;
+        text: root.item.rename_label;
+        font-size: 12px;
+        horizontal-alignment: center;
+        property <int> focus_nonce: root.rename_focus_nonce;
+        changed focus_nonce => { if (root.is_renaming) { self.focus(); } }
+        accepted(val) => { root.rename_commit(root.index, val); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { root.rename_commit(root.index, ""); accept }
+            else { reject }
+        }
+    }
+
+    if root.view_mode == "compact" && root.is_renaming: rename_compact := LineEdit {
+        z: 2;
+        x: 30px;
+        y: 3px;
+        width: parent.width - 38px;
+        height: parent.height - 6px;
+        text: root.item.rename_label;
+        font-size: 12px;
+        property <int> focus_nonce: root.rename_focus_nonce;
+        changed focus_nonce => { if (root.is_renaming) { self.focus(); } }
+        accepted(val) => { root.rename_commit(root.index, val); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { root.rename_commit(root.index, ""); accept }
+            else { reject }
         }
     }
 
@@ -1941,7 +1986,7 @@ component StorageTipsFooter inherits Rectangle {
     Text {
         x: 18px; y: 8px;
         width: parent.width - 36px; height: 18px;
-        text: "Recommendations";
+        text: "Suggestions";
         color: ThemePalette.text_faint;
         font-size: 10.5px;
         font-weight: 700;
@@ -1953,7 +1998,7 @@ component StorageTipsFooter inherits Rectangle {
         width: parent.width - 36px;
         text: root.scanning
             ? "Recommendations will appear once the scan completes."
-            : "Nothing pressing here. Pick a category above to drill into its largest items.";
+            : "Scan complete. Pick a category above to see what's using space.";
         color: ThemePalette.text_faint;
         font-size: 12px;
         wrap: word-wrap;
@@ -2061,7 +2106,7 @@ component StorageLargestPanel inherits Rectangle {
     Text {
         x: 6px; y: 16px;
         width: parent.width - 12px; height: 14px;
-        text: "Apps, projects, and large files — not AppData shells or nested folders";
+        text: "Largest space users — apps, projects, and big files";
         color: ThemePalette.text_faint;
         font-size: 10px;
         vertical-alignment: top;
@@ -2137,9 +2182,9 @@ component StorageOverview inherits Rectangle {
         // Compact header strip - title + totals on one row with action
         // buttons inline on the right.
         Rectangle {
-            preferred-height: 52px;
-            min-height: 52px;
-            max-height: 52px;
+            preferred-height: 56px;
+            min-height: 56px;
+            max-height: 56px;
             vertical-stretch: 0;
             background: ThemePalette.panel;
             Rectangle {
@@ -2148,21 +2193,18 @@ component StorageOverview inherits Rectangle {
                 background: ThemePalette.border;
             }
             Text {
-                x: 18px; y: 7px;
+                x: 18px; y: 8px;
                 width: parent.width - 236px; height: 20px;
-                text: "Storage on " + root.root_label;
+                text: "Storage · " + root.root_label;
                 color: ThemePalette.text;
-                font-size: 15px;
+                font-size: 16px;
                 font-weight: 700;
                 vertical-alignment: center;
                 overflow: elide;
             }
             Text {
-                x: 18px; y: 27px;
+                x: 18px; y: 30px;
                 width: parent.width - 236px; height: 18px;
-                // Show the disk-wide summary when available (more
-                // actionable: "X used of Y, Z free"); fall back to
-                // the scanned-categories total otherwise.
                 text: root.disk_summary != ""
                     ? root.disk_summary + (root.subtitle == "" ? "" : "  ·  " + root.subtitle)
                     : (root.total_text + (root.subtitle == "" ? "" : "  ·  " + root.subtitle));
@@ -2356,34 +2398,70 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // v0.9.16: dropped the cramped pill row + treemap. Category
-        // cards now show the name, byte size, AND percentage in a
-        // single 92px-tall row of cards that scrolls horizontally when
-        // narrow. Cards are click targets for the bucket drill-in,
-        // matching the rest of the app's "card = pane" affordance.
+        // v0.9.16: category cards + largest items. Side-by-side on wide panes.
+        storage_body := Rectangle {
+            vertical-stretch: 1;
+            min-height: 220px;
+            property <bool> wide_layout: parent.width >= 920px;
+            property <length> split_gap: 12px;
+            property <length> left_w: self.wide_layout ? (parent.width * 0.4) : parent.width;
+            property <length> right_x: self.left_w + self.split_gap;
+            property <length> right_w: parent.width - self.right_x;
+            property <length> bucket_min_card_w: self.wide_layout ? 120px : 148px;
+            property <int> bucket_cards_per_row: root.buckets.length > 0
+                ? Math.max(
+                    1,
+                    Math.min(
+                        self.wide_layout ? 2 : 4,
+                        Math.min(
+                            root.buckets.length,
+                            Math.floor((self.left_w - 24px) / self.bucket_min_card_w))))
+                : 1;
+            property <int> bucket_card_rows: root.buckets.length > 0
+                ? Math.max(1, Math.ceil(root.buckets.length / self.bucket_cards_per_row))
+                : 0;
+            property <length> bucket_area_h: root.buckets.length > 0
+                ? (10px + self.bucket_card_rows * 92px)
+                : 0px;
+
         if root.buckets.length > 0: bucket_strip := Rectangle {
-            // Wider minimum card width + cap at bucket count so one row
-            // fills the strip on typical desktop widths (no orphaned gap).
-            property <length> min_card_w: 132px;
+            x: 0;
+            y: 0;
+            width: storage_body.left_w;
+            height: storage_body.wide_layout ? parent.height : self.needed_h;
+            property <length> min_card_w: storage_body.wide_layout ? 120px : 148px;
             property <int> cards_per_row: Math.max(
                 1,
                 Math.min(
-                    root.buckets.length,
-                    Math.floor((self.width - 24px) / self.min_card_w)));
+                    storage_body.wide_layout ? 2 : 4,
+                    Math.min(
+                        root.buckets.length,
+                        Math.floor((self.width - 24px) / self.min_card_w))));
             property <int> card_rows: Math.max(1, Math.ceil(root.buckets.length / self.cards_per_row));
-            property <length> card_w: (self.width - 24px - (self.cards_per_row - 1) * 8px) / self.cards_per_row;
-            property <length> needed_h: 8px + self.card_rows * 88px;
-            preferred-height: self.needed_h;
-            min-height: self.needed_h;
-            max-height: self.needed_h;
-            vertical-stretch: 0;
+            property <length> card_w: (self.width - 24px - (self.cards_per_row - 1) * 10px) / self.cards_per_row;
+            property <length> needed_h: 10px + self.card_rows * 92px;
+            preferred-height: storage_body.wide_layout ? parent.height : self.needed_h;
+            min-height: storage_body.wide_layout ? 180px : self.needed_h;
+            max-height: storage_body.wide_layout ? parent.height : self.needed_h;
+            vertical-stretch: storage_body.wide_layout ? 1 : 0;
+            clip: storage_body.wide_layout;
             background: ThemePalette.bg;
+            Text {
+                x: 18px; y: 0px;
+                width: parent.width - 36px; height: 14px;
+                text: "Categories — tap a card to explore";
+                color: ThemePalette.text_faint;
+                font-size: 10px;
+                font-weight: 700;
+                letter-spacing: 0.5px;
+                vertical-alignment: center;
+            }
             for bucket[i] in root.buckets: Rectangle {
                 property <bool> is-active: bucket.id == root.selected_bucket;
-                x: 12px + Math.mod(i, bucket_strip.cards_per_row) * (bucket_strip.card_w + 8px);
-                y: 4px + Math.floor(i / bucket_strip.cards_per_row) * 88px;
+                x: 12px + Math.mod(i, bucket_strip.cards_per_row) * (bucket_strip.card_w + 10px);
+                y: 18px + Math.floor(i / bucket_strip.cards_per_row) * 92px;
                 width: bucket_strip.card_w;
-                height: 84px;
+                height: 86px;
                 border-radius: AppMetrics.radius_small;
                 border-width: 1px;
                 border-color: self.is-active ? bucket.color : ThemePalette.border;
@@ -2466,27 +2544,22 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // Largest items fills all space between buckets and recommendations.
-        Rectangle {
-            vertical-stretch: 1;
-            min-height: 220px;
-            background: ThemePalette.bg;
-            Rectangle {
-                x: 12px; y: 0;
-                width: parent.width - 24px; height: 1px;
-                background: ThemePalette.border;
-            }
-            StorageLargestPanel {
-                x: 12px; y: 4px;
-                width: parent.width - 24px;
-                height: parent.height - 4px;
-                top_items: root.top_items;
-                scanning: root.scanning;
-                show_bucket_label: true;
-                open_path(p) => { root.open_path(p); }
-                open_more(p) => { root.open_more(p); }
-                open_with(p) => { root.open_with(p); }
-            }
+        StorageLargestPanel {
+            x: storage_body.wide_layout ? storage_body.right_x : 12px;
+            y: storage_body.wide_layout
+                ? 0px
+                : (root.buckets.length > 0 ? storage_body.bucket_area_h + 6px : 4px);
+            width: storage_body.wide_layout ? storage_body.right_w : parent.width - 24px;
+            height: storage_body.wide_layout
+                ? parent.height
+                : max(180px, parent.height - (root.buckets.length > 0 ? storage_body.bucket_area_h + 10px : 10px));
+            top_items: root.top_items;
+            scanning: root.scanning;
+            show_bucket_label: true;
+            open_path(p) => { root.open_path(p); }
+            open_more(p) => { root.open_more(p); }
+            open_with(p) => { root.open_with(p); }
+        }
         }
 
         // Recommendations pinned to the bottom - grid layout, no scroll.
@@ -2534,7 +2607,7 @@ component StorageDrillIn inherits Rectangle {
     // children with vertical-stretch was producing a tiny ListView
     // viewport) to explicit absolute positioning. The list area now
     // always reaches the bottom of the pane.
-    property <length> header_h: 44px;
+    property <length> header_h: 52px;
     property <length> search_h: 40px;
     property <length> labels_h: root.top_items.length > 0 ? 28px : 0px;
     property <length> list_y: root.header_h + root.search_h + root.labels_h;
@@ -2569,14 +2642,25 @@ component StorageDrillIn inherits Rectangle {
             }
         }
         Text {
-            x: 46px; y: 0;
-            width: parent.width - 90px; height: parent.height;
+            x: 46px; y: 6px;
+            width: parent.width - 90px; height: 18px;
             text: root.selected_bucket != ""
-                ? "Largest in " + root.selected_bucket_name
-                : "All items ranked by size";
+                ? root.selected_bucket_name
+                : "All items by size";
             color: ThemePalette.text;
-            font-size: 13px;
+            font-size: 14px;
             font-weight: 700;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            x: 46px; y: 24px;
+            width: parent.width - 90px; height: 16px;
+            text: root.selected_bucket != ""
+                ? "Largest folders and files in this category"
+                : "Everything on the drive, ranked by size";
+            color: ThemePalette.text_faint;
+            font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
         }
@@ -2992,7 +3076,27 @@ export component MainWindow inherits Window {
     // preview header opens the file in the system default browser so the
     // user can see it rendered. The pane itself keeps showing source code.
     in-out property <bool> preview_is_html: false;
+    in-out property <bool> preview_is_media: false;
+    in-out property <bool> preview_is_pdf: false;
+    in-out property <bool> quick_look_visible: false;
+    in-out property <string> quick_look_path: "";
+    in-out property <string> batch_rename_find: "";
+    in-out property <string> batch_rename_replace: "";
+    in-out property <string> batch_rename_prefix: "";
+    in-out property <string> batch_rename_suffix: "";
+    in-out property <string> batch_rename_template: "";
+    in-out property <string> batch_rename_preview: "";
+    in-out property <bool> rename_presets_visible: false;
+    in-out property <[string]> rename_preset_names: [];
+    in-out property <int> tab_drag_from: -1;
+    in-out property <int> tab_drag_over: -1;
     callback open_preview_in_browser();
+    callback toggle_quick_look();
+    callback quick_look_play();
+    callback quick_look_close();
+    callback tab_reordered(int, int);
+    callback rename_preset_picked(string);
+    callback batch_rename_preview_refresh();
     in-out property <string> status_left: "Ready";
     in-out property <string> status_right: "";
     in-out property <string> toast_text: "";
@@ -3089,6 +3193,7 @@ export component MainWindow inherits Window {
     callback drag_window();
     callback confirm_delete();
     callback prompt_accept(string);
+    callback prompt_cancel();
     callback sort_column(string);
     callback clear_selection();
     // Drag-rectangle selection. Coordinates are in primary-pane local space
@@ -3296,8 +3401,17 @@ export component MainWindow inherits Window {
                             tab: tab;
                             index: index;
                             drag_target_path: root.drag_target_path;
+                            tab_drag_from: root.tab_drag_from;
+                            tab_drag_over: root.tab_drag_over;
                             activated(i) => { root.tab_activated(i); }
                             closed(i) => { root.tab_closed(i); }
+                            tab_drag_start(i) => { root.tab_drag_from = i; }
+                            tab_drag_hover(i) => { if (root.tab_drag_from >= 0) { root.tab_drag_over = i; } }
+                            tab_drag_end(from, to) => {
+                                root.tab_drag_from = -1;
+                                root.tab_drag_over = -1;
+                                if (from >= 0 && to >= 0 && from != to) { root.tab_reordered(from, to); }
+                            }
                         }
                     }
                 }
@@ -3318,6 +3432,13 @@ export component MainWindow inherits Window {
                                 self.px = self.mouse-x; self.py = self.mouse-y; self.dragging = false;
                             }
                             if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                                if (root.tab_drag_from >= 0) {
+                                    let from = root.tab_drag_from;
+                                    let to = root.tab_drag_over >= 0 ? root.tab_drag_over : from;
+                                    root.tab_drag_from = -1;
+                                    root.tab_drag_over = -1;
+                                    if (from >= 0 && to >= 0 && from != to) { root.tab_reordered(from, to); }
+                                }
                                 self.dragging = false;
                             }
                         }
@@ -3499,8 +3620,9 @@ export component MainWindow inherits Window {
                 clicked => { root.command("extract-here"); }
             }
             ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 3 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 2 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 1 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
+            if root.selected_count == 1: ToolButton { x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 2 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M4 7h16 M9 20h6 M12 4v16"; text_label: "Open with"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 1 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (8 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 0 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
             ToolButton { x: parent.sel_right - parent.sel_clear_w; y: root.is_simple ? 16px : 6px; button_width: parent.sel_clear_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
         }
 
@@ -4261,7 +4383,7 @@ export component MainWindow inherits Window {
                         item: file;
                         index: index;
                         view_mode: root.view_mode;
-                        rename_index: root.rename_index;
+                        rename_index: root.active_pane == "primary" ? root.rename_index : -1;
                         drag_target_path: root.drag_target_path;
                         selected(i, ctrl, shift) => { root.file_selected(i, ctrl, shift); }
                         opened(i) => { root.file_opened(i); }
@@ -4539,7 +4661,7 @@ export component MainWindow inherits Window {
                         item: file;
                         index: index;
                         view_mode: root.view_mode;
-                        rename_index: root.rename_index;
+                        rename_index: root.active_pane == "primary" ? root.rename_index : -1;
                         drag_target_path: root.drag_target_path;
                         selected(i, ctrl, shift) => { root.file_selected(i, ctrl, shift); }
                         opened(i) => { root.file_opened(i); }
@@ -4930,7 +5052,7 @@ export component MainWindow inherits Window {
                         item: file;
                         index: index;
                         view_mode: root.view_mode;
-                        rename_index: -1;
+                        rename_index: root.active_pane == "secondary" ? root.rename_index : -1;
                         drag_target_path: root.drag_target_path;
                         selected(i, ctrl, shift) => { root.secondary_file_selected(i, ctrl, shift); }
                         opened(i) => { root.secondary_file_opened(i); }
@@ -4964,7 +5086,7 @@ export component MainWindow inherits Window {
                         item: file;
                         index: index;
                         view_mode: root.view_mode;
-                        rename_index: -1;
+                        rename_index: root.active_pane == "secondary" ? root.rename_index : -1;
                         drag_target_path: root.drag_target_path;
                         selected(i, ctrl, shift) => { root.secondary_file_selected(i, ctrl, shift); }
                         opened(i) => { root.secondary_file_opened(i); }
@@ -7176,7 +7298,6 @@ export component MainWindow inherits Window {
             clicked => { }
         }
 
-        // Conflict-resolution dialog - three explicit buttons, no text input.
         if root.prompt_kind == "conflict": Rectangle {
             x: (parent.width - min(460px, parent.width - 32px)) / 2;
             y: (parent.height - min(220px, parent.height - 32px)) / 2;
@@ -7200,8 +7321,62 @@ export component MainWindow inherits Window {
             DialogButton { x: parent.width - 120px; y: parent.height - 48px; label: "Keep both"; primary: true; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("keep"); } }
         }
 
+        if root.prompt_kind == "rename-conflict": Rectangle {
+            x: (parent.width - min(460px, parent.width - 32px)) / 2;
+            y: (parent.height - min(220px, parent.height - 32px)) / 2;
+            width: min(460px, parent.width - 32px);
+            height: min(220px, parent.height - 32px);
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            Text { x: 18px; y: 16px; width: parent.width - 36px; height: 26px; text: root.prompt_title; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            CopyableMessageText {
+                x: 18px; y: 50px; content-width: parent.width - 36px;
+                text: "A file with that name already exists.\n\nKeep both saves with a numbered suffix.\nReplace overwrites the existing file.\nSkip cancels the rename.";
+                font-size: 12.5px; cap-height: 88px;
+            }
+            DialogButton { x: 18px; y: parent.height - 48px; label: "Skip"; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("skip"); } }
+            DialogButton { x: parent.width - 240px; y: parent.height - 48px; label: "Replace"; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("replace"); } }
+            DialogButton { x: parent.width - 120px; y: parent.height - 48px; label: "Keep both"; primary: true; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("keep"); } }
+        }
+
+        if root.prompt_kind == "batch-rename": Rectangle {
+            x: (parent.width - min(560px, parent.width - 24px)) / 2;
+            y: (parent.height - min(520px, parent.height - 24px)) / 2;
+            width: min(560px, parent.width - 24px);
+            height: min(520px, parent.height - 24px);
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            clip: true;
+            Text { x: 18px; y: 14px; width: parent.width - 36px; height: 24px; text: "Batch rename"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            Text { x: 18px; y: 44px; width: 80px; height: 20px; text: "Find (regex)"; color: ThemePalette.text_faint; font-size: 11px; }
+            br_find := LineEdit { x: 18px; y: 64px; width: parent.width - 36px; height: 30px; text <=> root.batch_rename_find; edited => { root.batch_rename_preview_refresh(); } }
+            Text { x: 18px; y: 100px; width: 80px; height: 20px; text: "Replace"; color: ThemePalette.text_faint; font-size: 11px; }
+            br_repl := LineEdit { x: 18px; y: 120px; width: parent.width - 36px; height: 30px; text <=> root.batch_rename_replace; edited => { root.batch_rename_preview_refresh(); } }
+            Text { x: 18px; y: 156px; width: 60px; height: 20px; text: "Prefix"; color: ThemePalette.text_faint; font-size: 11px; }
+            br_pre := LineEdit { x: 18px; y: 176px; width: (parent.width - 48px) / 2; height: 30px; text <=> root.batch_rename_prefix; edited => { root.batch_rename_preview_refresh(); } }
+            Text { x: parent.width / 2 + 6px; y: 156px; width: 60px; height: 20px; text: "Suffix"; color: ThemePalette.text_faint; font-size: 11px; }
+            br_suf := LineEdit { x: parent.width / 2 + 6px; y: 176px; width: (parent.width - 48px) / 2; height: 30px; text <=> root.batch_rename_suffix; edited => { root.batch_rename_preview_refresh(); } }
+            Text { x: 18px; y: 212px; width: 120px; height: 20px; text: "Template"; color: ThemePalette.text_faint; font-size: 11px; }
+            br_tmpl := LineEdit { x: 18px; y: 232px; width: parent.width - 36px; height: 30px; text <=> root.batch_rename_template; edited => { root.batch_rename_preview_refresh(); } }
+            Text { x: 18px; y: 270px; width: parent.width - 36px; height: 16px; text: "Preview"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+            CopyableMessageText {
+                x: 18px; y: 288px; content-width: parent.width - 36px;
+                text: root.batch_rename_preview;
+                font-size: 11px; mono: true; cap-height: max(72px, parent.height - 360px);
+            }
+            Text { x: 18px; y: parent.height - 72px; width: parent.width - 36px; height: 28px;
+                text: "Tokens: {n} {n:04} {name} {ext}  ·  Find uses regex";
+                color: ThemePalette.text_faint; font-size: 10px; wrap: word-wrap; }
+            DialogButton { x: parent.width - 180px; y: parent.height - 44px; label: "Cancel"; clicked => { root.prompt_cancel(); } }
+            DialogButton { x: parent.width - 90px; y: parent.height - 44px; label: "Rename"; primary: true; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("apply"); } }
+        }
+
         // Standard text-input prompt (rename / new folder / etc.)
-        if root.prompt_kind != "conflict": Rectangle {
+        if root.prompt_kind != "conflict" && root.prompt_kind != "rename-conflict" && root.prompt_kind != "batch-rename": Rectangle {
             x: (parent.width - min(420px, parent.width - 32px)) / 2;
             y: (parent.height - min(190px, parent.height - 32px)) / 2;
             width: min(420px, parent.width - 32px);
@@ -7216,12 +7391,95 @@ export component MainWindow inherits Window {
                 text: root.prompt_value;
                 accepted(value) => { root.prompt_visible = false; root.prompt_accept(value); }
                 key-pressed(e) => {
-                    if (e.text == Key.Escape) { root.prompt_visible = false; return accept; }
+                    if (e.text == Key.Escape) { root.prompt_cancel(); return accept; }
                     return reject;
                 }
             }
-            DialogButton { x: parent.width - 180px; y: parent.height - 48px; label: "Cancel"; clicked => { root.prompt_visible = false; } }
+            DialogButton { x: parent.width - 180px; y: parent.height - 48px; label: "Cancel"; clicked => { root.prompt_cancel(); } }
             DialogButton { x: parent.width - 90px; y: parent.height - 48px; label: "OK"; primary: true; clicked => { root.prompt_visible = false; root.prompt_accept(prompt.text); } }
+        }
+    }
+
+    if root.rename_presets_visible: Rectangle {
+        z: 110;
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.42);
+        TouchArea { clicked => { root.prompt_cancel(); } }
+        Rectangle {
+            x: (parent.width - min(380px, parent.width - 32px)) / 2;
+            y: (parent.height - min(320px, parent.height - 32px)) / 2;
+            width: min(380px, parent.width - 32px);
+            height: min(320px, parent.height - 32px);
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            Text { x: 18px; y: 14px; width: parent.width - 36px; height: 24px; text: "Rename presets"; color: ThemePalette.text; font-size: 17px; font-weight: 700; }
+            Text { x: 18px; y: 40px; width: parent.width - 36px; height: 18px; text: "Click a preset to apply to the selection"; color: ThemePalette.text_faint; font-size: 11px; }
+            ScrollView {
+                x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 76px;
+                for preset[i] in root.rename_preset_names: Rectangle {
+                    width: parent.width - 8px;
+                    height: 36px;
+                    border-radius: AppMetrics.radius_small;
+                    background: preset_touch.has-hover ? ThemePalette.accent_soft : rgba(0,0,0,0);
+                    Text { x: 12px; width: parent.width - 24px; height: parent.height; text: preset; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    preset_touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.rename_presets_visible = false; root.rename_preset_picked(preset); }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.quick_look_visible: Rectangle {
+        z: 120;
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.55);
+        TouchArea { clicked => { root.quick_look_close(); } }
+        Rectangle {
+            x: (parent.width - min(640px, parent.width - 48px)) / 2;
+            y: (parent.height - min(480px, parent.height - 48px)) / 2;
+            width: min(640px, parent.width - 48px);
+            height: min(480px, parent.height - 48px);
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            Text { x: 20px; y: 16px; width: parent.width - 80px; height: 28px; text: root.preview_title; color: ThemePalette.text; font-size: 20px; font-weight: 700; overflow: elide; }
+            ToolButton { x: parent.width - 44px; y: 10px; button_width: 32px; button_height: 32px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: "Close"; clicked => { root.quick_look_close(); } }
+            if root.preview_is_image: Image {
+                x: (parent.width - 280px) / 2; y: 56px;
+                width: 280px; height: 240px;
+                source: root.preview_image;
+                image-fit: contain;
+            }
+            if root.preview_is_pdf || root.preview_is_media: Rectangle {
+                x: 20px; y: 56px; width: parent.width - 40px; height: 56px;
+                border-radius: AppMetrics.radius_small;
+                background: ThemePalette.panel_alt;
+                Text {
+                    x: 16px; width: parent.width - 32px; height: parent.height;
+                    text: root.preview_is_pdf ? "PDF document — first page text preview below" : "Media file — press Play to open in your default app";
+                    color: ThemePalette.text_muted; font-size: 12.5px; vertical-alignment: center;
+                }
+            }
+            if root.preview_is_media: DialogButton {
+                x: 20px; y: 120px; label: "Play";
+                clicked => { root.quick_look_play(); }
+            }
+            CopyableMessageText {
+                x: 20px;
+                y: root.preview_is_image ? 308px : (root.preview_is_media ? 168px : 56px);
+                content-width: parent.width - 40px;
+                text: root.preview_body != "" ? root.preview_body : root.preview_meta;
+                font-size: 12px;
+                mono: !root.preview_is_pdf;
+                cap-height: root.preview_is_image ? 140px : 280px;
+            }
         }
     }
 
@@ -7674,7 +7932,7 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(Alt+Return); activated => { root.command("properties"); } }
         KeyBinding { keys: @keys(F2); activated => { root.command("rename"); } }
         KeyBinding { keys: @keys(Return); activated => { root.file_opened(root.selected_index); } }
-        KeyBinding { keys: @keys(Space); activated => { root.toggle_preview(); } }
+        KeyBinding { keys: @keys(Space); activated => { root.toggle_quick_look(); } }
         KeyBinding { keys: @keys(Control+D); activated => { root.command("duplicates"); } }
         KeyBinding { keys: @keys(Control+Shift+C); activated => { root.command("checksum"); } }
         KeyBinding { keys: @keys(UpArrow); activated => { root.file_selected(max(0, root.selected_index - 1), false, false); } }
@@ -7683,7 +7941,18 @@ export component MainWindow inherits Window {
             if (root.command_visible) { root.command_visible = false; }
             else if (root.settings_visible) { root.settings_visible = false; }
             else if (root.confirm_visible) { root.confirm_visible = false; }
-            else if (root.prompt_visible) { root.prompt_visible = false; }
+            else if (root.quick_look_visible) { root.quick_look_close(); }
+            else if (root.rename_presets_visible) { root.prompt_cancel(); }
+            else if (root.prompt_visible) {
+                if (root.prompt_kind == "conflict" || root.prompt_kind == "rename-conflict") {
+                    root.prompt_visible = false;
+                    root.prompt_kind = "text";
+                    root.prompt_accept("skip");
+                } else {
+                    root.prompt_cancel();
+                }
+            }
+            else if (root.rename_index >= 0) { root.rename_index = -1; }
             else if (root.image_tools_visible) { root.image_tools_visible = false; }
             else if (root.context_visible) { root.context_visible = false; }
             else if (root.address_editing) { root.address_editing = false; root.addr_suggestions = []; }
