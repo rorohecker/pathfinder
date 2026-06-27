@@ -83,11 +83,12 @@ const MAX_PREVIEW_CACHE_ENTRIES: usize = 96;
 // (which left huge empty space in the list pane). 300 is enough to
 // fill any practical viewport and still avoid pushing megabytes of
 // strings to Slint for unusually busy buckets.
-const STORAGE_BUCKET_DRILL_LIMIT: usize = 300;
-// Limit for the overall top-items shown on the overview page to keep
-// UI model construction bounded and responsive when the scan result
-// contains many thousands of entries.
-const STORAGE_TOP_ITEMS_LIMIT: usize = 200;
+const STORAGE_BUCKET_DRILL_LIMIT: usize = 500;
+// Limit for the overview's largest-items panel. Drill-in and full-list
+// modes use STORAGE_BUCKET_DRILL_LIMIT instead.
+const STORAGE_TOP_ITEMS_LIMIT: usize = 250;
+const STORAGE_TIPS_LIMIT: usize = 12;
+const STORAGE_CACHE_MAX_DRIVES: usize = 6;
 const STORAGE_DUPLICATE_MIN_SIZE: u64 = 64 * 1024 * 1024;
 const INDEX_DB_FILE: &str = ".pathfinder-index.sqlite3";
 const THUMBNAIL_CACHE_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
@@ -8231,7 +8232,7 @@ enum PendingPrompt {
 /// the first frame. Applied on the UI thread via the poll timer (Send-safe).
 struct DeferredStartupData {
     drives: Vec<DriveInfo>,
-    storage_cache: Option<StorageScanResult>,
+    storage_caches: HashMap<String, StorageScanResult>,
     user_pins: Vec<UserPin>,
     recent_locations: Vec<String>,
 }
@@ -8254,9 +8255,9 @@ struct NativeController {
     // navigate away from a folder; consulted whenever we navigate into one so
     // Back / Up / re-entering a folder restores the row the user was looking at.
     path_scroll: HashMap<String, f32>,
-    // Cached result of the most recent storage scan + status flags for the
-    // background scan thread. Pumped into Slint properties by the polling tick.
-    storage_cache: Option<StorageScanResult>,
+    // Per-drive scan results keyed by root path (e.g. "C:\\"). Lets the user
+    // switch drives without re-scanning each time they revisit Storage.
+    storage_caches: HashMap<String, StorageScanResult>,
     storage_scan_pending: Arc<Mutex<Option<(u64, Option<StorageScanResult>)>>>,
     storage_scan_ready: Arc<AtomicBool>,
     storage_scan_generation: Arc<AtomicU64>,
@@ -8411,21 +8412,64 @@ fn native_data_file(name: &str) -> PathBuf {
     native_data_dir().join(name)
 }
 
-fn read_storage_scan_cache() -> Option<StorageScanResult> {
-    let path = native_data_file("storage_scan_cache.json");
-    let mut result = fs::read_to_string(path)
-        .ok()
-        .and_then(|data| serde_json::from_str::<StorageScanResult>(&data).ok())?;
-    migrate_storage_scan_result(&mut result);
-    Some(result)
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct StorageScanCacheFile {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    results: HashMap<String, StorageScanResult>,
 }
 
-fn write_storage_scan_cache(result: &StorageScanResult) -> Result<(), String> {
+fn read_storage_scan_cache() -> HashMap<String, StorageScanResult> {
+    let path = native_data_file("storage_scan_cache.json");
+    let Ok(data) = fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    if let Ok(file) = serde_json::from_str::<StorageScanCacheFile>(&data) {
+        let mut out = file.results;
+        for result in out.values_mut() {
+            migrate_storage_scan_result(result);
+        }
+        return out;
+    }
+    // Legacy single-result cache file.
+    if let Ok(mut result) = serde_json::from_str::<StorageScanResult>(&data) {
+        migrate_storage_scan_result(&mut result);
+        let root = result.root.clone();
+        let mut map = HashMap::new();
+        map.insert(root, result);
+        return map;
+    }
+    HashMap::new()
+}
+
+fn trim_storage_scan_cache(map: &mut HashMap<String, StorageScanResult>) {
+    while map.len() > STORAGE_CACHE_MAX_DRIVES {
+        let oldest = map
+            .iter()
+            .min_by_key(|(_, r)| r.scanned_at)
+            .map(|(k, _)| k.clone());
+        if let Some(key) = oldest {
+            map.remove(&key);
+        } else {
+            break;
+        }
+    }
+}
+
+fn write_storage_scan_cache_entry(result: &StorageScanResult) -> Result<(), String> {
     let path = native_data_file("storage_scan_cache.json");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let data = serde_json::to_string_pretty(result).map_err(|e| e.to_string())?;
+    let mut map = read_storage_scan_cache();
+    map.insert(result.root.clone(), result.clone());
+    trim_storage_scan_cache(&mut map);
+    let file = StorageScanCacheFile {
+        version: 1,
+        results: map,
+    };
+    let data = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
     fs::write(path, data).map_err(|e| e.to_string())
 }
 
@@ -12279,7 +12323,7 @@ impl NativeController {
             history: vec![current_path.clone()],
             history_index: 0,
             path_scroll: HashMap::new(),
-            storage_cache: None,
+            storage_caches: HashMap::new(),
             storage_scan_pending: Arc::new(Mutex::new(None)),
             storage_scan_ready: Arc::new(AtomicBool::new(false)),
             storage_scan_generation: Arc::new(AtomicU64::new(0)),
@@ -12596,7 +12640,7 @@ impl NativeController {
         std::thread::spawn(move || {
             let data = DeferredStartupData {
                 drives: get_drives(),
-                storage_cache: read_storage_scan_cache(),
+                storage_caches: read_storage_scan_cache(),
                 user_pins: validate_user_pins(pins_to_validate),
                 recent_locations: validate_recent_locations(recents_to_validate, 12),
             };
@@ -12615,7 +12659,7 @@ impl NativeController {
             return;
         };
         self.drives = data.drives;
-        self.storage_cache = data.storage_cache;
+        self.storage_caches = data.storage_caches;
         self.user_pins = data.user_pins;
         self.recent_locations = data.recent_locations;
         self.sync_sidebar_models(ui);
@@ -16885,7 +16929,7 @@ impl NativeController {
 
         let n = paths.len();
         if from_storage_cleanup {
-            self.storage_cache = None;
+            self.storage_caches.remove(&self.storage_current_root);
         }
         self.selected_set.clear();
         self.secondary_selected_set.clear();
@@ -18378,6 +18422,16 @@ impl NativeController {
         }
     }
 
+    fn storage_result(&self) -> Option<&StorageScanResult> {
+        self.storage_caches.get(&self.storage_current_root)
+    }
+
+    fn storage_result_clone(&self) -> Option<StorageScanResult> {
+        self.storage_caches
+            .get(&self.storage_current_root)
+            .cloned()
+    }
+
     fn open_storage_view(&mut self, ui: &MainWindow, push_history: bool) {
         if self.current_path != "storage://" {
             self.storage_path_before = self.current_path.clone();
@@ -18417,12 +18471,7 @@ impl NativeController {
         // new scan. Was 5-minute staleness in v0.9.0; users found that
         // surprising because the data they were looking at could just
         // disappear when reopening the tab.
-        let cached_for_current = self
-            .storage_cache
-            .as_ref()
-            .filter(|r| r.root == self.storage_current_root)
-            .cloned();
-        if let Some(result) = cached_for_current {
+        if let Some(result) = self.storage_result_clone() {
             self.push_storage_to_ui(ui, &result);
         } else {
             ui.set_storage_root(ss(&self.storage_current_root));
@@ -18482,10 +18531,20 @@ impl NativeController {
                 } else {
                     d.name.clone()
                 };
+                let (bytes_text, bar_pct) = drive_free_space(&d.path)
+                    .map(|(free, total)| {
+                        let used_pct = if total > 0 {
+                            ((total.saturating_sub(free)) as f64 / total as f64 * 100.0) as f32
+                        } else {
+                            0.0
+                        };
+                        (format!("{} free", format_size_short(free)), used_pct)
+                    })
+                    .unwrap_or_else(|| (String::new(), 0.0));
                 StorageEntryUi {
                     name: ss(label),
                     path: ss(&d.path),
-                    bytes_text: ss(""),
+                    bytes_text: ss(bytes_text),
                     modified_text: ss(""),
                     bucket: ss(if d.kind == "local" {
                         "Fixed"
@@ -18493,7 +18552,7 @@ impl NativeController {
                         "Removable"
                     }),
                     is_dir: true,
-                    bar_pct: 0.0,
+                    bar_pct,
                     bucket_color: bucket_color_for("other"),
                 }
             })
@@ -18513,7 +18572,9 @@ impl NativeController {
         ui.set_storage_progress_files(0);
         ui.set_storage_progress_bytes_text(ss("0 B"));
         ui.set_storage_progress_percent(0.0);
-        // Query the volume's used-bytes ahead of the scan so the progress bar
+        ui.set_storage_list_total(0);
+        ui.set_storage_list_shown(0);
+        ui.set_storage_breakdown_text(ss("Scanning drive..."));
         // % is computed against a real denominator. drive_free_space returns
         // (free_to_caller, total_bytes); used = total - free.
         self.storage_disk_used = drive_free_space(&root)
@@ -18558,12 +18619,12 @@ impl NativeController {
         // tightened. Quick signature-only mode is no longer surfaced
         // - if users want it back we can add a separate "Reload from
         // cache" button.
-        self.storage_cache = None;
+        self.storage_caches.remove(&self.storage_current_root);
         self.start_storage_scan(ui);
     }
 
     fn storage_cleanup_entries_for_action(&self, action: &str) -> Vec<StorageEntry> {
-        let Some(result) = self.storage_cache.as_ref() else {
+        let Some(result) = self.storage_result() else {
             return Vec::new();
         };
         let now = now_unix_secs() as i64;
@@ -18595,7 +18656,7 @@ impl NativeController {
 
     fn prepare_storage_tip_action(&mut self, ui: &MainWindow, action: String, _path: String) {
         if action == "duplicates" {
-            if let Some(result) = self.storage_cache.as_ref() {
+            if let Some(result) = self.storage_result() {
                 ui.set_preview_visible(true);
                 ui.set_preview_title(ss("Duplicate Finder"));
                 ui.set_preview_body(ss(format!(
@@ -18683,12 +18744,7 @@ impl NativeController {
         ui.set_storage_show_all(false);
         ui.set_preview_visible(false);
         // Cached result for the new root?
-        let cached = self
-            .storage_cache
-            .as_ref()
-            .filter(|r| r.root == self.storage_current_root)
-            .cloned();
-        if let Some(result) = cached {
+        if let Some(result) = self.storage_result_clone() {
             self.push_storage_to_ui(ui, &result);
         } else {
             ui.set_storage_root(ss(&self.storage_current_root));
@@ -18794,11 +18850,13 @@ impl NativeController {
         // Share bar is relative to the LARGEST item, computed independently of
         // the current sort order so the bar stays meaningful under name/recent.
         let largest = filtered.iter().map(|e| e.bytes).max().unwrap_or(0).max(1);
-        let limit = if self.storage_selected_bucket.is_empty() {
+        let total_count = filtered.len();
+        let limit = if self.storage_selected_bucket.is_empty() && !self.storage_show_all_state {
             STORAGE_TOP_ITEMS_LIMIT
         } else {
             STORAGE_BUCKET_DRILL_LIMIT
-        }; // cap overall top-items for responsiveness
+        };
+        let shown_count = total_count.min(limit);
         let entries: Vec<StorageEntryUi> = filtered
             .into_iter()
             .take(limit)
@@ -18816,6 +18874,8 @@ impl NativeController {
                 }
             })
             .collect();
+        ui.set_storage_list_total(total_count as i32);
+        ui.set_storage_list_shown(shown_count as i32);
         ui.set_storage_top_items(slint::ModelRc::new(slint::VecModel::from(entries)));
     }
 
@@ -18861,9 +18921,7 @@ impl NativeController {
         self.storage_subtitle_last_update = Instant::now();
         ui.set_storage_buckets(slint::ModelRc::new(slint::VecModel::from(buckets)));
         self.push_storage_top_items(ui, result);
-        // Disk-wide totals for the hero strip. Uses fresh volume data
-        // so the bar reflects ACTUAL disk usage, not just what the
-        // bucket scan summed (which excludes skipped system dirs).
+        // Disk-wide totals + scanned vs unaccounted breakdown.
         if let Some((free, disk_total)) = drive_free_space(&result.root) {
             let used = disk_total.saturating_sub(free);
             let pct = if disk_total > 0 {
@@ -18878,20 +18936,50 @@ impl NativeController {
                 format_size_short(free)
             )));
             ui.set_storage_disk_used_pct(pct as f32);
+            let unaccounted = used.saturating_sub(result.total_bytes);
+            let coverage = if used > 0 {
+                (result.total_bytes as f64 / used as f64) * 100.0
+            } else {
+                100.0
+            };
+            ui.set_storage_scan_coverage_pct(coverage as f32);
+            let breakdown = if unaccounted > 512 * 1024 * 1024 {
+                format!(
+                    "{} scanned · {} system/other (Windows, pagefile, skipped folders)",
+                    format_size_short(result.total_bytes),
+                    format_size_short(unaccounted)
+                )
+            } else if unaccounted > 64 * 1024 * 1024 {
+                format!(
+                    "{} scanned · {} unaccounted (system files, skipped paths)",
+                    format_size_short(result.total_bytes),
+                    format_size_short(unaccounted)
+                )
+            } else {
+                format!(
+                    "{} scanned across {} files",
+                    format_size_short(result.total_bytes),
+                    result.scanned_files
+                )
+            };
+            ui.set_storage_breakdown_text(ss(breakdown));
         } else {
             ui.set_storage_disk_summary(ss(""));
             ui.set_storage_disk_used_pct(0.0);
+            ui.set_storage_scan_coverage_pct(100.0);
+            ui.set_storage_breakdown_text(ss(format!(
+                "{} scanned across {} files",
+                format_size_short(result.total_bytes),
+                result.scanned_files
+            )));
         }
         ui.set_storage_scanning(false);
         ui.set_storage_progress_files(result.scanned_files as i32);
         ui.set_storage_progress_bytes_text(ss(format_size_short(result.total_bytes)));
         ui.set_storage_progress_percent(100.0);
-        // Recommendations / explanations for the overview's bottom
-        // panel. Pulled from this scan result + the live volume.
-        // Overview footer fits ~6 tips without scrolling on typical layouts.
         let tips: Vec<StorageTipUi> = build_storage_tips(result)
             .into_iter()
-            .take(6)
+            .take(STORAGE_TIPS_LIMIT)
             .collect();
         ui.set_storage_tips(slint::ModelRc::new(slint::VecModel::from(tips)));
     }
@@ -18912,7 +19000,7 @@ impl NativeController {
             && !self.storage_scan_active
             && self.storage_subtitle_last_update.elapsed() >= Duration::from_secs(15)
         {
-            if let Some(cached) = self.storage_cache.as_ref() {
+            if let Some(cached) = self.storage_result() {
                 ui.set_storage_subtitle(ss(format!(
                     "Scanned {} ago in {:.1}s - click any bucket to drill in",
                     format_relative_time(cached.scanned_at),
@@ -18962,8 +19050,9 @@ impl NativeController {
         }
         self.storage_scan_active = false;
         if let Some(result) = result {
-            self.storage_cache = Some(result.clone());
-            let _ = write_storage_scan_cache(&result);
+            self.storage_caches
+                .insert(result.root.clone(), result.clone());
+            let _ = write_storage_scan_cache_entry(&result);
             if ui.get_is_storage_view() {
                 self.push_storage_to_ui(ui, &result);
             } else {
@@ -18985,13 +19074,12 @@ impl NativeController {
         self.storage_selected_bucket = bucket_id.clone();
         ui.set_storage_selected_bucket(ss(&bucket_id));
         let name = self
-            .storage_cache
-            .as_ref()
+            .storage_result()
             .and_then(|r| r.buckets.iter().find(|b| b.id == bucket_id))
             .map(|b| b.name.clone())
             .unwrap_or_else(|| bucket_display_name(&bucket_id).to_string());
         ui.set_storage_selected_bucket_name(ss(&name));
-        if let Some(result) = self.storage_cache.clone() {
+        if let Some(result) = self.storage_result_clone() {
             self.push_storage_top_items(ui, &result);
         }
     }
@@ -19012,7 +19100,7 @@ impl NativeController {
         // Return to the overview with the preview pane hidden. The user's
         // original preview visibility/width is restored when storage closes.
         ui.set_preview_visible(false);
-        if let Some(result) = self.storage_cache.clone() {
+        if let Some(result) = self.storage_result_clone() {
             self.push_storage_top_items(ui, &result);
         }
     }
@@ -20132,7 +20220,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 ctrl.storage_selected_bucket.clear();
                 ui.set_storage_selected_bucket(ss(""));
                 ui.set_storage_selected_bucket_name(ss(""));
-                if let Some(result) = ctrl.storage_cache.clone() {
+                if let Some(result) = ctrl.storage_result_clone() {
                     ctrl.push_storage_top_items(&ui, &result);
                 }
             }
@@ -20167,7 +20255,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             let mut ctrl = c.borrow_mut();
             ctrl.storage_drill_search = q.to_string();
-            if let Some(result) = ctrl.storage_cache.clone() {
+            if let Some(result) = ctrl.storage_result_clone() {
                 ctrl.push_storage_top_items(&ui, &result);
             }
         }
@@ -20179,7 +20267,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             let mut ctrl = c.borrow_mut();
             ctrl.storage_sort_mode = mode.to_string();
             ui.set_storage_sort_mode(ss(&mode));
-            if let Some(result) = ctrl.storage_cache.clone() {
+            if let Some(result) = ctrl.storage_result_clone() {
                 ctrl.push_storage_top_items(&ui, &result);
             }
         }
