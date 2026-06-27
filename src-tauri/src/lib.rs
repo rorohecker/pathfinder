@@ -18455,6 +18455,7 @@ impl NativeController {
         ui.set_is_storage_view(true);
         ui.set_preview_visible(false);
         ui.set_storage_show_all(false);
+        self.clear_selection(ui);
         if push_history {
             self.history.truncate(self.history_index + 1);
             self.history.push("storage://".to_string());
