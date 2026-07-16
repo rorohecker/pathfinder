@@ -70,6 +70,37 @@ export struct CommandItem {
     command: string,
 }
 
+export struct ToolListItem {
+    id: string,
+    title: string,
+    subtitle: string,
+    meta: string,
+    enabled: bool,
+    accent: color,
+}
+
+export struct ShortcutEditItem {
+    command: string,
+    label: string,
+    hint: string,
+    group: string,
+}
+
+export struct CompareRowItem {
+    path: string,
+    status: string,
+    left_size: string,
+    right_size: string,
+}
+
+export struct DupeGroupItem {
+    id: string,
+    title: string,
+    detail: string,
+    count: int,
+    reclaimable: string,
+}
+
 export struct StorageBucketUi {
     id: string,
     name: string,
@@ -3048,6 +3079,7 @@ export component MainWindow inherits Window {
     // Toggled from the "Storage" sidebar entry. Backed by a per-scan cache in
     // Rust so re-opening the tab doesn't trigger another whole-disk walk.
     in-out property <bool> is_storage_view: false;
+    in-out property <bool> is_home_view: false;
     in-out property <bool> storage_scanning: false;
     in-out property <string> storage_root: "";
     in-out property <string> storage_total_text: "";
@@ -3159,6 +3191,28 @@ export component MainWindow inherits Window {
     in-out property <string> batch_rename_preview: "";
     in-out property <bool> rename_presets_visible: false;
     in-out property <[string]> rename_preset_names: [];
+    // Reusable tool overlay (rules / smart-folders / templates / shortcuts / workspaces).
+    in-out property <bool> tool_overlay_visible: false;
+    in-out property <string> tool_overlay_kind: "";
+    in-out property <string> tool_overlay_title: "";
+    in-out property <string> tool_overlay_subtitle: "";
+    in-out property <[ToolListItem]> tool_overlay_items;
+    in-out property <[ShortcutEditItem]> shortcut_edit_items;
+    in-out property <bool> compare_overlay_visible: false;
+    in-out property <string> compare_overlay_title: "";
+    in-out property <string> compare_overlay_left: "";
+    in-out property <string> compare_overlay_right: "";
+    in-out property <bool> compare_overlay_hide_same: false;
+    in-out property <[CompareRowItem]> compare_rows;
+    in-out property <bool> dupe_overlay_visible: false;
+    in-out property <string> dupe_overlay_title: "";
+    in-out property <string> dupe_overlay_subtitle: "";
+    in-out property <[DupeGroupItem]> dupe_groups;
+    in-out property <bool> search_help_visible: false;
+    in-out property <string> search_chip_hint: "";
+    in-out property <bool> queue_busy: false;
+    in-out property <string> queue_busy_text: "";
+    in-out property <int> welcome_step: 0;
     in-out property <int> tab_drag_from: -1;
     in-out property <int> tab_drag_over: -1;
     callback open_preview_in_browser();
@@ -3168,6 +3222,24 @@ export component MainWindow inherits Window {
     callback tab_reordered(int, int);
     callback rename_preset_picked(string);
     callback batch_rename_preview_refresh();
+    callback tool_overlay_activate(string);
+    callback tool_overlay_toggle(string);
+    callback tool_overlay_secondary(string);
+    callback tool_overlay_close();
+    callback tool_overlay_primary_action();
+    callback shortcut_hint_changed(string, string);
+    callback compare_row_activate(string);
+    callback compare_overlay_close();
+    callback compare_toggle_hide_same();
+    callback dupe_group_keep(string);
+    callback dupe_group_delete_others(string);
+    callback dupe_overlay_close();
+    callback search_chip(string);
+    callback search_save_requested();
+    callback search_help_toggle();
+    callback queue_pill_clicked();
+    callback welcome_next_step();
+    callback welcome_set_mode(string);
     in-out property <string> status_left: "Ready";
     in-out property <string> status_right: "";
     in-out property <string> toast_text: "";
@@ -4139,6 +4211,78 @@ export component MainWindow inherits Window {
                         root.search_text = "";
                         root.search_requested("");
                     }
+                }
+            }
+
+            // Search help (?) + save bookmark + optional chip strip
+            ToolButton {
+                visible: toolbar.show_toolbar_search;
+                x: toolbar.tb_search_x + toolbar.tb_search_w + 4px;
+                y: 6px;
+                button_width: 28px;
+                button_height: 31px;
+                active: root.search_help_visible;
+                text_label: "?";
+                tooltip: "Search operators";
+                clicked => { root.search_help_toggle(); }
+            }
+            ToolButton {
+                visible: toolbar.show_toolbar_search && root.search_text != "";
+                x: toolbar.tb_search_x + toolbar.tb_search_w + 34px;
+                y: 6px;
+                button_width: 28px;
+                button_height: 31px;
+                icon_data: "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z";
+                tooltip: "Save search";
+                clicked => { root.search_save_requested(); }
+            }
+            if toolbar.show_toolbar_search && root.search_help_visible: Rectangle {
+                z: 40;
+                x: toolbar.tb_search_x;
+                y: 40px;
+                width: min(420px, parent.width - toolbar.tb_search_x - 12px);
+                height: root.search_chip_hint != "" ? 56px : 34px;
+                border-radius: AppMetrics.radius_small;
+                border-width: 1px;
+                border-color: ThemePalette.border_strong;
+                background: ThemePalette.panel_solid;
+                drop-shadow-blur: 12px;
+                drop-shadow-color: rgba(0, 0, 0, 0.3);
+                HorizontalLayout {
+                    x: 6px; y: 4px;
+                    width: parent.width - 12px;
+                    height: 26px;
+                    spacing: 4px;
+                    for chip_label[ci] in ["ext:", "kind:", "size:", "modified:", "tag:", "content:"]: Rectangle {
+                        property <string> chip_op: chip_label;
+                        preferred-width: chip_txt.preferred-width + 12px;
+                        width: self.preferred-width;
+                        height: 24px;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: chip_ta.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
+                        chip_txt := Text {
+                            width: parent.width; height: parent.height;
+                            text: chip_label;
+                            color: ThemePalette.text_muted;
+                            font-size: 10.5px;
+                            font-family: AppMetrics.mono_font;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        chip_ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.search_chip(chip_op); }
+                        }
+                    }
+                }
+                if root.search_chip_hint != "": Text {
+                    x: 8px; y: 32px; width: parent.width - 16px; height: 18px;
+                    text: root.search_chip_hint;
+                    color: ThemePalette.text_faint;
+                    font-size: 10.5px;
+                    overflow: elide;
                 }
             }
 
@@ -5300,16 +5444,48 @@ export component MainWindow inherits Window {
                         // Image preview area
                         if root.preview_is_image: Rectangle {
                             width: parent.width;
-                            height: 150px;
+                            height: 220px;
                             background: ThemePalette.bg;
                             border-width: 0;
                             Image {
-                                x: (parent.width - 150px) / 2;
+                                x: (parent.width - 200px) / 2;
                                 y: 10px;
-                                width: 150px;
-                                height: 130px;
+                                width: 200px;
+                                height: 200px;
                                 source: root.preview_image;
                                 image-fit: contain;
+                            }
+                        }
+
+                        if root.preview_is_media: Rectangle {
+                            width: parent.width;
+                            height: 48px;
+                            DialogButton {
+                                x: 16px; y: 8px;
+                                label: "Play in default app";
+                                primary: true;
+                                clicked => { root.quick_look_play(); }
+                            }
+                        }
+
+                        if root.preview_is_pdf && root.preview_body == "": Rectangle {
+                            x: 16px;
+                            width: parent.width - 32px;
+                            height: 40px;
+                            Text {
+                                width: parent.width; height: parent.height;
+                                text: "No extractable text on the first page — open the file to view the PDF.";
+                                color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap; vertical-alignment: center;
+                            }
+                        }
+
+                        if root.preview_is_html: Rectangle {
+                            width: parent.width;
+                            height: 28px;
+                            Text {
+                                x: 16px; width: parent.width - 32px; height: parent.height;
+                                text: "Markdown/HTML source below — use the browser button to open rendered output.";
+                                color: ThemePalette.text_faint; font-size: 11px; vertical-alignment: center; overflow: elide;
                             }
                         }
 
@@ -5396,6 +5572,31 @@ export component MainWindow inherits Window {
                     font-size: 11px;
                     vertical-alignment: center;
                     overflow: elide;
+                }
+                if root.queue_busy: Rectangle {
+                    horizontal-stretch: 0;
+                    preferred-width: Math.max(72px, queue_pill_label.preferred-width + 20px);
+                    width: self.preferred-width;
+                    preferred-height: 18px;
+                    height: self.preferred-height;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 9px;
+                    background: ThemePalette.warning;
+                    queue_pill_label := Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: root.queue_busy_text != "" ? root.queue_busy_text : "Queue busy";
+                        color: white;
+                        font-size: 10px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.queue_pill_clicked(); }
+                    }
                 }
                 Rectangle {
                     visible: root.update_available;
@@ -5532,7 +5733,6 @@ export component MainWindow inherits Window {
             if root.context_is_archive && !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Extract Here"; command_name: "extract-here"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: "Batch Rename"; command_name: "batch-rename"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: "Checksum"; command_name: "checksum"; picked(c) => { root.context_visible = false; root.command(c); } }
             ChoiceMenuRow { width: parent.width; label: "Add Note"; command_name: "note"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
             Rectangle {
@@ -5622,6 +5822,7 @@ export component MainWindow inherits Window {
 
             // -- Advanced items (hidden by default, never shown in simple mode) --------------------
             if root.context_advanced && !root.is_simple: Rectangle { height: 1px; background: ThemePalette.border; }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Checksum"; command_name: "checksum"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Copy as PowerShell Path"; command_name: "copy-as-powershell"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Locked File Inspector"; command_name: "locked-file"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Defender Scan"; command_name: "defender-scan"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -5941,9 +6142,9 @@ export component MainWindow inherits Window {
                 background: transparent;
                 Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
 
-                for tab_label[ti] in ["Appearance", "View", "Performance", "Themes", "AI"]: Rectangle {
-                    property <string> tid: ti == 0 ? "appearance" : (ti == 1 ? "view" : (ti == 2 ? "performance" : (ti == 3 ? "themes" : "ai")));
-                    property <bool> is_active: root.settings_tab == self.tid;
+                for tab_label[ti] in ["Appearance", "View", "Performance", "AI"]: Rectangle {
+                    property <string> tid: ti == 0 ? "appearance" : (ti == 1 ? "view" : (ti == 2 ? "performance" : "ai"));
+                    property <bool> is_active: root.settings_tab == self.tid || (self.tid == "appearance" && root.settings_tab == "themes");
                     visible: !(root.is_simple && tab_label == "AI");
                     x: 20px + ti * 102px;
                     y: 0;
@@ -5972,7 +6173,7 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.settings_tab == "appearance": ScrollView {
+            if root.settings_tab == "appearance" || root.settings_tab == "themes": ScrollView {
                 x: 20px;
                 y: 112px;
                 width: parent.width - 40px;
@@ -6156,163 +6357,12 @@ export component MainWindow inherits Window {
                         wrap: word-wrap;
                         height: self.preferred-height;
                     }
-                }
-            }
 
-            if root.settings_tab == "view": ScrollView {
-                x: 20px;
-                y: 112px;
-                width: parent.width - 40px;
-                height: parent.height - 124px;
+                    Text { text: "CUSTOM THEME"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
 
-                VerticalLayout {
-                width: parent.width - 20px;
-                spacing: 12px;
-                padding-bottom: 16px;
-
-                Text { text: "DEFAULT VIEW MODE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
-                Text {
-                    text: "Pathfinder remembers this for every folder you open until you change the view from the toolbar.";
-                    color: ThemePalette.text_muted;
-                    font-size: 11.5px;
-                    wrap: word-wrap;
-                    height: self.preferred-height;
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-                    width: parent.width;
-                    for vm_label[vi] in ["Grid", "Compact", "List", "Gallery"]: Rectangle {
-                        width: (parent.width - 24px) / 4;
-                        height: AppMetrics.row_h;
-                        property <string> vm_id: vi == 0 ? "grid" : (vi == 1 ? "compact" : (vi == 2 ? "list" : "gallery"));
-                        border-width: 1px;
-                        border-color: root.view_mode == self.vm_id ? ThemePalette.accent : ThemePalette.border;
-                        border-radius: AppMetrics.radius;
-                        background: root.view_mode == self.vm_id ? ThemePalette.accent_soft : ThemePalette.panel;
-                        Text {
-                            width: parent.width;
-                            height: parent.height;
-                            text: vm_label;
-                            color: root.view_mode == parent.vm_id ? ThemePalette.accent_strong : ThemePalette.text_muted;
-                            font-size: 13px;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                        TouchArea { mouse-cursor: pointer; clicked => { root.set_view(vm_id); } }
-                    }
-                }
-
-                Text { text: "OPTIONS"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
-                Rectangle {
-                    height: AppMetrics.row_h;
-                    border-radius: AppMetrics.radius;
-                    background: ThemePalette.panel;
-                    border-width: 1px;
-                    border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Show hidden files"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
-                    Rectangle {
-                        x: parent.width - 52px;
-                        y: (parent.height - 22px) / 2;
-                        width: 40px;
-                        height: 22px;
-                        border-radius: 11px;
-                        background: root.show_hidden ? ThemePalette.accent : ThemePalette.border_strong;
-                        animate background { duration: 60ms; easing: ease-out; }
-                        Rectangle {
-                            x: root.show_hidden ? 20px : 2px;
-                            y: 2px;
-                            width: 18px;
-                            height: 18px;
-                            border-radius: 9px;
-                            background: white;
-                            animate x { duration: 60ms; easing: ease-out; }
-                        }
-                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_hidden(); } }
-                    }
-                }
-                Rectangle {
-                    height: AppMetrics.row_h;
-                    border-radius: AppMetrics.radius;
-                    background: ThemePalette.panel;
-                    border-width: 1px;
-                    border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Show preview panel"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
-                    Rectangle {
-                        x: parent.width - 52px;
-                        y: (parent.height - 22px) / 2;
-                        width: 40px;
-                        height: 22px;
-                        border-radius: 11px;
-                        background: root.preview_visible ? ThemePalette.accent : ThemePalette.border_strong;
-                        animate background { duration: 60ms; easing: ease-out; }
-                        Rectangle {
-                            x: root.preview_visible ? 20px : 2px;
-                            y: 2px;
-                            width: 18px;
-                            height: 18px;
-                            border-radius: 9px;
-                            background: white;
-                            animate x { duration: 60ms; easing: ease-out; }
-                        }
-                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_preview(); } }
-                    }
-                }
-
-                if root.show_windows_integration: VerticalLayout {
-                    spacing: 10px;
-                    Text { text: "WINDOWS INTEGRATION"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    // Build a custom theme below; Save adds it to the theme picker as Custom.
                     Text {
-                        text: "Registers Pathfinder for your user account only (HKCU). Double-clicking a folder in Explorer opens it in Pathfinder. This does not replace every Explorer surface on Windows 11.";
-                        color: ThemePalette.text_muted;
-                        font-size: 11.5px;
-                        wrap: word-wrap;
-                        height: self.preferred-height;
-                    }
-                    HorizontalLayout {
-                        spacing: 10px;
-                        height: 36px;
-                        alignment: start;
-                        DialogButton {
-                            label: "Set as default folder handler";
-                            primary: true;
-                            clicked => { root.windows_set_default_folder_handler(); }
-                        }
-                        DialogButton {
-                            label: "Restore Explorer defaults";
-                            clicked => { root.windows_restore_folder_handler(); }
-                        }
-                    }
-                    Text {
-                        text: "Alternative: import extras/set-pathfinder-default-folder-handler.reg and replace CHANGEME_EXE with your pathfinder.exe path.";
-                        color: ThemePalette.text_faint;
-                        font-size: 11px;
-                        wrap: word-wrap;
-                        height: self.preferred-height;
-                    }
-                }
-                }
-            }
-
-            if root.settings_tab == "themes": ScrollView {
-                x: 20px;
-                y: 112px;
-                width: parent.width - 40px;
-                height: parent.height - 124px;
-                // Setting viewport-width caused the renderer to draw a vertical
-                // hairline at the boundary, so we shrink only the inner layout.
-                viewport-height: Math.max(self.height, themes_content.preferred-height);
-
-                themes_content := VerticalLayout {
-                    width: parent.width - 20px;
-                    spacing: 16px;
-                    padding-bottom: 20px;
-
-                    // Quick orientation so users do not confuse this tab
-                    // with the built-in theme picker on the Appearance tab.
-                    Text {
-                        text: "Build a theme here, then Save. It appears on Appearance as Custom. Pick a color token, adjust hex or swatches, and watch the mini window below (it uses only your token colors, not the rest of Settings).";
+                        text: "Build a theme here, then Save. It appears above as Custom. Pick a color token, adjust hex or swatches, and watch the mini window below (it uses only your token colors, not the rest of Settings).";
                         color: ThemePalette.text_faint;
                         font-size: 11.5px;
                         wrap: word-wrap;
@@ -6939,6 +6989,142 @@ export component MainWindow inherits Window {
                 }
             }
 
+            if root.settings_tab == "view": ScrollView {
+                x: 20px;
+                y: 112px;
+                width: parent.width - 40px;
+                height: parent.height - 124px;
+
+                VerticalLayout {
+                width: parent.width - 20px;
+                spacing: 12px;
+                padding-bottom: 16px;
+
+                Text { text: "DEFAULT VIEW MODE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Text {
+                    text: "Pathfinder remembers this for every folder you open until you change the view from the toolbar.";
+                    color: ThemePalette.text_muted;
+                    font-size: 11.5px;
+                    wrap: word-wrap;
+                    height: self.preferred-height;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    width: parent.width;
+                    for vm_label[vi] in ["Grid", "Compact", "List", "Gallery"]: Rectangle {
+                        width: (parent.width - 24px) / 4;
+                        height: AppMetrics.row_h;
+                        property <string> vm_id: vi == 0 ? "grid" : (vi == 1 ? "compact" : (vi == 2 ? "list" : "gallery"));
+                        border-width: 1px;
+                        border-color: root.view_mode == self.vm_id ? ThemePalette.accent : ThemePalette.border;
+                        border-radius: AppMetrics.radius;
+                        background: root.view_mode == self.vm_id ? ThemePalette.accent_soft : ThemePalette.panel;
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: vm_label;
+                            color: root.view_mode == parent.vm_id ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                            font-size: 13px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.set_view(vm_id); } }
+                    }
+                }
+
+                Text { text: "OPTIONS"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Rectangle {
+                    height: AppMetrics.row_h;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Show hidden files"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Rectangle {
+                        x: parent.width - 52px;
+                        y: (parent.height - 22px) / 2;
+                        width: 40px;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: root.show_hidden ? ThemePalette.accent : ThemePalette.border_strong;
+                        animate background { duration: 60ms; easing: ease-out; }
+                        Rectangle {
+                            x: root.show_hidden ? 20px : 2px;
+                            y: 2px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: white;
+                            animate x { duration: 60ms; easing: ease-out; }
+                        }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_hidden(); } }
+                    }
+                }
+                Rectangle {
+                    height: AppMetrics.row_h;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Show preview panel"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Rectangle {
+                        x: parent.width - 52px;
+                        y: (parent.height - 22px) / 2;
+                        width: 40px;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: root.preview_visible ? ThemePalette.accent : ThemePalette.border_strong;
+                        animate background { duration: 60ms; easing: ease-out; }
+                        Rectangle {
+                            x: root.preview_visible ? 20px : 2px;
+                            y: 2px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: white;
+                            animate x { duration: 60ms; easing: ease-out; }
+                        }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_preview(); } }
+                    }
+                }
+
+                if root.show_windows_integration: VerticalLayout {
+                    spacing: 10px;
+                    Text { text: "WINDOWS INTEGRATION"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text {
+                        text: "Registers Pathfinder for your user account only (HKCU). Double-clicking a folder in Explorer opens it in Pathfinder. This does not replace every Explorer surface on Windows 11.";
+                        color: ThemePalette.text_muted;
+                        font-size: 11.5px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        height: 36px;
+                        alignment: start;
+                        DialogButton {
+                            label: "Set as default folder handler";
+                            primary: true;
+                            clicked => { root.windows_set_default_folder_handler(); }
+                        }
+                        DialogButton {
+                            label: "Restore Explorer defaults";
+                            clicked => { root.windows_restore_folder_handler(); }
+                        }
+                    }
+                    Text {
+                        text: "Alternative: import extras/set-pathfinder-default-folder-handler.reg and replace CHANGEME_EXE with your pathfinder.exe path.";
+                        color: ThemePalette.text_faint;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                }
+                }
+            }
+
             if root.settings_tab == "performance": ScrollView {
                 x: 20px;
                 y: 112px;
@@ -7081,6 +7267,13 @@ export component MainWindow inherits Window {
                 }
 
                 Text { text: "OPTIONAL SEARCH"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Text {
+                    width: parent.width;
+                    text: "CLIP visual search is reserved but not bundled in this build. The control below is disabled.";
+                    color: ThemePalette.text_muted;
+                    font-size: 11.5px;
+                    wrap: word-wrap;
+                }
                 Rectangle {
                     width: parent.width;
                     height: AppMetrics.row_h;
@@ -7088,27 +7281,22 @@ export component MainWindow inherits Window {
                     background: ThemePalette.panel;
                     border-width: 1px;
                     border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Image tags in search (Local AI classifier)"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; overflow: elide; }
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Image tags / CLIP search (unavailable in this build)"; color: ThemePalette.text_muted; font-size: 13px; vertical-alignment: center; overflow: elide; }
                     Rectangle {
                         x: parent.width - 52px;
                         y: (parent.height - 22px) / 2;
                         width: 40px;
                         height: 22px;
                         border-radius: 11px;
-                        background: root.clip_search_enabled ? ThemePalette.accent : ThemePalette.border_strong;
-                        animate background { duration: 60ms; easing: ease-out; }
+                        background: ThemePalette.border_strong;
+                        opacity: 0.45;
                         Rectangle {
-                            x: root.clip_search_enabled ? 20px : 2px;
+                            x: 2px;
                             y: 2px;
                             width: 18px;
                             height: 18px;
                             border-radius: 9px;
                             background: white;
-                            animate x { duration: 60ms; easing: ease-out; }
-                        }
-                        TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.set_clip_search_enabled(!root.clip_search_enabled); }
                         }
                     }
                 }
@@ -7494,6 +7682,290 @@ export component MainWindow inherits Window {
         }
     }
 
+    if root.tool_overlay_visible: Rectangle {
+        z: 110;
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.42);
+        TouchArea { clicked => { root.tool_overlay_close(); } }
+        Rectangle {
+            x: (parent.width - min(520px, parent.width - 32px)) / 2;
+            y: (parent.height - min(420px, parent.height - 32px)) / 2;
+            width: min(520px, parent.width - 32px);
+            height: min(420px, parent.height - 32px);
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            drop-shadow-blur: 20px;
+            drop-shadow-color: rgba(0, 0, 0, 0.45);
+            TouchArea {}
+            Text {
+                x: 18px; y: 14px; width: parent.width - 36px; height: 24px;
+                text: root.tool_overlay_title;
+                color: ThemePalette.text; font-size: 17px; font-weight: 700; overflow: elide;
+            }
+            Text {
+                x: 18px; y: 40px; width: parent.width - 36px; height: 18px;
+                text: root.tool_overlay_subtitle;
+                color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
+            }
+            if root.tool_overlay_kind == "shortcuts": ScrollView {
+                x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 120px;
+                for sc[si] in root.shortcut_edit_items: Rectangle {
+                    width: parent.width - 8px;
+                    height: 56px;
+                    border-radius: AppMetrics.radius_small;
+                    background: Math.mod(si, 2) == 0 ? ThemePalette.panel : rgba(0, 0, 0, 0);
+                    Text {
+                        x: 12px; y: 6px; width: parent.width - 24px; height: 18px;
+                        text: sc.label + (sc.group != "" ? (" · " + sc.group) : "");
+                        color: ThemePalette.text; font-size: 12.5px; font-weight: 600; overflow: elide;
+                    }
+                    LineEdit {
+                        x: 12px; y: 26px; width: parent.width - 24px; height: 24px;
+                        text: sc.hint;
+                        placeholder-text: "Shortcut hint";
+                        font-size: 12px;
+                        font-family: AppMetrics.mono_font;
+                        edited(val) => { root.shortcut_hint_changed(sc.command, val); }
+                    }
+                }
+            }
+            if root.tool_overlay_kind != "shortcuts": ScrollView {
+                x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 120px;
+                for item[ti] in root.tool_overlay_items: Rectangle {
+                    width: parent.width - 8px;
+                    height: 52px;
+                    border-radius: AppMetrics.radius_small;
+                    background: tool_row_ta.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+                    Rectangle {
+                        x: 8px; y: 16px; width: 4px; height: 20px;
+                        border-radius: 2px;
+                        background: item.accent;
+                    }
+                    Text {
+                        x: 20px; y: 8px; width: parent.width - (root.tool_overlay_kind == "rules" ? 120px : 90px); height: 20px;
+                        text: item.title;
+                        color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
+                    }
+                    Text {
+                        x: 20px; y: 28px; width: parent.width - (root.tool_overlay_kind == "rules" ? 120px : 90px); height: 16px;
+                        text: item.subtitle;
+                        color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
+                    }
+                    if root.tool_overlay_kind == "rules": Rectangle {
+                        x: parent.width - 108px; y: 14px; width: 52px; height: 24px;
+                        border-radius: 12px;
+                        background: item.enabled ? ThemePalette.success : ThemePalette.border_strong;
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: item.enabled ? "On" : "Off";
+                            color: white; font-size: 10px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.tool_overlay_toggle(item.id); }
+                        }
+                    }
+                    if item.meta != "": Text {
+                        x: parent.width - 48px; y: 0; width: 36px; height: parent.height;
+                        text: item.meta;
+                        color: ThemePalette.text_faint; font-size: 11px;
+                        horizontal-alignment: right; vertical-alignment: center; overflow: elide;
+                    }
+                    ToolButton {
+                        x: parent.width - 36px; y: 10px;
+                        button_width: 28px; button_height: 28px;
+                        visible: item.meta == "";
+                        text_label: "···";
+                        tooltip: "More";
+                        clicked => { root.tool_overlay_secondary(item.id); }
+                    }
+                    tool_row_ta := TouchArea {
+                        x: 0; y: 0;
+                        width: parent.width - (root.tool_overlay_kind == "rules" ? 112px : 40px);
+                        height: parent.height;
+                        mouse-cursor: pointer;
+                        clicked => { root.tool_overlay_activate(item.id); }
+                    }
+                }
+            }
+            DialogButton {
+                x: 18px; y: parent.height - 48px;
+                label: "Close";
+                clicked => { root.tool_overlay_close(); }
+            }
+            if root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "shortcuts" || root.tool_overlay_kind == "workspaces" || root.tool_overlay_kind == "smart-folders": DialogButton {
+                x: parent.width - self.preferred-width - 18px; y: parent.height - 48px;
+                label: root.tool_overlay_kind == "rules" ? "Run enabled"
+                    : (root.tool_overlay_kind == "shortcuts" ? "Save"
+                    : (root.tool_overlay_kind == "workspaces" ? "Open" : "Close"));
+                primary: true;
+                clicked => {
+                    if (root.tool_overlay_kind == "smart-folders") {
+                        root.tool_overlay_close();
+                    } else {
+                        root.tool_overlay_primary_action();
+                    }
+                }
+            }
+        }
+    }
+
+    if root.compare_overlay_visible: Rectangle {
+        z: 110;
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.42);
+        TouchArea { clicked => { root.compare_overlay_close(); } }
+        Rectangle {
+            x: (parent.width - min(560px, parent.width - 32px)) / 2;
+            y: (parent.height - min(440px, parent.height - 32px)) / 2;
+            width: min(560px, parent.width - 32px);
+            height: min(440px, parent.height - 32px);
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            drop-shadow-blur: 20px;
+            drop-shadow-color: rgba(0, 0, 0, 0.45);
+            TouchArea {}
+            Text {
+                x: 18px; y: 14px; width: parent.width - 36px; height: 24px;
+                text: root.compare_overlay_title != "" ? root.compare_overlay_title : "Compare folders";
+                color: ThemePalette.text; font-size: 17px; font-weight: 700; overflow: elide;
+            }
+            Text {
+                x: 18px; y: 40px; width: parent.width - 36px; height: 16px;
+                text: root.compare_overlay_left + "  ↔  " + root.compare_overlay_right;
+                color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
+            }
+            Rectangle {
+                x: 18px; y: 62px; width: 160px; height: 26px;
+                border-radius: AppMetrics.radius_small;
+                border-width: 1px;
+                border-color: root.compare_overlay_hide_same ? ThemePalette.accent : ThemePalette.border;
+                background: root.compare_overlay_hide_same ? ThemePalette.accent_soft : ThemePalette.panel_alt;
+                Text {
+                    x: 10px; width: parent.width - 20px; height: parent.height;
+                    text: root.compare_overlay_hide_same ? "Hide same: On" : "Hide same: Off";
+                    color: root.compare_overlay_hide_same ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                    font-size: 11.5px; vertical-alignment: center;
+                }
+                TouchArea { mouse-cursor: pointer; clicked => { root.compare_toggle_hide_same(); } }
+            }
+            ScrollView {
+                x: 12px; y: 96px; width: parent.width - 24px; height: parent.height - 152px;
+                for row[ri] in root.compare_rows: Rectangle {
+                    width: parent.width - 8px;
+                    height: 40px;
+                    border-radius: AppMetrics.radius_small;
+                    background: cmp_ta.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+                    property <color> status_color:
+                        row.status == "same" ? ThemePalette.success :
+                        (row.status == "left-only" || row.status == "newer-left" ? ThemePalette.accent :
+                        (row.status == "right-only" || row.status == "newer-right" ? ThemePalette.warning : ThemePalette.danger));
+                    Rectangle {
+                        x: 8px; y: 12px; width: 8px; height: 8px;
+                        border-radius: 4px;
+                        background: parent.status_color;
+                    }
+                    Text {
+                        x: 24px; y: 4px; width: parent.width - 160px; height: 18px;
+                        text: row.path;
+                        color: ThemePalette.text; font-size: 12.5px; overflow: elide;
+                    }
+                    Text {
+                        x: 24px; y: 22px; width: parent.width - 160px; height: 14px;
+                        text: row.status + " · L " + row.left_size + " · R " + row.right_size;
+                        color: ThemePalette.text_faint; font-size: 10.5px; overflow: elide;
+                    }
+                    cmp_ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.compare_row_activate(row.path); }
+                    }
+                }
+            }
+            DialogButton {
+                x: parent.width - self.preferred-width - 18px; y: parent.height - 48px;
+                label: "Close";
+                primary: true;
+                clicked => { root.compare_overlay_close(); }
+            }
+        }
+    }
+
+    if root.dupe_overlay_visible: Rectangle {
+        z: 110;
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.42);
+        TouchArea { clicked => { root.dupe_overlay_close(); } }
+        Rectangle {
+            x: (parent.width - min(520px, parent.width - 32px)) / 2;
+            y: (parent.height - min(420px, parent.height - 32px)) / 2;
+            width: min(520px, parent.width - 32px);
+            height: min(420px, parent.height - 32px);
+            border-width: 1px;
+            border-color: ThemePalette.border_strong;
+            border-radius: AppMetrics.radius;
+            background: ThemePalette.panel_solid;
+            drop-shadow-blur: 20px;
+            drop-shadow-color: rgba(0, 0, 0, 0.45);
+            TouchArea {}
+            Text {
+                x: 18px; y: 14px; width: parent.width - 36px; height: 24px;
+                text: root.dupe_overlay_title != "" ? root.dupe_overlay_title : "Duplicate files";
+                color: ThemePalette.text; font-size: 17px; font-weight: 700; overflow: elide;
+            }
+            Text {
+                x: 18px; y: 40px; width: parent.width - 36px; height: 18px;
+                text: root.dupe_overlay_subtitle;
+                color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
+            }
+            ScrollView {
+                x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 120px;
+                for grp[gi] in root.dupe_groups: Rectangle {
+                    width: parent.width - 8px;
+                    height: 72px;
+                    border-radius: AppMetrics.radius_small;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    background: ThemePalette.panel;
+                    Text {
+                        x: 12px; y: 8px; width: parent.width - 24px; height: 18px;
+                        text: grp.title;
+                        color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
+                    }
+                    Text {
+                        x: 12px; y: 28px; width: parent.width - 24px; height: 14px;
+                        text: grp.detail + " · " + grp.count + " files · " + grp.reclaimable;
+                        color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
+                    }
+                    DialogButton {
+                        x: 12px; y: parent.height - 38px;
+                        label: "Keep";
+                        clicked => { root.dupe_group_keep(grp.id); }
+                    }
+                    DialogButton {
+                        x: 96px; y: parent.height - 38px;
+                        label: "Delete others";
+                        danger: true;
+                        clicked => { root.dupe_group_delete_others(grp.id); }
+                    }
+                }
+            }
+            DialogButton {
+                x: parent.width - self.preferred-width - 18px; y: parent.height - 48px;
+                label: "Close";
+                primary: true;
+                clicked => { root.dupe_overlay_close(); }
+            }
+        }
+    }
+
     if root.quick_look_visible: Rectangle {
         z: 120;
         width: parent.width;
@@ -7663,7 +8135,11 @@ export component MainWindow inherits Window {
                     height: self.preferred-height;
                 }
                 Text {
-                    text: "Three quick steps to make Pathfinder feel like your everyday file manager. You can finish them all here, or come back later from Settings.";
+                    text: root.welcome_step == 0
+                        ? "Three quick steps to make Pathfinder feel like your everyday file manager. You can finish them all here, or come back later from Settings."
+                        : (root.welcome_step == 1
+                            ? "Pick how much of Pathfinder you want up front. You can change this any time in Settings → Appearance."
+                            : "A couple of shortcuts that pay off immediately.");
                     color: ThemePalette.text_muted;
                     font-size: 12.5px;
                     wrap: word-wrap;
@@ -7671,8 +8147,8 @@ export component MainWindow inherits Window {
                     height: self.preferred-height;
                 }
 
-                // Step 1: default folder handler
-                Rectangle {
+                // Step 0: default folder handler + pin tips
+                if root.welcome_step == 0: Rectangle {
                     height: w1_title.preferred-height + w1_body.preferred-height + 68px;
                     border-radius: AppMetrics.radius_small;
                     border-width: 1px;
@@ -7696,9 +8172,7 @@ export component MainWindow inherits Window {
                         clicked => { root.welcome_set_default_handler(); }
                     }
                 }
-
-                // Step 2: pin to taskbar
-                Rectangle {
+                if root.welcome_step == 0: Rectangle {
                     height: w2_title.preferred-height + w2_body.preferred-height + 28px;
                     border-radius: AppMetrics.radius_small;
                     border-width: 1px;
@@ -7716,9 +8190,7 @@ export component MainWindow inherits Window {
                         height: self.preferred-height;
                     }
                 }
-
-                // Step 3: unpin File Explorer
-                Rectangle {
+                if root.welcome_step == 0: Rectangle {
                     height: w3_title.preferred-height + w3_body.preferred-height + 28px;
                     border-radius: AppMetrics.radius_small;
                     border-width: 1px;
@@ -7737,17 +8209,92 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                // Step 1: interface mode
+                if root.welcome_step == 1: Rectangle {
+                    height: 148px;
+                    border-radius: AppMetrics.radius_small;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    background: ThemePalette.panel;
+                    Text {
+                        x: 14px; y: 12px; width: parent.width - 28px; height: 20px;
+                        text: "Choose your starting mode";
+                        color: ThemePalette.text; font-size: 13px; font-weight: 700;
+                    }
+                    HorizontalLayout {
+                        x: 14px; y: 44px; width: parent.width - 28px; height: AppMetrics.row_h;
+                        spacing: 8px;
+                        for mode_label[mi] in ["Simple", "Normal"]: Rectangle {
+                            width: (parent.width - 8px) / 2;
+                            height: AppMetrics.row_h;
+                            property <string> mode_id: mi == 0 ? "simple" : "normal";
+                            border-width: 1px;
+                            border-color: root.ui_mode == self.mode_id ? ThemePalette.accent : ThemePalette.border;
+                            border-radius: AppMetrics.radius;
+                            background: root.ui_mode == self.mode_id ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            Text {
+                                width: parent.width; height: parent.height;
+                                text: mode_label;
+                                color: root.ui_mode == parent.mode_id ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                                font-size: 13px; horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.welcome_set_mode(mode_id); }
+                            }
+                        }
+                    }
+                    Text {
+                        x: 14px; y: 96px; width: parent.width - 28px;
+                        text: root.ui_mode == "simple"
+                            ? "Essential features only — dual pane, power tools, and AI stay tucked away."
+                            : "Full access including dual pane, power tools, command palette, and AI.";
+                        color: ThemePalette.text_faint; font-size: 11.5px; wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                }
+
+                // Step 2: tips
+                if root.welcome_step == 2: Rectangle {
+                    height: tip1.preferred-height + tip2.preferred-height + 48px;
+                    border-radius: AppMetrics.radius_small;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    background: ThemePalette.panel;
+                    tip1 := Text {
+                        x: 14px; y: 14px; width: parent.width - 28px;
+                        text: "Press Ctrl+P to open the command palette — search any action, theme, or folder jump without leaving the keyboard.";
+                        color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                    tip2 := Text {
+                        x: 14px; y: tip1.y + tip1.preferred-height + 12px; width: parent.width - 28px;
+                        text: "Optional AI features (semantic search & helpers) live under Settings → AI. Install only if you want them — Pathfinder works fully without.";
+                        color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                }
+
                 HorizontalLayout {
                     height: 36px;
                     spacing: 10px;
                     alignment: end;
-                    DialogButton {
+                    if root.welcome_step == 0: DialogButton {
                         label: "Open Taskbar settings";
                         clicked => { root.welcome_open_taskbar_settings(); }
                     }
-                    DialogButton {
+                    if root.welcome_step < 2: DialogButton {
+                        label: "Next";
+                        primary: true;
+                        clicked => { root.welcome_next_step(); }
+                    }
+                    if root.welcome_step >= 2: DialogButton {
                         label: "Got it";
                         primary: true;
+                        clicked => { root.welcome_dismiss(); }
+                    }
+                    if root.welcome_step < 2: DialogButton {
+                        label: "Skip";
                         clicked => { root.welcome_dismiss(); }
                     }
                 }
@@ -8001,6 +8548,9 @@ export component MainWindow inherits Window {
             if (root.command_visible) { root.command_visible = false; }
             else if (root.settings_visible) { root.settings_visible = false; }
             else if (root.confirm_visible) { root.confirm_visible = false; }
+            else if (root.tool_overlay_visible) { root.tool_overlay_close(); }
+            else if (root.compare_overlay_visible) { root.compare_overlay_close(); }
+            else if (root.dupe_overlay_visible) { root.dupe_overlay_close(); }
             else if (root.quick_look_visible) { root.quick_look_close(); }
             else if (root.rename_presets_visible) { root.prompt_cancel(); }
             else if (root.prompt_visible) {
@@ -8015,6 +8565,7 @@ export component MainWindow inherits Window {
             else if (root.rename_index >= 0) { root.rename_index = -1; }
             else if (root.image_tools_visible) { root.image_tools_visible = false; }
             else if (root.context_visible) { root.context_visible = false; }
+            else if (root.search_help_visible) { root.search_help_toggle(); }
             else if (root.address_editing) { root.address_editing = false; root.addr_suggestions = []; }
             else if (root.search_text != "") { root.search_text = ""; root.search_requested(""); }
             else if (root.selected_count > 0) { root.clear_selection(); }

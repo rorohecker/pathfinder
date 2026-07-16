@@ -274,6 +274,7 @@ struct NativeDirectoryResult {
 enum SidebarActivateAction {
     None,
     Navigate(String),
+    NavigateThenSearch { path: String, query: String },
 }
 
 #[derive(Clone)]
@@ -8027,6 +8028,9 @@ struct NativeSettings {
     /// Suppress the first-run welcome dialog after the user dismisses it once.
     #[serde(default)]
     first_run_welcome_dismissed: bool,
+    /// Shown once: tip toast when opening the command palette.
+    #[serde(default)]
+    palette_tip_shown: bool,
     /// Override folder icon color set on the Appearance tab. None means use
     /// the per-theme defaults from `icon_folder_colors`.
     #[serde(default)]
@@ -8066,6 +8070,7 @@ impl Default for NativeSettings {
             search_semantic_mode: false,
             clip_search_enabled: false,
             first_run_welcome_dismissed: false,
+            palette_tip_shown: false,
             folder_color: None,
             custom_accent_hex: None,
         }
@@ -8216,6 +8221,7 @@ enum PendingPrompt {
     },
     NewTemplate(FileTemplate),
     CompareFolder(String),
+    SaveWorkspace,
     BatchRename(Vec<String>),
     RenamePreset(Vec<String>),
     RenameConflict { path: String, new_name: String },
@@ -8362,6 +8368,13 @@ struct NativeController {
     pending_deferred_startup: Arc<Mutex<Option<DeferredStartupData>>>,
     /// Deferred shell-icon + thumbnail disk reads after the first file list paints.
     enrich_visible_pending: bool,
+    compare_hide_same: bool,
+    compare_left: String,
+    compare_right: String,
+    compare_all_rows: Vec<FolderCompareEntry>,
+    dupe_groups_cache: Vec<(String, Vec<String>)>,
+    shortcut_draft: HashMap<String, String>,
+    recent_commands: std::collections::VecDeque<String>,
 }
 
 #[derive(Clone)]
@@ -10272,6 +10285,190 @@ fn default_file_templates() -> Vec<FileTemplate> {
     ]
 }
 
+fn load_file_templates() -> Vec<FileTemplate> {
+    let saved: Vec<FileTemplate> = read_native_json("file_templates.json", Vec::new());
+    if saved.is_empty() {
+        let defaults = default_file_templates();
+        let _ = write_native_json("file_templates.json", &defaults);
+        defaults
+    } else {
+        saved
+    }
+}
+
+fn load_automation_rules() -> Vec<AutomationRule> {
+    let saved: Vec<AutomationRule> = read_native_json("automation_rules.json", Vec::new());
+    if saved.is_empty() {
+        let defaults = default_automation_rules();
+        let _ = write_native_json("automation_rules.json", &defaults);
+        defaults
+    } else {
+        saved
+    }
+}
+
+fn save_automation_rules(rules: &[AutomationRule]) -> Result<(), String> {
+    write_native_json("automation_rules.json", &rules)
+}
+
+fn load_shortcut_overrides() -> HashMap<String, String> {
+    read_native_json("shortcuts.json", HashMap::new())
+}
+
+fn save_shortcut_overrides(map: &HashMap<String, String>) -> Result<(), String> {
+    write_native_json("shortcuts.json", map)
+}
+
+fn shortcut_hint_for(command: &str, default_hint: &str) -> String {
+    load_shortcut_overrides()
+        .get(command)
+        .cloned()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| default_hint.to_string())
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct WorkspaceSession {
+    name: String,
+    tabs: Vec<SessionTab>,
+}
+
+fn load_workspaces() -> Vec<WorkspaceSession> {
+    read_native_json("workspaces.json", Vec::new())
+}
+
+fn save_workspaces(list: &[WorkspaceSession]) -> Result<(), String> {
+    write_native_json("workspaces.json", &list)
+}
+
+fn native_save_search(name: String, query: String, scope: String) -> Result<(), String> {
+    let mut searches: Vec<SavedSearch> = read_native_json("searches.json", Vec::new());
+    searches.retain(|s| s.name != name);
+    searches.insert(
+        0,
+        SavedSearch {
+            name,
+            query,
+            scope,
+        },
+    );
+    if searches.len() > 50 {
+        searches.truncate(50);
+    }
+    write_native_json("searches.json", &searches)
+}
+
+fn run_automation_rules_once(
+    rules: &[AutomationRule],
+    tags: &mut HashMap<String, String>,
+) -> Result<(usize, usize), String> {
+    let mut tagged = 0usize;
+    let mut moved = 0usize;
+    for rule in rules.iter().filter(|r| r.enabled) {
+        if rule.folder.is_empty() || !Path::new(&rule.folder).is_dir() {
+            continue;
+        }
+        let ext = rule.extension.trim_start_matches('.').to_ascii_lowercase();
+        let entries = fs::read_dir(&rule.folder).map_err(|e| e.to_string())?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let file_ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            if !ext.is_empty() && file_ext != ext {
+                continue;
+            }
+            let path_str = path.to_string_lossy().to_string();
+            if !rule.tag.is_empty() {
+                tags.insert(path_str.clone(), rule.tag.clone());
+                tagged += 1;
+            }
+            if let Some(dest_dir) = rule.move_to.as_ref().filter(|d| !d.is_empty()) {
+                let dest = PathBuf::from(dest_dir);
+                if !dest.is_dir() {
+                    let _ = fs::create_dir_all(&dest);
+                }
+                if dest.is_dir() {
+                    let dest_path = dest.join(path.file_name().unwrap_or_default());
+                    let dest_final = if dest_path.exists() {
+                        keep_both_destination(&dest_path)
+                    } else {
+                        dest_path
+                    };
+                    if fs::rename(&path, &dest_final).is_ok() {
+                        moved += 1;
+                        if let Some(tag) = tags.remove(&path_str) {
+                            tags.insert(dest_final.to_string_lossy().to_string(), tag);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok((tagged, moved))
+}
+
+fn collect_image_duplicate_groups(folder: &str) -> Vec<(String, Vec<String>)> {
+    let Ok(conn) = open_index_connection() else {
+        return Vec::new();
+    };
+    let prefix = format!("{}%", folder.trim_end_matches(['\\', '/']));
+    let sql = "SELECT path, dhash FROM image_dhash WHERE path LIKE ?1 ESCAPE '\\'";
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map(params![prefix], |row| {
+        let path: String = row.get(0)?;
+        let dh: Vec<u8> = row.get(1)?;
+        Ok((path, dh))
+    });
+    let Ok(rows) = rows else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(String, u64)> = Vec::new();
+    for r in rows {
+        let Ok((path, blob)) = r else { continue };
+        if blob.len() != 8 {
+            continue;
+        }
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(&blob);
+        entries.push((path, u64::from_le_bytes(arr)));
+    }
+    let mut groups = Vec::new();
+    let mut seen: HashSet<usize> = HashSet::new();
+    for i in 0..entries.len() {
+        if seen.contains(&i) {
+            continue;
+        }
+        let mut group = vec![i];
+        for j in (i + 1)..entries.len() {
+            if seen.contains(&j) {
+                continue;
+            }
+            if crate::inference::hamming64(entries[i].1, entries[j].1) == 0 {
+                group.push(j);
+            }
+        }
+        if group.len() > 1 {
+            for &idx in &group {
+                seen.insert(idx);
+            }
+            let paths: Vec<String> = group.iter().map(|&idx| entries[idx].0.clone()).collect();
+            let title = Path::new(&paths[0])
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| paths[0].clone());
+            groups.push((title, paths));
+        }
+    }
+    groups
+}
+
 fn default_automation_rules() -> Vec<AutomationRule> {
     vec![AutomationRule {
         name: "Tag review PDFs in Downloads".to_string(),
@@ -10364,6 +10561,14 @@ fn build_breadcrumbs(path: &str) -> Vec<ChoiceItem> {
         return vec![ChoiceItem {
             id: ss("recycle://"),
             label: ss("Recycle Bin"),
+            description: ss(""),
+            color: slint::Color::from_argb_u8(0, 0, 0, 0),
+        }];
+    }
+    if path == "home://" {
+        return vec![ChoiceItem {
+            id: ss("home://"),
+            label: ss("Home"),
             description: ss(""),
             color: slint::Color::from_argb_u8(0, 0, 0, 0),
         }];
@@ -11808,6 +12013,8 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Rules and Automation", "", "rules"),
     ("Tools", "Smart Folders", "", "smart-folders"),
     ("Tools", "Home Page", "", "home-page"),
+    ("Tools", "Save Workspace", "", "save-workspace"),
+    ("Tools", "Open Workspace", "", "open-workspace"),
     ("Tools", "Libraries", "", "libraries"),
     ("Tools", "Recent Locations", "", "recent-locations"),
     ("Tools", "Copy As Path", "", "copy-as-path"),
@@ -11902,7 +12109,15 @@ fn command_match_score(group: &str, label: &str, command: &str, query: &str) -> 
 }
 
 fn command_items_filtered(query: &str) -> ModelRc<CommandItem> {
+    command_items_filtered_with_recent(query, &[])
+}
+
+fn command_items_filtered_with_recent(
+    query: &str,
+    recent: &[String],
+) -> ModelRc<CommandItem> {
     let q = query.to_lowercase();
+    let overrides = load_shortcut_overrides();
     let mut matches: Vec<(i32, &(&str, &str, &str, &str))> = ALL_COMMANDS
         .iter()
         .filter_map(|item @ (group, label, _, command)| {
@@ -11914,17 +12129,38 @@ fn command_items_filtered(query: &str) -> ModelRc<CommandItem> {
             .cmp(score_b)
             .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
     });
-    model_from_vec(
-        matches
-            .into_iter()
-            .map(|(_, (group, label, hint, command))| CommandItem {
-                group: ss(*group),
-                label: ss(*label),
-                hint: ss(*hint),
-                command: ss(*command),
-            })
-            .collect(),
-    )
+    let mut items: Vec<CommandItem> = Vec::new();
+    if q.is_empty() && !recent.is_empty() {
+        for cmd in recent.iter().take(5) {
+            if let Some((_group, label, hint, command)) =
+                ALL_COMMANDS.iter().find(|(_, _, _, c)| *c == cmd.as_str())
+            {
+                let hint_s = overrides
+                    .get(*command)
+                    .cloned()
+                    .unwrap_or_else(|| (*hint).to_string());
+                items.push(CommandItem {
+                    group: ss("Recent"),
+                    label: ss(*label),
+                    hint: ss(hint_s),
+                    command: ss(*command),
+                });
+            }
+        }
+    }
+    items.extend(matches.into_iter().map(|(_, (group, label, hint, command))| {
+        let hint_s = overrides
+            .get(*command)
+            .cloned()
+            .unwrap_or_else(|| (*hint).to_string());
+        CommandItem {
+            group: ss(*group),
+            label: ss(*label),
+            hint: ss(hint_s),
+            command: ss(*command),
+        }
+    }));
+    model_from_vec(items)
 }
 
 fn command_items() -> ModelRc<CommandItem> {
@@ -12424,6 +12660,13 @@ impl NativeController {
             pending_search_result: Arc::new(Mutex::new(None)),
             pending_deferred_startup: Arc::new(Mutex::new(None)),
             enrich_visible_pending: false,
+            compare_hide_same: true,
+            compare_left: String::new(),
+            compare_right: String::new(),
+            compare_all_rows: Vec::new(),
+            dupe_groups_cache: Vec::new(),
+            shortcut_draft: HashMap::new(),
+            recent_commands: std::collections::VecDeque::new(),
         }
     }
 
@@ -13730,6 +13973,16 @@ impl NativeController {
             is_header: true,
             active: false,
         });
+        // Home dashboard — virtual landing for drives, pins, and saved searches.
+        items.push(SideItem {
+            label: ss("Home"),
+            path: ss("home://"),
+            icon: ss("home"),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: false,
+            active: self.current_path == "home://",
+        });
         for folder in &self.known_folders {
             items.push(SideItem {
                 label: ss(&folder.name),
@@ -13774,6 +14027,33 @@ impl NativeController {
             is_header: false,
             active: self.current_path == "storage://",
         });
+
+        if !self.user_pins.is_empty() {
+            items.push(SideItem {
+                label: ss("PINNED"),
+                path: ss(""),
+                icon: ss(""),
+                count: ss(""),
+                color: rgba_u8(0, 0, 0, 0.0),
+                is_header: true,
+                active: false,
+            });
+            for pin in self.user_pins.iter().take(12) {
+                items.push(SideItem {
+                    label: ss(&pin.name),
+                    path: ss(&pin.path),
+                    icon: ss(if pin.kind == "file" {
+                        self.icon_for_path(&pin.path, &pin.name)
+                    } else {
+                        "folder"
+                    }),
+                    count: ss(""),
+                    color: rgba_u8(0, 0, 0, 0.0),
+                    is_header: false,
+                    active: same_path_string(&self.current_path, &pin.path),
+                });
+            }
+        }
 
         items.push(SideItem {
             label: ss("DRIVES"),
@@ -13827,6 +14107,54 @@ impl NativeController {
             }
         }
 
+        let smart = smart_folders_for_path(&self.current_path);
+        items.push(SideItem {
+            label: ss("SMART FOLDERS"),
+            path: ss(""),
+            icon: ss(""),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: true,
+            active: false,
+        });
+        for folder in smart {
+            items.push(SideItem {
+                label: ss(&folder.name),
+                path: ss(format!("smart:{}", folder.id)),
+                icon: ss("folder"),
+                count: ss(""),
+                color: rgba_u8(0, 0, 0, 0.0),
+                is_header: false,
+                active: self.search_query == format!("smart:{}", folder.id)
+                    || self.search_query == folder.query,
+            });
+        }
+
+        let saved = read_native_json::<Vec<SavedSearch>>("searches.json", Vec::new());
+        if !saved.is_empty() {
+            items.push(SideItem {
+                label: ss("SAVED SEARCHES"),
+                path: ss(""),
+                icon: ss(""),
+                count: ss(""),
+                color: rgba_u8(0, 0, 0, 0.0),
+                is_header: true,
+                active: false,
+            });
+            for search in saved.into_iter().take(8) {
+                let encoded = format!("search:{}", search.name);
+                items.push(SideItem {
+                    label: ss(&search.name),
+                    path: ss(&encoded),
+                    icon: ss("search"),
+                    count: ss(""),
+                    color: rgba_u8(0, 0, 0, 0.0),
+                    is_header: false,
+                    active: self.search_query == search.query,
+                });
+            }
+        }
+
         items.push(SideItem {
             label: ss("TAGS"),
             path: ss(""),
@@ -13874,6 +14202,15 @@ impl NativeController {
             is_header: true,
             active: false,
         });
+        items.push(SideItem {
+            label: ss("Home"),
+            path: ss("home://"),
+            icon: ss("home"),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: false,
+            active: self.current_path == "home://",
+        });
         for folder in &self.known_folders {
             items.push(SideItem {
                 label: ss(&folder.name),
@@ -13892,6 +14229,32 @@ impl NativeController {
                 is_header: false,
                 active: same_path_string(&self.current_path, &folder.path),
             });
+        }
+        if !self.user_pins.is_empty() {
+            items.push(SideItem {
+                label: ss("PINNED"),
+                path: ss(""),
+                icon: ss(""),
+                count: ss(""),
+                color: rgba_u8(0, 0, 0, 0.0),
+                is_header: true,
+                active: false,
+            });
+            for pin in self.user_pins.iter().take(6) {
+                items.push(SideItem {
+                    label: ss(&pin.name),
+                    path: ss(&pin.path),
+                    icon: ss(if pin.kind == "file" {
+                        self.icon_for_path(&pin.path, &pin.name)
+                    } else {
+                        "folder"
+                    }),
+                    count: ss(""),
+                    color: rgba_u8(0, 0, 0, 0.0),
+                    is_header: false,
+                    active: same_path_string(&self.current_path, &pin.path),
+                });
+            }
         }
         items.push(SideItem {
             label: ss("DRIVES"),
@@ -13946,6 +14309,7 @@ impl NativeController {
                 let title = match tab.path.as_str() {
                     "recycle://" => "Recycle Bin".to_string(),
                     "storage://" => "Storage".to_string(),
+                    "home://" => "Home".to_string(),
                     _ => Path::new(&tab.path)
                         .file_name()
                         .map(|name| name.to_string_lossy().to_string())
@@ -14356,19 +14720,54 @@ impl NativeController {
             self.update_models(ui);
             return SidebarActivateAction::None;
         }
+        if let Some(name) = path.strip_prefix("search:") {
+            let saved = read_native_json::<Vec<SavedSearch>>("searches.json", Vec::new());
+            if let Some(search) = saved.into_iter().find(|s| s.name == name) {
+                if !search.scope.is_empty() && !same_path_string(&self.current_path, &search.scope) {
+                    return SidebarActivateAction::NavigateThenSearch {
+                        path: search.scope,
+                        query: search.query,
+                    };
+                }
+                self.search_query = search.query;
+                ui.set_search_text(ss(&self.search_query));
+                self.apply_filter();
+                self.selected_index = -1;
+                self.update_models(ui);
+                // Trigger full search for non-local filters.
+                self.search(ui, self.search_query.clone());
+            }
+            return SidebarActivateAction::None;
+        }
         if let Some(smart) = path.strip_prefix("smart:") {
             if smart == "old-downloads" {
                 if let Some(downloads) = dirs::download_dir() {
                     let target = downloads.to_string_lossy().to_string();
+                    let query = smart_folders_for_path(&self.current_path)
+                        .into_iter()
+                        .find(|f| f.id == smart)
+                        .map(|f| f.query)
+                        .unwrap_or_else(|| format!("smart:{smart}"));
                     if !same_path_string(&self.current_path, &target) {
-                        return SidebarActivateAction::Navigate(target);
+                        return SidebarActivateAction::NavigateThenSearch {
+                            path: target,
+                            query,
+                        };
                     }
                 }
             }
-            self.search_query = format!("smart:{smart}");
+            // Prefer the smart folder's explicit query when available.
+            let query = smart_folders_for_path(&self.current_path)
+                .into_iter()
+                .find(|f| f.id == smart)
+                .map(|f| f.query)
+                .unwrap_or_else(|| format!("smart:{smart}"));
+            self.search_query = query.clone();
+            ui.set_search_text(ss(&query));
             self.apply_filter();
             self.selected_index = -1;
             self.update_models(ui);
+            self.search(ui, self.search_query.clone());
             return SidebarActivateAction::None;
         }
         if path.is_empty() {
@@ -14391,6 +14790,10 @@ impl NativeController {
         // Virtual namespaces must be handled before path-query resolution.
         // `storage://` and `recycle://` contain `/` and would otherwise be
         // joined against the current folder as bogus relative paths.
+        if raw == "home://" {
+            self.open_home_view(ui, push_history);
+            return;
+        }
         if raw == "recycle://" {
             if ui.get_is_storage_view() {
                 self.close_storage_view(ui);
@@ -14410,6 +14813,10 @@ impl NativeController {
             raw
         };
         // Virtual recycle-bin namespace - content comes from trash::os_limited.
+        if path == "home://" {
+            self.open_home_view(ui, push_history);
+            return;
+        }
         if path == "recycle://" {
             if ui.get_is_storage_view() {
                 self.close_storage_view(ui);
@@ -14899,6 +15306,26 @@ impl NativeController {
                     format_size_short(entry.size)
                 )));
             }
+            return;
+        }
+        if let Some(name) = entry.path.strip_prefix("search:") {
+            let saved = read_native_json::<Vec<SavedSearch>>("searches.json", Vec::new());
+            if let Some(search) = saved.into_iter().find(|s| s.name == name) {
+                if !search.scope.is_empty() {
+                    self.search_query = search.query.clone();
+                    ui.set_search_text(ss(&search.query));
+                    self.navigate(ui, search.scope, true);
+                    self.search(ui, self.search_query.clone());
+                } else {
+                    self.search_query = search.query.clone();
+                    ui.set_search_text(ss(&search.query));
+                    self.search(ui, self.search_query.clone());
+                }
+            }
+            return;
+        }
+        if entry.path == "storage://" || entry.path == "recycle://" || entry.path == "home://" {
+            self.navigate(ui, entry.path, true);
             return;
         }
         if entry.kind == FileKind::Directory {
@@ -16198,6 +16625,8 @@ impl NativeController {
             "rules" => self.show_rules(ui),
             "smart-folders" => self.show_smart_folders(ui),
             "home-page" => self.show_home_page(ui),
+            "save-workspace" => self.show_workspaces_overlay(ui, true),
+            "open-workspace" => self.show_workspaces_overlay(ui, false),
             "libraries" => self.show_libraries(ui),
             "recent-locations" => self.show_recent_locations(ui),
             "copy-as-path" => {
@@ -16299,8 +16728,7 @@ impl NativeController {
                 self.update_models(ui);
             }
             "find-image-duplicates" => {
-                let msg = scan_image_duplicates_in_folder(&self.current_path);
-                self.show_toast(ui, msg);
+                self.show_image_duplicates(ui);
             }
             "performance-debug" => self.show_performance_debug(ui),
             "clear-thumbnail-cache" => match clear_thumbnail_cache() {
@@ -16836,32 +17264,38 @@ impl NativeController {
                     self.show_toast(ui, "Pick a folder path to compare.");
                     return;
                 }
-                match compare_folders(Path::new(&left), Path::new(right), 500) {
+                match compare_folders(Path::new(&left), Path::new(right), 2000) {
                     Ok(rows) => {
-                        let body = rows
-                            .iter()
-                            .filter(|row| row.status != "same")
-                            .take(200)
-                            .map(|row| {
-                                format!(
-                                    "{} | {} | L {} / R {}",
-                                    row.status,
-                                    row.path,
-                                    format_size_short(row.left_size),
-                                    format_size_short(row.right_size)
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        ui.set_preview_title(ss("Folder Compare"));
-                        ui.set_preview_body(ss(if body.is_empty() {
-                            "Folders match in the scanned range.".to_string()
-                        } else {
-                            body
-                        }));
-                        ui.set_preview_meta(ss(format!("{} rows scanned", rows.len())));
+                        self.compare_left = left;
+                        self.compare_right = right.to_string();
+                        self.compare_all_rows = rows;
+                        self.compare_hide_same = true;
+                        self.push_compare_overlay(ui);
                     }
                     Err(error) => self.show_toast_kind(ui, error, "error"),
+                }
+            }
+            Some(PendingPrompt::SaveWorkspace) => {
+                let name = value.trim();
+                if name.is_empty() {
+                    self.show_toast(ui, "Workspace name cannot be empty.");
+                    return;
+                }
+                let mut list = load_workspaces();
+                list.retain(|w| w.name != name);
+                list.insert(
+                    0,
+                    WorkspaceSession {
+                        name: name.to_string(),
+                        tabs: self.tabs.clone(),
+                    },
+                );
+                if list.len() > 30 {
+                    list.truncate(30);
+                }
+                match save_workspaces(&list) {
+                    Ok(()) => self.show_toast_kind(ui, format!("Saved workspace '{name}'"), "success"),
+                    Err(e) => self.show_toast_kind(ui, e, "error"),
                 }
             }
             Some(PendingPrompt::ConflictPaste { src, dest, cut }) => {
@@ -16897,16 +17331,27 @@ impl NativeController {
             }
             Some(PendingPrompt::RenameTag(tag_id)) => {
                 let new_label = value.trim().to_string();
-                if new_label.is_empty() {
-                    self.tag_labels.remove(&tag_id);
+                if let Some(smart_id) = tag_id.strip_prefix("smart:") {
+                    match rename_smart_folder(smart_id.to_string(), new_label.clone()) {
+                        Ok(_) => {
+                            ui.set_side_items(model_from_vec(self.side_items()));
+                            self.show_smart_folders(ui);
+                            self.show_toast_kind(ui, "Smart folder renamed", "success");
+                        }
+                        Err(e) => self.show_toast_kind(ui, e, "error"),
+                    }
                 } else {
-                    self.tag_labels.insert(tag_id, new_label.clone());
+                    if new_label.is_empty() {
+                        self.tag_labels.remove(&tag_id);
+                    } else {
+                        self.tag_labels.insert(tag_id, new_label.clone());
+                    }
+                    let _ = write_native_json("tag_labels.json", &self.tag_labels);
+                    self.sync_tag_names(ui);
+                    ui.set_side_items(model_from_vec(self.side_items()));
+                    ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
+                    self.show_toast_kind(ui, "Tag renamed", "success");
                 }
-                let _ = write_native_json("tag_labels.json", &self.tag_labels);
-                self.sync_tag_names(ui);
-                ui.set_side_items(model_from_vec(self.side_items()));
-                ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
-                self.show_toast_kind(ui, "Tag renamed", "success");
             }
             Some(PendingPrompt::Archive) | Some(PendingPrompt::StorageCleanup(_)) | None => {}
         }
@@ -17551,29 +17996,94 @@ impl NativeController {
     fn show_duplicates(&mut self, ui: &MainWindow) {
         match find_duplicates(self.active_directory().to_string(), Some(1024)) {
             Ok(groups) => {
-                ui.set_preview_title(ss("Duplicate Finder"));
-                let body = if groups.is_empty() {
-                    "No duplicate files found.".to_string()
+                self.dupe_groups_cache = groups
+                    .iter()
+                    .enumerate()
+                    .map(|(i, group)| {
+                        let title = group
+                            .first()
+                            .map(|f| f.name.clone())
+                            .unwrap_or_else(|| format!("Group {}", i + 1));
+                        (
+                            format!("exact-{i}::{title}"),
+                            group.iter().map(|f| f.path.clone()).collect(),
+                        )
+                    })
+                    .collect();
+                let items: Vec<DupeGroupItem> = self
+                    .dupe_groups_cache
+                    .iter()
+                    .map(|(id_title, paths)| {
+                        let title = id_title
+                            .split_once("::")
+                            .map(|(_, t)| t.to_string())
+                            .unwrap_or_else(|| id_title.clone());
+                        let size = paths
+                            .first()
+                            .and_then(|p| fs::metadata(p).ok())
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        let reclaim = size.saturating_mul(paths.len().saturating_sub(1) as u64);
+                        DupeGroupItem {
+                            id: ss(id_title),
+                            title: ss(&title),
+                            detail: ss(format!("{} identical files", paths.len())),
+                            count: paths.len() as i32,
+                            reclaimable: ss(format_size_short(reclaim)),
+                        }
+                    })
+                    .collect();
+                ui.set_dupe_overlay_title(ss("Duplicate files"));
+                ui.set_dupe_overlay_subtitle(ss(if items.is_empty() {
+                    "No duplicate files found in this folder."
                 } else {
-                    groups
-                        .iter()
-                        .take(12)
-                        .map(|group| {
-                            format!(
-                                "{} duplicates | {} each | {}",
-                                group.len(),
-                                format_size_short(group.first().map(|f| f.size).unwrap_or(0)),
-                                group.first().map(|f| f.name.clone()).unwrap_or_default()
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                };
-                ui.set_preview_body(ss(body));
-                ui.set_preview_meta(ss(format!("{} duplicate groups", groups.len())));
+                    "Keep one file per group, or delete the extras to Recycle Bin."
+                }));
+                ui.set_dupe_groups(model_from_vec(items));
+                ui.set_dupe_overlay_visible(true);
             }
             Err(error) => self.show_toast(ui, error),
         }
+    }
+
+    fn show_image_duplicates(&mut self, ui: &MainWindow) {
+        let groups = collect_image_duplicate_groups(&self.current_path);
+        self.dupe_groups_cache = groups
+            .into_iter()
+            .enumerate()
+            .map(|(i, (title, paths))| (format!("img-{i}::{title}"), paths))
+            .collect();
+        let items: Vec<DupeGroupItem> = self
+            .dupe_groups_cache
+            .iter()
+            .map(|(id_title, paths)| {
+                let title = id_title
+                    .split_once("::")
+                    .map(|(_, t)| t.to_string())
+                    .unwrap_or_else(|| id_title.clone());
+                let size = paths
+                    .first()
+                    .and_then(|p| fs::metadata(p).ok())
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                let reclaim = size.saturating_mul(paths.len().saturating_sub(1) as u64);
+                DupeGroupItem {
+                    id: ss(id_title),
+                    title: ss(&title),
+                    detail: ss(format!("{} matching dHash images", paths.len())),
+                    count: paths.len() as i32,
+                    reclaimable: ss(format_size_short(reclaim)),
+                }
+            })
+            .collect();
+        ui.set_dupe_overlay_title(ss("Duplicate images"));
+        ui.set_dupe_overlay_subtitle(ss(if items.is_empty() {
+            "No exact duplicate image hashes in this folder (index more images first)."
+        } else {
+            "Keep the first image in each group, or delete the others."
+        }));
+        ui.set_dupe_groups(model_from_vec(items));
+        ui.set_dupe_overlay_visible(true);
     }
 
     fn show_operation_log(&mut self, ui: &MainWindow) {
@@ -17685,30 +18195,126 @@ impl NativeController {
     }
 
     fn show_home_page(&mut self, ui: &MainWindow) {
-        let drives = self
-            .drives
-            .iter()
-            .map(|d| format!("Drive {}  {}", d.name, d.path))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let saved = read_native_json::<Vec<SavedSearch>>("searches.json", Vec::new())
+        self.navigate(ui, "home://".to_string(), true);
+    }
+
+    fn open_home_view(&mut self, ui: &MainWindow, push_history: bool) {
+        if ui.get_is_storage_view() {
+            self.close_storage_view(ui);
+        }
+        ui.set_in_recycle_bin(false);
+        let mut entries = Vec::new();
+        let push_dir = |entries: &mut Vec<FileEntry>, name: &str, path: &str| {
+            if path.is_empty() || !Path::new(path).exists() {
+                return;
+            }
+            entries.push(FileEntry {
+                path: path.to_string(),
+                name: name.to_string(),
+                name_lower: name.to_ascii_lowercase(),
+                kind: FileKind::Directory,
+                size: 0,
+                modified: 0,
+                extension: None,
+            });
+        };
+        for drive in &self.drives {
+            let label = if drive.name.is_empty() {
+                drive.path.clone()
+            } else {
+                format!("{} ({})", drive.name, drive.path.trim_end_matches('\\'))
+            };
+            push_dir(&mut entries, &label, &drive.path);
+        }
+        for pin in self.user_pins.iter().take(12) {
+            let kind = if pin.kind == "file" {
+                FileKind::File
+            } else {
+                FileKind::Directory
+            };
+            entries.push(FileEntry {
+                path: pin.path.clone(),
+                name: format!("Pinned · {}", pin.name),
+                name_lower: pin.name.to_ascii_lowercase(),
+                kind,
+                size: 0,
+                modified: pin.pinned_at,
+                extension: Path::new(&pin.path)
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_string()),
+            });
+        }
+        for path in self.recent_locations.iter().take(8) {
+            if path == "home://" || path == "storage://" || path == "recycle://" {
+                continue;
+            }
+            let label = Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone());
+            push_dir(&mut entries, &format!("Recent · {label}"), path);
+        }
+        for search in read_native_json::<Vec<SavedSearch>>("searches.json", Vec::new())
             .into_iter()
             .take(6)
-            .map(|s| format!("Saved search: {}  {}", s.name, s.query))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let recent = self
-            .recent_locations
-            .iter()
-            .take(8)
-            .map(|p| format!("Recent: {p}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        ui.set_preview_title(ss("Home"));
-        ui.set_preview_body(ss(format!("{drives}\n\n{saved}\n\n{recent}")));
-        ui.set_preview_meta(ss(
-            "Quick Access, drives, saved searches, recent locations, and storage warnings.",
-        ));
+        {
+            entries.push(FileEntry {
+                path: format!("search:{}", search.name),
+                name: format!("Saved · {}", search.name),
+                name_lower: search.name.to_ascii_lowercase(),
+                kind: FileKind::Other,
+                size: 0,
+                modified: 0,
+                extension: None,
+            });
+        }
+        if let Some(downloads) = dirs::download_dir() {
+            push_dir(
+                &mut entries,
+                "Downloads",
+                &downloads.to_string_lossy(),
+            );
+        }
+        entries.push(FileEntry {
+            path: "storage://".to_string(),
+            name: "Storage analyzer".to_string(),
+            name_lower: "storage analyzer".to_string(),
+            kind: FileKind::Directory,
+            size: 0,
+            modified: 0,
+            extension: None,
+        });
+
+        let path = "home://".to_string();
+        if push_history {
+            self.history.truncate(self.history_index + 1);
+            self.history.push(path.clone());
+            self.history_index = self.history.len().saturating_sub(1);
+        }
+        self.current_path = path.clone();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.path = path.clone();
+        }
+        self.files = entries;
+        self.search_query.clear();
+        ui.set_search_text(ss(""));
+        self.selected_index = -1;
+        self.selected_set.clear();
+        self.select_anchor = -1;
+        self.files_model = None;
+        self.active_archive = None;
+        ui.set_view_mode(ss("list"));
+        ui.set_empty_state(ss(if self.files.is_empty() {
+            "Home is empty — pin folders or browse a drive to get started."
+        } else {
+            ""
+        }));
+        self.apply_filter();
+        self.update_models(ui);
+        ui.set_side_items(model_from_vec(self.side_items()));
+        ui.set_current_path(ss("Home"));
+        ui.set_address_text(ss("Home"));
+        ui.set_status_left(ss(format!("{} shortcuts", self.files.len())));
     }
 
     fn show_libraries(&mut self, ui: &MainWindow) {
@@ -17739,14 +18345,24 @@ impl NativeController {
     }
 
     fn show_smart_folders(&mut self, ui: &MainWindow) {
-        let body = smart_folders_for_path(&self.current_path)
+        let items: Vec<ToolListItem> = smart_folders_for_path(&self.current_path)
             .into_iter()
-            .map(|s| format!("{} | {} | {}", s.name, s.query, s.description))
-            .collect::<Vec<_>>()
-            .join("\n");
-        ui.set_preview_title(ss("Smart Folders"));
-        ui.set_preview_body(ss(body));
-        ui.set_preview_meta(ss("Use the Smart Folders section in the sidebar."));
+            .map(|s| ToolListItem {
+                id: ss(&s.id),
+                title: ss(&s.name),
+                subtitle: ss(&s.description),
+                meta: ss(""),
+                enabled: true,
+                accent: color("#4f9cff"),
+            })
+            .collect();
+        ui.set_tool_overlay_kind(ss("smart-folders"));
+        ui.set_tool_overlay_title(ss("Smart Folders"));
+        ui.set_tool_overlay_subtitle(ss(
+            "Click a smart folder to filter. Labels can be renamed from More.",
+        ));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
     }
 
     fn show_recent_locations(&mut self, ui: &MainWindow) {
@@ -17784,24 +18400,23 @@ impl NativeController {
     }
 
     fn show_templates(&mut self, ui: &MainWindow) {
-        let templates = default_file_templates();
-        let body = templates
-            .iter()
-            .enumerate()
-            .map(|(i, t)| format!("{}: {} .{}", i + 1, t.name, t.extension))
-            .collect::<Vec<_>>()
-            .join("\n");
-        ui.set_preview_title(ss("New From Template"));
-        ui.set_preview_body(ss(body));
-        ui.set_preview_meta(ss(
-            "Runs the first template from the command palette, or use the prompt to name the file.",
-        ));
-        if let Some(template) = templates.into_iter().next() {
-            self.pending_prompt = Some(PendingPrompt::NewTemplate(template));
-            ui.set_prompt_title(ss("New file from template"));
-            ui.set_prompt_value(ss("New Note"));
-            ui.set_prompt_visible(true);
-        }
+        let templates = load_file_templates();
+        let items: Vec<ToolListItem> = templates
+            .into_iter()
+            .map(|t| ToolListItem {
+                id: ss(&t.name),
+                title: ss(&t.name),
+                subtitle: ss(format!(".{}", t.extension)),
+                meta: ss(""),
+                enabled: true,
+                accent: color("#e2a934"),
+            })
+            .collect();
+        ui.set_tool_overlay_kind(ss("templates"));
+        ui.set_tool_overlay_title(ss("New From Template"));
+        ui.set_tool_overlay_subtitle(ss("Pick a template, then name the new file."));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
     }
 
     fn show_rename_presets(&mut self, ui: &MainWindow) {
@@ -18303,42 +18918,112 @@ impl NativeController {
     }
 
     fn show_rules(&mut self, ui: &MainWindow) {
-        let rules = read_native_json("automation_rules.json", default_automation_rules());
-        let body = rules
-            .iter()
-            .map(|r| {
-                format!(
-                    "{} [{}] ext:{} tag:{} folder:{}{}",
-                    r.name,
-                    if r.enabled { "on" } else { "off" },
+        let rules = load_automation_rules();
+        let items: Vec<ToolListItem> = rules
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| ToolListItem {
+                id: ss(i.to_string()),
+                title: ss(&r.name),
+                subtitle: ss(format!(
+                    "ext:{} tag:{} · {}",
                     r.extension,
                     r.tag,
-                    r.folder,
-                    r.move_to
-                        .as_ref()
-                        .map(|m| format!(" move:{m}"))
-                        .unwrap_or_default()
-                )
+                    if r.folder.is_empty() {
+                        "(no folder)".to_string()
+                    } else {
+                        r.folder.clone()
+                    }
+                )),
+                meta: ss(""),
+                enabled: r.enabled,
+                accent: if r.enabled {
+                    color("#58c77a")
+                } else {
+                    color("#888888")
+                },
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        ui.set_preview_title(ss("Rules and Automation"));
-        ui.set_preview_body(ss(body));
-        ui.set_preview_meta(ss(
-            "Rules are stored in automation_rules.json and are designed to stay opt-in.",
+            .collect();
+        ui.set_tool_overlay_kind(ss("rules"));
+        ui.set_tool_overlay_title(ss("Rules and Automation"));
+        ui.set_tool_overlay_subtitle(ss(
+            "Toggle rules on, then Run enabled. Moves stay opt-in and only run when you ask.",
         ));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
     }
 
     fn show_shortcuts(&mut self, ui: &MainWindow) {
-        let body = ALL_COMMANDS
+        self.shortcut_draft = load_shortcut_overrides();
+        let items: Vec<ShortcutEditItem> = ALL_COMMANDS
             .iter()
-            .filter(|(_, _, hint, _)| !hint.is_empty())
-            .map(|(_, label, hint, command)| format!("{hint:14} {label} ({command})"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        ui.set_preview_title(ss("Keyboard Shortcuts"));
-        ui.set_preview_body(ss(body));
-        ui.set_preview_meta(ss("Custom shortcut storage is ready for a UI editor without changing the default bindings."));
+            .map(|(group, label, hint, command)| ShortcutEditItem {
+                command: ss(*command),
+                label: ss(*label),
+                hint: ss(shortcut_hint_for(command, hint)),
+                group: ss(*group),
+            })
+            .collect();
+        ui.set_tool_overlay_kind(ss("shortcuts"));
+        ui.set_tool_overlay_title(ss("Shortcut Editor"));
+        ui.set_tool_overlay_subtitle(ss(
+            "Edit the displayed chord hints. Defaults remain until you Save.",
+        ));
+        ui.set_shortcut_edit_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
+    }
+
+    fn show_workspaces_overlay(&mut self, ui: &MainWindow, save_mode: bool) {
+        if save_mode {
+            self.pending_prompt = Some(PendingPrompt::SaveWorkspace);
+            ui.set_prompt_kind(ss("text"));
+            ui.set_prompt_title(ss("Save workspace as"));
+            ui.set_prompt_value(ss("My workspace"));
+            ui.set_prompt_visible(true);
+            return;
+        }
+        let items: Vec<ToolListItem> = load_workspaces()
+            .into_iter()
+            .map(|w| ToolListItem {
+                id: ss(&w.name),
+                title: ss(&w.name),
+                subtitle: ss(format!("{} tabs", w.tabs.len())),
+                meta: ss(""),
+                enabled: true,
+                accent: color("#4f9cff"),
+            })
+            .collect();
+        ui.set_tool_overlay_kind(ss("workspaces"));
+        ui.set_tool_overlay_title(ss("Open Workspace"));
+        ui.set_tool_overlay_subtitle(ss(if items.is_empty() {
+            "No saved workspaces yet. Use Save Workspace first."
+        } else {
+            "Click a workspace to restore its tabs."
+        }));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
+    }
+
+    fn push_compare_overlay(&mut self, ui: &MainWindow) {
+        let hide_same = self.compare_hide_same;
+        let items: Vec<CompareRowItem> = self
+            .compare_all_rows
+            .iter()
+            .filter(|r| !(hide_same && r.status == "same"))
+            .take(500)
+            .map(|r| CompareRowItem {
+                path: ss(&r.path),
+                status: ss(&r.status),
+                left_size: ss(format_size_short(r.left_size)),
+                right_size: ss(format_size_short(r.right_size)),
+            })
+            .collect();
+        ui.set_compare_overlay_title(ss("Folder Compare"));
+        ui.set_compare_overlay_left(ss(&self.compare_left));
+        ui.set_compare_overlay_right(ss(&self.compare_right));
+        ui.set_compare_overlay_hide_same(self.compare_hide_same);
+        ui.set_compare_rows(model_from_vec(items));
+        ui.set_compare_overlay_visible(true);
     }
 
     fn show_performance_debug(&mut self, ui: &MainWindow) {
@@ -19141,6 +19826,277 @@ impl NativeController {
         ui.set_preview_meta(ss("Use Clear Thumbnail Cache or Clear Local Caches to remove generated cache data without deleting your files."));
     }
 
+    fn tool_overlay_activate(&mut self, ui: &MainWindow, id: String) {
+        let kind = ui.get_tool_overlay_kind().to_string();
+        match kind.as_str() {
+            "smart-folders" => {
+                ui.set_tool_overlay_visible(false);
+                let query = smart_folders_for_path(&self.current_path)
+                    .into_iter()
+                    .find(|f| f.id == id)
+                    .map(|f| f.query)
+                    .unwrap_or_else(|| format!("smart:{id}"));
+                if id == "old-downloads" {
+                    if let Some(downloads) = dirs::download_dir() {
+                        self.search_query = query;
+                        ui.set_search_text(ss(&self.search_query));
+                        self.navigate(ui, downloads.to_string_lossy().to_string(), true);
+                        self.search(ui, self.search_query.clone());
+                        return;
+                    }
+                }
+                self.search_query = query;
+                ui.set_search_text(ss(&self.search_query));
+                self.search(ui, self.search_query.clone());
+            }
+            "templates" => {
+                if let Some(template) = load_file_templates().into_iter().find(|t| t.name == id) {
+                    ui.set_tool_overlay_visible(false);
+                    self.pending_prompt = Some(PendingPrompt::NewTemplate(template.clone()));
+                    ui.set_prompt_kind(ss("text"));
+                    ui.set_prompt_title(ss(format!("New {} file", template.name)));
+                    ui.set_prompt_value(ss(format!("New.{}", template.extension)));
+                    ui.set_prompt_visible(true);
+                }
+            }
+            "workspaces" => {
+                ui.set_tool_overlay_visible(false);
+                if let Some(ws) = load_workspaces().into_iter().find(|w| w.name == id) {
+                    if ws.tabs.is_empty() {
+                        self.show_toast(ui, "Workspace has no tabs.");
+                        return;
+                    }
+                    self.tabs = ws.tabs;
+                    self.active_tab = 0;
+                    let path = self.tabs[0].path.clone();
+                    self.navigate(ui, path, false);
+                    self.update_models(ui);
+                    self.show_toast_kind(ui, format!("Opened workspace '{id}'"), "success");
+                }
+            }
+            "rules" => {
+                // Activate = focus rule folder if present.
+                if let Ok(idx) = id.parse::<usize>() {
+                    if let Some(rule) = load_automation_rules().get(idx) {
+                        if !rule.folder.is_empty() {
+                            ui.set_tool_overlay_visible(false);
+                            self.navigate(ui, rule.folder.clone(), true);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn tool_overlay_toggle(&mut self, ui: &MainWindow, id: String) {
+        if ui.get_tool_overlay_kind().as_str() != "rules" {
+            return;
+        }
+        let Ok(idx) = id.parse::<usize>() else {
+            return;
+        };
+        let mut rules = load_automation_rules();
+        if let Some(rule) = rules.get_mut(idx) {
+            rule.enabled = !rule.enabled;
+        }
+        let _ = save_automation_rules(&rules);
+        self.show_rules(ui);
+    }
+
+    fn tool_overlay_secondary(&mut self, ui: &MainWindow, id: String) {
+        let kind = ui.get_tool_overlay_kind().to_string();
+        if kind == "smart-folders" {
+            self.pending_prompt = Some(PendingPrompt::RenameTag(format!("smart:{id}")));
+            ui.set_prompt_kind(ss("text"));
+            ui.set_prompt_title(ss("Rename smart folder"));
+            let current = smart_folders_for_path(&self.current_path)
+                .into_iter()
+                .find(|f| f.id == id)
+                .map(|f| f.name)
+                .unwrap_or_default();
+            ui.set_prompt_value(ss(current));
+            ui.set_prompt_visible(true);
+        }
+    }
+
+    fn tool_overlay_primary_action(&mut self, ui: &MainWindow) {
+        let kind = ui.get_tool_overlay_kind().to_string();
+        match kind.as_str() {
+            "rules" => {
+                let rules = load_automation_rules();
+                match run_automation_rules_once(&rules, &mut self.tags) {
+                    Ok((tagged, moved)) => {
+                        let _ = write_native_json("tags.json", &self.tags);
+                        self.sync_tag_names(ui);
+                        self.update_models(ui);
+                        ui.set_side_items(model_from_vec(self.side_items()));
+                        self.show_toast_kind(
+                            ui,
+                            format!("Rules ran: tagged {tagged}, moved {moved}"),
+                            "success",
+                        );
+                    }
+                    Err(e) => self.show_toast_kind(ui, e, "error"),
+                }
+            }
+            "shortcuts" => {
+                match save_shortcut_overrides(&self.shortcut_draft) {
+                    Ok(()) => {
+                        ui.set_tool_overlay_visible(false);
+                        self.show_toast_kind(ui, "Shortcuts saved", "success");
+                    }
+                    Err(e) => self.show_toast_kind(ui, e, "error"),
+                }
+            }
+            "workspaces" => {
+                // Open first selected isn't available; keep overlay for click-to-open.
+                self.show_toast(ui, "Click a workspace to open it.");
+            }
+            _ => ui.set_tool_overlay_visible(false),
+        }
+    }
+
+    fn shortcut_hint_changed(&mut self, command: String, hint: String) {
+        if hint.trim().is_empty() {
+            self.shortcut_draft.remove(&command);
+        } else {
+            self.shortcut_draft.insert(command, hint);
+        }
+    }
+
+    fn dupe_group_keep(&mut self, ui: &MainWindow, id: String) {
+        self.show_toast_kind(
+            ui,
+            format!(
+                "Keeping first file in {}",
+                id.split_once("::").map(|(_, t)| t).unwrap_or(&id)
+            ),
+            "success",
+        );
+    }
+
+    fn dupe_group_delete_others(&mut self, ui: &MainWindow, id: String) {
+        let Some((_, paths)) = self
+            .dupe_groups_cache
+            .iter()
+            .find(|(k, _)| *k == id)
+            .map(|(k, v)| (k.clone(), v.clone()))
+        else {
+            self.show_toast(ui, "Group not found.");
+            return;
+        };
+        if paths.len() < 2 {
+            self.show_toast(ui, "Nothing to delete.");
+            return;
+        }
+        let mut deleted = 0usize;
+        for path in paths.iter().skip(1) {
+            match trash::delete(Path::new(path)) {
+                Ok(()) => deleted += 1,
+                Err(e) => {
+                    self.show_toast_kind(ui, e.to_string(), "error");
+                    break;
+                }
+            }
+        }
+        self.dupe_groups_cache.retain(|(k, _)| k != &id);
+        let items: Vec<DupeGroupItem> = self
+            .dupe_groups_cache
+            .iter()
+            .map(|(id_title, paths)| {
+                let title = id_title
+                    .split_once("::")
+                    .map(|(_, t)| t.to_string())
+                    .unwrap_or_else(|| id_title.clone());
+                DupeGroupItem {
+                    id: ss(id_title),
+                    title: ss(&title),
+                    detail: ss(format!("{} files", paths.len())),
+                    count: paths.len() as i32,
+                    reclaimable: ss(""),
+                }
+            })
+            .collect();
+        ui.set_dupe_groups(model_from_vec(items));
+        self.refresh(ui);
+        self.show_toast_kind(
+            ui,
+            format!("Moved {deleted} duplicate(s) to Recycle Bin"),
+            "success",
+        );
+    }
+
+    fn search_chip_insert(&mut self, ui: &MainWindow, op: String) {
+        let mut text = ui.get_search_text().to_string();
+        let token = match op.as_str() {
+            "ext" => "ext:",
+            "kind" => "kind:",
+            "size" => "size:>",
+            "modified" => "modified:",
+            "tag" => "tag:",
+            "content" => "content:",
+            _ => return,
+        };
+        if !text.is_empty() && !text.ends_with(' ') {
+            text.push(' ');
+        }
+        text.push_str(token);
+        ui.set_search_text(ss(&text));
+        self.search_query = text;
+        ui.set_search_help_visible(true);
+        ui.set_search_chip_hint(ss(match op.as_str() {
+            "ext" => "Example: ext:pdf",
+            "kind" => "Example: kind:image",
+            "size" => "Example: size:>100mb",
+            "modified" => "Example: modified:week",
+            "tag" => "Example: tag:yellow",
+            "content" => "Example: content:TODO",
+            _ => "",
+        }));
+    }
+
+    fn search_save_current(&mut self, ui: &MainWindow) {
+        let query = ui.get_search_text().to_string();
+        if query.trim().is_empty() {
+            self.show_toast(ui, "Type a search first.");
+            return;
+        }
+        let name = query.chars().take(40).collect::<String>();
+        match native_save_search(name.clone(), query, self.current_path.clone()) {
+            Ok(()) => {
+                ui.set_side_items(model_from_vec(self.side_items()));
+                self.show_toast_kind(ui, format!("Saved search '{name}'"), "success");
+            }
+            Err(e) => self.show_toast_kind(ui, e, "error"),
+        }
+    }
+
+    fn sync_queue_busy(&self, ui: &MainWindow) {
+        let (len, paused) = (
+            self.app_state
+                .operation_queue
+                .lock()
+                .map(|q| q.len())
+                .unwrap_or(0),
+            self.app_state.queue_is_paused(),
+        );
+        let active = ACTIVE_HEAVY_OPS.load(Ordering::SeqCst);
+        let busy = len > 0 || active > 0;
+        ui.set_queue_busy(busy);
+        if busy {
+            ui.set_queue_busy_text(ss(if paused {
+                format!("Queue paused ({len})")
+            } else if len > 0 {
+                format!("{len} queued")
+            } else {
+                "Working…".to_string()
+            }));
+        } else {
+            ui.set_queue_busy_text(ss(""));
+        }
+    }
+
     fn undo(&mut self, ui: &MainWindow) {
         let op = self
             .app_state
@@ -19152,7 +20108,11 @@ impl NativeController {
             self.show_toast(ui, "Nothing to undo.");
             return;
         };
-        let result = match op.kind.as_str() {
+        let kind = op.kind.clone();
+        let from = op.from.clone();
+        let to = op.to.clone();
+        let batch_len = op.batch.as_ref().map(|b| b.len()).unwrap_or(0);
+        let result = match kind.as_str() {
             "batch_rename" => match op.batch {
                 None => Err("Missing batch rename metadata".to_string()),
                 Some(ops) => {
@@ -19169,23 +20129,63 @@ impl NativeController {
                     }
                     outcome
                 }
-            }
+            },
             "rename" | "move" => {
-                let from = op.to.as_deref().unwrap_or("");
-                native_move(&self.app_state, from, &op.from)
+                let from_path = to.as_deref().unwrap_or("");
+                native_move(&self.app_state, from_path, &from)
             }
-            "copy" => op
-                .to
+            "copy" => to
                 .as_deref()
                 .map(native_delete_path)
                 .unwrap_or_else(|| Err("Missing copied path".to_string())),
             "delete" => undo_delete_from_trash(op.trash_id.as_deref()),
-            _ => Err(format!("Cannot undo '{}'", op.kind)),
+            _ => Err(format!("Cannot undo '{kind}'")),
         };
         match result {
             Ok(()) => {
                 self.refresh(ui);
-                self.show_toast(ui, "Undone");
+                let detail = match kind.as_str() {
+                    "batch_rename" => {
+                        format!(
+                            "Undone: renamed {batch_len} file{}",
+                            if batch_len == 1 { "" } else { "s" }
+                        )
+                    }
+                    "rename" => {
+                        let name = Path::new(&from)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| from.clone());
+                        format!("Undone: rename → {name}")
+                    }
+                    "move" => {
+                        let name = Path::new(&from)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| from.clone());
+                        format!("Undone: moved {name}")
+                    }
+                    "copy" => {
+                        let name = to
+                            .as_deref()
+                            .and_then(|p| {
+                                Path::new(p)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                            })
+                            .unwrap_or_else(|| "file".to_string());
+                        format!("Undone: deleted copy of {name}")
+                    }
+                    "delete" => {
+                        let name = Path::new(&from)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| from.clone());
+                        format!("Undone: restored {name}")
+                    }
+                    other => format!("Undone: {other}"),
+                };
+                self.show_toast_kind(ui, detail, "success");
             }
             Err(error) => self.show_toast(ui, error),
         }
@@ -19225,9 +20225,32 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_side_activated(move |index| {
         if let Some(ui) = weak.upgrade() {
             let action = c.borrow_mut().side_activate_action(&ui, index);
-            if let SidebarActivateAction::Navigate(path) = action {
-                c.borrow_mut()
-                    .queue_sidebar_navigate(&ui, path, c.clone());
+            match action {
+                SidebarActivateAction::Navigate(path) => {
+                    c.borrow_mut()
+                        .queue_sidebar_navigate(&ui, path, c.clone());
+                }
+                SidebarActivateAction::NavigateThenSearch { path, query } => {
+                    c.borrow_mut()
+                        .queue_sidebar_navigate(&ui, path, c.clone());
+                    // Apply search after navigation commits on the next tick.
+                    let weak2 = weak.clone();
+                    let c2 = c.clone();
+                    let q = query;
+                    let timer = slint::Timer::default();
+                    timer.start(
+                        slint::TimerMode::SingleShot,
+                        Duration::from_millis(80),
+                        move || {
+                            if let Some(ui) = weak2.upgrade() {
+                                ui.set_search_text(ss(&q));
+                                c2.borrow_mut().search(&ui, q.clone());
+                            }
+                        },
+                    );
+                    std::mem::forget(timer);
+                }
+                SidebarActivateAction::None => {}
             }
         }
     });
@@ -19586,6 +20609,159 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
 
     let weak = ui.as_weak();
     let c = controller.clone();
+    ui.on_tool_overlay_activate(move |id| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().tool_overlay_activate(&ui, id.to_string());
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_tool_overlay_toggle(move |id| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().tool_overlay_toggle(&ui, id.to_string());
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_tool_overlay_secondary(move |id| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().tool_overlay_secondary(&ui, id.to_string());
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_tool_overlay_close(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_tool_overlay_visible(false);
+            let _ = c;
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_tool_overlay_primary_action(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().tool_overlay_primary_action(&ui);
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_shortcut_hint_changed(move |command, hint| {
+        c.borrow_mut()
+            .shortcut_hint_changed(command.to_string(), hint.to_string());
+        let _ = weak;
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_compare_row_activate(move |path| {
+        if let Some(ui) = weak.upgrade() {
+            let left = c.borrow().compare_left.clone();
+            let full = Path::new(&left).join(path.as_str());
+            if let Some(parent) = full.parent() {
+                c.borrow_mut()
+                    .navigate(&ui, parent.to_string_lossy().to_string(), true);
+            }
+            ui.set_compare_overlay_visible(false);
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_compare_overlay_close(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_compare_overlay_visible(false);
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_compare_toggle_hide_same(move || {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.compare_hide_same = !ctrl.compare_hide_same;
+            ctrl.push_compare_overlay(&ui);
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_dupe_group_keep(move |id| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().dupe_group_keep(&ui, id.to_string());
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_dupe_group_delete_others(move |id| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().dupe_group_delete_others(&ui, id.to_string());
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_dupe_overlay_close(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_dupe_overlay_visible(false);
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_search_chip(move |op| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().search_chip_insert(&ui, op.to_string());
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_search_save_requested(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().search_save_current(&ui);
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_search_help_toggle(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_search_help_visible(!ui.get_search_help_visible());
+            if ui.get_search_help_visible() {
+                ui.set_search_chip_hint(ss(
+                    "Tips: ext:pdf  kind:image  size:>10mb  modified:week  tag:yellow  content:TODO",
+                ));
+            }
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_queue_pill_clicked(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().show_operation_queue(&ui);
+            ui.set_op_drawer_visible(true);
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_welcome_next_step(move || {
+        if let Some(ui) = weak.upgrade() {
+            let step = ui.get_welcome_step();
+            if step < 2 {
+                ui.set_welcome_step(step + 1);
+            } else {
+                c.borrow_mut().settings.first_run_welcome_dismissed = true;
+                let _ = write_native_json("settings.json", &c.borrow().settings);
+                ui.set_welcome_visible(false);
+                c.borrow_mut().navigate(&ui, "home://".to_string(), true);
+            }
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_welcome_set_mode(move |mode| {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.settings.ui_mode = mode.to_string();
+            ctrl.save_settings();
+            ui.set_ui_mode(ss(mode.as_str()));
+            let simple = ctrl.side_items_simple();
+            ui.set_side_items_simple(model_from_vec(simple));
+            ui.set_welcome_step(2);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_toggle_dual_pane(move || {
         if let Some(ui) = weak.upgrade() {
             let was_dual = ui.get_dual_pane();
@@ -19835,7 +21011,16 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_command(move |command| {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().command(&ui, &command);
+            let cmd = command.to_string();
+            {
+                let mut ctrl = c.borrow_mut();
+                ctrl.recent_commands.retain(|c| c != &cmd);
+                ctrl.recent_commands.push_front(cmd.clone());
+                while ctrl.recent_commands.len() > 8 {
+                    ctrl.recent_commands.pop_back();
+                }
+            }
+            c.borrow_mut().command(&ui, &cmd);
         }
     });
 
@@ -20126,6 +21311,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             let mut ctrl = c.borrow_mut();
             ctrl.settings.first_run_welcome_dismissed = true;
             ctrl.save_settings();
+            ctrl.navigate(&ui, "home://".to_string(), true);
         }
     });
 
@@ -20417,6 +21603,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     if needs_storage_poll {
                         c.borrow_mut().poll_storage_scan(&ui);
                     }
+                    if let Ok(ctrl) = c.try_borrow() {
+                        ctrl.sync_queue_busy(&ui);
+                    }
                 }
 
                 // Push live progress for any currently running archive op into
@@ -20559,6 +21748,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                     ctrl.apply_sort();
                                     ctrl.update_models(&ui);
                                     ctrl.update_status(&ui);
+                                    if count == 0 && !result.partial {
+                                        ui.set_empty_state(ss(
+                                            "No matches. Try ext:pdf, kind:image, size:>10mb, or modified:week",
+                                        ));
+                                    } else {
+                                        ui.set_empty_state(ss(""));
+                                    }
                                     ui.set_status_right(ss(format!(
                                         "{} | {}{} ({} {})",
                                         result.path,
@@ -20717,9 +21913,20 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_filter_commands(move |query| {
         if let Some(ui) = weak.upgrade() {
-            ui.set_command_items(command_items_filtered(&query));
+            let recent: Vec<String> = c.borrow().recent_commands.iter().cloned().collect();
+            ui.set_command_items(command_items_filtered_with_recent(&query, &recent));
+            let mut ctrl = c.borrow_mut();
+            if !ctrl.settings.palette_tip_shown {
+                ctrl.settings.palette_tip_shown = true;
+                ctrl.save_settings();
+                ctrl.show_toast(
+                    &ui,
+                    "Tip: type to filter commands. Try “duplicates”, “rules”, or “home”.",
+                );
+            }
         }
     });
 
@@ -20728,10 +21935,20 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_command_run_first(move |query| {
         if let Some(ui) = weak.upgrade() {
             use slint::Model;
-            let items = command_items_filtered(&query);
+            let recent: Vec<String> = c.borrow().recent_commands.iter().cloned().collect();
+            let items = command_items_filtered_with_recent(&query, &recent);
             if let Some(item) = items.row_data(0) {
                 ui.set_command_visible(false);
-                c.borrow_mut().command(&ui, item.command.as_str());
+                let cmd = item.command.to_string();
+                {
+                    let mut ctrl = c.borrow_mut();
+                    ctrl.recent_commands.retain(|c| c != &cmd);
+                    ctrl.recent_commands.push_front(cmd.clone());
+                    while ctrl.recent_commands.len() > 8 {
+                        ctrl.recent_commands.pop_back();
+                    }
+                }
+                c.borrow_mut().command(&ui, cmd.as_str());
             }
         }
     });
