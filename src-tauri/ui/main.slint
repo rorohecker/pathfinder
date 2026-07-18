@@ -5,6 +5,9 @@ import "fonts/PressStart2P-Regular.ttf";
 import "fonts/NotoSans-Regular.ttf";
 import "fonts/NotoSansMono-Regular.ttf";
 import "fonts/JetBrainsMono-Variable.ttf";
+import "fonts/Inter-Regular.ttf";
+import "fonts/Lora-Regular.ttf";
+import "fonts/FiraCode-Regular.ttf";
 
 export struct FileItem {
     name: string,
@@ -6990,11 +6993,20 @@ export component MainWindow inherits Window {
                         Rectangle {
                             border-radius: 5px;
                             border-width: 1px;
-                            border-color: root.ce_ui_font == "press-start-2p" ? ThemePalette.accent : ThemePalette.border;
-                            background: root.ce_ui_font == "press-start-2p" ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            border-color: root.ce_ui_font == "inter" ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_ui_font == "inter" ? ThemePalette.accent_soft : ThemePalette.panel_solid;
                             horizontal-stretch: 1;
-                            Text { width: parent.width; height: parent.height; text: "Press Start 2P"; color: root.ce_ui_font == "press-start-2p" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; font-family: "Press Start 2P"; }
-                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_font_preset("ui", "press-start-2p"); } }
+                            Text { width: parent.width; height: parent.height; text: "Inter"; color: root.ce_ui_font == "inter" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; font-family: "Inter"; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_font_preset("ui", "inter"); } }
+                        }
+                        Rectangle {
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: root.ce_ui_font == "lora" ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_ui_font == "lora" ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            horizontal-stretch: 1;
+                            Text { width: parent.width; height: parent.height; text: "Lora"; color: root.ce_ui_font == "lora" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; font-family: "Lora"; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_font_preset("ui", "lora"); } }
                         }
                     }
                     Text { text: "MONO FONT"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
@@ -7022,11 +7034,11 @@ export component MainWindow inherits Window {
                         Rectangle {
                             border-radius: 5px;
                             border-width: 1px;
-                            border-color: root.ce_mono_font == "press-start-2p" ? ThemePalette.accent : ThemePalette.border;
-                            background: root.ce_mono_font == "press-start-2p" ? ThemePalette.accent_soft : ThemePalette.panel_solid;
+                            border-color: root.ce_mono_font == "fira-code" ? ThemePalette.accent : ThemePalette.border;
+                            background: root.ce_mono_font == "fira-code" ? ThemePalette.accent_soft : ThemePalette.panel_solid;
                             horizontal-stretch: 1;
-                            Text { width: parent.width; height: parent.height; text: "Press Start 2P"; color: root.ce_mono_font == "press-start-2p" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; font-family: "Press Start 2P"; }
-                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_font_preset("mono", "press-start-2p"); } }
+                            Text { width: parent.width; height: parent.height; text: "Fira Code"; color: root.ce_mono_font == "fira-code" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; font-family: "Fira Code"; }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.ce_font_preset("mono", "fira-code"); } }
                         }
                     }
                     Rectangle {

@@ -12,5 +12,8 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/fonts/NotoSans-Regular.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/NotoSansMono-Regular.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/JetBrainsMono-Variable.ttf");
+    println!("cargo:rerun-if-changed=ui/fonts/Inter-Regular.ttf");
+    println!("cargo:rerun-if-changed=ui/fonts/Lora-Regular.ttf");
+    println!("cargo:rerun-if-changed=ui/fonts/FiraCode-Regular.ttf");
     tauri_build::build()
 }

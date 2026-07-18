@@ -8276,45 +8276,65 @@ fn normalize_theme_font_presets(def: &mut ThemeDefinition) {
     def.mono_font = normalize_mono_font_preset(&def.mono_font);
 }
 
+// All selectable fonts resolve to one of a small set of BUNDLED families. This
+// keeps the UI self-contained (never relying on a Windows-installed font) and,
+// critically, guarantees the global font always has full glyph coverage. The
+// femtovg renderer has no glyph fallback (slint-ui/slint#3057), so applying a
+// glyph-limited display font (e.g. Press Start 2P) as the app-wide font blanks
+// out text and can black out the whole window. Press Start 2P is therefore
+// mapped to a safe text font here and is no longer selectable as a UI/mono font.
 fn normalize_ui_font_preset(raw: &str) -> String {
     let s = raw.trim().to_ascii_lowercase().replace(" ", "-");
-    if s.contains("press") || s.contains("start2p") || s == "press-start-2p" {
-        return "press-start-2p".to_string();
+    if s.contains("inter") {
+        return "inter".to_string();
     }
-    if s == "noto-sans"
-        || s.is_empty()
-        || s.contains("segoe")
-        || s.contains("arial")
-        || s.contains("inter")
-        || s.contains("system")
+    // Serif requests (bundled Lora) - includes legacy system serif names.
+    if s.contains("lora")
+        || s.contains("serif")
+        || s.contains("georgia")
+        || s.contains("cambria")
+        || s.contains("times")
+        || s.contains("garamond")
+        || s.contains("book-antiqua")
+        || s.contains("palatino")
     {
-        return "noto-sans".to_string();
+        return "lora".to_string();
     }
+    // Monospace UI (e.g. the Terminal theme) - reuse bundled mono families.
+    // Not offered in the editor chips; only reachable from built-in themes.
+    if s.contains("mono")
+        || s.contains("cascadia")
+        || s.contains("consolas")
+        || s.contains("courier")
+        || s.contains("jetbrains")
+        || s.contains("fira")
+    {
+        return normalize_mono_font_preset(&s);
+    }
+    // Everything else (incl. retired pixel font and legacy sans names) -> Noto Sans.
     "noto-sans".to_string()
 }
 
 fn normalize_mono_font_preset(raw: &str) -> String {
     let s = raw.trim().to_ascii_lowercase().replace(" ", "-");
-    if s.contains("press") || s.contains("start2p") || s == "press-start-2p" {
-        return "press-start-2p".to_string();
-    }
     if s.contains("jetbrains") {
         return "jetbrains-mono".to_string();
     }
-    if s == "noto-sans-mono"
-        || s.is_empty()
-        || s.contains("cascadia")
-        || s.contains("consolas")
-        || s.contains("courier")
-    {
-        return "noto-sans-mono".to_string();
+    if s.contains("fira") {
+        return "fira-code".to_string();
     }
+    // Everything else (incl. retired pixel font and legacy mono names) -> Noto Sans Mono.
     "noto-sans-mono".to_string()
 }
 
 fn bundled_ui_family_from_preset(preset: &str) -> &'static str {
     match preset {
-        "press-start-2p" => "Press Start 2P",
+        "inter" => "Inter",
+        "lora" => "Lora",
+        // Monospace UI presets (Terminal theme) reuse the bundled mono families.
+        "jetbrains-mono" => "JetBrains Mono",
+        "fira-code" => "Fira Code",
+        "noto-sans-mono" => "Noto Sans Mono",
         _ => "Noto Sans",
     }
 }
@@ -8322,7 +8342,7 @@ fn bundled_ui_family_from_preset(preset: &str) -> &'static str {
 fn bundled_mono_family_from_preset(preset: &str) -> &'static str {
     match preset {
         "jetbrains-mono" => "JetBrains Mono",
-        "press-start-2p" => "Press Start 2P",
+        "fira-code" => "Fira Code",
         _ => "Noto Sans Mono",
     }
 }
@@ -11977,9 +11997,10 @@ fn theme_palette(id: &str) -> PaletteSpec {
             accent_strong: color("#ffef7a"),
             radius: 0.0,
             radius_small: 0.0,
-            // Press Start 2P (bundled, OFL) - true 8-bit arcade pixel font.
-            ui_font: "Press Start 2P",
-            mono_font: "Press Start 2P",
+            // Bundled fonts only. A pixel display font can't drive full-UI text
+            // under femtovg (no glyph fallback); the neon palette carries the vibe.
+            ui_font: "Inter",
+            mono_font: "JetBrains Mono",
             light_controls: false,
             outer_border: 4.0,
         },
@@ -12171,8 +12192,14 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
     metrics.set_radius(palette.radius);
     metrics.set_radius_small(palette.radius_small);
     metrics.set_outer_border(palette.outer_border);
-    metrics.set_ui_font(ss(palette.ui_font));
-    metrics.set_mono_font(ss(palette.mono_font));
+    // Resolve built-in theme fonts to bundled families too, so no theme relies
+    // on a Windows-installed font (and never applies a glyph-limited font app-wide).
+    metrics.set_ui_font(ss(bundled_ui_family_from_preset(
+        normalize_ui_font_preset(palette.ui_font).as_str(),
+    )));
+    metrics.set_mono_font(ss(bundled_mono_family_from_preset(
+        normalize_mono_font_preset(palette.mono_font).as_str(),
+    )));
     metrics.set_light_controls(palette.light_controls);
     apply_density_metrics(&metrics, &settings.density);
 
@@ -12320,7 +12347,8 @@ fn apply_custom_theme_to_ui(ui: &MainWindow, def: &ThemeDefinition) {
     metrics.set_light_controls(is_light);
 
     let base_row_h = 38.0_f32;
-    let size_delta = def.font_size_delta as f32 * 4.0;
+    // Clamp so a corrupt/imported theme can't produce a broken (huge/negative) layout.
+    let size_delta = def.font_size_delta.clamp(-1, 1) as f32 * 4.0;
     let row_h = base_row_h + size_delta;
     metrics.set_row_h(row_h);
     metrics.set_grid_w(136.0 + size_delta * 3.0);
