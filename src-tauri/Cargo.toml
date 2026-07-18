@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "0.9.34"
+version = "0.9.35"
 edition = "2024"
 
 [lib]
@@ -37,6 +37,11 @@ sha2 = "0.10"
 hex = "0.4"
 regex = "1"
 pdf-extract = "0.7"
+# PDF page rasterization for the preview pane. Dynamic linking (default): the
+# bundled `pdfium/pdfium.dll` is loaded at runtime, so no bindgen/clang is
+# needed at build time. Default features pull in `image` 0.25 (matching ours)
+# and a thread-safe binding guard.
+pdfium-render = "0.8"
 zip = "2"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 memchr = "2"

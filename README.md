@@ -16,6 +16,8 @@ It also has a bit of personality. Eleven themes, each with its own folder color 
 
 ## What is new
 
+**Version 0.9.35** fixes the selection action bar overlapping the preview pane, makes Storage use space more efficiently with collapsible suggestions, bundles pdfium for real PDF page previews, adds async preview loading to prevent UI freezes, builds an in-app HTML/Markdown Code/View renderer, removes the duplicate Home sidebar entry, and tightens responsive toolbar behavior on narrow panes.
+
 **Version 0.9.34** surfaces pins, smart folders, and saved searches in the sidebar; adds real overlays for rules/automation, templates, shortcuts, folder compare, and duplicate cleanup; introduces a Home landing (`home://`), search operator chips, descriptive undo toasts, a busy queue pill, named workspaces, merged Appearance settings, and an expanded first-run welcome.
 
 **Version 0.9.8** tightens the Storage analyzer layout so all category buckets fit the overview without scrolling, makes bucket drill-ins show compact top folder/app groups, verifies app drill-ins roll up folders instead of individual files, and trims UI-thread work that could cause small hitches when going back or switching tabs.

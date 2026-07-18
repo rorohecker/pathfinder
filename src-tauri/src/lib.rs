@@ -562,6 +562,10 @@ struct AppState {
     // Debounce map for file watcher indexing: tracks last index time per path
     // to avoid excessive indexing when rapid file system events occur.
     index_debounce: Arc<Mutex<HashMap<String, Instant>>>,
+    // Rasterized PDF first pages (RGBA + dimensions) keyed by path|mtime|width,
+    // so re-selecting a PDF shows the rendered page instantly instead of
+    // re-running pdfium each time. Values are Arc'd for cheap hand-off.
+    pdf_page_cache: Arc<Mutex<HashMap<String, Arc<(Vec<u8>, u32, u32)>>>>,
 }
 
 impl Default for AppState {
@@ -579,6 +583,7 @@ impl Default for AppState {
             queue_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             git_cache: Arc::new(Mutex::new(HashMap::new())),
             index_debounce: Arc::new(Mutex::new(HashMap::new())),
+            pdf_page_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -2024,6 +2029,113 @@ fn pdf_first_page_preview(path: &Path) -> Option<String> {
     } else {
         Some(preview)
     }
+}
+
+/// Width (in pixels) the PDF first page is rasterized to for the preview pane.
+/// Big enough to stay crisp in the pane and if the pane is widened.
+const PDF_PREVIEW_WIDTH: u32 = 900;
+
+/// Locations to look for the bundled pdfium dynamic library, in priority order.
+fn pdfium_library_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // Bundled next to the executable (Tauri resource) …
+            candidates.push(dir.join("pdfium.dll"));
+            // … or under a nested resources folder, depending on bundler.
+            candidates.push(dir.join("resources").join("pdfium.dll"));
+        }
+    }
+    // Dev builds run from target/<profile>; fall back to the checked-in copy.
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("pdfium")
+            .join("pdfium.dll"),
+    );
+    candidates
+}
+
+/// Bind to the bundled pdfium library (falling back to a system copy). Returns
+/// None when pdfium can't be found, so the preview degrades to text/metadata.
+fn load_pdfium() -> Option<pdfium_render::prelude::Pdfium> {
+    use pdfium_render::prelude::Pdfium;
+    for candidate in pdfium_library_candidates() {
+        if candidate.is_file() {
+            if let Ok(bindings) = Pdfium::bind_to_library(&candidate) {
+                return Some(Pdfium::new(bindings));
+            }
+        }
+    }
+    Pdfium::bind_to_system_library().ok().map(Pdfium::new)
+}
+
+/// Rasterize the first page of a PDF to RGBA8 pixels. Runs off the UI thread.
+fn pdf_render_first_page(path: &Path, target_width: u32) -> Option<(Vec<u8>, u32, u32)> {
+    use pdfium_render::prelude::*;
+    let pdfium = load_pdfium()?;
+    let document = pdfium.load_pdf_from_file(path, None).ok()?;
+    let page = document.pages().first().ok()?;
+    let config = PdfRenderConfig::new()
+        .set_target_width(target_width as i32)
+        .set_maximum_height((target_width as f32 * 1.6) as i32);
+    let image = page
+        .render_with_config(&config)
+        .ok()?
+        .as_image()
+        .into_rgba8();
+    let (w, h) = image.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some((image.into_raw(), w, h))
+}
+
+/// Cache key for a rasterized PDF page.
+fn pdf_page_cache_key(path: &str, modified: u64, target_width: u32) -> String {
+    format!("{path}|{modified}|{target_width}")
+}
+
+/// Return a cached rasterized PDF page without rendering (cheap, UI-thread safe).
+fn pdf_page_cached_only(
+    state: &AppState,
+    path: &str,
+    modified: u64,
+    target_width: u32,
+) -> Option<Arc<(Vec<u8>, u32, u32)>> {
+    let key = pdf_page_cache_key(path, modified, target_width);
+    state.pdf_page_cache.lock().ok()?.get(&key).cloned()
+}
+
+/// Return a rasterized PDF page, rendering (and caching) it on a miss. Slow on a
+/// cold miss, so only call this off the UI thread.
+fn pdf_page_rgba_cached(
+    state: &AppState,
+    path: &str,
+    modified: u64,
+    target_width: u32,
+) -> Option<Arc<(Vec<u8>, u32, u32)>> {
+    if let Some(hit) = pdf_page_cached_only(state, path, modified, target_width) {
+        return Some(hit);
+    }
+    let arc = Arc::new(pdf_render_first_page(Path::new(path), target_width)?);
+    if let Ok(mut cache) = state.pdf_page_cache.lock() {
+        let key = pdf_page_cache_key(path, modified, target_width);
+        cache.insert(key, arc.clone());
+        // Bound the cache; evict an arbitrary entry when it grows too large.
+        if cache.len() > 24 {
+            if let Some(k) = cache.keys().next().cloned() {
+                cache.remove(&k);
+            }
+        }
+    }
+    Some(arc)
+}
+
+/// Build a Slint image from raw RGBA8 pixel data on the UI thread.
+fn rgba_to_slint_image(data: &(Vec<u8>, u32, u32)) -> slint::Image {
+    let (raw, w, h) = data;
+    let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(raw, *w, *h);
+    slint::Image::from_rgba8(buf)
 }
 
 /// Natural / "Windows Explorer" string comparison: numeric runs are compared
@@ -4689,9 +4801,10 @@ fn read_preview_uncached(
     }
 
     if ext == "pdf" {
-        let text = pdf_first_page_preview(path_buf).unwrap_or_else(|| {
-            generic_metadata_preview(path_buf, metadata, "PDF document")
-        });
+        // Empty body (rather than duplicated metadata) when no text could be
+        // extracted, so the preview pane can show a clear "no extractable text"
+        // message instead of repeating the meta block below it.
+        let text = pdf_first_page_preview(path_buf).unwrap_or_default();
         return Ok(PreviewContent {
             kind: "pdf".to_string(),
             mime: Some("application/pdf".to_string()),
@@ -8375,6 +8488,25 @@ struct NativeController {
     dupe_groups_cache: Vec<(String, Vec<String>)>,
     shortcut_draft: HashMap<String, String>,
     recent_commands: std::collections::VecDeque<String>,
+    // Async file preview. Reading a file body (PDF text extraction, archive
+    // listing, large text) can be slow, so it runs on a background thread and
+    // the result is applied by the poll tick. `preview_generation` stamps each
+    // request; stale results (the user already clicked something else) are
+    // dropped so the pane never flashes an out-of-date body.
+    preview_generation: Arc<AtomicU64>,
+    preview_ready: Arc<AtomicBool>,
+    pending_preview_result: Arc<Mutex<Option<PreviewResult>>>,
+}
+
+#[derive(Clone)]
+struct PreviewResult {
+    generation: u64,
+    body: String,
+    meta: String,
+    rendered: String,
+    // Rasterized PDF first page (RGBA + dimensions), built off the UI thread
+    // and turned into a Slint image when the poll tick applies the result.
+    pdf_image: Option<Arc<(Vec<u8>, u32, u32)>>,
 }
 
 #[derive(Clone)]
@@ -10833,6 +10965,228 @@ fn native_read_preview(
     Ok(content)
 }
 
+/// Number of bytes the preview pane reads. Larger than the old 4 KB so text and
+/// HTML/Markdown source show meaningful content; `read_preview_uncached` still
+/// caps text at 64 KB internally, so this never reads an entire large file.
+const PREVIEW_READ_BYTES: usize = 64 * 1024;
+
+/// True if a preview for `path` is already sitting in the in-memory cache, so
+/// the caller can render it synchronously without a background thread hop.
+/// Only does a cheap stat (needed for the cache key) — never reads the body.
+fn preview_is_cached(state: &AppState, path: &str) -> bool {
+    let path_buf = PathBuf::from(path);
+    let Ok(metadata) = fs::metadata(&path_buf) else {
+        return false;
+    };
+    let key = format!(
+        "{}|{}|{}",
+        cache_key(&path_buf),
+        unix_secs(metadata.modified()),
+        PREVIEW_READ_BYTES
+    );
+    state.preview(&key).is_some()
+}
+
+/// Read a file preview and format the pane's body, meta block, and (for
+/// HTML/Markdown) a rendered plain-text version. This is the slow part of a
+/// selection change, so it runs off the UI thread.
+fn build_preview_display(
+    state: &AppState,
+    path: &str,
+    ext: &str,
+    type_label: &str,
+    size: u64,
+    modified: u64,
+) -> (String, String, String) {
+    match native_read_preview(state, path, Some(PREVIEW_READ_BYTES)) {
+        Ok(preview) => {
+            let body = match preview.kind.as_str() {
+                "image" | "folder" => String::new(),
+                "text" | "svg" | "archive" | "pdf" | "font" | "media"
+                | "image-too-large" | "image-metadata" => preview.text.unwrap_or_default(),
+                other => format!("{other} file"),
+            };
+            let truncated_note = if preview.truncated { " | truncated" } else { "" };
+            let meta = format!(
+                "Path:     {}\nType:     {}\nSize:     {}\nModified: {}{}",
+                path,
+                type_label,
+                format_size_short(size),
+                format_modified(modified),
+                truncated_note,
+            );
+            let rendered = match ext {
+                "html" | "htm" => render_html_to_text(&body),
+                "md" | "markdown" => render_markdown_to_text(&body),
+                _ => String::new(),
+            };
+            (body, meta, rendered)
+        }
+        Err(error) => (String::from("Preview unavailable"), error, String::new()),
+    }
+}
+
+/// Decode the handful of HTML entities common in real documents. Kept small and
+/// allocation-light; the preview only needs readable text, not a full parse.
+fn decode_html_entities(input: &str) -> String {
+    let mut out = input
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&mdash;", "\u{2014}")
+        .replace("&ndash;", "\u{2013}")
+        .replace("&hellip;", "\u{2026}")
+        .replace("&bull;", "\u{2022}")
+        .replace("&copy;", "\u{00a9}")
+        .replace("&reg;", "\u{00ae}")
+        .replace("&trade;", "\u{2122}");
+    // Numeric entities like &#8217; — resolve the decimal ones we can.
+    if out.contains("&#") {
+        let re = &NUMERIC_ENTITY_RE;
+        out = re
+            .replace_all(&out, |caps: &regex::Captures| {
+                caps.get(1)
+                    .and_then(|m| m.as_str().parse::<u32>().ok())
+                    .and_then(char::from_u32)
+                    .map(|c| c.to_string())
+                    .unwrap_or_default()
+            })
+            .into_owned();
+    }
+    out
+}
+
+/// Collapse runs of blank lines to at most one and trim trailing whitespace so
+/// a stripped document reads cleanly in the narrow preview column.
+fn tidy_rendered_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut blank_run = 0u32;
+    for line in input.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                out.push('\n');
+            }
+        } else {
+            blank_run = 0;
+            out.push_str(trimmed);
+            out.push('\n');
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Convert an HTML document into readable plain text: script/style content is
+/// dropped, block tags become line breaks, list items get bullets, and entities
+/// are decoded. This is the built-in "rendered" view — there is no WebView in
+/// the app by design, so this gives a fast, dependency-free approximation.
+fn render_html_to_text(html: &str) -> String {
+    let chars: Vec<char> = html.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0usize;
+    let mut in_skip = false; // inside <script> / <style>
+    while i < n {
+        let c = chars[i];
+        if c == '<' {
+            let mut j = i + 1;
+            let closing = j < n && chars[j] == '/';
+            if closing {
+                j += 1;
+            }
+            let mut name = String::new();
+            while j < n && (chars[j].is_ascii_alphanumeric()) {
+                name.push(chars[j].to_ascii_lowercase());
+                j += 1;
+            }
+            let mut k = i + 1;
+            while k < n && chars[k] != '>' {
+                k += 1;
+            }
+            let tag_end = if k < n { k + 1 } else { n };
+            match name.as_str() {
+                "script" | "style" => in_skip = !closing,
+                "br" => out.push('\n'),
+                "li" => {
+                    if !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    if !closing {
+                        out.push_str("\u{2022} ");
+                    }
+                }
+                "td" | "th" if !closing => {
+                    out.push('\t');
+                }
+                "p" | "div" | "section" | "article" | "header" | "footer" | "nav" | "main"
+                | "ul" | "ol" | "table" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                | "blockquote" | "pre" | "hr" | "figure" | "figcaption"
+                    if !out.ends_with('\n') =>
+                {
+                    out.push('\n');
+                }
+                _ => {}
+            }
+            i = tag_end;
+            continue;
+        }
+        if !in_skip {
+            out.push(c);
+        }
+        i += 1;
+    }
+    tidy_rendered_text(&decode_html_entities(&out))
+}
+
+/// Lightly render Markdown to plain text: strip heading markers and emphasis,
+/// turn `-`/`*`/`+` bullets into real bullets, and rewrite `[text](url)` links
+/// as `text (url)`.
+fn render_markdown_to_text(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    for raw in md.lines() {
+        let line = raw.trim_end();
+        // Fenced code fences: drop the ``` marker lines entirely.
+        if line.trim_start().starts_with("```") {
+            continue;
+        }
+        let mut l = line.to_string();
+        // Headings: strip a leading run of '#'.
+        let hashes = l.chars().take_while(|c| *c == '#').count();
+        if hashes > 0 && hashes <= 6 && l.chars().nth(hashes) == Some(' ') {
+            l = l[hashes + 1..].trim_start().to_string();
+        }
+        // Bullets, preserving indentation.
+        let lt = l.trim_start();
+        if let Some(rest) = lt
+            .strip_prefix("- ")
+            .or_else(|| lt.strip_prefix("* "))
+            .or_else(|| lt.strip_prefix("+ "))
+        {
+            let indent_len = l.len() - lt.len();
+            l = format!("{}\u{2022} {}", &l[..indent_len], rest);
+        }
+        out.push_str(&l);
+        out.push('\n');
+    }
+    // Inline cleanup: links first, then emphasis / code markers.
+    let linked = MD_LINK_RE.replace_all(&out, "$1 ($2)").into_owned();
+    let cleaned = linked
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "");
+    tidy_rendered_text(&cleaned)
+}
+
+static NUMERIC_ENTITY_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"&#(\d+);").unwrap());
+static MD_LINK_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\[([^\]]+)\]\(([^)\s]+)\)").unwrap());
+
 fn native_git_status(state: &AppState, path: &str) -> Arc<GitStatusMap> {
     if !is_inside_git_worktree(Path::new(path)) {
         return Arc::new(GitStatusMap::new());
@@ -12667,6 +13021,9 @@ impl NativeController {
             dupe_groups_cache: Vec::new(),
             shortcut_draft: HashMap::new(),
             recent_commands: std::collections::VecDeque::new(),
+            preview_generation: Arc::new(AtomicU64::new(0)),
+            preview_ready: Arc::new(AtomicBool::new(false)),
+            pending_preview_result: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -13984,6 +14341,12 @@ impl NativeController {
             active: self.current_path == "home://",
         });
         for folder in &self.known_folders {
+            // The Home landing (home://) above already represents the user's
+            // home location, so skip the redundant "home" known-folder entry.
+            // Otherwise the sidebar shows two identical "Home" rows.
+            if folder.id == "home" {
+                continue;
+            }
             items.push(SideItem {
                 label: ss(&folder.name),
                 path: ss(&folder.path),
@@ -14212,6 +14575,12 @@ impl NativeController {
             active: self.current_path == "home://",
         });
         for folder in &self.known_folders {
+            // The Home landing (home://) above already represents the user's
+            // home location, so skip the redundant "home" known-folder entry.
+            // Otherwise the sidebar shows two identical "Home" rows.
+            if folder.id == "home" {
+                continue;
+            }
             items.push(SideItem {
                 label: ss(&folder.name),
                 path: ss(&folder.path),
@@ -15423,6 +15792,10 @@ impl NativeController {
             ui.set_preview_is_html(false);
             ui.set_preview_is_media(false);
             ui.set_preview_is_pdf(false);
+            ui.set_preview_can_render(false);
+            ui.set_preview_show_rendered(false);
+            ui.set_preview_rendered(ss(""));
+            ui.set_preview_has_pdf_page(false);
             ui.set_quick_look_path(ss(""));
             return;
         };
@@ -15437,6 +15810,14 @@ impl NativeController {
             ext_for_html.as_str(),
             "html" | "htm" | "md" | "markdown" | "svg"
         ));
+        // Only real markup gets the in-app Code/Rendered toggle (SVG stays
+        // source-only). Reset the toggle to source on every selection change.
+        ui.set_preview_can_render(matches!(
+            ext_for_html.as_str(),
+            "html" | "htm" | "md" | "markdown"
+        ));
+        ui.set_preview_show_rendered(false);
+        ui.set_preview_rendered(ss(""));
 
         if let Some(archive) = &self.active_archive {
             ui.set_preview_is_image(false);
@@ -15462,6 +15843,21 @@ impl NativeController {
         ui.set_preview_is_pdf(ext == "pdf");
         ui.set_preview_is_media(is_media_ext(&ext));
         ui.set_quick_look_path(ss(&entry.path));
+
+        // PDF: show a previously-rasterized first page instantly (no flicker)
+        // if it's cached; otherwise clear it until the async render lands.
+        if ext == "pdf" {
+            if let Some(rgba) =
+                pdf_page_cached_only(&self.app_state, &entry.path, entry.modified, PDF_PREVIEW_WIDTH)
+            {
+                ui.set_preview_pdf_page(rgba_to_slint_image(&rgba));
+                ui.set_preview_has_pdf_page(true);
+            } else {
+                ui.set_preview_has_pdf_page(false);
+            }
+        } else {
+            ui.set_preview_has_pdf_page(false);
+        }
         let is_image = is_thumbnail_image_ext(&ext);
         if is_image {
             let disk_key = thumbnail_cache_key(Path::new(&entry.path), entry.modified, 160);
@@ -15480,36 +15876,83 @@ impl NativeController {
             ui.set_preview_is_image(false);
         }
 
-        match native_read_preview(&self.app_state, &entry.path, Some(4 * 1024)) {
-            Ok(preview) => {
-                let body = match preview.kind.as_str() {
-                    "image" => String::new(),
-                    "text" | "svg" | "archive" | "pdf" | "font" | "media" | "image-too-large"
-                    | "image-metadata" => preview.text.unwrap_or_default(),
-                    "folder" => String::new(),
-                    other => format!("{other} file"),
-                };
-                let truncated_note = if preview.truncated {
-                    " | truncated"
-                } else {
-                    ""
-                };
-                let meta = format!(
-                    "Path:     {}\nType:     {}\nSize:     {}\nModified: {}{}",
-                    entry.path,
-                    entry_type(&entry),
-                    format_size_short(entry.size),
-                    format_modified(entry.modified),
-                    truncated_note,
-                );
-                ui.set_preview_body(ss(body));
-                ui.set_preview_meta(ss(meta));
-            }
-            Err(error) => {
-                ui.set_preview_body(ss("Preview unavailable"));
-                ui.set_preview_meta(ss(error));
-            }
+        let type_label = entry_type(&entry);
+        let base_meta = format!(
+            "Path:     {}\nType:     {}\nSize:     {}\nModified: {}",
+            entry.path,
+            type_label,
+            format_size_short(entry.size),
+            format_modified(entry.modified),
+        );
+
+        // A thumbnail already renders above, so skip the body read entirely.
+        // This avoids a full-file base64 encode (and the freeze it caused) when
+        // selecting a large image.
+        if ui.get_preview_is_image() {
+            ui.set_preview_body(ss(""));
+            ui.set_preview_meta(ss(base_meta));
+            return;
         }
+
+        // Fast path: already cached, so format it inline with no flicker. A
+        // cache hit means `build_preview_display` does no disk read beyond the
+        // stat we just did, so it stays snappy. PDFs always take the async path
+        // so the (slow) page rasterization never runs on the UI thread.
+        if ext != "pdf" && preview_is_cached(&self.app_state, &entry.path) {
+            let (body, meta, rendered) = build_preview_display(
+                &self.app_state,
+                &entry.path,
+                &ext,
+                &type_label,
+                entry.size,
+                entry.modified,
+            );
+            ui.set_preview_body(ss(body));
+            ui.set_preview_meta(ss(meta));
+            ui.set_preview_rendered(ss(rendered));
+            return;
+        }
+
+        // Cold path: show meta immediately and read the body on a background
+        // thread. The poll tick applies the result, dropping it if the
+        // selection changed in the meantime. This is what keeps rapid clicks
+        // and slow files (PDF, archives) from ever freezing the UI thread.
+        ui.set_preview_body(ss(""));
+        ui.set_preview_meta(ss(base_meta));
+
+        let generation = self.preview_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let path = entry.path.clone();
+        let ext_owned = ext.clone();
+        let app_state = self.app_state.clone();
+        let ready = self.preview_ready.clone();
+        let pending = self.pending_preview_result.clone();
+        let gen_check = self.preview_generation.clone();
+        let size = entry.size;
+        let modified = entry.modified;
+        std::thread::spawn(move || {
+            let (body, meta, rendered) =
+                build_preview_display(&app_state, &path, &ext_owned, &type_label, size, modified);
+            // Rasterize the PDF first page (cached) so the pane shows the real
+            // document, not just extracted text.
+            let pdf_image = if ext_owned == "pdf" {
+                pdf_page_rgba_cached(&app_state, &path, modified, PDF_PREVIEW_WIDTH)
+            } else {
+                None
+            };
+            if gen_check.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(PreviewResult {
+                    generation,
+                    body,
+                    meta,
+                    rendered,
+                    pdf_image,
+                });
+            }
+            ready.store(true, Ordering::Release);
+        });
     }
 
     fn go_up(&mut self, ui: &MainWindow) {
@@ -21545,6 +21988,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let pending_dir = controller.borrow().pending_directory_result.clone();
         let search_ready = controller.borrow().search_ready.clone();
         let pending_search = controller.borrow().pending_search_result.clone();
+        let preview_ready = controller.borrow().preview_ready.clone();
+        let pending_preview = controller.borrow().pending_preview_result.clone();
         let timer = slint::Timer::default();
         let prev_ai_install = Rc::new(Cell::new(local_ai::InstallState::NotInstalled));
         let prev_ai_cell = prev_ai_install.clone();
@@ -21567,6 +22012,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let op_fired = op_ready.swap(false, Ordering::AcqRel);
                 let dir_pending = dir_ready.load(Ordering::Acquire);
                 let search_pending = search_ready.load(Ordering::Acquire);
+                let preview_pending = preview_ready.load(Ordering::Acquire);
                 let storage_pending = {
                     if let Ok(ctrl) = c.try_borrow() {
                         ctrl.storage_scan_ready.load(Ordering::Acquire)
@@ -21580,6 +22026,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     || op_fired
                     || dir_pending
                     || search_pending
+                    || preview_pending
                     || storage_pending;
                 if !work_pending {
                     let skips = idle_skips_cell.get();
@@ -21682,6 +22129,32 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 }
                 let dir_fired = dir_ready.swap(false, Ordering::AcqRel);
                 let search_fired = search_ready.swap(false, Ordering::AcqRel);
+                let preview_fired = preview_ready.swap(false, Ordering::AcqRel);
+                if preview_fired {
+                    if let Some(ui) = weak.upgrade() {
+                        let result = pending_preview.lock().ok().and_then(|mut l| l.take());
+                        if let Some(result) = result {
+                            // Only apply if this is still the current selection
+                            // and the preview pane is open.
+                            let current = c
+                                .try_borrow()
+                                .map(|ctrl| {
+                                    ctrl.preview_generation.load(Ordering::SeqCst)
+                                        == result.generation
+                                })
+                                .unwrap_or(false);
+                            if current && ui.get_preview_visible() {
+                                ui.set_preview_body(ss(result.body));
+                                ui.set_preview_meta(ss(result.meta));
+                                ui.set_preview_rendered(ss(result.rendered));
+                                if let Some(rgba) = result.pdf_image {
+                                    ui.set_preview_pdf_page(rgba_to_slint_image(&rgba));
+                                    ui.set_preview_has_pdf_page(true);
+                                }
+                            }
+                        }
+                    }
+                }
                 if git_fired {
                     if let Ok(mut lock) = pending_git.lock() {
                         if let Some(status) = lock.take() {

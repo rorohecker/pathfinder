@@ -2111,45 +2111,54 @@ component StorageTipsFooter inherits Rectangle {
     in property <bool> scanning;
     callback open_path(string);
     callback tip_action(string, string);
+    property <bool> expanded: false;
     background: ThemePalette.panel_solid;
-    vertical-stretch: 1;
-    min-height: 120px;
+    vertical-stretch: 0;
+    clip: true;
+    preferred-height: root.expanded
+        ? min(168px, 36px + root.tips.length * 52px)
+        : (root.tips.length > 0 ? 30px : 0px);
+    min-height: root.tips.length > 0 ? (root.expanded ? 96px : 30px) : 0px;
+    max-height: root.expanded ? 168px : 30px;
+    visible: root.tips.length > 0 || root.scanning;
 
     Rectangle {
         x: 0; y: 0;
         width: parent.width; height: 1px;
         background: ThemePalette.border;
     }
-    Text {
-        x: 14px; y: 10px;
-        width: parent.width - 28px; height: 16px;
-        text: root.tips.length > 0 ? ("Suggestions · " + root.tips.length) : "Suggestions";
-        color: ThemePalette.text_faint;
-        font-size: 10px;
-        font-weight: 700;
-        vertical-alignment: center;
-    }
-    ScrollView {
-        x: 0; y: 32px;
-        width: parent.width;
-        height: parent.height - 36px;
-        if root.tips.length == 0: Text {
-            x: 14px; y: 6px;
+    Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: 30px;
+        background: header_touch.has-hover ? ThemePalette.panel_alt : transparent;
+        Text {
+            x: 14px;
             width: parent.width - 28px;
-            text: root.scanning
-                ? "Recommendations will appear once the scan completes."
-                : "Scan complete. Pick a category or review largest items above.";
+            height: parent.height;
+            text: root.tips.length > 0
+                ? ("Suggestions · " + root.tips.length + (root.expanded ? "  ▴" : "  ▾"))
+                : "Suggestions";
             color: ThemePalette.text_faint;
-            font-size: 11px;
-            wrap: word-wrap;
+            font-size: 10px;
+            font-weight: 700;
+            vertical-alignment: center;
         }
+        header_touch := TouchArea {
+            mouse-cursor: root.tips.length > 0 ? pointer : default;
+            clicked => { if (root.tips.length > 0) { root.expanded = !root.expanded; } }
+        }
+    }
+    if root.expanded: ScrollView {
+        x: 0; y: 30px;
+        width: parent.width;
+        height: parent.height - 30px;
         VerticalLayout {
             width: parent.width;
-            spacing: 6px;
-            padding: 6px;
+            spacing: 4px;
+            padding: 4px;
             for tip[i] in root.tips: Rectangle {
                 width: parent.width - 12px;
-                height: 48px;
+                height: 44px;
                 border-radius: AppMetrics.radius_small;
                 border-width: 1px;
                 border-color: ThemePalette.border;
@@ -2172,7 +2181,7 @@ component StorageTipsFooter inherits Rectangle {
                     font-family: AppMetrics.mono_font;
                 }
                 Text {
-                    x: 36px; y: 8px;
+                    x: 36px; y: 6px;
                     width: parent.width - (tip.bytes_text != "" ? 108px : 44px); height: 16px;
                     text: tip.title;
                     color: ThemePalette.text;
@@ -2182,7 +2191,7 @@ component StorageTipsFooter inherits Rectangle {
                     overflow: elide;
                 }
                 Text {
-                    x: 36px; y: 26px;
+                    x: 36px; y: 24px;
                     width: parent.width - (tip.bytes_text != "" ? 108px : 44px); height: 14px;
                     text: tip.detail;
                     color: ThemePalette.text_muted;
@@ -2191,7 +2200,7 @@ component StorageTipsFooter inherits Rectangle {
                     overflow: elide;
                 }
                 if tip.bytes_text != "": Text {
-                    x: parent.width - 100px; y: 8px;
+                    x: parent.width - 100px; y: 6px;
                     width: 92px; height: 16px;
                     text: tip.bytes_text;
                     color: ThemePalette.text;
@@ -2227,7 +2236,8 @@ component StorageLargestPanel inherits Rectangle {
     callback open_with(string);
     background: ThemePalette.bg;
     vertical-stretch: 1;
-    min-height: 120px;
+    min-height: 100px;
+    clip: true;
 
     property <bool> compact: self.width < 720px;
     property <bool> tiny: self.width < 480px;
@@ -2236,16 +2246,16 @@ component StorageLargestPanel inherits Rectangle {
     property <length> share_w: self.tiny ? 0px : (self.compact ? max(72px, self.width * 0.11) : max(100px, min(150px, self.width * 0.14)));
     property <length> size_w: self.tiny ? 72px : 88px;
     property <bool> show_headers: root.top_items.length > 0;
-    property <length> header_block_h: 34px;
+    property <length> header_block_h: 26px;
     property <length> list_header_h: 28px;
     property <length> list_gap: 4px;
     property <length> list_y: self.header_block_h + (self.show_headers ? self.list_header_h + self.list_gap : 0px);
 
     Text {
-        x: 10px; y: 4px;
+        x: 10px; y: 6px;
         width: parent.width - 20px; height: 16px;
         text: root.list_total > 0
-            ? ("Largest items · showing " + root.list_shown + " of " + root.list_total)
+            ? ("Largest items · " + root.list_shown + " of " + root.list_total)
             : (root.top_items.length > 0
                 ? ("Largest items · " + root.top_items.length)
                 : "Largest items");
@@ -2253,15 +2263,6 @@ component StorageLargestPanel inherits Rectangle {
         font-size: 11px;
         font-weight: 700;
         vertical-alignment: center;
-    }
-    Text {
-        x: 10px; y: 20px;
-        width: parent.width - 20px; height: 14px;
-        text: "Biggest space users — click a row to open its folder";
-        color: ThemePalette.text_faint;
-        font-size: 10px;
-        vertical-alignment: center;
-        overflow: elide;
     }
     if root.show_headers: StorageListHeader {
         x: 0; y: root.header_block_h;
@@ -2341,9 +2342,9 @@ component StorageOverview inherits Rectangle {
         spacing: 0;
         alignment: stretch;
 
-        // Header: title, actions, optional drive pills inline.
+        // Header: title, disk summary, and actions on one compact row.
         Rectangle {
-            preferred-height: root.drives.length > 1 ? 78px : 56px;
+            preferred-height: root.drives.length > 1 ? 68px : 50px;
             min-height: self.preferred-height;
             max-height: self.preferred-height;
             vertical-stretch: 0;
@@ -2354,18 +2355,18 @@ component StorageOverview inherits Rectangle {
                 background: ThemePalette.border;
             }
             Text {
-                x: 18px; y: 8px;
-                width: parent.width - 236px; height: 20px;
+                x: 16px; y: 8px;
+                width: parent.width - 220px; height: 18px;
                 text: "Storage · " + root.root_label;
                 color: ThemePalette.text;
-                font-size: 16px;
+                font-size: 15px;
                 font-weight: 700;
                 vertical-alignment: center;
                 overflow: elide;
             }
             Text {
-                x: 18px; y: 30px;
-                width: parent.width - 236px; height: 16px;
+                x: 16px; y: 28px;
+                width: parent.width - 220px; height: 14px;
                 text: root.disk_summary != "" ? root.disk_summary : root.total_text;
                 color: ThemePalette.text_muted;
                 font-size: 11px;
@@ -2373,9 +2374,9 @@ component StorageOverview inherits Rectangle {
                 overflow: elide;
             }
             if root.drives.length > 1: HorizontalLayout {
-                x: 18px; y: 50px;
-                width: parent.width - 240px;
-                height: 24px;
+                x: 16px; y: 46px;
+                width: parent.width - 220px;
+                height: 20px;
                 spacing: 6px;
                 alignment: start;
                 for drv[i] in root.drives: Rectangle {
@@ -2405,8 +2406,8 @@ component StorageOverview inherits Rectangle {
                 }
             }
             Rectangle {
-                x: parent.width - 220px; y: 14px;
-                width: 96px; height: 28px;
+                x: parent.width - 208px; y: 10px;
+                width: 88px; height: 28px;
                 border-radius: AppMetrics.radius_small;
                 border-width: 1px;
                 border-color: ThemePalette.border;
@@ -2426,8 +2427,8 @@ component StorageOverview inherits Rectangle {
                 }
             }
             Rectangle {
-                x: parent.width - 116px; y: 14px;
-                width: 92px; height: 28px;
+                x: parent.width - 112px; y: 10px;
+                width: 84px; height: 28px;
                 border-radius: AppMetrics.radius_small;
                 border-width: 1px;
                 border-color: ThemePalette.border;
@@ -2449,9 +2450,9 @@ component StorageOverview inherits Rectangle {
             }
         }
 
-        // Stats strip: scan breakdown + category bar on one clean row.
+        // Stats strip: category bar + scan summary on one slim row.
         Rectangle {
-            preferred-height: root.buckets.length > 0 ? 48px : 32px;
+            preferred-height: root.buckets.length > 0 ? 36px : 28px;
             min-height: self.preferred-height;
             max-height: self.preferred-height;
             vertical-stretch: 0;
@@ -2462,18 +2463,18 @@ component StorageOverview inherits Rectangle {
                 background: ThemePalette.border;
             }
             Text {
-                x: 18px; y: 6px;
-                width: parent.width - 200px; height: 14px;
+                x: 16px; y: 4px;
+                width: parent.width - 190px; height: 12px;
                 text: root.breakdown_text != "" ? root.breakdown_text : root.subtitle;
                 color: ThemePalette.text_muted;
-                font-size: 11px;
+                font-size: 10px;
                 vertical-alignment: center;
                 overflow: elide;
             }
             if root.buckets.length > 0: HorizontalLayout {
-                x: 18px; y: 26px;
-                width: parent.width - 36px;
-                height: 8px;
+                x: 16px; y: 20px;
+                width: parent.width - 32px;
+                height: 6px;
                 spacing: 2px;
                 for bucket[i] in root.buckets: Rectangle {
                     horizontal-stretch: max(0.35, bucket.percent);
@@ -2486,8 +2487,8 @@ component StorageOverview inherits Rectangle {
                 }
             }
             if root.disk_used_pct > 0 || (root.scan_coverage_pct > 0 && root.scan_coverage_pct < 100): Text {
-                x: parent.width - 182px; y: 6px;
-                width: 168px; height: 14px;
+                x: parent.width - 176px; y: 4px;
+                width: 160px; height: 12px;
                 text: (root.disk_used_pct > 0 ? (round(root.disk_used_pct) + "% disk used") : "")
                     + (root.disk_used_pct > 0 && root.scan_coverage_pct > 0 && root.scan_coverage_pct < 100 ? " · " : "")
                     + (root.scan_coverage_pct > 0 && root.scan_coverage_pct < 100 ? (round(root.scan_coverage_pct) + "% categorized") : "");
@@ -2501,9 +2502,9 @@ component StorageOverview inherits Rectangle {
         }
 
         if root.scanning: Rectangle {
-            preferred-height: 32px;
-            min-height: 32px;
-            max-height: 32px;
+            preferred-height: 26px;
+            min-height: 26px;
+            max-height: 26px;
             vertical-stretch: 0;
             background: ThemePalette.panel_solid;
             Text {
@@ -2544,7 +2545,7 @@ component StorageOverview inherits Rectangle {
             property <bool> side_by_side: parent.width >= 760px;
 
             if root.buckets.length > 0 && self.side_by_side: Rectangle {
-                width: min(300px, max(240px, parent.width * 0.28));
+                width: min(260px, max(220px, parent.width * 0.26));
                 vertical-stretch: 1;
                 background: ThemePalette.bg;
                 clip: true;
@@ -2588,9 +2589,9 @@ component StorageOverview inherits Rectangle {
                 alignment: stretch;
 
                 if root.buckets.length > 0 && !main_split.side_by_side: Rectangle {
-                    preferred-height: min(260px, root.buckets.length * 48px + 36px);
-                    min-height: 96px;
-                    max-height: 260px;
+                    preferred-height: min(200px, root.buckets.length * 44px + 32px);
+                    min-height: 88px;
+                    max-height: 200px;
                     vertical-stretch: 0;
                     background: ThemePalette.bg;
                     clip: true;
@@ -2627,8 +2628,8 @@ component StorageOverview inherits Rectangle {
                 }
 
                 StorageLargestPanel {
-                    vertical-stretch: 3;
-                    min-height: 160px;
+                    vertical-stretch: 1;
+                    min-height: 100px;
                     top_items: root.top_items;
                     scanning: root.scanning;
                     show_bucket_label: true;
@@ -2640,9 +2641,6 @@ component StorageOverview inherits Rectangle {
                 }
 
                 StorageTipsFooter {
-                    vertical-stretch: main_split.side_by_side ? 2 : 0;
-                    preferred-height: main_split.side_by_side ? 0px : min(200px, 40px + root.tips.length * 54px);
-                    min-height: main_split.side_by_side ? 140px : 96px;
                     tips: root.tips;
                     scanning: root.scanning;
                     open_path(p) => { root.open_path(p); }
@@ -3175,10 +3173,19 @@ export component MainWindow inherits Window {
     in-out property <string> image_tools_subtitle: "";
     in-out property <bool> preview_is_image: false;
     in-out property <image> preview_image;
+    // Rasterized PDF first page shown at the top of the preview pane.
+    in-out property <bool> preview_has_pdf_page: false;
+    in-out property <image> preview_pdf_page;
     // HTML / Markdown preview toggle. When true, an extra button in the
     // preview header opens the file in the system default browser so the
     // user can see it rendered. The pane itself keeps showing source code.
     in-out property <bool> preview_is_html: false;
+    // True for html/htm/md/markdown — shows the in-app Code/Rendered toggle.
+    in-out property <bool> preview_can_render: false;
+    // When true the pane shows the built-in rendered text instead of source.
+    in-out property <bool> preview_show_rendered: false;
+    // Rendered (tags-stripped) plain text produced by the Rust side.
+    in-out property <string> preview_rendered: "";
     in-out property <bool> preview_is_media: false;
     in-out property <bool> preview_is_pdf: false;
     in-out property <bool> quick_look_visible: false;
@@ -3711,15 +3718,39 @@ export component MainWindow inherits Window {
             property <length> sel_gap: 4px;
             property <length> sel_clear_w: root.is_simple ? 54px : 44px;
             property <length> sel_norm_step: 34px;
-            property <length> sel_right: self.width - 10px;
+            // Bar width matches the main file pane only — never draws over the
+            // preview column (that was causing the right-side icon overlap).
+            property <length> sel_bar_w: root.main_content_w;
+            property <length> sel_right: sel_bar_w - 10px;
             property <length> sel_btns_left: root.is_simple
                 ? 0px
                 : (sel_right - sel_clear_w - (8 + sel_shift) * sel_norm_step - sel_norm_step);
+            // The label ("N items selected") shares the row with the action
+            // buttons, which are anchored to the right. When the pane gets
+            // narrow, collapse the label to zero so it never slides under the
+            // leftmost button (previously the max(72px) floor forced an overlap
+            // once an archive selection added the Extract button).
             property <length> sel_label_w: root.is_simple
-                ? min(200px, max(120px, self.width * 0.22))
-                : min(200px, max(72px, sel_btns_left - 16px));
+                ? min(200px, max(96px, sel_bar_w * 0.20))
+                : (sel_btns_left < 116px ? 0px : min(200px, sel_btns_left - 16px));
+            // Drop lower-priority actions when the pane is narrow so icons
+            // never stack on top of each other.
+            property <bool> sel_show_select_all: !root.is_simple && sel_bar_w >= 500px;
+            property <bool> sel_show_info: !root.is_simple && sel_bar_w >= 460px;
+            property <bool> sel_show_open_with: !root.is_simple && root.selected_count == 1 && sel_bar_w >= 540px;
+            property <bool> sel_show_cut: !root.is_simple && sel_bar_w >= 360px;
+            property <bool> sel_show_paste: !root.is_simple && sel_bar_w >= 380px;
+            property <bool> sel_show_rename: !root.is_simple && sel_bar_w >= 400px;
+            property <int> sel_right_trim:
+                (sel_show_select_all ? 0 : 1)
+                + (sel_show_info ? 0 : 1)
+                + ((root.selected_count == 1 && !sel_show_open_with) ? 1 : 0);
+            property <int> sel_left_trim:
+                (sel_show_cut ? 0 : 1)
+                + (sel_show_paste ? 0 : 1)
+                + (sel_show_rename ? 0 : 1);
             property <length> sel_btn_w: root.is_simple
-                ? min(root.simple_btn_w, max(54px, (self.width - sel_label_w - sel_clear_w - 24px - (sel_btn_count - 1) * sel_gap) / sel_btn_count))
+                ? min(root.simple_btn_w, max(54px, (sel_bar_w - sel_label_w - sel_clear_w - 24px - (sel_btn_count - 1) * sel_gap) / sel_btn_count))
                 : 31px;
             property <length> sel_step: root.is_simple ? (sel_btn_w + sel_gap) : sel_norm_step;
             property <length> sel_left: sel_label_w + 10px;
@@ -3728,7 +3759,7 @@ export component MainWindow inherits Window {
 
             x: root.sidebar_w;
             y: root.title_h;
-            width: parent.width - root.sidebar_w;
+            width: sel_bar_w;
             height: root.toolbar_h;
             z: 15;
             background: ThemePalette.panel_solid;
@@ -3743,7 +3774,8 @@ export component MainWindow inherits Window {
             Rectangle { x: 0; y: 0; width: 3px; height: parent.height; background: ThemePalette.accent; }
             Text {
                 x: 18px;
-                width: parent.sel_label_w - 8px;
+                visible: parent.sel_label_w > 8px;
+                width: max(0px, parent.sel_label_w - 8px);
                 height: parent.height;
                 text: root.selected_count == 1 ? "1 item selected" : (root.selected_count + " items selected");
                 color: ThemePalette.accent_strong;
@@ -3752,13 +3784,13 @@ export component MainWindow inherits Window {
                 vertical-alignment: center;
                 overflow: elide;
             }
-            ToolButton { x: root.is_simple ? parent.sel_left : parent.sel_right - parent.sel_clear_w - (8 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + parent.sel_step : parent.sel_right - parent.sel_clear_w - (7 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (6 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (5 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (4 + parent.sel_shift) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
+            ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left : parent.sel_right - parent.sel_clear_w - (8 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
+            ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left + parent.sel_step : parent.sel_right - parent.sel_clear_w - (7 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
+            ToolButton { visible: parent.sel_show_paste; x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (6 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
+            ToolButton { visible: parent.sel_show_rename; x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (5 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (4 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
             if root.selection_has_archive && !root.in_recycle_bin: ToolButton {
-                x: root.is_simple ? parent.sel_left + 5 * parent.sel_step : parent.sel_right - parent.sel_clear_w - 4 * parent.sel_norm_step;
+                x: root.is_simple ? parent.sel_left + 5 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (4 - parent.sel_left_trim) * parent.sel_norm_step;
                 y: root.is_simple ? 16px : 6px;
                 button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above;
                 icon_data: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3";
@@ -3768,10 +3800,10 @@ export component MainWindow inherits Window {
                 tooltip: "Extract Here";
                 clicked => { root.command("extract-here"); }
             }
-            ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 3 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
-            if root.selected_count == 1: ToolButton { x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 2 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M4 7h16 M9 20h6 M12 4v16"; text_label: "Open with"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 1 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + (8 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - 0 * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - (3 - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
+            ToolButton { visible: root.selected_count == 1 && parent.sel_show_open_with; x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - (2 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M4 7h16 M9 20h6 M12 4v16"; text_label: "Open with"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
+            ToolButton { visible: parent.sel_show_info; x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - (1 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
+            ToolButton { visible: parent.sel_show_select_all; x: root.is_simple ? parent.sel_left + (8 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - (0 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
             ToolButton { x: parent.sel_right - parent.sel_clear_w; y: root.is_simple ? 16px : 6px; button_width: parent.sel_clear_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
         }
 
@@ -3780,7 +3812,7 @@ export component MainWindow inherits Window {
             visible: root.selected_count == 0;
             x: root.sidebar_w;
             y: root.title_h;
-            width: parent.width - root.sidebar_w;
+            width: root.main_content_w;
             height: root.toolbar_h;
             z: 10;
             background: ThemePalette.panel;
@@ -5394,7 +5426,11 @@ export component MainWindow inherits Window {
                     }
                     Text {
                         x: 48px;
-                        width: parent.width - 92px;
+                        // Reserve room on the right for the header buttons so
+                        // the title never slides under them: close only (92),
+                        // + browser (125 for svg/other html), + Code/Rendered
+                        // toggle (155 for renderable markup).
+                        width: parent.width - (root.preview_can_render ? 160px : (root.preview_is_html ? 125px : 92px));
                         height: parent.height;
                         text: root.preview_title == "" ? "Preview" : root.preview_title;
                         color: ThemePalette.text;
@@ -5403,10 +5439,57 @@ export component MainWindow inherits Window {
                         overflow: elide;
                         vertical-alignment: center;
                     }
+                    // Built-in Code/Rendered toggle for HTML and Markdown. The
+                    // rendered view is produced natively (no WebView) and shown
+                    // in the pane below; source is the default.
+                    if root.preview_can_render: Rectangle {
+                        x: parent.width - 103px;
+                        y: 8px;
+                        width: 62px;
+                        height: 30px;
+                        border-radius: 6px;
+                        background: ThemePalette.bg;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        Rectangle {
+                            x: root.preview_show_rendered ? parent.width / 2 : 0px;
+                            y: 0;
+                            width: parent.width / 2;
+                            height: parent.height;
+                            border-radius: 6px;
+                            background: ThemePalette.accent_soft;
+                            border-width: 1px;
+                            border-color: ThemePalette.accent;
+                        }
+                        Text {
+                            x: 0; y: 0; width: parent.width / 2; height: parent.height;
+                            text: "Code";
+                            font-size: 10px;
+                            font-weight: root.preview_show_rendered ? 400 : 700;
+                            color: root.preview_show_rendered ? ThemePalette.text_muted : ThemePalette.accent_strong;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        Text {
+                            x: parent.width / 2; y: 0; width: parent.width / 2; height: parent.height;
+                            text: "View";
+                            font-size: 10px;
+                            font-weight: root.preview_show_rendered ? 700 : 400;
+                            color: root.preview_show_rendered ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        TouchArea {
+                            x: 0; width: parent.width / 2; height: parent.height;
+                            clicked => { root.preview_show_rendered = false; }
+                        }
+                        TouchArea {
+                            x: parent.width / 2; width: parent.width / 2; height: parent.height;
+                            clicked => { root.preview_show_rendered = true; }
+                        }
+                    }
                     // When the selected file is HTML or Markdown, surface a
                     // small "Open in browser" button so the user can flip
-                    // between viewing source here and the rendered version
-                    // in their default browser.
+                    // between viewing source/rendered here and the full
+                    // rendered version in their default browser.
                     if root.preview_is_html: ToolButton {
                         x: parent.width - 70px;
                         y: 7px;
@@ -5457,6 +5540,22 @@ export component MainWindow inherits Window {
                             }
                         }
 
+                        // Rasterized PDF first page (rendered natively via the
+                        // bundled pdfium). Shown above the extracted text.
+                        if root.preview_has_pdf_page: Rectangle {
+                            width: parent.width;
+                            height: 380px;
+                            background: ThemePalette.bg;
+                            Image {
+                                x: 10px;
+                                y: 10px;
+                                width: parent.width - 20px;
+                                height: parent.height - 20px;
+                                source: root.preview_pdf_page;
+                                image-fit: contain;
+                            }
+                        }
+
                         if root.preview_is_media: Rectangle {
                             width: parent.width;
                             height: 48px;
@@ -5468,23 +5567,41 @@ export component MainWindow inherits Window {
                             }
                         }
 
-                        if root.preview_is_pdf && root.preview_body == "": Rectangle {
+                        if root.preview_is_pdf: Rectangle {
                             x: 16px;
                             width: parent.width - 32px;
-                            height: 40px;
+                            height: (root.preview_body == "" && !root.preview_has_pdf_page) ? 58px : 34px;
                             Text {
                                 width: parent.width; height: parent.height;
-                                text: "No extractable text on the first page — open the file to view the PDF.";
+                                text: root.preview_has_pdf_page
+                                    ? "PDF · first page rendered above. Open the file for the full document."
+                                    : (root.preview_body == ""
+                                        ? "Rendering PDF page… if nothing appears it may be protected or image-only — open it to view the full document."
+                                        : "PDF · first-page text extract shown below. Open the file for the full document.");
                                 color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap; vertical-alignment: center;
                             }
                         }
 
-                        if root.preview_is_html: Rectangle {
+                        // Renderable markup (html/htm/md): explain the toggle.
+                        if root.preview_can_render: Rectangle {
                             width: parent.width;
                             height: 28px;
                             Text {
                                 x: 16px; width: parent.width - 32px; height: parent.height;
-                                text: "Markdown/HTML source below — use the browser button to open rendered output.";
+                                text: root.preview_show_rendered
+                                    ? "Rendered view (built-in). Switch to Code for raw source, or open in your browser."
+                                    : "Source view. Switch to View for a built-in rendered version, or open in your browser.";
+                                color: ThemePalette.text_faint; font-size: 11px; vertical-alignment: center; overflow: elide;
+                            }
+                        }
+
+                        // Non-renderable markup (e.g. SVG): source only.
+                        if root.preview_is_html && !root.preview_can_render: Rectangle {
+                            width: parent.width;
+                            height: 28px;
+                            Text {
+                                x: 16px; width: parent.width - 32px; height: parent.height;
+                                text: "Source below — use the browser button to open rendered output.";
                                 color: ThemePalette.text_faint; font-size: 11px; vertical-alignment: center; overflow: elide;
                             }
                         }
@@ -5509,13 +5626,26 @@ export component MainWindow inherits Window {
                             width: parent.width; height: 8px;
                         }
 
-                        if root.preview_body != "": CopyableMessageText {
+                        // Source (code) view — the default. Shown unless the
+                        // built-in rendered view is active and available.
+                        if root.preview_body != "" && !(root.preview_can_render && root.preview_show_rendered && root.preview_rendered != ""): CopyableMessageText {
                             x: 16px;
                             content-width: parent.width - 32px;
                             text: root.preview_body;
                             font-size: 11.5px;
                             text-color: ThemePalette.text_muted;
                             mono: true;
+                            cap-height: 480px;
+                        }
+
+                        // Built-in rendered view for HTML / Markdown.
+                        if root.preview_can_render && root.preview_show_rendered && root.preview_rendered != "": CopyableMessageText {
+                            x: 16px;
+                            content-width: parent.width - 32px;
+                            text: root.preview_rendered;
+                            font-size: 12.5px;
+                            text-color: ThemePalette.text;
+                            mono: false;
                             cap-height: 480px;
                         }
 
