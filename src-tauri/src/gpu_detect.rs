@@ -39,6 +39,7 @@ impl GpuAdapter {
             0x10DE => "NVIDIA",
             0x1002 | 0x1022 => "AMD",
             0x8086 => "Intel",
+            0x5143 | 0x4D4F4351 => "Qualcomm",
             0x14E4 => "Broadcom",
             0x1B36 => "Red Hat (Virtio)",
             0x1AF4 => "Virtio",
@@ -122,7 +123,10 @@ fn enumerate_dxgi() -> GpuInventory {
             let flags = desc.Flags;
             let is_software = (flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0;
             let is_remote = (flags & DXGI_ADAPTER_FLAG_REMOTE.0 as u32) != 0;
-            let known_vendor = matches!(desc.VendorId, 0x10DE | 0x1002 | 0x1022 | 0x8086);
+            let known_vendor = matches!(
+                desc.VendorId,
+                0x10DE | 0x1002 | 0x1022 | 0x8086 | 0x5143 | 0x4D4F4351
+            );
             let dedicated_video_mb = (desc.DedicatedVideoMemory as u64) / (1024 * 1024);
             let dedicated_system_mb = (desc.DedicatedSystemMemory as u64) / (1024 * 1024);
             let shared_system_mb = (desc.SharedSystemMemory as u64) / (1024 * 1024);

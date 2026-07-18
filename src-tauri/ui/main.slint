@@ -3142,15 +3142,28 @@ export component MainWindow inherits Window {
     in-out property <bool> show_windows_integration: false;
 
     // -- AI install/uninstall state ----------------------------------------
-    // "not_installed" | "downloading" | "installed" | "error"
+    // "not_installed" | "downloading" | "updating" | "installed" | "error"
     in-out property <string> ai_install_state: "not_installed";
     in-out property <float> ai_download_progress: 0;
     in-out property <string> ai_install_message: "";
     in-out property <bool> ai_install_explainer_visible: false;
     in-out property <int> ai_install_size_mb: 180;
+    in-out property <string> ai_profile: "balanced";
+    in-out property <string> ai_profile_label: "Balanced (recommended)";
+    in-out property <bool> ai_auto_update: true;
+    in-out property <string> ai_update_status: "";
+    in-out property <string> ai_feature_semantic: "Install Local AI to enable";
+    in-out property <string> ai_feature_classify: "Install Local AI to enable";
+    in-out property <string> ai_feature_dupes: "Ready - near-duplicate detection uses a lightweight image hash";
+    in-out property <string> ai_disk_usage: "";
+    in-out property <string> ai_model_versions: "";
     callback ai_install_request();
     callback ai_install_confirm();
     callback ai_uninstall();
+    callback ai_repair();
+    callback ai_update_models();
+    callback ai_set_profile(string);
+    callback ai_toggle_auto_update();
     in-out property <bool> command_visible: false;
     in-out property <bool> context_visible: false;
     in-out property <bool> image_tools_visible: false;
@@ -3722,6 +3735,10 @@ export component MainWindow inherits Window {
             // preview column (that was causing the right-side icon overlap).
             property <length> sel_bar_w: root.main_content_w;
             property <length> sel_right: sel_bar_w - 10px;
+            // Right edge for the numbered icon buttons. Sits one full step to the
+            // left of the (wider) Clear button so the rightmost icon (Select all)
+            // never lands on top of Clear.
+            property <length> sel_r: sel_right - sel_clear_w - sel_norm_step;
             property <length> sel_btns_left: root.is_simple
                 ? 0px
                 : (sel_right - sel_clear_w - (8 + sel_shift) * sel_norm_step - sel_norm_step);
@@ -3784,13 +3801,13 @@ export component MainWindow inherits Window {
                 vertical-alignment: center;
                 overflow: elide;
             }
-            ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left : parent.sel_right - parent.sel_clear_w - (8 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
-            ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left + parent.sel_step : parent.sel_right - parent.sel_clear_w - (7 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
-            ToolButton { visible: parent.sel_show_paste; x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (6 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
-            ToolButton { visible: parent.sel_show_rename; x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (5 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (4 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
+            ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left : parent.sel_r - (8 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
+            ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left + parent.sel_step : parent.sel_r - (7 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
+            ToolButton { visible: parent.sel_show_paste; x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.sel_r - (6 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
+            ToolButton { visible: parent.sel_show_rename; x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.sel_r - (5 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_r - (4 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
             if root.selection_has_archive && !root.in_recycle_bin: ToolButton {
-                x: root.is_simple ? parent.sel_left + 5 * parent.sel_step : parent.sel_right - parent.sel_clear_w - (4 - parent.sel_left_trim) * parent.sel_norm_step;
+                x: root.is_simple ? parent.sel_left + 5 * parent.sel_step : parent.sel_r - (4 - parent.sel_left_trim) * parent.sel_norm_step;
                 y: root.is_simple ? 16px : 6px;
                 button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above;
                 icon_data: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3";
@@ -3800,10 +3817,10 @@ export component MainWindow inherits Window {
                 tooltip: "Extract Here";
                 clicked => { root.command("extract-here"); }
             }
-            ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - (3 - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
-            ToolButton { visible: root.selected_count == 1 && parent.sel_show_open_with; x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - (2 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M4 7h16 M9 20h6 M12 4v16"; text_label: "Open with"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
-            ToolButton { visible: parent.sel_show_info; x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - (1 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
-            ToolButton { visible: parent.sel_show_select_all; x: root.is_simple ? parent.sel_left + (8 + parent.sel_shift) * parent.sel_step : parent.sel_right - parent.sel_clear_w - (0 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_r - (3 - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
+            ToolButton { visible: root.selected_count == 1 && parent.sel_show_open_with; x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_r - (2 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M4 7h16 M9 20h6 M12 4v16"; text_label: "Open with"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
+            ToolButton { visible: parent.sel_show_info; x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_r - (1 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
+            ToolButton { visible: parent.sel_show_select_all; x: root.is_simple ? parent.sel_left + (8 + parent.sel_shift) * parent.sel_step : parent.sel_r - (0 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
             ToolButton { x: parent.sel_right - parent.sel_clear_w; y: root.is_simple ? 16px : 6px; button_width: parent.sel_clear_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
         }
 
@@ -7449,24 +7466,51 @@ export component MainWindow inherits Window {
                             width: parent.width - 28px;
                             text: root.ai_install_state == "installed"
                                 ? "Local AI is installed"
-                                : (root.ai_install_state == "downloading"
-                                    ? "Downloading models ..."
-                                    : "Local AI is not installed");
+                                : (root.ai_install_state == "downloading" || root.ai_install_state == "updating"
+                                    ? "Downloading models …"
+                                    : (root.ai_install_state == "error" ? "Local AI needs attention" : "Local AI is not installed"));
                             color: ThemePalette.text;
                             font-size: 13px;
                             font-weight: 700;
                             wrap: word-wrap;
                         }
-                        if root.ai_install_state == "installed" || root.ai_install_state == "not_installed": Text {
+                        Text {
                             width: parent.width - 28px;
-                            text: root.ai_install_state == "installed"
-                                ? "Semantic search, image classification, and perceptual duplicate detection are ready."
-                                : "Adds about " + root.ai_install_size_mb + " MB on disk. Models run entirely on your machine.";
+                            text: "Profile: " + root.ai_profile_label;
+                            color: ThemePalette.accent_strong;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        if root.ai_model_versions != "": Text {
+                            width: parent.width - 28px;
+                            text: root.ai_model_versions;
+                            color: ThemePalette.text_muted;
+                            font-size: 11px;
+                            font-family: AppMetrics.mono_font;
+                            wrap: word-wrap;
+                        }
+                        if root.ai_disk_usage != "": Text {
+                            width: parent.width - 28px;
+                            text: root.ai_disk_usage;
                             color: ThemePalette.text_muted;
                             font-size: 11.5px;
                             wrap: word-wrap;
                         }
-                        if root.ai_install_state == "downloading" || root.ai_install_state == "error": CopyableMessageText {
+                        if root.ai_update_status != "": Text {
+                            width: parent.width - 28px;
+                            text: root.ai_update_status;
+                            color: ThemePalette.text_muted;
+                            font-size: 11.5px;
+                            wrap: word-wrap;
+                        }
+                        if root.ai_install_state == "not_installed": Text {
+                            width: parent.width - 28px;
+                            text: "Adds about " + root.ai_install_size_mb + " MB on disk for the selected profile. Models run entirely on your machine.";
+                            color: ThemePalette.text_muted;
+                            font-size: 11.5px;
+                            wrap: word-wrap;
+                        }
+                        if root.ai_install_state == "downloading" || root.ai_install_state == "updating" || root.ai_install_state == "error": CopyableMessageText {
                             content-width: parent.width - 28px;
                             text: root.ai_install_message;
                             font-size: 11.5px;
@@ -7474,7 +7518,7 @@ export component MainWindow inherits Window {
                             cap-height: 160px;
                         }
 
-                        if root.ai_install_state == "downloading": Rectangle {
+                        if root.ai_install_state == "downloading" || root.ai_install_state == "updating": Rectangle {
                             width: parent.width - 28px;
                             height: 6px;
                             border-radius: 3px;
@@ -7490,48 +7534,95 @@ export component MainWindow inherits Window {
                             }
                         }
 
+                        // Profile picker (compact / balanced / quality)
+                        if root.ai_install_state == "not_installed" || root.ai_install_state == "installed" || root.ai_install_state == "error": HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                width: 88px; height: 30px; border-radius: AppMetrics.radius_small;
+                                background: root.ai_profile == "compact" ? ThemePalette.accent : ThemePalette.panel_alt;
+                                border-width: 1px; border-color: ThemePalette.border;
+                                Text { width: parent.width; height: parent.height; text: "Compact"; color: root.ai_profile == "compact" ? white : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("compact"); } }
+                            }
+                            Rectangle {
+                                width: 96px; height: 30px; border-radius: AppMetrics.radius_small;
+                                background: root.ai_profile == "balanced" ? ThemePalette.accent : ThemePalette.panel_alt;
+                                border-width: 1px; border-color: ThemePalette.border;
+                                Text { width: parent.width; height: parent.height; text: "Balanced"; color: root.ai_profile == "balanced" ? white : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("balanced"); } }
+                            }
+                            Rectangle {
+                                width: 88px; height: 30px; border-radius: AppMetrics.radius_small;
+                                background: root.ai_profile == "quality" ? ThemePalette.accent : ThemePalette.panel_alt;
+                                border-width: 1px; border-color: ThemePalette.border;
+                                Text { width: parent.width; height: parent.height; text: "Quality"; color: root.ai_profile == "quality" ? white : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("quality"); } }
+                            }
+                        }
+
+                        if root.ai_install_state == "installed": Rectangle {
+                            width: parent.width - 28px;
+                            height: AppMetrics.row_h;
+                            border-radius: AppMetrics.radius;
+                            background: ThemePalette.panel_alt;
+                            Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Keep models up to date"; color: ThemePalette.text; font-size: 12.5px; vertical-alignment: center; overflow: elide; }
+                            Rectangle {
+                                x: parent.width - 52px;
+                                y: (parent.height - 22px) / 2;
+                                width: 40px; height: 22px; border-radius: 11px;
+                                background: root.ai_auto_update ? ThemePalette.accent : ThemePalette.border_strong;
+                                Rectangle {
+                                    x: root.ai_auto_update ? 20px : 2px; y: 2px; width: 18px; height: 18px; border-radius: 9px; background: white;
+                                    animate x { duration: 120ms; easing: ease-out; }
+                                }
+                                TouchArea { mouse-cursor: pointer; clicked => { root.ai_toggle_auto_update(); } }
+                            }
+                        }
+
                         HorizontalLayout {
-                            alignment: center;
-                            spacing: 0;
-                            if root.ai_install_state == "not_installed": Rectangle {
+                            spacing: 8px;
+                            if root.ai_install_state == "not_installed" || root.ai_install_state == "error": Rectangle {
                                 width: 126px;
                                 height: 36px;
                                 border-radius: AppMetrics.radius_small;
                                 background: install_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.accent;
                                 Text {
                                     width: parent.width; height: parent.height;
-                                    text: "Install AI";
-                                    color: white;
-                                    font-size: 12.5px;
-                                    font-weight: 700;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                    text: root.ai_install_state == "error" ? "Retry" : "Install AI";
+                                    color: white; font-size: 12.5px; font-weight: 700;
+                                    horizontal-alignment: center; vertical-alignment: center;
                                 }
                                 install_touch := TouchArea {
                                     mouse-cursor: pointer;
-                                    clicked => { root.ai_install_explainer_visible = true; }
+                                    clicked => {
+                                        if (root.ai_install_state == "error") {
+                                            root.ai_repair();
+                                        } else {
+                                            root.ai_install_explainer_visible = true;
+                                        }
+                                    }
                                 }
                             }
                             if root.ai_install_state == "installed": Rectangle {
-                                width: 126px;
-                                height: 36px;
-                                border-radius: AppMetrics.radius_small;
-                                border-width: 1px;
-                                border-color: ThemePalette.border_strong;
+                                width: 118px; height: 36px; border-radius: AppMetrics.radius_small;
+                                border-width: 1px; border-color: ThemePalette.border_strong;
+                                background: repair_touch.has-hover ? ThemePalette.panel_alt : transparent;
+                                Text { width: parent.width; height: parent.height; text: "Verify & repair"; color: ThemePalette.text; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                repair_touch := TouchArea { mouse-cursor: pointer; clicked => { root.ai_repair(); } }
+                            }
+                            if root.ai_install_state == "installed": Rectangle {
+                                width: 118px; height: 36px; border-radius: AppMetrics.radius_small;
+                                border-width: 1px; border-color: ThemePalette.border_strong;
+                                background: upd_touch.has-hover ? ThemePalette.panel_alt : transparent;
+                                Text { width: parent.width; height: parent.height; text: "Update models"; color: ThemePalette.text; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                upd_touch := TouchArea { mouse-cursor: pointer; clicked => { root.ai_update_models(); } }
+                            }
+                            if root.ai_install_state == "installed": Rectangle {
+                                width: 100px; height: 36px; border-radius: AppMetrics.radius_small;
+                                border-width: 1px; border-color: ThemePalette.border_strong;
                                 background: uninstall_touch.has-hover ? ThemePalette.panel_alt : transparent;
-                                Text {
-                                    width: parent.width; height: parent.height;
-                                    text: "Uninstall";
-                                    color: ThemePalette.text;
-                                    font-size: 12.5px;
-                                    font-weight: 600;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-                                uninstall_touch := TouchArea {
-                                    mouse-cursor: pointer;
-                                    clicked => { root.ai_uninstall(); }
-                                }
+                                Text { width: parent.width; height: parent.height; text: "Remove"; color: ThemePalette.text; font-size: 12.5px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                uninstall_touch := TouchArea { mouse-cursor: pointer; clicked => { root.ai_uninstall(); } }
                             }
                         }
                     }
@@ -7539,40 +7630,27 @@ export component MainWindow inherits Window {
 
                 Text { text: "FEATURES"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Rectangle {
-                    width: parent.width;
-                    height: 58px;
-                    border-width: 1px;
-                    border-color: ThemePalette.border;
-                    border-radius: AppMetrics.radius;
-                    background: ThemePalette.panel;
+                    width: parent.width; height: 58px;
+                    border-width: 1px; border-color: ThemePalette.border; border-radius: AppMetrics.radius; background: ThemePalette.panel;
                     Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Semantic content search"; color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
-                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready - search by meaning across indexed files" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
+                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_feature_semantic; color: ThemePalette.text_muted; font-size: 11.5px; overflow: elide; }
                 }
                 Rectangle {
-                    width: parent.width;
-                    height: 58px;
-                    border-width: 1px;
-                    border-color: ThemePalette.border;
-                    border-radius: AppMetrics.radius;
-                    background: ThemePalette.panel;
+                    width: parent.width; height: 58px;
+                    border-width: 1px; border-color: ThemePalette.border; border-radius: AppMetrics.radius; background: ThemePalette.panel;
                     Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Image classification"; color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
-                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready - auto-suggest tags for photos" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
+                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_feature_classify; color: ThemePalette.text_muted; font-size: 11.5px; overflow: elide; }
                 }
                 Rectangle {
-                    width: parent.width;
-                    height: 58px;
-                    border-width: 1px;
-                    border-color: ThemePalette.border;
-                    border-radius: AppMetrics.radius;
-                    background: ThemePalette.panel;
+                    width: parent.width; height: 58px;
+                    border-width: 1px; border-color: ThemePalette.border; border-radius: AppMetrics.radius; background: ThemePalette.panel;
                     Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Perceptual duplicate detection"; color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
-                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_install_state == "installed" ? "Ready - find near-duplicate images and resized copies" : "Install Local AI to enable"; color: root.ai_install_state == "installed" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11.5px; overflow: elide; }
+                    Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_feature_dupes; color: ThemePalette.text_muted; font-size: 11.5px; overflow: elide; }
                 }
                 }
             }
 
-            // AI installer explainer dialog. Lists what gets downloaded and
-            // confirms before kicking off the background install.
+            // AI installer explainer dialog.
             if root.ai_install_explainer_visible: Rectangle {
                 x: 0; y: 0;
                 width: parent.width; height: parent.height;
@@ -7580,9 +7658,9 @@ export component MainWindow inherits Window {
                 TouchArea { clicked => { root.ai_install_explainer_visible = false; } }
                 Rectangle {
                     x: (parent.width - 480px) / 2;
-                    y: (parent.height - 360px) / 2;
+                    y: (parent.height - 380px) / 2;
                     width: 480px;
-                    height: 360px;
+                    height: 380px;
                     border-width: 1px;
                     border-color: ThemePalette.border_strong;
                     border-radius: AppMetrics.radius;
@@ -7595,16 +7673,17 @@ export component MainWindow inherits Window {
                     Text {
                         x: 22px; y: 58px;
                         width: parent.width - 44px;
-                        height: 220px;
-                        text: "What you get\n" +
-                              "  Semantic search across your files using a local text embedding model.\n" +
-                              "  Image classification that auto-suggests tags for your photos.\n" +
-                              "  Perceptual duplicate detection that finds near-duplicate and resized copies.\n\n" +
-                              "What gets downloaded\n" +
-                              "  Text embedding model (about 25 MB).\n" +
-                              "  Image classifier (about 10 MB).\n" +
-                              "  ONNX Runtime with DirectML for NPU and GPU acceleration (about 70 MB).\n\n" +
-                              "Everything runs on your machine. No content leaves the device. You can uninstall any time from this same screen.";
+                        height: 240px;
+                        text: "Profile: " + root.ai_profile_label + "\n\n" +
+                              "What you get\n" +
+                              "  Semantic search across your files using a local embedding model.\n" +
+                              "  Image classification that suggests tags for photos.\n" +
+                              "  Near-duplicate detection for resized and lightly edited copies.\n\n" +
+                              "What gets downloaded (~" + root.ai_install_size_mb + " MB)\n" +
+                              "  Text embedding model + tokenizer for the selected profile.\n" +
+                              "  Image classifier for the selected profile.\n" +
+                              "  ONNX Runtime with DirectML (NPU / GPU / CPU).\n\n" +
+                              "Models can self-update later without re-downloading unchanged files.";
                         color: ThemePalette.text_muted;
                         font-size: 12.5px;
                         wrap: word-wrap;

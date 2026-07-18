@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "catalog_version": "2026.07.17",
+  "updated_at": "2026-07-17T00:00:00Z",
+  "remote_catalog_url": "https://raw.githubusercontent.com/rorohecker/pathfinder/main/src-tauri/ai-catalog.json",
+  "default_profile": "balanced",
+  "assets": {
+    "ort-directml-1.24.4": {
+      "id": "ort-directml-1.24.4",
+      "kind": "runtime",
+      "display_name": "ONNX Runtime DirectML 1.24.4",
+      "url": "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.24.4/microsoft.ml.onnxruntime.directml.1.24.4.nupkg",
+      "local_name": "_Microsoft.ML.OnnxRuntime.DirectML.nupkg",
+      "sha256": "57e9f11b73437bef7a309496135d4c1f96b1a8e9ddba60013fa27bfc1d788681",
+      "bytes": 12458649,
+      "extract": "ort_nupkg_win_x64"
+    },
+    "minilm-l6-quant": {
+      "id": "minilm-l6-quant",
+      "kind": "embedding",
+      "display_name": "all-MiniLM-L6-v2 (INT8)",
+      "url": "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_quantized.onnx",
+      "local_name": "text-embedding.onnx",
+      "sha256": "afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1",
+      "bytes": 22972370,
+      "embed_dim": 384,
+      "max_seq": 256,
+      "query_prefix": ""
+    },
+    "minilm-l6-tok-xenova": {
+      "id": "minilm-l6-tok-xenova",
+      "kind": "tokenizer",
+      "display_name": "MiniLM tokenizer (Xenova)",
+      "url": "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+      "local_name": "tokenizer.json",
+      "sha256": "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0",
+      "bytes": 711661,
+      "pairs_with": "minilm-l6-quant"
+    },
+    "minilm-l6-full": {
+      "id": "minilm-l6-full",
+      "kind": "embedding",
+      "display_name": "all-MiniLM-L6-v2",
+      "url": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
+      "local_name": "text-embedding.onnx",
+      "sha256": "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452",
+      "bytes": 90405214,
+      "embed_dim": 384,
+      "max_seq": 128,
+      "query_prefix": ""
+    },
+    "minilm-l6-tok": {
+      "id": "minilm-l6-tok",
+      "kind": "tokenizer",
+      "display_name": "MiniLM tokenizer",
+      "url": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+      "local_name": "tokenizer.json",
+      "sha256": "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037",
+      "bytes": 466247,
+      "pairs_with": "minilm-l6-full"
+    },
+    "bge-small-quant": {
+      "id": "bge-small-quant",
+      "kind": "embedding",
+      "display_name": "BGE-small-en-v1.5 (INT8)",
+      "url": "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_quantized.onnx",
+      "local_name": "text-embedding.onnx",
+      "sha256": "6c9c6101a956d62dfb5e7190c538226c0c5bb9cb27b651234b6df063ee7dbfe4",
+      "bytes": 34014426,
+      "embed_dim": 384,
+      "max_seq": 512,
+      "query_prefix": "Represent this sentence for searching relevant passages: "
+    },
+    "bge-small-tok": {
+      "id": "bge-small-tok",
+      "kind": "tokenizer",
+      "display_name": "BGE-small tokenizer",
+      "url": "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/tokenizer.json",
+      "local_name": "tokenizer.json",
+      "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+      "bytes": 711396,
+      "pairs_with": "bge-small-quant"
+    },
+    "mobilenet-v2": {
+      "id": "mobilenet-v2",
+      "kind": "classifier",
+      "display_name": "MobileNetV2",
+      "url": "https://media.githubusercontent.com/media/onnx/models/main/validated/vision/classification/mobilenet/model/mobilenetv2-7.onnx",
+      "local_name": "image-classifier.onnx",
+      "sha256": "c1c513582d56afceff8516c73804e484c81c6a830712ab6d682253f4a3cd042f",
+      "bytes": 14246826,
+      "input_name": "data",
+      "input_size": 224
+    },
+    "efficientnet-lite4": {
+      "id": "efficientnet-lite4",
+      "kind": "classifier",
+      "display_name": "EfficientNet-Lite4",
+      "url": "https://media.githubusercontent.com/media/onnx/models/main/validated/vision/classification/efficientnet-lite4/model/efficientnet-lite4-11.onnx",
+      "local_name": "image-classifier.onnx",
+      "sha256": "d111689907c06eea7c82e4833ddef758da6453b9d4cf60b7e99ca05c7cbd9c12",
+      "bytes": 51946641,
+      "input_name": "images:0",
+      "input_size": 224
+    }
+  },
+  "profiles": {
+    "compact": {
+      "id": "compact",
+      "display_name": "Compact",
+      "description": "Smallest download. Fast indexing on CPU and NPU.",
+      "recommended": false,
+      "assets": ["ort-directml-1.24.4", "minilm-l6-quant", "minilm-l6-tok-xenova", "mobilenet-v2"],
+      "embedding_asset": "minilm-l6-quant",
+      "classifier_asset": "mobilenet-v2"
+    },
+    "balanced": {
+      "id": "balanced",
+      "display_name": "Balanced",
+      "description": "Best speed and quality for everyday search. Recommended.",
+      "recommended": true,
+      "assets": ["ort-directml-1.24.4", "minilm-l6-full", "minilm-l6-tok", "mobilenet-v2"],
+      "embedding_asset": "minilm-l6-full",
+      "classifier_asset": "mobilenet-v2"
+    },
+    "quality": {
+      "id": "quality",
+      "display_name": "Quality",
+      "description": "Higher retrieval quality and stronger image labels. Larger download.",
+      "recommended": false,
+      "assets": ["ort-directml-1.24.4", "bge-small-quant", "bge-small-tok", "efficientnet-lite4"],
+      "embedding_asset": "bge-small-quant",
+      "classifier_asset": "efficientnet-lite4"
+    }
+  }
+}

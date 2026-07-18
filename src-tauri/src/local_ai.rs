@@ -1,28 +1,33 @@
-//! Pathfinder Local AI: install state tracking, model downloads, and
-//! background progress reporting. Inference itself ships in a follow-up
-//! release that adds the `ort` crate with the DirectML execution provider
-//! for NPU acceleration; this module handles everything around the model
-//! files so the install flow is real and visible from the Settings tab.
+//! Pathfinder Local AI: versioned asset catalog, hashed downloads, profiles,
+//! and silent self-update.
 //!
 //! Layout on disk:
-//!
 //! ```text
 //! %APPDATA%\Pathfinder\ai\
-//!   manifest.json            <- install state, model list, sizes
-//!   onnxruntime.dll          <- ONNX Runtime (Windows DirectML build), user download
-//!   onnxruntime_providers_*.dll
-//!   text-embedding.onnx        <- all-MiniLM-L6-v2
+//!   manifest.json
+//!   install.lock
+//!   onnxruntime.dll (+ provider DLLs)
+//!   text-embedding.onnx
 //!   tokenizer.json
-//!   image-classifier.onnx    <- MobileNetV3-small
+//!   image-classifier.onnx
+//!   *.part                  <- in-progress downloads
 //! ```
 
-use std::fs::File;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zip::ZipArchive;
+
+const BUNDLED_CATALOG_JSON: &str = include_str!("../ai-catalog.json");
+const MANIFEST_SCHEMA: u32 = 2;
+const LOCK_STALE_SECS: u64 = 3600;
 
 /// State machine for the AI installer. Mirrored to the Slint property
 /// `ai_install_state`.
@@ -31,6 +36,7 @@ use zip::ZipArchive;
 pub enum InstallState {
     NotInstalled,
     Downloading,
+    Updating,
     Installed,
     Error,
 }
@@ -40,6 +46,7 @@ impl InstallState {
         match self {
             Self::NotInstalled => "not_installed",
             Self::Downloading => "downloading",
+            Self::Updating => "updating",
             Self::Installed => "installed",
             Self::Error => "error",
         }
@@ -47,98 +54,201 @@ impl InstallState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledAsset {
+    pub id: String,
+    pub revision: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub local_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
+    #[serde(default = "default_schema")]
+    pub schema_version: u32,
     pub state: InstallState,
-    pub installed_models: Vec<String>,
+    #[serde(default)]
+    pub profile: String,
+    #[serde(default)]
+    pub catalog_version: String,
+    #[serde(default)]
+    pub installed_assets: Vec<InstalledAsset>,
+    #[serde(default)]
     pub total_bytes: u64,
+    #[serde(default)]
     pub installed_at: Option<u64>,
+    #[serde(default)]
+    pub last_verified_at: Option<u64>,
+    #[serde(default)]
+    pub last_update_check_at: Option<u64>,
+    #[serde(default)]
+    pub embedding_model_id: String,
+    #[serde(default)]
+    pub embedding_dim: u32,
+    #[serde(default)]
+    pub embedding_revision: String,
+    #[serde(default)]
+    pub classifier_model_id: String,
+    #[serde(default)]
+    pub error_message: String,
+    /// Legacy field from schema v1 — kept for migration.
+    #[serde(default)]
+    pub installed_models: Vec<String>,
+}
+
+fn default_schema() -> u32 {
+    MANIFEST_SCHEMA
 }
 
 impl Default for Manifest {
     fn default() -> Self {
         Self {
+            schema_version: MANIFEST_SCHEMA,
             state: InstallState::NotInstalled,
-            installed_models: Vec::new(),
+            profile: "balanced".into(),
+            catalog_version: String::new(),
+            installed_assets: Vec::new(),
             total_bytes: 0,
             installed_at: None,
+            last_verified_at: None,
+            last_update_check_at: None,
+            embedding_model_id: String::new(),
+            embedding_dim: 0,
+            embedding_revision: String::new(),
+            classifier_model_id: String::new(),
+            error_message: String::new(),
+            installed_models: Vec::new(),
         }
     }
 }
 
-/// Live progress published by the background installer. Polled by the UI
-/// timer that drives the rest of the queue progress reporting.
+/// Live progress published by the background installer / updater.
 pub struct InstallProgress {
-    pub state: std::sync::Mutex<InstallState>,
+    pub state: Mutex<InstallState>,
     pub bytes_downloaded: AtomicU64,
     pub bytes_total: AtomicU64,
-    pub message: std::sync::Mutex<String>,
+    pub message: Mutex<String>,
     pub busy: AtomicBool,
+    pub update_available: AtomicBool,
+    pub update_bytes: AtomicU64,
 }
 
 impl InstallProgress {
     pub fn new() -> Self {
         Self {
-            state: std::sync::Mutex::new(InstallState::NotInstalled),
+            state: Mutex::new(InstallState::NotInstalled),
             bytes_downloaded: AtomicU64::new(0),
             bytes_total: AtomicU64::new(0),
-            message: std::sync::Mutex::new(String::new()),
+            message: Mutex::new(String::new()),
             busy: AtomicBool::new(false),
+            update_available: AtomicBool::new(false),
+            update_bytes: AtomicU64::new(0),
         }
     }
 }
 
-/// One model file we know how to fetch. URL points at a CDN-hosted ONNX
-/// blob. SHA stays empty for the initial release; once we have stable
-/// hosted mirrors with known digests, fill it in and verify at download time.
-struct ModelSource {
-    pub local_name: &'static str,
-    pub display_name: &'static str,
-    pub url: &'static str,
-    pub approx_bytes: u64,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogAsset {
+    pub id: String,
+    pub kind: String,
+    pub display_name: String,
+    pub url: String,
+    pub local_name: String,
+    #[serde(default)]
+    pub sha256: String,
+    pub bytes: u64,
+    #[serde(default)]
+    pub embed_dim: Option<u32>,
+    #[serde(default)]
+    pub max_seq: Option<u32>,
+    #[serde(default)]
+    pub query_prefix: Option<String>,
+    #[serde(default)]
+    pub input_name: Option<String>,
+    #[serde(default)]
+    pub input_size: Option<u32>,
+    #[serde(default)]
+    pub extract: Option<String>,
+    #[serde(default)]
+    pub pairs_with: Option<String>,
 }
 
-/// The set of model files that make up a complete Local AI install.
-/// Picked for size and Snapdragon X / Intel Core Ultra / AMD XDNA NPU support
-/// via DirectML when `ort` lands in the follow-up release.
-/// ONNX Runtime + DirectML native libraries (same NuGet Microsoft ships).
-/// Version must satisfy `ort` 2.0-rc API (ONNX Runtime 1.24.x).
-#[cfg(windows)]
-const ORT_DIRECTML_NUPKG_VER: &str = "1.24.0";
-#[cfg(windows)]
-const ORT_NUPKG_URL: &str =
-    "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/1.24.0";
-#[cfg(windows)]
-const ORT_NUPKG_APPROX_BYTES: u64 = 72_000_000;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogProfile {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    #[serde(default)]
+    pub recommended: bool,
+    pub assets: Vec<String>,
+    pub embedding_asset: String,
+    pub classifier_asset: String,
+}
 
-const MODELS: &[ModelSource] = &[
-    ModelSource {
-        local_name: "text-embedding.onnx",
-        display_name: "Text embedding (all-MiniLM-L6-v2)",
-        url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
-        approx_bytes: 90_000_000,
-    },
-    ModelSource {
-        local_name: "tokenizer.json",
-        display_name: "Tokenizer vocab",
-        url: "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
-        approx_bytes: 720_000,
-    },
-    ModelSource {
-        local_name: "image-classifier.onnx",
-        display_name: "Image classifier (MobileNetV3-small)",
-        url: "https://github.com/onnx/models/raw/main/Computer_Vision/mobilenetv3_Opset18_timm/mobilenetv3_Opset18.onnx",
-        approx_bytes: 10_000_000,
-    },
-];
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiCatalog {
+    pub schema_version: u32,
+    pub catalog_version: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub remote_catalog_url: String,
+    pub default_profile: String,
+    pub assets: HashMap<String, CatalogAsset>,
+    pub profiles: HashMap<String, CatalogProfile>,
+}
 
-/// Total approximate install size used for the explainer dialog.
-pub fn approx_total_install_mb() -> u32 {
-    let mut total: u64 = MODELS.iter().map(|m| m.approx_bytes).sum();
-    #[cfg(windows)]
-    {
-        total = total.saturating_add(ORT_NUPKG_APPROX_BYTES);
-    }
+#[derive(Debug, Clone)]
+pub struct ActiveModelInfo {
+    pub profile: String,
+    pub embedding_id: String,
+    pub embedding_dim: u32,
+    pub embedding_revision: String,
+    pub query_prefix: String,
+    pub max_seq: usize,
+    pub classifier_id: String,
+    pub classifier_input_name: String,
+    pub classifier_input_size: u32,
+}
+
+/// Total approximate install size for a profile (MB).
+pub fn approx_install_mb_for_profile(profile: &str) -> u32 {
+    let catalog = bundled_catalog();
+    let profile = resolve_profile(&catalog, profile);
+    let total: u64 = profile
+        .assets
+        .iter()
+        .filter_map(|id| catalog.assets.get(id))
+        .map(|a| a.bytes)
+        .sum();
     ((total.saturating_add(500_000)) / 1_000_000) as u32
+}
+
+pub fn approx_total_install_mb() -> u32 {
+    approx_install_mb_for_profile("balanced")
+}
+
+pub fn profile_summaries() -> Vec<(String, String, String, bool, u32)> {
+    let catalog = active_catalog();
+    let mut rows: Vec<_> = catalog
+        .profiles
+        .values()
+        .map(|p| {
+            let mb = approx_install_mb_for_profile(&p.id);
+            (
+                p.id.clone(),
+                p.display_name.clone(),
+                p.description.clone(),
+                p.recommended,
+                mb,
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        // Recommended first, then name.
+        b.3.cmp(&a.3).then_with(|| a.1.cmp(&b.1))
+    });
+    rows
 }
 
 pub fn ai_dir() -> PathBuf {
@@ -154,7 +264,42 @@ pub fn manifest_path() -> PathBuf {
     ai_dir().join("manifest.json")
 }
 
-/// DirectML ONNX Runtime DLL next to models (Windows Local AI install).
+fn lock_path() -> PathBuf {
+    ai_dir().join("install.lock")
+}
+
+fn catalog_cache_path() -> PathBuf {
+    ai_dir().join("catalog.cache.json")
+}
+
+pub fn bundled_catalog() -> AiCatalog {
+    serde_json::from_str(BUNDLED_CATALOG_JSON).expect("bundled ai-catalog.json must parse")
+}
+
+/// Prefer a freshly fetched remote catalog cache; fall back to bundled.
+pub fn active_catalog() -> AiCatalog {
+    let cache = catalog_cache_path();
+    if cache.is_file() {
+        if let Ok(s) = fs::read_to_string(&cache) {
+            if let Ok(c) = serde_json::from_str::<AiCatalog>(&s) {
+                if c.schema_version >= 1 && !c.assets.is_empty() {
+                    return c;
+                }
+            }
+        }
+    }
+    bundled_catalog()
+}
+
+fn resolve_profile<'a>(catalog: &'a AiCatalog, profile: &str) -> &'a CatalogProfile {
+    catalog
+        .profiles
+        .get(profile)
+        .or_else(|| catalog.profiles.get(&catalog.default_profile))
+        .or_else(|| catalog.profiles.values().next())
+        .expect("catalog must contain at least one profile")
+}
+
 #[cfg(windows)]
 pub fn onnx_runtime_installed() -> bool {
     ai_dir().join("onnxruntime.dll").is_file()
@@ -165,10 +310,58 @@ pub fn onnx_runtime_installed() -> bool {
     false
 }
 
-/// Core embedding model files present (semantic search / embeddings).
 pub fn core_models_installed() -> bool {
     let d = ai_dir();
     d.join("text-embedding.onnx").is_file() && d.join("tokenizer.json").is_file()
+}
+
+pub fn classifier_installed() -> bool {
+    ai_dir().join("image-classifier.onnx").is_file()
+}
+
+/// Verified install: files present and runtime available. Full SHA verification
+/// is reserved for repair / update paths so readiness checks stay cheap.
+pub fn install_verified() -> bool {
+    let m = read_manifest();
+    if !matches!(m.state, InstallState::Installed) {
+        return false;
+    }
+    if !core_models_installed() {
+        return false;
+    }
+    #[cfg(windows)]
+    if !onnx_runtime_installed() {
+        return false;
+    }
+    true
+}
+
+/// Expensive integrity check used by Verify & repair.
+pub fn verify_asset_hashes() -> Result<(), String> {
+    let m = read_manifest();
+    for asset in &m.installed_assets {
+        if asset.local_name.starts_with('_') || asset.local_name.ends_with(".nupkg") {
+            continue;
+        }
+        if asset.id.starts_with("ort-") {
+            #[cfg(windows)]
+            if !onnx_runtime_installed() {
+                return Err("onnxruntime.dll missing".into());
+            }
+            continue;
+        }
+        let path = ai_dir().join(&asset.local_name);
+        if !path.is_file() {
+            return Err(format!("missing {}", asset.local_name));
+        }
+        if !asset.sha256.is_empty() {
+            let actual = sha256_file(&path)?;
+            if !actual.eq_ignore_ascii_case(&asset.sha256) {
+                return Err(format!("{} hash mismatch", asset.local_name));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn read_manifest() -> Manifest {
@@ -176,251 +369,635 @@ pub fn read_manifest() -> Manifest {
     if !p.exists() {
         return Manifest::default();
     }
-    std::fs::read_to_string(&p)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Manifest>(&s).ok())
-        .unwrap_or_default()
+    let Ok(s) = fs::read_to_string(&p) else {
+        return Manifest::default();
+    };
+    let mut m: Manifest = serde_json::from_str(&s).unwrap_or_default();
+    migrate_manifest(&mut m);
+    m
+}
+
+fn migrate_manifest(m: &mut Manifest) {
+    if m.schema_version < MANIFEST_SCHEMA {
+        m.schema_version = MANIFEST_SCHEMA;
+        if m.profile.is_empty() {
+            m.profile = "balanced".into();
+        }
+        // Legacy installs listed file names only — treat as installed if files exist.
+        if matches!(m.state, InstallState::Installed) && m.installed_assets.is_empty() {
+            if core_models_installed() {
+                // Keep Installed; verify will repair hashes on next update check.
+            } else {
+                m.state = InstallState::NotInstalled;
+            }
+        }
+    }
 }
 
 pub fn write_manifest(m: &Manifest) {
     let dir = ai_dir();
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = fs::create_dir_all(&dir);
+    let tmp = dir.join("manifest.json.part");
     if let Ok(s) = serde_json::to_string_pretty(m) {
-        let _ = std::fs::write(manifest_path(), s);
+        if fs::write(&tmp, s).is_ok() {
+            let _ = fs::rename(&tmp, manifest_path());
+        }
     }
 }
 
-/// Kick off an install. Returns immediately; progress is published via
-/// the shared `InstallProgress` and the UI polls it every 100 ms.
-pub fn start_install(progress: Arc<InstallProgress>) {
+pub fn actual_disk_usage_bytes() -> u64 {
+    let dir = ai_dir();
+    if !dir.is_dir() {
+        return 0;
+    }
+    let mut total = 0u64;
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("part") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
+pub fn active_model_info() -> Option<ActiveModelInfo> {
+    let m = read_manifest();
+    if !matches!(m.state, InstallState::Installed) || !core_models_installed() {
+        return None;
+    }
+    let catalog = active_catalog();
+    let profile = resolve_profile(&catalog, &m.profile);
+    let emb = catalog.assets.get(&profile.embedding_asset)?;
+    let clf = catalog.assets.get(&profile.classifier_asset)?;
+    Some(ActiveModelInfo {
+        profile: profile.id.clone(),
+        embedding_id: emb.id.clone(),
+        embedding_dim: emb.embed_dim.unwrap_or(384),
+        embedding_revision: m.embedding_revision.clone(),
+        query_prefix: emb.query_prefix.clone().unwrap_or_default(),
+        max_seq: emb.max_seq.unwrap_or(128) as usize,
+        classifier_id: clf.id.clone(),
+        classifier_input_name: clf
+            .input_name
+            .clone()
+            .unwrap_or_else(|| "data".into()),
+        classifier_input_size: clf.input_size.unwrap_or(224),
+    })
+}
+
+fn try_acquire_lock() -> Result<(), String> {
+    let dir = ai_dir();
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let lock = lock_path();
+    if lock.exists() {
+        if let Ok(meta) = fs::metadata(&lock) {
+            if let Ok(modified) = meta.modified() {
+                if modified
+                    .elapsed()
+                    .unwrap_or(Duration::from_secs(0))
+                    .as_secs()
+                    < LOCK_STALE_SECS
+                {
+                    return Err("Another Local AI install is already running.".into());
+                }
+            }
+        }
+        let _ = fs::remove_file(&lock);
+    }
+    fs::write(&lock, format!("{}", std::process::id())).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn release_lock() {
+    let _ = fs::remove_file(lock_path());
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn asset_path(asset: &CatalogAsset) -> PathBuf {
+    ai_dir().join(&asset.local_name)
+}
+
+fn asset_is_valid(asset: &CatalogAsset) -> bool {
+    if asset.extract.as_deref() == Some("ort_nupkg_win_x64") {
+        #[cfg(windows)]
+        {
+            return onnx_runtime_installed();
+        }
+        #[cfg(not(windows))]
+        {
+            return true;
+        }
+    }
+    let path = asset_path(asset);
+    if !path.is_file() {
+        return false;
+    }
+    let Ok(meta) = fs::metadata(&path) else {
+        return false;
+    };
+    if asset.bytes > 0 {
+        let len = meta.len();
+        // Allow small variance for CDN encoding differences; require near match.
+        let lo = asset.bytes.saturating_mul(95) / 100;
+        let hi = asset.bytes.saturating_mul(105) / 100;
+        if len < lo || len > hi.max(asset.bytes.saturating_add(1024 * 1024)) {
+            return false;
+        }
+    }
+    if !asset.sha256.is_empty() {
+        match sha256_file(&path) {
+            Ok(actual) => actual.eq_ignore_ascii_case(&asset.sha256),
+            Err(_) => false,
+        }
+    } else {
+        true
+    }
+}
+
+fn download_https(url: &str, dest: &Path, progress: &InstallProgress, base: u64) -> Result<u64, String> {
+    let _ = fs::remove_file(dest);
+    let part = PathBuf::from(format!("{}.part", dest.display()));
+    let _ = fs::remove_file(&part);
+
+    let resp = ureq::get(url)
+        .set("User-Agent", "Pathfinder-LocalAI/1.0")
+        .set("Accept", "application/octet-stream,*/*")
+        .timeout(Duration::from_secs(300))
+        .call()
+        .map_err(|e| format!("download failed: {e}"))?;
+    if !(200..300).contains(&resp.status()) {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let mut reader = resp.into_reader();
+    let mut out = File::create(&part).map_err(|e| format!("create part file: {e}"))?;
+    let mut buf = [0u8; 64 * 1024];
+    let mut written = 0u64;
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        written = written.saturating_add(n as u64);
+        progress
+            .bytes_downloaded
+            .store(base.saturating_add(written), Ordering::Release);
+    }
+    drop(out);
+    fs::rename(&part, dest).map_err(|e| format!("finalize download: {e}"))?;
+    Ok(written)
+}
+
+fn ensure_asset(
+    asset: &CatalogAsset,
+    progress: &InstallProgress,
+    accumulated: &mut u64,
+) -> Result<InstalledAsset, String> {
+    if asset_is_valid(asset) {
+        let path = if asset.extract.as_deref() == Some("ort_nupkg_win_x64") {
+            ai_dir().join("onnxruntime.dll")
+        } else {
+            asset_path(asset)
+        };
+        let bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(asset.bytes);
+        let sha = if !asset.sha256.is_empty() {
+            asset.sha256.clone()
+        } else if asset.extract.as_deref() == Some("ort_nupkg_win_x64") {
+            String::new()
+        } else {
+            sha256_file(&path).unwrap_or_default()
+        };
+        *accumulated = accumulated.saturating_add(bytes);
+        progress
+            .bytes_downloaded
+            .store(*accumulated, Ordering::Release);
+        return Ok(InstalledAsset {
+            id: asset.id.clone(),
+            revision: asset.sha256.clone(),
+            sha256: sha,
+            bytes,
+            local_name: if asset.extract.as_deref() == Some("ort_nupkg_win_x64") {
+                "onnxruntime.dll".into()
+            } else {
+                asset.local_name.clone()
+            },
+        });
+    }
+
+    if let Ok(mut m) = progress.message.lock() {
+        *m = format!("Downloading {} …", asset.display_name);
+    }
+    let dest = asset_path(asset);
+    let written = download_https(&asset.url, &dest, progress, *accumulated)?;
+    if !asset.sha256.is_empty() {
+        let actual = sha256_file(&dest)?;
+        if !actual.eq_ignore_ascii_case(&asset.sha256) {
+            let _ = fs::remove_file(&dest);
+            return Err(format!(
+                "{} hash mismatch (got {actual}, expected {})",
+                asset.display_name, asset.sha256
+            ));
+        }
+    }
+    if asset.extract.as_deref() == Some("ort_nupkg_win_x64") {
+        #[cfg(windows)]
+        {
+            extract_win64_native_dlls_from_ort_package(&dest, &ai_dir())?;
+            let _ = fs::remove_file(&dest);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = dest;
+        }
+    }
+    let final_path = if asset.extract.as_deref() == Some("ort_nupkg_win_x64") {
+        ai_dir().join("onnxruntime.dll")
+    } else {
+        dest
+    };
+    let bytes = fs::metadata(&final_path)
+        .map(|m| m.len())
+        .unwrap_or(written);
+    let sha = if asset.extract.as_deref() == Some("ort_nupkg_win_x64") {
+        asset.sha256.clone()
+    } else {
+        sha256_file(&final_path).unwrap_or_else(|_| asset.sha256.clone())
+    };
+    *accumulated = accumulated.saturating_add(bytes);
+    progress
+        .bytes_downloaded
+        .store(*accumulated, Ordering::Release);
+    Ok(InstalledAsset {
+        id: asset.id.clone(),
+        revision: asset.sha256.clone(),
+        sha256: sha,
+        bytes,
+        local_name: if asset.extract.as_deref() == Some("ort_nupkg_win_x64") {
+            "onnxruntime.dll".into()
+        } else {
+            asset.local_name.clone()
+        },
+    })
+}
+
+fn cleanup_orphans(keep: &HashSet<String>) {
+    let dir = ai_dir();
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name == "manifest.json"
+            || name == "install.lock"
+            || name == "catalog.cache.json"
+            || name.ends_with(".part")
+        {
+            continue;
+        }
+        // Keep ORT companion DLLs.
+        if name.starts_with("onnxruntime") || name.starts_with("DirectML") {
+            continue;
+        }
+        if !keep.contains(name) {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+fn install_profile_inner(
+    profile_id: &str,
+    progress: Arc<InstallProgress>,
+    updating: bool,
+) -> Result<Manifest, String> {
+    try_acquire_lock()?;
+    let catalog = fetch_catalog_best_effort();
+    let profile = resolve_profile(&catalog, profile_id).clone();
+    let assets: Vec<CatalogAsset> = profile
+        .assets
+        .iter()
+        .filter_map(|id| catalog.assets.get(id).cloned())
+        .collect();
+    if assets.is_empty() {
+        release_lock();
+        return Err("Profile has no assets.".into());
+    }
+
+    let total: u64 = assets.iter().map(|a| a.bytes).sum();
+    progress.bytes_total.store(total, Ordering::Release);
+    progress.bytes_downloaded.store(0, Ordering::Release);
+    if let Ok(mut s) = progress.state.lock() {
+        *s = if updating {
+            InstallState::Updating
+        } else {
+            InstallState::Downloading
+        };
+    }
+
+    let mut accumulated = 0u64;
+    let mut installed = Vec::new();
+    let mut keep_names: HashSet<String> = HashSet::new();
+    keep_names.insert("onnxruntime.dll".into());
+
+    for asset in &assets {
+        match ensure_asset(asset, &progress, &mut accumulated) {
+            Ok(row) => {
+                keep_names.insert(row.local_name.clone());
+                installed.push(row);
+            }
+            Err(e) => {
+                release_lock();
+                return Err(e);
+            }
+        }
+    }
+
+    cleanup_orphans(&keep_names);
+
+    let emb = catalog
+        .assets
+        .get(&profile.embedding_asset)
+        .cloned()
+        .ok_or_else(|| "Missing embedding asset".to_string())?;
+    let clf = catalog
+        .assets
+        .get(&profile.classifier_asset)
+        .cloned()
+        .ok_or_else(|| "Missing classifier asset".to_string())?;
+
+    let disk = actual_disk_usage_bytes();
+    let manifest = Manifest {
+        schema_version: MANIFEST_SCHEMA,
+        state: InstallState::Installed,
+        profile: profile.id.clone(),
+        catalog_version: catalog.catalog_version.clone(),
+        installed_assets: installed,
+        total_bytes: disk,
+        installed_at: Some(now_unix_secs()),
+        last_verified_at: Some(now_unix_secs()),
+        last_update_check_at: Some(now_unix_secs()),
+        embedding_model_id: emb.id.clone(),
+        embedding_dim: emb.embed_dim.unwrap_or(384),
+        embedding_revision: emb.sha256.clone(),
+        classifier_model_id: clf.id.clone(),
+        error_message: String::new(),
+        installed_models: Vec::new(),
+    };
+    write_manifest(&manifest);
+    release_lock();
+    Ok(manifest)
+}
+
+fn set_error(progress: &InstallProgress, msg: String) {
+    if let Ok(mut s) = progress.state.lock() {
+        *s = InstallState::Error;
+    }
+    if let Ok(mut m) = progress.message.lock() {
+        *m = msg.clone();
+    }
+    let mut manifest = read_manifest();
+    manifest.state = InstallState::Error;
+    manifest.error_message = msg;
+    write_manifest(&manifest);
+    progress.busy.store(false, Ordering::Release);
+}
+
+/// Kick off an install for `profile` (default balanced).
+pub fn start_install(progress: Arc<InstallProgress>, profile: Option<String>) {
     if progress.busy.swap(true, Ordering::AcqRel) {
         return;
     }
-    if let Ok(mut s) = progress.state.lock() { *s = InstallState::Downloading; }
-    progress.bytes_downloaded.store(0, Ordering::Release);
-    let mut bytes_total: u64 = MODELS.iter().map(|m| m.approx_bytes).sum();
-    #[cfg(windows)]
-    {
-        bytes_total = bytes_total.saturating_add(ORT_NUPKG_APPROX_BYTES);
-    }
-    progress.bytes_total.store(bytes_total, Ordering::Release);
-    if let Ok(mut m) = progress.message.lock() { *m = "Preparing download...".to_string(); }
-
+    let profile = profile
+        .unwrap_or_else(|| read_manifest().profile)
+        .trim()
+        .to_string();
+    let profile = if profile.is_empty() {
+        "balanced".into()
+    } else {
+        profile
+    };
     std::thread::spawn(move || {
-        let dir = ai_dir();
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            if let Ok(mut s) = progress.state.lock() { *s = InstallState::Error; }
-            if let Ok(mut m) = progress.message.lock() { *m = format!("Cannot create AI folder: {}", e); }
-            progress.busy.store(false, Ordering::Release);
-            return;
-        }
-        let mut accumulated: u64 = 0;
-        let mut installed: Vec<String> = Vec::new();
-
-        #[cfg(windows)]
-        {
-            if let Ok(mut m) = progress.message.lock() {
-                *m = "Downloading ONNX Runtime (DirectML) ...".to_string();
+        match install_profile_inner(&profile, progress.clone(), false) {
+            Ok(_) => {
+                if let Ok(mut s) = progress.state.lock() {
+                    *s = InstallState::Installed;
+                }
+                if let Ok(mut m) = progress.message.lock() {
+                    *m = "Install complete.".into();
+                }
+                progress.update_available.store(false, Ordering::Release);
+                progress.busy.store(false, Ordering::Release);
             }
-            let ort_zip = dir.join("_Microsoft.ML.OnnxRuntime.DirectML.zip");
-            let _ = std::fs::remove_file(&ort_zip);
-            match download_file_with_progress(
-                ORT_NUPKG_URL,
-                &ort_zip,
-                ORT_NUPKG_APPROX_BYTES,
-                &progress,
-                accumulated,
-            ) {
-                Ok(written) => {
-                    accumulated = accumulated.saturating_add(written);
-                    progress.bytes_downloaded.store(accumulated, Ordering::Release);
-                    if let Err(e) = extract_win64_native_dlls_from_ort_package(&ort_zip, &dir) {
-                        let _ = std::fs::remove_file(&ort_zip);
-                        if let Ok(mut s) = progress.state.lock() {
-                            *s = InstallState::Error;
-                        }
-                        if let Ok(mut m) = progress.message.lock() {
-                            *m = format!("Extract ONNX Runtime failed: {e}");
-                        }
-                        progress.busy.store(false, Ordering::Release);
-                        return;
-                    }
-                    let _ = std::fs::remove_file(&ort_zip);
-                    installed.push("onnxruntime.dll (DirectML bundle)".to_string());
-                }
-                Err(e) => {
-                    let _ = std::fs::remove_file(&ort_zip);
-                    if let Ok(mut s) = progress.state.lock() {
-                        *s = InstallState::Error;
-                    }
-                    if let Ok(mut m) = progress.message.lock() {
-                        *m = format!("ONNX Runtime download failed: {e}");
-                    }
-                    progress.busy.store(false, Ordering::Release);
-                    return;
-                }
-            }
+            Err(e) => set_error(&progress, e),
         }
-
-        for model in MODELS {
-            if let Ok(mut m) = progress.message.lock() { *m = format!("Downloading {} ...", model.display_name); }
-            let dest = dir.join(model.local_name);
-            match download_file_with_progress(model.url, &dest, model.approx_bytes, &progress, accumulated) {
-                Ok(written) => {
-                    accumulated = accumulated.saturating_add(written);
-                    progress.bytes_downloaded.store(accumulated, Ordering::Release);
-                    installed.push(model.local_name.to_string());
-                }
-                Err(e) => {
-                    if let Ok(mut s) = progress.state.lock() { *s = InstallState::Error; }
-                    if let Ok(mut m) = progress.message.lock() { *m = format!("{} failed: {}", model.display_name, e); }
-                    progress.busy.store(false, Ordering::Release);
-                    return;
-                }
-            }
-        }
-        let manifest = Manifest {
-            state: InstallState::Installed,
-            installed_models: installed,
-            total_bytes: accumulated,
-            installed_at: Some(now_unix_secs()),
-        };
-        write_manifest(&manifest);
-        if let Ok(mut s) = progress.state.lock() { *s = InstallState::Installed; }
-        if let Ok(mut m) = progress.message.lock() { *m = "Install complete.".to_string(); }
-        progress.busy.store(false, Ordering::Release);
     });
 }
 
-/// Delete every file under `%APPDATA%\Pathfinder\ai`. Sets state back to
-/// NotInstalled and clears the on-disk manifest.
+pub fn start_repair(progress: Arc<InstallProgress>) {
+    // Hash-verify first; if anything is wrong, reinstall the active profile.
+    if let Err(e) = verify_asset_hashes() {
+        if let Ok(mut m) = progress.message.lock() {
+            *m = format!("Repair needed: {e}");
+        }
+    }
+    let profile = read_manifest().profile;
+    start_install(progress, Some(profile));
+}
+
+pub fn change_profile(progress: Arc<InstallProgress>, profile: String) {
+    start_install(progress, Some(profile));
+}
+
+/// Fetch remote catalog if possible and cache it; always returns a usable catalog.
+pub fn fetch_catalog_best_effort() -> AiCatalog {
+    let bundled = bundled_catalog();
+    let url = bundled.remote_catalog_url.clone();
+    if url.is_empty() {
+        return bundled;
+    }
+    match ureq::get(&url)
+        .set("User-Agent", "Pathfinder-LocalAI/1.0")
+        .timeout(Duration::from_secs(20))
+        .call()
+    {
+        Ok(resp) if (200..300).contains(&resp.status()) => {
+            if let Ok(body) = resp.into_string() {
+                if let Ok(remote) = serde_json::from_str::<AiCatalog>(&body) {
+                    if remote.schema_version >= 1 && !remote.assets.is_empty() {
+                        let _ = fs::create_dir_all(ai_dir());
+                        let _ = fs::write(catalog_cache_path(), body);
+                        // Prefer whichever catalog_version string compares newer
+                        // lexicographically when both look like dates; else prefer remote.
+                        return remote;
+                    }
+                }
+            }
+            bundled
+        }
+        _ => bundled,
+    }
+}
+
+/// Bytes that would need downloading to bring the active profile up to date.
+pub fn pending_update_bytes(catalog: &AiCatalog, profile_id: &str) -> u64 {
+    let profile = resolve_profile(catalog, profile_id);
+    let mut need = 0u64;
+    for id in &profile.assets {
+        if let Some(asset) = catalog.assets.get(id) {
+            if !asset_is_valid(asset) {
+                need = need.saturating_add(asset.bytes);
+            }
+        }
+    }
+    need
+}
+
+pub fn check_for_model_updates(progress: Arc<InstallProgress>) -> u64 {
+    let catalog = fetch_catalog_best_effort();
+    let mut manifest = read_manifest();
+    if !matches!(
+        manifest.state,
+        InstallState::Installed | InstallState::Error
+    ) && !core_models_installed()
+    {
+        return 0;
+    }
+    let profile = if manifest.profile.is_empty() {
+        catalog.default_profile.clone()
+    } else {
+        manifest.profile.clone()
+    };
+    let need = pending_update_bytes(&catalog, &profile);
+    progress
+        .update_available
+        .store(need > 0, Ordering::Release);
+    progress.update_bytes.store(need, Ordering::Release);
+    manifest.last_update_check_at = Some(now_unix_secs());
+    if need == 0 && matches!(manifest.state, InstallState::Installed) {
+        manifest.catalog_version = catalog.catalog_version.clone();
+    }
+    write_manifest(&manifest);
+    need
+}
+
+/// Apply pending model updates for the installed profile (only changed assets).
+pub fn start_model_update(progress: Arc<InstallProgress>) {
+    if progress.busy.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let profile = {
+        let m = read_manifest();
+        if m.profile.is_empty() {
+            "balanced".into()
+        } else {
+            m.profile
+        }
+    };
+    std::thread::spawn(move || {
+        match install_profile_inner(&profile, progress.clone(), true) {
+            Ok(_) => {
+                if let Ok(mut s) = progress.state.lock() {
+                    *s = InstallState::Installed;
+                }
+                if let Ok(mut m) = progress.message.lock() {
+                    *m = "Models updated.".into();
+                }
+                progress.update_available.store(false, Ordering::Release);
+                progress.update_bytes.store(0, Ordering::Release);
+                progress.busy.store(false, Ordering::Release);
+            }
+            Err(e) => {
+                // Soft fail: restore Installed if files still work.
+                if install_verified() || core_models_installed() {
+                    if let Ok(mut s) = progress.state.lock() {
+                        *s = InstallState::Installed;
+                    }
+                    if let Ok(mut m) = progress.message.lock() {
+                        *m = format!("Update failed (kept previous models): {e}");
+                    }
+                    let mut manifest = read_manifest();
+                    manifest.state = InstallState::Installed;
+                    manifest.error_message = e;
+                    write_manifest(&manifest);
+                    progress.busy.store(false, Ordering::Release);
+                } else {
+                    set_error(&progress, e);
+                }
+            }
+        }
+    });
+}
+
+/// Background auto-update: check then apply when updates exist.
+pub fn maybe_auto_update_models(progress: Arc<InstallProgress>, enabled: bool) {
+    if !enabled {
+        return;
+    }
+    if progress.busy.load(Ordering::Acquire) {
+        return;
+    }
+    let m = read_manifest();
+    if !matches!(m.state, InstallState::Installed) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let need = check_for_model_updates(progress.clone());
+        if need > 0 && !progress.busy.load(Ordering::Acquire) {
+            start_model_update(progress);
+        }
+    });
+}
+
 pub fn uninstall(progress: Arc<InstallProgress>) {
     if progress.busy.load(Ordering::Acquire) {
         return;
     }
     let dir = ai_dir();
-    let _ = std::fs::remove_dir_all(&dir);
-    if let Ok(mut s) = progress.state.lock() { *s = InstallState::NotInstalled; }
-    if let Ok(mut m) = progress.message.lock() { *m = String::new(); }
+    let _ = fs::remove_dir_all(&dir);
+    if let Ok(mut s) = progress.state.lock() {
+        *s = InstallState::NotInstalled;
+    }
+    if let Ok(mut m) = progress.message.lock() {
+        *m = String::new();
+    }
     progress.bytes_downloaded.store(0, Ordering::Release);
+    progress.update_available.store(false, Ordering::Release);
+    progress.update_bytes.store(0, Ordering::Release);
+    // Do not recreate the folder unless needed.
+    let _ = fs::create_dir_all(&dir);
     write_manifest(&Manifest::default());
 }
 
-/// Read PowerShell stderr in the background so a verbose error stream cannot
-/// fill the pipe buffer and block the child (classic `stderr` + `wait` deadlock).
-fn drain_stderr_capped(mut stderr: std::process::ChildStderr, out: Arc<Mutex<String>>, cap: usize) {
-    use std::io::Read;
-    let mut kept = Vec::with_capacity(cap.min(4096));
-    let mut chunk = [0u8; 8192];
-    loop {
-        match stderr.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => {
-                let room = cap.saturating_sub(kept.len());
-                if room > 0 {
-                    kept.extend_from_slice(&chunk[..n.min(room)]);
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    if let Ok(mut g) = out.lock() {
-        *g = String::from_utf8_lossy(&kept).into_owned();
-    }
-}
-
-/// Download a single file with periodic byte-count updates to the shared
-/// progress struct. Uses a streaming PowerShell Invoke-WebRequest because
-/// it works without bundling a TLS stack and respects the user's network
-/// configuration (proxies, certificates, etc).
-fn download_file_with_progress(
-    url: &str,
-    dest: &std::path::Path,
-    expected_bytes: u64,
-    progress: &Arc<InstallProgress>,
-    accumulated_before: u64,
-) -> Result<u64, String> {
-    // Use the `ureq` crate would be cleaner, but to avoid adding a TLS
-    // dep we shell out to PowerShell which Windows already has. Stream
-    // the response to disk in 64 KB chunks and report progress.
-    let script = format!(
-        "$ProgressPreference='SilentlyContinue'; \
-         $resp = [System.Net.HttpWebRequest]::Create('{}'); \
-         $resp.UserAgent = 'Pathfinder'; \
-         $r = $resp.GetResponse(); \
-         $s = $r.GetResponseStream(); \
-         $fs = [System.IO.File]::Create('{}'); \
-         $buf = New-Object byte[] 65536; \
-         while (($n = $s.Read($buf, 0, $buf.Length)) -gt 0) {{ \
-             $fs.Write($buf, 0, $n); \
-         }} \
-         $fs.Close(); $s.Close(); $r.Close();",
-        url.replace('\'', "''"),
-        dest.to_string_lossy().replace('\'', "''")
-    );
-
-    let mut child = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &script,
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "failed to pipe stderr".to_string())?;
-    const STDERR_CAP: usize = 64 * 1024;
-    let err_shared = Arc::new(Mutex::new(String::new()));
-    let err_for_thread = Arc::clone(&err_shared);
-    let drain = std::thread::spawn(move || {
-        drain_stderr_capped(stderr, err_for_thread, STDERR_CAP);
-    });
-
-    // Poll progress by reading the file size while PowerShell streams.
-    while child.try_wait().map_err(|e| e.to_string())?.is_none() {
-        if let Ok(meta) = std::fs::metadata(dest) {
-            progress.bytes_downloaded.store(
-                accumulated_before.saturating_add(meta.len()),
-                Ordering::Release,
-            );
-        }
-        std::thread::sleep(std::time::Duration::from_millis(120));
-    }
-
-    let status = child.wait().map_err(|e| e.to_string())?;
-    let _ = drain.join();
-    let err_buf = err_shared.lock().map(|g| g.clone()).unwrap_or_default();
-
-    if !status.success() {
-        let err_msg = if err_buf.is_empty() {
-            "Download failed".to_string()
-        } else {
-            err_buf.trim().to_string()
-        };
-        // PowerShell may have created a truncated file; do not leave a corrupt artifact.
-        let _ = std::fs::remove_file(dest);
-        return Err(err_msg);
-    }
-    let written = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(expected_bytes);
-    Ok(written)
-}
-
-fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// Join `dest` with a single zip entry file name. Rejects absolute paths,
-/// `..`, `.`, and multi-segment names (zip-slip) so we only write under `dest`.
 #[cfg(windows)]
 fn safe_join_single_filename(dest: &Path, fname: &str) -> Option<PathBuf> {
     let p = Path::new(fname);
@@ -434,8 +1011,6 @@ fn safe_join_single_filename(dest: &Path, fname: &str) -> Option<PathBuf> {
     }
 }
 
-/// Pull `runtimes/win-x64/native/*.dll` from the official DirectML NuGet
-/// (.nupkg is a zip) into `dest` so `onnxruntime.dll` sits next to the models.
 #[cfg(windows)]
 fn extract_win64_native_dlls_from_ort_package(zip_path: &Path, dest: &Path) -> Result<(), String> {
     let file = File::open(zip_path).map_err(|e| e.to_string())?;
@@ -464,10 +1039,39 @@ fn extract_win64_native_dlls_from_ort_package(zip_path: &Path, dest: &Path) -> R
         }
     }
     if !found_main {
-        return Err(format!(
-            "onnxruntime.dll not found under {prefix} in Microsoft.ML.OnnxRuntime.DirectML {}",
-            ORT_DIRECTML_NUPKG_VER
-        ));
+        return Err("onnxruntime.dll not found in DirectML package".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_catalog_parses_and_has_profiles() {
+        let c = bundled_catalog();
+        assert!(c.profiles.contains_key("balanced"));
+        assert!(c.profiles.contains_key("compact"));
+        assert!(c.profiles.contains_key("quality"));
+        assert!(c.assets.contains_key("minilm-l6-full"));
+        assert!(!c.assets["ort-directml-1.24.4"].sha256.is_empty());
+    }
+
+    #[test]
+    fn approx_sizes_are_sane() {
+        let bal = approx_install_mb_for_profile("balanced");
+        let compact = approx_install_mb_for_profile("compact");
+        assert!(compact < bal);
+        assert!(compact > 20);
+        assert!(bal < 200);
+    }
+
+    #[test]
+    fn pending_update_zero_when_nothing_installed_still_counts() {
+        // Without files, every asset is "needed".
+        let c = bundled_catalog();
+        let need = pending_update_bytes(&c, "compact");
+        assert!(need > 1_000_000);
+    }
 }

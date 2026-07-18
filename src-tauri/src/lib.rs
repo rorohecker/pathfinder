@@ -70,6 +70,8 @@ pub fn __test_detect_gpus() -> Vec<(String, u32, u64, bool, bool)> {
 }
 mod inference;
 mod local_ai;
+mod imagenet_labels;
+mod winml_bridge;
 
 slint::include_modules!();
 
@@ -94,18 +96,22 @@ const INDEX_DB_FILE: &str = ".pathfinder-index.sqlite3";
 const THUMBNAIL_CACHE_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
 const INDEX_ESTIMATE_BYTES_PER_FILE: u64 = 420;
 const MAX_OPERATION_QUEUE_ITEMS: usize = 200;
-const MAX_HEAVY_OPS: usize = 2;
+// Cap on concurrent heavy background jobs (duplicate scans, preview cache
+// warming, etc). Scaled to the machine so multi-core systems get more
+// throughput instead of a fixed pair of workers.
+static MAX_HEAVY_OPS: LazyLock<usize> = LazyLock::new(|| (num_cpus() / 2).clamp(2, 6));
 const GITHUB_LATEST_RELEASE_API: &str =
     "https://api.github.com/repos/rorohecker/pathfinder/releases/latest";
 const GITHUB_RELEASES_URL: &str = "https://github.com/rorohecker/pathfinder/releases";
 
 static ACTIVE_HEAVY_OPS: AtomicUsize = AtomicUsize::new(0);
 
-// Dedicated 2-thread pool for thumbnail generation. Threads run at below-normal
-// priority on Windows so they don't compete with foreground I/O.
+// Dedicated pool for thumbnail generation, sized to the machine (up to 8
+// threads). Threads run at below-normal priority on Windows so they don't
+// compete with foreground I/O even when we use more of them.
 static THUMBNAIL_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     rayon::ThreadPoolBuilder::new()
-        .num_threads(2)
+        .num_threads(num_cpus().saturating_sub(1).clamp(2, 8))
         .thread_name(|i| format!("pathfinder-thumb-{i}"))
         .spawn_handler(|thread| {
             std::thread::Builder::new()
@@ -4945,7 +4951,7 @@ fn read_preview_uncached(
 
 #[tauri::command]
 fn warm_preview_cache(state: State<'_, AppState>, paths: Vec<String>, max_bytes: Option<usize>) {
-    if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= MAX_HEAVY_OPS {
+    if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= *MAX_HEAVY_OPS {
         ACTIVE_HEAVY_OPS.fetch_sub(1, Ordering::SeqCst);
         return;
     }
@@ -5128,52 +5134,60 @@ fn process_memory_stats() -> Option<(u64, u64)> {
 fn compute_ai_capabilities() -> AiCapabilities {
     let devices = detect_npu_names();
     let npu_hardware_found = !devices.is_empty();
-    let env_runtime = std::env::var("PATHFINDER_LOCAL_AI_RUNTIME")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
     let onnx_installed = local_ai::onnx_runtime_installed();
     let models_ready = local_ai::core_models_installed();
-    let manifest_installed = matches!(
-        local_ai::read_manifest().state,
-        local_ai::InstallState::Installed
-    );
-    // ORT DLL beside models, explicit env override, or completed installer manifest.
-    let runtime_configured = onnx_installed || env_runtime || manifest_installed;
-    // NPU is "available" for inference only when hardware + runtime + models line up.
-    let npu_enabled = npu_hardware_found && runtime_configured && models_ready;
-    let device_name = if npu_hardware_found {
-        devices.join(", ")
-    } else {
-        "CPU Fallback".to_string()
-    };
-    let acceleration_kind = if npu_enabled { "NPU" } else { "CPU" }.to_string();
+    let verified = local_ai::install_verified() || crate::inference::smoke_test_ready();
+    let runtime_configured = onnx_installed && models_ready;
+    let selected = crate::inference::selected_provider();
+    let acceleration_kind = selected
+        .as_ref()
+        .map(|p| p.kind.as_str().to_string())
+        .unwrap_or_else(|| {
+            if npu_hardware_found && runtime_configured {
+                "NPU".into()
+            } else if !crate::gpu_detect::detect_gpus().discrete().is_empty()
+                || !crate::gpu_detect::detect_gpus().integrated().is_empty()
+            {
+                "GPU".into()
+            } else {
+                "CPU".into()
+            }
+        });
+    let device_name = selected
+        .as_ref()
+        .map(|p| p.label.clone())
+        .unwrap_or_else(|| {
+            if npu_hardware_found {
+                devices.join(", ")
+            } else if let Some(g) = crate::gpu_detect::detect_gpus().primary_directml_target() {
+                g.name.clone()
+            } else {
+                "CPU".to_string()
+            }
+        });
+    let npu_enabled = acceleration_kind == "NPU" && runtime_configured;
     let ort = crate::inference::ort_runtime_line();
-    let reason = if npu_enabled {
+    let reason = if !runtime_configured {
         format!(
-            "NPU acceleration: {}. Local AI on-device (DirectML EP). [{}]",
-            device_name, ort
-        )
-    } else if npu_hardware_found && runtime_configured && !models_ready {
-        format!(
-            "NPU detected ({}). Install embedding models from Settings -> Local AI to enable acceleration. [{}]",
-            device_name, ort
-        )
-    } else if npu_hardware_found && !runtime_configured {
-        format!(
-            "NPU detected ({}). Install Local AI (ONNX Runtime + models) from Settings to enable. [{}]",
-            device_name, ort
+            "Local AI not installed. Install from Settings to enable on-device models. [{}]",
+            ort
         )
     } else {
-        format!("No NPU detected - CPU inference on-device. [{}]", ort)
+        format!(
+            "Active accelerator: {} ({}). Fallback order NPU → GPU → CPU. [{}]",
+            acceleration_kind, device_name, ort
+        )
     };
     let gpu_summary = gpu_capability_summary();
+    let semantic = verified && models_ready;
+    let image_cls = semantic && crate::inference::image_classifier_available();
 
     AiCapabilities {
         npu_available: npu_enabled,
-        semantic_search: true,
-        automatic_summaries: true,
-        image_classification: true,
-        local_embeddings: true,
+        semantic_search: semantic,
+        automatic_summaries: false,
+        image_classification: image_cls,
+        local_embeddings: semantic,
         device_name,
         acceleration_kind,
         runtime_configured,
@@ -5188,19 +5202,12 @@ fn local_ai_semantic_ready() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        let env_runtime = std::env::var("PATHFINDER_LOCAL_AI_RUNTIME")
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
-        let manifest_installed = matches!(
-            local_ai::read_manifest().state,
-            local_ai::InstallState::Installed
-        );
-        local_ai::onnx_runtime_installed() || env_runtime || manifest_installed
+        if !local_ai::onnx_runtime_installed() {
+            return false;
+        }
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        true
-    }
+    // Prefer a real smoke test once, but don't block every search on session rebuild.
+    crate::inference::smoke_test_ready() || local_ai::install_verified()
 }
 
 fn local_ai_image_search_ready() -> bool {
@@ -5208,10 +5215,11 @@ fn local_ai_image_search_ready() -> bool {
 }
 
 fn ai_status_label(capabilities: &AiCapabilities) -> &'static str {
-    if capabilities.npu_available && capabilities.acceleration_kind == "NPU" {
-        "NPU Accelerated"
-    } else {
-        "CPU Fallback"
+    match capabilities.acceleration_kind.as_str() {
+        "NPU" if capabilities.runtime_configured => "NPU Accelerated",
+        "GPU" if capabilities.runtime_configured => "GPU Accelerated",
+        _ if capabilities.runtime_configured => "CPU Inference",
+        _ => "AI Not Installed",
     }
 }
 
@@ -5679,7 +5687,7 @@ fn duplicate_reclaimable_bytes(groups: &[Vec<FileEntry>]) -> (u64, u64, u64) {
 
 #[tauri::command]
 fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEntry>>, String> {
-    if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= MAX_HEAVY_OPS {
+    if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= *MAX_HEAVY_OPS {
         ACTIVE_HEAVY_OPS.fetch_sub(1, Ordering::SeqCst);
         return Err("Too many operations in progress. Please wait.".to_string());
     }
@@ -8138,6 +8146,12 @@ struct NativeSettings {
     search_semantic_mode: bool,
     /// Reserved for optional CLIP model (not bundled in this build).
     clip_search_enabled: bool,
+    /// Local AI model profile: compact | balanced | quality.
+    #[serde(default = "default_ai_profile")]
+    ai_profile: String,
+    /// Keep Local AI models up to date automatically.
+    #[serde(default = "default_true")]
+    ai_auto_update_models: bool,
     /// Suppress the first-run welcome dialog after the user dismisses it once.
     #[serde(default)]
     first_run_welcome_dismissed: bool,
@@ -8152,6 +8166,14 @@ struct NativeSettings {
     /// from the preset id so the hex survives switching to a preset and back.
     #[serde(default)]
     custom_accent_hex: Option<String>,
+}
+
+fn default_ai_profile() -> String {
+    "balanced".into()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for NativeSettings {
@@ -8182,6 +8204,8 @@ impl Default for NativeSettings {
             window_maximized: false,
             search_semantic_mode: false,
             clip_search_enabled: false,
+            ai_profile: default_ai_profile(),
+            ai_auto_update_models: true,
             first_run_welcome_dismissed: false,
             palette_tip_shown: false,
             folder_color: None,
@@ -8920,11 +8944,75 @@ fn open_index_connection() -> Result<Connection, String> {
             updated_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_image_desc_embeddings_prefix ON image_desc_embeddings(path);
+
+        CREATE TABLE IF NOT EXISTS ai_index_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         ",
     )
     .map_err(|e| e.to_string())?;
+    // Best-effort column migration for embedding model versioning.
+    let _ = conn.execute(
+        "ALTER TABLE path_embeddings ADD COLUMN model_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE path_embeddings ADD COLUMN model_rev TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE path_embeddings ADD COLUMN embed_dim INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE image_desc_embeddings ADD COLUMN model_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE image_desc_embeddings ADD COLUMN model_rev TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     mark_hidden(&path);
     Ok(conn)
+}
+
+fn current_embedding_fingerprint() -> (String, String, u32) {
+    if let Some(info) = local_ai::active_model_info() {
+        (
+            info.embedding_id,
+            info.embedding_revision,
+            info.embedding_dim,
+        )
+    } else {
+        (String::new(), String::new(), 0)
+    }
+}
+
+fn ensure_embedding_model_compatible(conn: &rusqlite::Connection) -> Result<(), String> {
+    let (id, rev, dim) = current_embedding_fingerprint();
+    if id.is_empty() {
+        return Ok(());
+    }
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM ai_index_meta WHERE key = 'embedding_fingerprint'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    let fingerprint = format!("{id}|{rev}|{dim}");
+    if stored.as_deref() == Some(fingerprint.as_str()) {
+        return Ok(());
+    }
+    let _ = conn.execute("DELETE FROM path_embeddings", []);
+    let _ = conn.execute("DELETE FROM image_desc_embeddings", []);
+    let _ = conn.execute(
+        "INSERT INTO ai_index_meta(key, value) VALUES('embedding_fingerprint', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![fingerprint],
+    );
+    Ok(())
 }
 
 fn schedule_index_directory(parent: String, entries: Vec<FileEntry>) {
@@ -8970,6 +9058,7 @@ fn schedule_index_directory_debounced(state: &AppState, parent: String, entries:
 fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), String> {
     let parent = cache_key_str(parent);
     let mut conn = open_index_connection()?;
+    let _ = ensure_embedding_model_compatible(&conn);
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -9064,22 +9153,21 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
     // main FTS transaction commits so readers are not blocked for as long.
     let mut emb_rows: Vec<(String, Vec<u8>, i64)> = Vec::new();
     let mut dhash_rows: Vec<(String, Vec<u8>, i64)> = Vec::new();
+    let semantic_ready = local_ai_semantic_ready_cached();
     let index_image_desc =
-        crate::local_ai::core_models_installed() && crate::inference::image_classifier_available();
+        semantic_ready && crate::inference::image_classifier_available();
     let mut img_desc_label_pairs: Vec<(String, String)> = Vec::new();
     let mut img_desc_clear_paths: Vec<String> = Vec::new();
+    let mut name_paths: Vec<(String, String)> = Vec::new();
     for entry in entries {
         if entry.kind == FileKind::Directory {
             continue;
         }
         let extension = entry.extension.as_deref().unwrap_or("").to_lowercase();
-        if let Some(vec) = crate::inference::embed_file_label(&entry.name) {
-            let mut blob = Vec::with_capacity(vec.len() * 4);
-            for x in &vec {
-                blob.extend_from_slice(&x.to_le_bytes());
-            }
-            emb_rows.push((entry.path.clone(), blob, now));
+        if semantic_ready {
+            name_paths.push((entry.path.clone(), entry.name.clone()));
         }
+        // dHash is pure CPU image hashing — works without Local AI models.
         if matches!(
             extension.as_str(),
             "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
@@ -9098,6 +9186,22 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
                 img_desc_label_pairs.push((entry.path.clone(), labels));
             } else {
                 img_desc_clear_paths.push(entry.path.clone());
+            }
+        }
+    }
+    if semantic_ready && !name_paths.is_empty() {
+        const BATCH: usize = 32;
+        for chunk in name_paths.chunks(BATCH) {
+            let refs: Vec<&str> = chunk.iter().map(|(_, n)| n.as_str()).collect();
+            let batch = crate::inference::embed_file_labels_batch(&refs);
+            for ((path, _), emb_opt) in chunk.iter().zip(batch) {
+                if let Some(vec) = emb_opt {
+                    let mut blob = Vec::with_capacity(vec.len() * 4);
+                    for x in &vec {
+                        blob.extend_from_slice(&x.to_le_bytes());
+                    }
+                    emb_rows.push((path.clone(), blob, now));
+                }
             }
         }
     }
@@ -9348,7 +9452,7 @@ fn scan_image_duplicates_in_folder(folder: &str) -> String {
             if seen.contains(&j) {
                 continue;
             }
-            if crate::inference::hamming64(entries[i].1, entries[j].1) == 0 {
+            if crate::inference::is_near_duplicate_dhash(entries[i].1, entries[j].1) {
                 group.push(j);
             }
         }
@@ -10092,17 +10196,45 @@ fn download_and_install_update(url: &str) -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        if suffix == ".msi" {
-            std::process::Command::new("msiexec.exe")
-                .arg("/i")
-                .arg(&installer)
-                .spawn()
-                .map_err(|e| format!("Could not start Windows Installer (msiexec): {e}"))?;
+        // Silent, hands-off update: a tiny batch helper waits for this app to
+        // exit (so the running .exe is unlocked), runs the installer with no
+        // UI, then relaunches Pathfinder. The user only ever sees the app
+        // close and reopen on the new version - no wizard, no reinstall.
+        let app_exe = std::env::current_exe()
+            .map_err(|e| format!("Could not resolve current executable: {e}"))?;
+        let pid = std::process::id();
+        let installer_str = installer.to_string_lossy().replace('"', "");
+        let app_exe_str = app_exe.to_string_lossy().replace('"', "");
+        let install_cmd = if suffix == ".msi" {
+            format!("msiexec.exe /i \"{installer_str}\" /qn /norestart")
         } else {
-            std::process::Command::new(&installer)
-                .spawn()
-                .map_err(|e| format!("Could not start installer: {e}"))?;
-        }
+            // Tauri's NSIS installer runs fully silent with /S.
+            format!("\"{installer_str}\" /S")
+        };
+        let script = format!(
+            "@echo off\r\n\
+setlocal\r\n\
+set \"PID={pid}\"\r\n\
+:waitloop\r\n\
+tasklist /FI \"PID eq %PID%\" 2>nul | find \"%PID%\" >nul\r\n\
+if not errorlevel 1 (\r\n\
+  timeout /t 1 /nobreak >nul\r\n\
+  goto waitloop\r\n\
+)\r\n\
+{install_cmd}\r\n\
+timeout /t 1 /nobreak >nul\r\n\
+start \"\" \"{app_exe_str}\"\r\n\
+del \"%~f0\"\r\n"
+        );
+        let script_path = std::env::temp_dir().join(format!("pathfinder_update_{pid}.cmd"));
+        fs::write(&script_path, script)
+            .map_err(|e| format!("Could not stage update helper: {e}"))?;
+        ProcessCommand::new("cmd.exe")
+            .arg("/c")
+            .arg(&script_path)
+            .no_window()
+            .spawn()
+            .map_err(|e| format!("Could not start update helper: {e}"))?;
     }
     #[cfg(not(windows))]
     {
@@ -10582,7 +10714,7 @@ fn collect_image_duplicate_groups(folder: &str) -> Vec<(String, Vec<String>)> {
             if seen.contains(&j) {
                 continue;
             }
-            if crate::inference::hamming64(entries[i].1, entries[j].1) == 0 {
+            if crate::inference::is_near_duplicate_dhash(entries[i].1, entries[j].1) {
                 group.push(j);
             }
         }
@@ -12978,11 +13110,11 @@ impl NativeController {
             settings,
             ai: AiCapabilities {
                 npu_available: false,
-                semantic_search: true,
-                automatic_summaries: true,
-                image_classification: true,
-                local_embeddings: true,
-                device_name: "CPU Fallback".to_string(),
+                semantic_search: false,
+                automatic_summaries: false,
+                image_classification: false,
+                local_embeddings: false,
+                device_name: "Detecting".to_string(),
                 acceleration_kind: "CPU".to_string(),
                 runtime_configured: false,
                 reason: "Detecting...".to_string(),
@@ -13179,6 +13311,7 @@ impl NativeController {
             .map(|s| *s)
             .unwrap_or(local_ai::InstallState::NotInstalled);
         ui.set_ai_install_state(SharedString::from(ai_install_state.as_slint_str()));
+        self.sync_ai_settings_ui(ui);
         let semantic_ready = local_ai_semantic_ready_cached();
         let image_ready = local_ai_image_search_ready_cached();
         if !semantic_ready {
@@ -13190,6 +13323,82 @@ impl NativeController {
         ui.set_semantic_search_available(semantic_ready);
         ui.set_search_semantic_mode(self.settings.search_semantic_mode);
         ui.set_clip_search_enabled(self.settings.clip_search_enabled);
+    }
+
+    fn sync_ai_settings_ui(&self, ui: &MainWindow) {
+        let profile = if self.settings.ai_profile.is_empty() {
+            "balanced".to_string()
+        } else {
+            self.settings.ai_profile.clone()
+        };
+        ui.set_ai_profile(ss(&profile));
+        let label = match profile.as_str() {
+            "compact" => "Compact — smallest download",
+            "quality" => "Quality — higher retrieval accuracy",
+            _ => "Balanced (recommended)",
+        };
+        ui.set_ai_profile_label(ss(label));
+        ui.set_ai_auto_update(self.settings.ai_auto_update_models);
+        let mb = local_ai::approx_install_mb_for_profile(&profile) as i32;
+        ui.set_ai_install_size_mb(mb);
+        let disk = local_ai::actual_disk_usage_bytes();
+        if disk > 0 {
+            ui.set_ai_disk_usage(ss(format!(
+                "On disk: {:.0} MB",
+                disk as f64 / 1_000_000.0
+            )));
+        } else {
+            ui.set_ai_disk_usage(ss(""));
+        }
+        let m = local_ai::read_manifest();
+        if !m.embedding_model_id.is_empty() {
+            ui.set_ai_model_versions(ss(format!(
+                "catalog {} · {} · {}",
+                if m.catalog_version.is_empty() {
+                    "bundled"
+                } else {
+                    &m.catalog_version
+                },
+                m.embedding_model_id,
+                m.classifier_model_id
+            )));
+        } else {
+            ui.set_ai_model_versions(ss(""));
+        }
+        let upd = self
+            .ai_progress
+            .update_bytes
+            .load(std::sync::atomic::Ordering::Acquire);
+        if self
+            .ai_progress
+            .update_available
+            .load(std::sync::atomic::Ordering::Acquire)
+            && upd > 0
+        {
+            ui.set_ai_update_status(ss(format!(
+                "Update available (~{:.0} MB)",
+                upd as f64 / 1_000_000.0
+            )));
+        } else if matches!(m.state, local_ai::InstallState::Installed) {
+            ui.set_ai_update_status(ss("Models up to date"));
+        } else {
+            ui.set_ai_update_status(ss(""));
+        }
+        let semantic = local_ai_semantic_ready_cached();
+        let classify = semantic && crate::inference::image_classifier_available();
+        ui.set_ai_feature_semantic(ss(if semantic {
+            "Ready — search by meaning across indexed files"
+        } else {
+            "Install Local AI to enable"
+        }));
+        ui.set_ai_feature_classify(ss(if classify {
+            "Ready — auto-suggest tags for photos"
+        } else {
+            "Install Local AI to enable"
+        }));
+        ui.set_ai_feature_dupes(ss(
+            "Ready — near-duplicate detection uses a lightweight image hash (no model required)",
+        ));
     }
 
     /// Work deferred until after the first frame is painted so startup feels
@@ -13229,6 +13438,10 @@ impl NativeController {
                 }
             });
         });
+        // Silent Local AI model self-update when enabled.
+        let progress = self.ai_progress.clone();
+        let auto = self.settings.ai_auto_update_models;
+        local_ai::maybe_auto_update_models(progress, auto);
     }
 
     /// Load sidebar drives and the storage scan cache off the critical startup
@@ -13278,13 +13491,20 @@ impl NativeController {
                 }
                 None => "Memory in use: not available on this platform".to_string(),
             };
+            let ai_bytes = local_ai::actual_disk_usage_bytes();
             let footprint = format!(
-                "{ram_line}\nIndex database: {} on disk\nThumbnail cache: {} of {} budget\n\nLocations:\n  {}\n  {}",
+                "{ram_line}\nIndex database: {} on disk\nThumbnail cache: {} of {} budget\nLocal AI models: {}\n\nLocations:\n  {}\n  {}\n  {}",
                 format_size_short(status.index_bytes),
                 format_size_short(status.thumbnail_bytes),
                 format_size_short(status.thumbnail_limit),
+                if ai_bytes == 0 {
+                    "not installed".to_string()
+                } else {
+                    format_size_short(ai_bytes)
+                },
                 native_index_file().display(),
                 thumbnail_cache_dir().display(),
+                local_ai::ai_dir().display(),
             );
             let index_line = format!(
                 "{} files indexed | {} on disk | thumbnails {} of {} cap | {}",
@@ -21415,8 +21635,16 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c_ai = controller.clone();
     ui.on_ai_install_confirm(move || {
         if let Some(ui) = weak.upgrade() {
+            let profile = {
+                let b = c_ai.borrow();
+                if b.settings.ai_profile.is_empty() {
+                    "balanced".to_string()
+                } else {
+                    b.settings.ai_profile.clone()
+                }
+            };
             let progress = c_ai.borrow().ai_progress.clone();
-            local_ai::start_install(progress);
+            local_ai::start_install(progress, Some(profile));
             ui.set_ai_install_state(SharedString::from("downloading"));
         }
     });
@@ -21447,6 +21675,70 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             ui.set_clip_search_enabled(false);
             ui.set_ai_download_progress(0.0);
             ui.set_ai_install_message(SharedString::from(""));
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c_ai = controller.clone();
+    ui.on_ai_repair(move || {
+        if let Some(ui) = weak.upgrade() {
+            let progress = c_ai.borrow().ai_progress.clone();
+            local_ai::start_repair(progress);
+            ui.set_ai_install_state(SharedString::from("downloading"));
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c_ai = controller.clone();
+    ui.on_ai_update_models(move || {
+        if let Some(ui) = weak.upgrade() {
+            let progress = c_ai.borrow().ai_progress.clone();
+            local_ai::start_model_update(progress);
+            ui.set_ai_install_state(SharedString::from("updating"));
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c_ai = controller.clone();
+    ui.on_ai_set_profile(move |profile| {
+        if let Some(ui) = weak.upgrade() {
+            let profile = profile.to_string();
+            let installed = matches!(
+                local_ai::read_manifest().state,
+                local_ai::InstallState::Installed
+            );
+            {
+                let mut b = c_ai.borrow_mut();
+                b.settings.ai_profile = profile.clone();
+                b.save_settings();
+                b.sync_ai_settings_ui(&ui);
+            }
+            if installed {
+                let progress = c_ai.borrow().ai_progress.clone();
+                local_ai::change_profile(progress, profile);
+                ui.set_ai_install_state(SharedString::from("downloading"));
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c_ai = controller.clone();
+    ui.on_ai_toggle_auto_update(move || {
+        if let Some(ui) = weak.upgrade() {
+            let mut b = c_ai.borrow_mut();
+            b.settings.ai_auto_update_models = !b.settings.ai_auto_update_models;
+            b.save_settings();
+            ui.set_ai_auto_update(b.settings.ai_auto_update_models);
+            b.sync_ai_settings_ui(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c_ai = controller.clone();
+    ui.on_ai_install_request(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_ai_install_explainer_visible(true);
+            c_ai.borrow().sync_ai_settings_ui(&ui);
         }
     });
 
@@ -21773,18 +22065,15 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             std::thread::spawn(move || {
                 match download_and_install_update(&url) {
                     Ok(()) => {
-                        let toast = if url.to_ascii_lowercase().contains(".msi") {
-                            "Windows Installer started - follow the MSI wizard, then restart Pathfinder."
-                        } else {
-                            "Installer launched - Pathfinder will close."
-                        };
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak2.upgrade() {
-                                ui.set_toast_text(ss(toast));
+                                ui.set_toast_text(ss(
+                                    "Update ready - installing and relaunching Pathfinder...",
+                                ));
                                 ui.set_toast_kind(ss("info"));
                             }
                             std::thread::spawn(|| {
-                                std::thread::sleep(std::time::Duration::from_millis(1400));
+                                std::thread::sleep(std::time::Duration::from_millis(900));
                                 let _ = slint::invoke_from_event_loop(|| {
                                     let _ = slint::quit_event_loop();
                                 });
@@ -22085,6 +22374,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         .unwrap_or(local_ai::InstallState::NotInstalled);
                     if ui.get_settings_visible()
                         || ai_state == local_ai::InstallState::Downloading
+                        || ai_state == local_ai::InstallState::Updating
+                        || ai_state == local_ai::InstallState::Error
                     {
                         ui.set_ai_install_state(SharedString::from(ai_state.as_slint_str()));
                         let downloaded = ai_progress_for_ui
@@ -22101,6 +22392,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         ui.set_ai_download_progress(frac);
                         if let Ok(msg) = ai_progress_for_ui.message.lock() {
                             ui.set_ai_install_message(SharedString::from(msg.as_str()));
+                        }
+                        if let Ok(ctrl) = c.try_borrow() {
+                            ctrl.sync_ai_settings_ui(&ui);
                         }
                     }
                     let prev_st = prev_ai_cell.get();
