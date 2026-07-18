@@ -10206,10 +10206,16 @@ fn download_and_install_update(url: &str) -> Result<(), String> {
         let installer_str = installer.to_string_lossy().replace('"', "");
         let app_exe_str = app_exe.to_string_lossy().replace('"', "");
         let install_cmd = if suffix == ".msi" {
+            // MSI upgrades in place when the UpgradeCode matches; /qn is silent.
             format!("msiexec.exe /i \"{installer_str}\" /qn /norestart")
         } else {
-            // Tauri's NSIS installer runs fully silent with /S.
-            format!("\"{installer_str}\" /S")
+            // Tauri's NSIS installer: `/S` is silent, `/UPDATE` makes it patch
+            // the existing install in place - it skips running the previous
+            // version's uninstaller, preserves app data, and does not recreate
+            // shortcuts. Without `/UPDATE`, even a silent run first executes the
+            // old uninstaller, which is the "uninstall then reinstall" the user
+            // was seeing.
+            format!("\"{installer_str}\" /S /UPDATE")
         };
         let script = format!(
             "@echo off\r\n\

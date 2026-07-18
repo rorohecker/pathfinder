@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "0.9.37"
+version = "0.9.38"
 edition = "2024"
 
 [lib]
