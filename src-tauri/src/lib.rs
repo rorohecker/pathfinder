@@ -13339,9 +13339,9 @@ impl NativeController {
         };
         ui.set_ai_profile(ss(&profile));
         let label = match profile.as_str() {
-            "compact" => "Compact — smallest download",
-            "quality" => "Quality — higher retrieval accuracy",
-            _ => "Balanced (recommended)",
+            "compact" => "Compact — smallest (~50 MB)",
+            "quality" => "Quality — best accuracy (~99 MB)",
+            _ => "Balanced (recommended, ~61 MB)",
         };
         ui.set_ai_profile_label(ss(label));
         ui.set_ai_auto_update(self.settings.ai_auto_update_models);

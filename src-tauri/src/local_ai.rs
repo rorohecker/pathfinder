@@ -1054,17 +1054,29 @@ mod tests {
         assert!(c.profiles.contains_key("balanced"));
         assert!(c.profiles.contains_key("compact"));
         assert!(c.profiles.contains_key("quality"));
-        assert!(c.assets.contains_key("minilm-l6-full"));
+        assert!(c.assets.contains_key("bge-small-quant"));
+        assert!(c.assets.contains_key("minilm-l6-quant"));
         assert!(!c.assets["ort-directml-1.24.4"].sha256.is_empty());
+        // Storage should grow Compact < Balanced < Quality.
+        assert_eq!(
+            c.profiles["balanced"].embedding_asset,
+            "bge-small-quant"
+        );
+        assert_eq!(
+            c.profiles["quality"].classifier_asset,
+            "efficientnet-lite4"
+        );
     }
 
     #[test]
     fn approx_sizes_are_sane() {
-        let bal = approx_install_mb_for_profile("balanced");
         let compact = approx_install_mb_for_profile("compact");
-        assert!(compact < bal);
+        let bal = approx_install_mb_for_profile("balanced");
+        let quality = approx_install_mb_for_profile("quality");
+        assert!(compact < bal, "compact ({compact}) should be < balanced ({bal})");
+        assert!(bal < quality, "balanced ({bal}) should be < quality ({quality})");
         assert!(compact > 20);
-        assert!(bal < 200);
+        assert!(quality < 150);
     }
 
     #[test]

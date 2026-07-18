@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "catalog_version": "2026.07.17",
-  "updated_at": "2026-07-17T00:00:00Z",
+  "catalog_version": "2026.07.18",
+  "updated_at": "2026-07-18T00:00:00Z",
   "remote_catalog_url": "https://raw.githubusercontent.com/rorohecker/pathfinder/main/src-tauri/ai-catalog.json",
   "default_profile": "balanced",
   "assets": {
@@ -36,28 +36,6 @@
       "sha256": "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0",
       "bytes": 711661,
       "pairs_with": "minilm-l6-quant"
-    },
-    "minilm-l6-full": {
-      "id": "minilm-l6-full",
-      "kind": "embedding",
-      "display_name": "all-MiniLM-L6-v2",
-      "url": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
-      "local_name": "text-embedding.onnx",
-      "sha256": "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452",
-      "bytes": 90405214,
-      "embed_dim": 384,
-      "max_seq": 128,
-      "query_prefix": ""
-    },
-    "minilm-l6-tok": {
-      "id": "minilm-l6-tok",
-      "kind": "tokenizer",
-      "display_name": "MiniLM tokenizer",
-      "url": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
-      "local_name": "tokenizer.json",
-      "sha256": "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037",
-      "bytes": 466247,
-      "pairs_with": "minilm-l6-full"
     },
     "bge-small-quant": {
       "id": "bge-small-quant",
@@ -108,7 +86,7 @@
     "compact": {
       "id": "compact",
       "display_name": "Compact",
-      "description": "Smallest download. Fast indexing on CPU and NPU.",
+      "description": "Smallest download (~50 MB). MiniLM embeddings and MobileNet labels.",
       "recommended": false,
       "assets": ["ort-directml-1.24.4", "minilm-l6-quant", "minilm-l6-tok-xenova", "mobilenet-v2"],
       "embedding_asset": "minilm-l6-quant",
@@ -117,16 +95,16 @@
     "balanced": {
       "id": "balanced",
       "display_name": "Balanced",
-      "description": "Best speed and quality for everyday search. Recommended.",
+      "description": "Better search (~61 MB). BGE embeddings with MobileNet labels. Recommended.",
       "recommended": true,
-      "assets": ["ort-directml-1.24.4", "minilm-l6-full", "minilm-l6-tok", "mobilenet-v2"],
-      "embedding_asset": "minilm-l6-full",
+      "assets": ["ort-directml-1.24.4", "bge-small-quant", "bge-small-tok", "mobilenet-v2"],
+      "embedding_asset": "bge-small-quant",
       "classifier_asset": "mobilenet-v2"
     },
     "quality": {
       "id": "quality",
       "display_name": "Quality",
-      "description": "Higher retrieval quality and stronger image labels. Larger download.",
+      "description": "Best accuracy (~99 MB). BGE embeddings and EfficientNet labels.",
       "recommended": false,
       "assets": ["ort-directml-1.24.4", "bge-small-quant", "bge-small-tok", "efficientnet-lite4"],
       "embedding_asset": "bge-small-quant",
