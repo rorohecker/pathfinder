@@ -3731,9 +3731,13 @@ export component MainWindow inherits Window {
             property <length> sel_gap: 4px;
             property <length> sel_clear_w: root.is_simple ? 54px : 44px;
             property <length> sel_norm_step: 34px;
-            // Bar width matches the main file pane only — never draws over the
-            // preview column (that was causing the right-side icon overlap).
-            property <length> sel_bar_w: root.main_content_w;
+            // The selection bar spans the full width from the sidebar to the
+            // window edge, including across the top of the preview column. The
+            // preview pane starts below the toolbar row, so this strip is empty
+            // otherwise; filling it keeps the top of the app as one clean bar.
+            // The action buttons are right-anchored to this wider width, so the
+            // extra room only spaces them out - it never causes icon overlap.
+            property <length> sel_bar_w: root.width - root.sidebar_w;
             property <length> sel_right: sel_bar_w - 10px;
             // Right edge for the numbered icon buttons. Sits one full step to the
             // left of the (wider) Clear button so the rightmost icon (Select all)
@@ -3824,12 +3828,15 @@ export component MainWindow inherits Window {
             ToolButton { x: parent.sel_right - parent.sel_clear_w; y: root.is_simple ? 16px : 6px; button_width: parent.sel_clear_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
         }
 
-        // Toolbar - hidden while the selection bar is visible.
+        // Toolbar - hidden while the selection bar is visible. Spans the full
+        // width (sidebar edge to window edge) so the strip above the preview
+        // column is filled instead of left as dead space. Its right-anchored
+        // controls simply sit further right when the preview is open.
         toolbar := Rectangle {
             visible: root.selected_count == 0;
             x: root.sidebar_w;
             y: root.title_h;
-            width: root.main_content_w;
+            width: root.width - root.sidebar_w;
             height: root.toolbar_h;
             z: 10;
             background: ThemePalette.panel;
