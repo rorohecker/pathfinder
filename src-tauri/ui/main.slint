@@ -1,4 +1,5 @@
-import { LineEdit, ListView, ScrollView, Slider } from "std-widgets.slint";
+import { LineEdit, ListView, ScrollView, Slider, Palette } from "std-widgets.slint";
+export { Palette }
 
 // Bundled OFL fonts (embedded via build.rs). Family names come from font metadata.
 import "fonts/PressStart2P-Regular.ttf";
@@ -14,6 +15,8 @@ export struct FileItem {
     file_path: string,
     is_dir: bool,
     size_text: string,
+    // Relative size 0..1 within the current folder (for details size bar).
+    size_ratio: float,
     modified_text: string,
     type_text: string,
     extension: string,
@@ -51,6 +54,12 @@ export struct SideItem {
     color: color,
     is_header: bool,
     active: bool,
+    // Nested folder-tree indent (0 = top level).
+    indent: int,
+    // Drive usage 0..1; negative hides the bar.
+    usage: float,
+    expandable: bool,
+    expanded: bool,
 }
 
 export struct TabItem {
@@ -102,6 +111,9 @@ export struct DupeGroupItem {
     detail: string,
     count: int,
     reclaimable: string,
+    keep_path: string,
+    paths_preview: string,
+    keep_size: string,
 }
 
 export struct StorageBucketUi {
@@ -169,6 +181,8 @@ export global ThemePalette {
     // %APPDATA%\Pathfinder\theme_icons\{theme}.png. If width is 0px the
     // file wasn't found and NodeVisual falls back to its drawn shape.
     in-out property <image> folder_icon_image;
+    // Text that sits on accent / danger fills (primary buttons, active chips).
+    in-out property <color> on_accent: #ffffff;
     // True while DoDragDrop is blocking the UI thread - selected items show glow
     in-out property <bool> is_dragging: false;
     in-out property <int> drag_count: 0;
@@ -345,6 +359,7 @@ component TabButton inherits Rectangle {
     in property <int> tab_drag_over: -1;
     callback activated(int);
     callback closed(int);
+    callback context_menu(int);
     callback tab_drag_start(int);
     callback tab_drag_hover(int);
     callback tab_drag_end(int, int);
@@ -409,6 +424,12 @@ component TabButton inherits Rectangle {
                 }
                 self.dragging = false;
             }
+            if (event.button == PointerEventButton.middle && event.kind == PointerEventKind.up) {
+                root.closed(root.index);
+            }
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                root.context_menu(root.index);
+            }
         }
     }
 
@@ -437,6 +458,7 @@ component SideRow inherits Rectangle {
     in property <string> drag_target_path;
     callback activated(int);
     callback rename_activated(string);
+    callback expand_toggled(string);
 
     property <bool> is_drop_target: !root.item.is_header
         && root.drag_target_path != ""
@@ -494,9 +516,31 @@ component SideRow inherits Rectangle {
         border-color: rgba(0, 0, 0, 0.14);
     }
 
+    // Expand/collapse chevron for folder tree rows.
+    if !root.item.is_header && root.item.expandable: Rectangle {
+        x: 2px + root.item.indent * 12px;
+        y: (parent.height - 18px) / 2;
+        width: 18px;
+        height: 18px;
+        border-radius: 4px;
+        background: chevron_touch.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+        Text {
+            width: parent.width; height: parent.height;
+            text: root.item.expanded ? "▾" : "▸";
+            color: ThemePalette.text_faint;
+            font-size: 11px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        chevron_touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.expand_toggled(root.item.path); }
+        }
+    }
+
     SvgIcon {
         visible: !root.item.is_header && root.item.icon != "tag";
-        x: 9px;
+        x: (root.item.expandable ? 20px : 9px) + root.item.indent * 12px;
         y: (parent.height - 16px) / 2;
         icon_size: 16px;
         data: root.item.icon == "drive" ? "M22 12H2 M5.5 5.2 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.8A2 2 0 0 0 16.7 4H7.3a2 2 0 0 0-1.8 1.2z" :
@@ -519,14 +563,31 @@ component SideRow inherits Rectangle {
 
     Text {
         visible: !root.item.is_header;
-        x: 38px;
-        width: parent.width - 86px;
-        height: parent.height;
+        x: 38px + root.item.indent * 12px + (root.item.expandable ? 10px : 0px);
+        width: parent.width - 86px - root.item.indent * 12px;
+        height: parent.height - (root.item.usage >= 0 ? 6px : 0px);
         text: root.item.label;
         color: root.item.active ? ThemePalette.accent_strong : (touch.has-hover ? ThemePalette.text : ThemePalette.text_muted);
         font-size: 13px;
         overflow: elide;
         vertical-alignment: center;
+    }
+
+    // Thin usage bar for drives (free/used).
+    if !root.item.is_header && root.item.usage >= 0: Rectangle {
+        x: 38px + root.item.indent * 12px;
+        y: parent.height - 5px;
+        width: parent.width - 86px - root.item.indent * 12px;
+        height: 3px;
+        border-radius: 1.5px;
+        background: ThemePalette.border;
+        Rectangle {
+            width: parent.width * Math.clamp(root.item.usage, 0, 1);
+            height: parent.height;
+            border-radius: 1.5px;
+            background: root.item.usage > 0.9 ? ThemePalette.danger :
+                        (root.item.usage > 0.75 ? ThemePalette.warning : ThemePalette.accent);
+        }
     }
 
     Text {
@@ -1216,19 +1277,36 @@ component FileRow inherits Rectangle {
         vertical-alignment: center;
     }
 
-    // SIZE column - right-aligned, monospaced
-    if root.view_mode == "list" && root.show_list_size: Text {
+    // SIZE column - right-aligned, monospaced + relative bar
+    if root.view_mode == "list" && root.show_list_size: Rectangle {
         x: parent.width - root.list_right_zone;
         y: root.group_header_h;
         width: root.col_size_w;
         height: parent.height - root.group_header_h;
-        text: root.item.size_text;
-        color: ThemePalette.text_faint;
-        font-family: AppMetrics.mono_font;
-        font-size: root.list_meta_font;
-        overflow: elide;
-        vertical-alignment: center;
-        horizontal-alignment: right;
+        Text {
+            width: parent.width;
+            height: parent.height - 5px;
+            text: root.item.size_text;
+            color: ThemePalette.text_faint;
+            font-family: AppMetrics.mono_font;
+            font-size: root.list_meta_font;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+        if root.item.size_ratio > 0: Rectangle {
+            y: parent.height - 4px;
+            width: parent.width;
+            height: 2px;
+            border-radius: 1px;
+            background: ThemePalette.border;
+            Rectangle {
+                width: parent.width * Math.clamp(root.item.size_ratio, 0, 1);
+                height: parent.height;
+                border-radius: 1px;
+                background: ThemePalette.accent;
+            }
+        }
     }
 
     // MODIFIED column
@@ -1750,7 +1828,7 @@ component DialogButton inherits Rectangle {
         width: parent.width - 28px;
         height: parent.height;
         text: root.label;
-        color: root.primary ? white : ThemePalette.text_muted;
+        color: root.primary ? ThemePalette.on_accent : ThemePalette.text_muted;
         font-size: 12.5px;
         font-weight: 600;
         horizontal-alignment: center;
@@ -3011,6 +3089,11 @@ component StorageDrillIn inherits Rectangle {
 
 
 export component MainWindow inherits Window {
+    // Keep Fluent std-widgets (LineEdit etc.) aligned with ThemePalette light/dark.
+    public function sync_widget_palette(light: bool) {
+        Palette.color-scheme = light ? ColorScheme.light : ColorScheme.dark;
+    }
+
     no-frame: true;
     resize-border-width: 8px;
     title: "Pathfinder";
@@ -3286,6 +3369,15 @@ export component MainWindow inherits Window {
     in-out property <string> sort_by: "modified";
     in-out property <string> sort_dir: "desc";
     in-out property <string> toast_kind: "info";
+    // When non-empty, toast shows an action button (e.g. "Undo").
+    in-out property <string> toast_action: "";
+    in-out property <bool> folder_changed_banner: false;
+    in-out property <string> search_source_pref: "auto";
+    in-out property <float> thumb_size_scale: 1.0;
+    in-out property <[ChoiceItem]> tag_chips: [];
+    in-out property <[ChoiceItem]> crumb_sibling_items: [];
+    in-out property <bool> crumb_siblings_visible: false;
+    in-out property <int> crumb_siblings_index: -1;
     in-out property <bool> op_drawer_visible: false;
     in-out property <string> op_drawer_text: "";
     // Live progress for compress / extract operations. progress is 0.0 to 1.0;
@@ -3350,6 +3442,22 @@ export component MainWindow inherits Window {
     callback welcome_dismiss();
     callback toast_copy();
     callback toast_dismiss();
+    callback toast_action_clicked();
+    callback side_expand_toggled(string);
+    callback crumb_siblings(int);
+    callback preview_action(string);
+    callback tab_middle_close(int);
+    callback tab_context(int);
+    callback apply_tag_chip(string);
+    callback search_source_picked(string);
+    callback dupe_keep_strategy(string);
+    callback redo_command();
+    callback batch_tag_selected();
+    callback batch_note_selected();
+    callback folder_changed_refresh();
+    callback new_window();
+    callback thumb_size_changed(float);
+    callback file_diff_selected();
     in-out property <bool> welcome_visible: false;
     in-out property <string> welcome_default_status: "Click Set as default below to register Pathfinder for folder shortcuts in Explorer.";
     in-out property <bool> welcome_default_handler_set: false;
@@ -3483,7 +3591,9 @@ export component MainWindow inherits Window {
     property <int> secondary_grid_columns: Math.max(1, Math.floor(root.secondary_file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
     property <length> grid_cell_w: root.file_area_w / root.grid_columns;
     property <length> secondary_grid_cell_w: root.secondary_file_area_w / root.secondary_grid_columns;
-    property <length> grid_item_h: root.view_mode == "gallery" ? 154px : (root.view_mode == "compact" ? 32px : AppMetrics.grid_h);
+    property <length> grid_item_h: root.view_mode == "gallery"
+        ? (154px * root.thumb_size_scale)
+        : (root.view_mode == "compact" ? 32px : (AppMetrics.grid_h * root.thumb_size_scale));
     property <length> secondary_grid_item_h: root.grid_item_h;
     property <int> grid_rows: (root.files.length + root.grid_columns - 1) / root.grid_columns;
     property <int> secondary_grid_rows: (root.secondary_files.length + root.secondary_grid_columns - 1) / root.secondary_grid_columns;
@@ -3571,6 +3681,7 @@ export component MainWindow inherits Window {
                             tab_drag_over: root.tab_drag_over;
                             activated(i) => { root.tab_activated(i); }
                             closed(i) => { root.tab_closed(i); }
+                            context_menu(i) => { root.tab_context(i); }
                             tab_drag_start(i) => { root.tab_drag_from = i; }
                             tab_drag_hover(i) => { if (root.tab_drag_from >= 0) { root.tab_drag_over = i; } }
                             tab_drag_end(from, to) => {
@@ -3682,6 +3793,7 @@ export component MainWindow inherits Window {
                     drag_target_path: root.drag_target_path;
                     activated(i) => { root.side_activated(i); }
                     rename_activated(path) => { root.rename_tag_prompt(path); }
+                    expand_toggled(path) => { root.side_expand_toggled(path); }
                 }
             }
             if root.is_simple: ListView {
@@ -3697,6 +3809,7 @@ export component MainWindow inherits Window {
                     drag_target_path: root.drag_target_path;
                     activated(i) => { root.side_activated(i); }
                     rename_activated(path) => { root.rename_tag_prompt(path); }
+                    expand_toggled(path) => { root.side_expand_toggled(path); }
                 }
             }
 
@@ -4007,6 +4120,48 @@ export component MainWindow inherits Window {
                                 ct := TouchArea {
                                     mouse-cursor: pointer;
                                     clicked => { root.crumb_navigate(ci); }
+                                    pointer-event(event) => {
+                                        if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                                            root.crumb_siblings(ci);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if root.crumb_siblings_visible: Rectangle {
+                        x: 0;
+                        y: parent.height + 2px;
+                        width: Math.min(280px, parent.width);
+                        height: Math.min(280px, root.crumb_sibling_items.length * 28px + 8px);
+                        z: 40;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel_solid;
+                        drop-shadow-blur: 12px;
+                        drop-shadow-color: rgba(0, 0, 0, 0.35);
+                        VerticalLayout {
+                            padding: 4px;
+                            spacing: 1px;
+                            for sib[si] in root.crumb_sibling_items: Rectangle {
+                                height: 26px;
+                                border-radius: 4px;
+                                background: sib_touch.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+                                Text {
+                                    x: 8px; width: parent.width - 16px; height: parent.height;
+                                    text: sib.label;
+                                    color: ThemePalette.text;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                sib_touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.crumb_siblings_visible = false;
+                                        root.navigate(sib.id);
+                                    }
                                 }
                             }
                         }
@@ -4219,7 +4374,7 @@ export component MainWindow inherits Window {
                 if search_box.semantic_available && sem_touch.has-hover: HoverTip {
                     x: 0px;
                     y: parent.height + 6px;
-                    tip_text: root.search_semantic_mode ? "Semantic ranking on (embeddings)" : "Semantic ranking off - click to rank by name embeddings";
+                    tip_text: root.search_semantic_mode ? "Semantic ranking on (filename embeddings, not OCR)" : "Semantic ranking off - click to rank by name embeddings";
                 }
                 search_input := TextInput {
                     x: search_box.semantic_available ? 56px : 30px;
@@ -4299,8 +4454,8 @@ export component MainWindow inherits Window {
                 z: 40;
                 x: toolbar.tb_search_x;
                 y: 40px;
-                width: min(420px, parent.width - toolbar.tb_search_x - 12px);
-                height: root.search_chip_hint != "" ? 56px : 34px;
+                width: min(460px, parent.width - toolbar.tb_search_x - 12px);
+                height: root.search_chip_hint != "" ? 118px : 96px;
                 border-radius: AppMetrics.radius_small;
                 border-width: 1px;
                 border-color: ThemePalette.border_strong;
@@ -4336,8 +4491,61 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
+                HorizontalLayout {
+                    x: 6px; y: 32px;
+                    width: parent.width - 12px;
+                    height: 24px;
+                    spacing: 4px;
+                    for src[si] in ["auto", "index", "live", "windows"]: Rectangle {
+                        preferred-width: src_txt.preferred-width + 14px;
+                        width: self.preferred-width;
+                        height: 22px;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: root.search_source_pref == src ? ThemePalette.accent : ThemePalette.border;
+                        background: root.search_source_pref == src ? ThemePalette.accent_soft : ThemePalette.panel_alt;
+                        src_txt := Text {
+                            width: parent.width; height: parent.height;
+                            text: src;
+                            color: ThemePalette.text_muted;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.search_source_picked(src); }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    x: 6px; y: 58px;
+                    width: parent.width - 12px;
+                    height: 24px;
+                    spacing: 4px;
+                    for chip[ti] in root.tag_chips: Rectangle {
+                        preferred-width: tag_chip_txt.preferred-width + 16px;
+                        width: self.preferred-width;
+                        height: 22px;
+                        border-radius: 11px;
+                        background: chip.color;
+                        tag_chip_txt := Text {
+                            width: parent.width; height: parent.height;
+                            text: chip.label;
+                            color: white;
+                            font-size: 10px;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.apply_tag_chip(chip.id); }
+                        }
+                    }
+                }
                 if root.search_chip_hint != "": Text {
-                    x: 8px; y: 32px; width: parent.width - 16px; height: 18px;
+                    x: 8px; y: 86px; width: parent.width - 16px; height: 18px;
                     text: root.search_chip_hint;
                     color: ThemePalette.text_faint;
                     font-size: 10.5px;
@@ -4444,6 +4652,20 @@ export component MainWindow inherits Window {
                 active: root.view_mode == "list";
                 clicked => { root.set_view("list"); }
             }
+            if !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid"): HorizontalLayout {
+                x: parent.width - 168px;
+                y: 8px;
+                height: 26px;
+                spacing: 4px;
+                DialogButton {
+                    label: "-";
+                    clicked => { root.thumb_size_changed(root.thumb_size_scale - 0.15); }
+                }
+                DialogButton {
+                    label: "+";
+                    clicked => { root.thumb_size_changed(root.thumb_size_scale + 0.15); }
+                }
+            }
             ToolButton {
                 x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 204px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
@@ -4517,9 +4739,27 @@ export component MainWindow inherits Window {
                 : ThemePalette.bg;
             background: pane_bg;
 
+            if root.folder_changed_banner: Rectangle {
+                x: 0;
+                y: -2px;
+                width: root.primary_pane_w;
+                height: 28px;
+                z: 8;
+                background: ThemePalette.warning;
+                Text {
+                    x: 12px; width: parent.width - 100px; height: parent.height;
+                    text: "Folder changed on disk — click to refresh";
+                    color: white; font-size: 11.5px; font-weight: 600; vertical-alignment: center; overflow: elide;
+                }
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.folder_changed_refresh(); }
+                }
+            }
+
             primary_pane_root := Rectangle {
                 x: 0;
-                y: 0;
+                y: root.folder_changed_banner ? 28px : 0;
                 width: root.primary_pane_w;
                 height: parent.height;
                 background: parent.pane_bg;
@@ -4971,32 +5211,60 @@ export component MainWindow inherits Window {
                     height: parent.height;
                     VerticalLayout {
                         alignment: center;
-                        spacing: 8px;
-                        SvgIcon {
-                            x: (parent.width - 32px) / 2;
-                            icon_size: 32px;
-                            data: root.search_text != "" ?
-                                "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3" :
-                                "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z";
-                            tint: ThemePalette.text_faint;
+                        spacing: 10px;
+                        Rectangle {
+                            width: 56px;
+                            height: 56px;
+                            x: (parent.width - 56px) / 2;
+                            border-radius: 14px;
+                            background: ThemePalette.accent_soft;
+                            SvgIcon {
+                                x: (parent.width - 28px) / 2;
+                                y: (parent.height - 28px) / 2;
+                                icon_size: 28px;
+                                data: root.in_recycle_bin ?
+                                    "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" :
+                                    root.is_home_view ?
+                                    "M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10" :
+                                    root.search_text != "" ?
+                                    "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3" :
+                                    "M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z";
+                                tint: ThemePalette.accent_strong;
+                            }
                         }
                         Text {
                             width: parent.width;
                             text: root.empty_state != "" ? root.empty_state :
                                   root.search_text != "" ? "No results for \"" + root.search_text + "\"" :
                                   root.filter_text != "" ? "No files match \"" + root.filter_text + "\"" :
+                                  root.is_home_view ? "Your Home is quiet" :
+                                  root.in_recycle_bin ? "Recycle Bin is empty" :
                                   "This folder is empty";
-                            color: ThemePalette.text_faint;
-                            font-size: 13px;
+                            color: ThemePalette.text;
+                            font-size: 15px;
+                            font-weight: 600;
                             horizontal-alignment: center;
                         }
                         Text {
-                            visible: root.search_text != "";
-                            width: parent.width;
-                            text: root.search_scope_all ? "Try a different query or switch back to this folder" : "Try a different query or search the whole drive";
+                            visible: root.search_text != "" || root.is_home_view || root.in_recycle_bin || root.empty_state == "Loading folder..." || root.empty_state == "Loading Recycle Bin..." || root.empty_state == "Searching..." || root.empty_state == "Searching drive...";
+                            width: min(360px, parent.width - 48px);
+                            x: (parent.width - self.width) / 2;
+                            text: root.search_text != "" ? (root.search_scope_all ? "Try a different query or switch back to this folder" : "Try a different query or search the whole drive") :
+                                  root.is_home_view ? "Pin folders from the sidebar or open a drive — shortcuts collect here." :
+                                  root.in_recycle_bin ? "Deleted files appear here until you empty the bin." :
+                                  root.empty_state == "Loading Recycle Bin..." ? "Reading the OS Recycle Bin…" :
+                                  root.empty_state == "Loading folder..." ? "Reading folder contents…" :
+                                  "Hang tight…";
                             color: ThemePalette.text_faint;
-                            font-size: 11px;
+                            font-size: 12px;
                             horizontal-alignment: center;
+                            wrap: word-wrap;
+                            height: self.preferred-height;
+                        }
+                        if root.in_recycle_bin && root.empty_state == "Recycle Bin is empty.": DialogButton {
+                            x: (parent.width - self.preferred-width) / 2;
+                            label: "Refresh";
+                            clicked => { root.command("refresh"); }
                         }
                     }
                     // Covers the whole pane so clicks reach clear_selection even over the message.
@@ -5535,11 +5803,30 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                // Preview action row
+                Rectangle {
+                    x: 1px;
+                    y: 46px;
+                    width: parent.width - 1px;
+                    height: 34px;
+                    background: ThemePalette.panel_alt;
+                    HorizontalLayout {
+                        x: 10px;
+                        y: 4px;
+                        height: 26px;
+                        spacing: 6px;
+                        DialogButton { label: "Open"; clicked => { root.preview_action("open"); } }
+                        DialogButton { label: "Copy path"; clicked => { root.preview_action("copy-path"); } }
+                        DialogButton { label: "Reveal"; clicked => { root.preview_action("reveal"); } }
+                        DialogButton { label: "Tag"; clicked => { root.preview_action("tag"); } }
+                    }
+                }
+
                 ScrollView {
                     x: 0px;
-                    y: 48px;
+                    y: 80px;
                     width: parent.width;
-                    height: parent.height - 48px;
+                    height: parent.height - 80px;
 
                     VerticalLayout {
                         // Inner content shrinks by 20 px so the scroll bar has
@@ -6292,8 +6579,19 @@ export component MainWindow inherits Window {
             }
             ToolButton { x: parent.width - 46px; y: 14px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: "Close settings"; clicked => { root.settings_visible = false; } }
 
+            Text {
+                x: 20px; y: 48px; width: parent.width - 40px; height: 16px;
+                text: root.settings_tab == "ai" ? "On-device models · no cloud · no OCR"
+                    : (root.settings_tab == "performance" ? "Index, cache, and scan budgets"
+                    : (root.settings_tab == "view" ? "Layout density, panes, and defaults"
+                    : "Theme, accent, fonts, and chrome"));
+                color: ThemePalette.text_faint;
+                font-size: 11px;
+                overflow: elide;
+            }
+
             Rectangle {
-                y: 56px;
+                y: 68px;
                 width: parent.width;
                 height: 44px;
                 background: transparent;
@@ -6332,9 +6630,9 @@ export component MainWindow inherits Window {
 
             if root.settings_tab == "appearance" || root.settings_tab == "themes": ScrollView {
                 x: 20px;
-                y: 112px;
+                y: 124px;
                 width: parent.width - 40px;
-                height: parent.height - 124px;
+                height: parent.height - 136px;
 
                 VerticalLayout {
                     // Inner content stops 20 px short of the ScrollView right
@@ -7157,9 +7455,9 @@ export component MainWindow inherits Window {
 
             if root.settings_tab == "view": ScrollView {
                 x: 20px;
-                y: 112px;
+                y: 124px;
                 width: parent.width - 40px;
-                height: parent.height - 124px;
+                height: parent.height - 136px;
 
                 VerticalLayout {
                 width: parent.width - 20px;
@@ -7293,9 +7591,9 @@ export component MainWindow inherits Window {
 
             if root.settings_tab == "performance": ScrollView {
                 x: 20px;
-                y: 112px;
+                y: 124px;
                 width: parent.width - 40px;
-                height: parent.height - 124px;
+                height: parent.height - 136px;
 
                 VerticalLayout {
                     width: parent.width - 20px;
@@ -7377,9 +7675,9 @@ export component MainWindow inherits Window {
 
             if root.settings_tab == "ai" && !root.is_simple: ScrollView {
                 x: 20px;
-                y: 112px;
+                y: 124px;
                 width: parent.width - 40px;
-                height: parent.height - 124px;
+                height: parent.height - 136px;
 
                 VerticalLayout {
                     width: parent.width - 20px;
@@ -7387,6 +7685,14 @@ export component MainWindow inherits Window {
                     padding-bottom: 16px;
 
                 Text { text: "AI CAPABILITIES"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Text {
+                    width: parent.width;
+                    text: "On-device only. Semantic ranking uses filename embeddings. Image tags are approximate ImageNet labels — there is no OCR for text inside screenshots.";
+                    color: ThemePalette.text_muted;
+                    font-size: 11.5px;
+                    wrap: word-wrap;
+                    height: self.preferred-height;
+                }
                 Rectangle {
                     width: parent.width;
                     border-width: 1px;
@@ -7560,21 +7866,21 @@ export component MainWindow inherits Window {
                                 width: 88px; height: 30px; border-radius: AppMetrics.radius_small;
                                 background: root.ai_profile == "compact" ? ThemePalette.accent : ThemePalette.panel_alt;
                                 border-width: 1px; border-color: ThemePalette.border;
-                                Text { width: parent.width; height: parent.height; text: "Compact"; color: root.ai_profile == "compact" ? white : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: parent.width; height: parent.height; text: "Compact"; color: root.ai_profile == "compact" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("compact"); } }
                             }
                             Rectangle {
                                 width: 96px; height: 30px; border-radius: AppMetrics.radius_small;
                                 background: root.ai_profile == "balanced" ? ThemePalette.accent : ThemePalette.panel_alt;
                                 border-width: 1px; border-color: ThemePalette.border;
-                                Text { width: parent.width; height: parent.height; text: "Balanced"; color: root.ai_profile == "balanced" ? white : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: parent.width; height: parent.height; text: "Balanced"; color: root.ai_profile == "balanced" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("balanced"); } }
                             }
                             Rectangle {
                                 width: 88px; height: 30px; border-radius: AppMetrics.radius_small;
                                 background: root.ai_profile == "quality" ? ThemePalette.accent : ThemePalette.panel_alt;
                                 border-width: 1px; border-color: ThemePalette.border;
-                                Text { width: parent.width; height: parent.height; text: "Quality"; color: root.ai_profile == "quality" ? white : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: parent.width; height: parent.height; text: "Quality"; color: root.ai_profile == "quality" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("quality"); } }
                             }
                         }
@@ -7608,7 +7914,7 @@ export component MainWindow inherits Window {
                                 Text {
                                     width: parent.width; height: parent.height;
                                     text: root.ai_install_state == "error" ? "Retry" : "Install AI";
-                                    color: white; font-size: 12.5px; font-weight: 700;
+                                    color: ThemePalette.on_accent; font-size: 12.5px; font-weight: 700;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
                                 install_touch := TouchArea {
@@ -7764,6 +8070,7 @@ export component MainWindow inherits Window {
     }
 
     if root.prompt_visible: Rectangle {
+        z: 160;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
@@ -7853,26 +8160,60 @@ export component MainWindow inherits Window {
 
         // Standard text-input prompt (rename / new folder / etc.)
         if root.prompt_kind != "conflict" && root.prompt_kind != "rename-conflict" && root.prompt_kind != "batch-rename": Rectangle {
-            x: (parent.width - min(420px, parent.width - 32px)) / 2;
-            y: (parent.height - min(190px, parent.height - 32px)) / 2;
-            width: min(420px, parent.width - 32px);
-            height: min(190px, parent.height - 32px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(440px, parent.width - 40px);
+            height: 188px;
             border-width: 1px;
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
             background: ThemePalette.panel_solid;
-            Text { x: 18px; y: 16px; width: parent.width - 36px; height: 26px; text: root.prompt_title; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
-            prompt := LineEdit {
-                x: 18px; y: 66px; width: parent.width - 36px; height: 34px;
-                text: root.prompt_value;
-                accepted(value) => { root.prompt_visible = false; root.prompt_accept(value); }
-                key-pressed(e) => {
-                    if (e.text == Key.Escape) { root.prompt_cancel(); return accept; }
-                    return reject;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: rgba(0, 0, 0, 0.4);
+            clip: true;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+                alignment: stretch;
+
+                Text {
+                    text: root.prompt_title;
+                    color: ThemePalette.text;
+                    font-size: 18px;
+                    font-weight: 700;
+                    overflow: elide;
+                }
+
+                prompt := LineEdit {
+                    height: 36px;
+                    text <=> root.prompt_value;
+                    font-size: 13px;
+                    font-family: AppMetrics.ui_font;
+                    accepted(value) => { root.prompt_visible = false; root.prompt_accept(value); }
+                    key-pressed(e) => {
+                        if (e.text == Key.Escape) { root.prompt_cancel(); return accept; }
+                        return reject;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    DialogButton {
+                        label: "Cancel";
+                        clicked => { root.prompt_cancel(); }
+                    }
+                    DialogButton {
+                        label: "OK";
+                        primary: true;
+                        clicked => {
+                            root.prompt_visible = false;
+                            root.prompt_accept(root.prompt_value);
+                        }
+                    }
                 }
             }
-            DialogButton { x: parent.width - 180px; y: parent.height - 48px; label: "Cancel"; clicked => { root.prompt_cancel(); } }
-            DialogButton { x: parent.width - 90px; y: parent.height - 48px; label: "OK"; primary: true; clicked => { root.prompt_visible = false; root.prompt_accept(prompt.text); } }
         }
     }
 
@@ -8132,10 +8473,10 @@ export component MainWindow inherits Window {
         background: rgba(0, 0, 0, 0.42);
         TouchArea { clicked => { root.dupe_overlay_close(); } }
         Rectangle {
-            x: (parent.width - min(520px, parent.width - 32px)) / 2;
-            y: (parent.height - min(420px, parent.height - 32px)) / 2;
-            width: min(520px, parent.width - 32px);
-            height: min(420px, parent.height - 32px);
+            x: (parent.width - min(640px, parent.width - 32px)) / 2;
+            y: (parent.height - min(520px, parent.height - 32px)) / 2;
+            width: min(640px, parent.width - 32px);
+            height: min(520px, parent.height - 32px);
             border-width: 1px;
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
@@ -8153,32 +8494,52 @@ export component MainWindow inherits Window {
                 text: root.dupe_overlay_subtitle;
                 color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
             }
+            HorizontalLayout {
+                x: 18px; y: 58px; spacing: 8px; height: 28px;
+                DialogButton { label: "Keep newest"; clicked => { root.dupe_keep_strategy("newest"); } }
+                DialogButton { label: "Keep largest"; clicked => { root.dupe_keep_strategy("largest"); } }
+            }
             ScrollView {
-                x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 120px;
+                x: 12px; y: 90px; width: parent.width - 24px; height: parent.height - 146px;
                 for grp[gi] in root.dupe_groups: Rectangle {
                     width: parent.width - 8px;
-                    height: 72px;
+                    height: 118px;
                     border-radius: AppMetrics.radius_small;
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     background: ThemePalette.panel;
+                    Rectangle {
+                        x: 12px; y: 12px; width: 4px; height: 40px;
+                        border-radius: 2px;
+                        background: ThemePalette.accent;
+                    }
                     Text {
-                        x: 12px; y: 8px; width: parent.width - 24px; height: 18px;
+                        x: 24px; y: 10px; width: parent.width - 36px; height: 18px;
                         text: grp.title;
                         color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
                     }
                     Text {
-                        x: 12px; y: 28px; width: parent.width - 24px; height: 14px;
-                        text: grp.detail + " · " + grp.count + " files · " + grp.reclaimable;
-                        color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
+                        x: 24px; y: 30px; width: parent.width - 36px; height: 14px;
+                        text: grp.detail + " · keep " + grp.keep_size + " · reclaim " + grp.reclaimable;
+                        color: ThemePalette.text_muted; font-size: 11px; overflow: elide;
+                    }
+                    Text {
+                        x: 24px; y: 48px; width: parent.width - 36px; height: 14px;
+                        text: "Keep: " + grp.keep_path;
+                        color: ThemePalette.text_faint; font-size: 10.5px; font-family: AppMetrics.mono_font; overflow: elide;
+                    }
+                    Text {
+                        x: 24px; y: 64px; width: parent.width - 36px; height: 14px;
+                        text: grp.paths_preview;
+                        color: ThemePalette.text_faint; font-size: 10.5px; font-family: AppMetrics.mono_font; overflow: elide;
                     }
                     DialogButton {
                         x: 12px; y: parent.height - 38px;
-                        label: "Keep";
+                        label: "Keep first";
                         clicked => { root.dupe_group_keep(grp.id); }
                     }
                     DialogButton {
-                        x: 96px; y: parent.height - 38px;
+                        x: 118px; y: parent.height - 38px;
                         label: "Delete others";
                         danger: true;
                         clicked => { root.dupe_group_delete_others(grp.id); }
@@ -8212,8 +8573,8 @@ export component MainWindow inherits Window {
             Text { x: 20px; y: 16px; width: parent.width - 80px; height: 28px; text: root.preview_title; color: ThemePalette.text; font-size: 20px; font-weight: 700; overflow: elide; }
             ToolButton { x: parent.width - 44px; y: 10px; button_width: 32px; button_height: 32px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: "Close"; clicked => { root.quick_look_close(); } }
             if root.preview_is_image: Image {
-                x: (parent.width - 280px) / 2; y: 56px;
-                width: 280px; height: 240px;
+                x: (parent.width - 420px) / 2; y: 56px;
+                width: 420px; height: 320px;
                 source: root.preview_image;
                 image-fit: contain;
             }
@@ -8539,7 +8900,7 @@ export component MainWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: parent.height - self.height - 14px;
             width: min(560px, parent.width - 28px);
-            height: toast_body.preferred-height + (root.toast_kind == "error" || root.toast_kind == "warning" ? 52px : 36px);
+            height: toast_body.preferred-height + ((root.toast_kind == "error" || root.toast_kind == "warning" || root.toast_action != "") ? 52px : 36px);
             border-width: 1px;
             border-color: root.toast_kind == "error" ? ThemePalette.danger :
                           root.toast_kind == "success" ? ThemePalette.success :
@@ -8563,11 +8924,19 @@ export component MainWindow inherits Window {
             toast_body := CopyableMessageText {
                 x: 13px;
                 y: 10px;
-                content-width: parent.width - 26px;
+                content-width: parent.width - (root.toast_action != "" ? 100px : 26px);
                 text: root.toast_text;
                 font-size: 12.5px;
                 text-color: ThemePalette.text;
                 cap-height: root.toast_kind == "error" || root.toast_kind == "warning" ? 220px : 140px;
+            }
+
+            if root.toast_action != "": DialogButton {
+                x: parent.width - self.preferred-width - 12px;
+                y: parent.height - 38px;
+                label: root.toast_action;
+                primary: true;
+                clicked => { root.toast_action_clicked(); }
             }
 
             if root.toast_kind == "error" || root.toast_kind == "warning": HorizontalLayout {
@@ -8756,6 +9125,8 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(Control+V); activated => { root.command("paste"); } }
         KeyBinding { keys: @keys(Control+A); activated => { root.command("select-all"); } }
         KeyBinding { keys: @keys(Control+Z); activated => { root.command("undo"); } }
+        KeyBinding { keys: @keys(Control+Y); activated => { root.command("redo"); } }
+        KeyBinding { keys: @keys(Control+N); activated => { root.command("new-window"); } }
         KeyBinding { keys: @keys(Control+Shift+N); activated => { root.command("new-folder"); } }
         KeyBinding { keys: @keys(Alt+LeftArrow); activated => { root.go_back(); } }
         KeyBinding { keys: @keys(Alt+RightArrow); activated => { root.go_forward(); } }
@@ -8763,7 +9134,7 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(F3); activated => { root.toggle_dual_pane(); } }
         KeyBinding { keys: @keys(F5); activated => { root.refresh(); } }
         KeyBinding { keys: @keys(Delete); activated => { root.command("delete"); } }
-        KeyBinding { keys: @keys(Shift+Delete); activated => { if (root.in_recycle_bin) { root.command("purge"); } } }
+        KeyBinding { keys: @keys(Shift+Delete); activated => { root.command("purge"); } }
         KeyBinding { keys: @keys(Alt+Return); activated => { root.command("properties"); } }
         KeyBinding { keys: @keys(F2); activated => { root.command("rename"); } }
         KeyBinding { keys: @keys(Return); activated => { root.file_opened(root.selected_index); } }
@@ -8812,8 +9183,8 @@ export global AppMetrics {
     in-out property <length> grid_h: 122px;
     in-out property <length> pad: 16px;
     in-out property <length> outer_border: 0px;
-    in-out property <string> ui_font: "Segoe UI";
-    in-out property <string> mono_font: "Cascadia Mono";
+    in-out property <string> ui_font: "Noto Sans";
+    in-out property <string> mono_font: "JetBrains Mono";
     in-out property <bool> light_controls: false;
     in-out property <string> icon_set: "";
 }

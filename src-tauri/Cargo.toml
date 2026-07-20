@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "0.9.41"
+version = "0.9.42"
 edition = "2024"
 
 [lib]
@@ -43,6 +43,7 @@ pdf-extract = "0.7"
 # and a thread-safe binding guard.
 pdfium-render = "0.8"
 zip = "2"
+kamadak-exif = "0.5"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 memchr = "2"
 once_cell = "1.19"

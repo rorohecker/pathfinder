@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+﻿#![allow(dead_code)]
 #![allow(
     clippy::collapsible_if,
     clippy::needless_borrows_for_generic_args,
@@ -75,7 +75,7 @@ mod winml_bridge;
 
 slint::include_modules!();
 
-const DIRECTORY_CACHE_TTL: Duration = Duration::from_secs(20);
+const DIRECTORY_CACHE_TTL: Duration = Duration::from_secs(8);
 const PREVIEW_CACHE_TTL: Duration = Duration::from_secs(180);
 const DRIVE_SPACE_CACHE_TTL: Duration = Duration::from_secs(10);
 const MAX_DIRECTORY_CACHE_ENTRIES: usize = 64;
@@ -299,7 +299,7 @@ pub struct FileOp {
     pub to: Option<String>,
     #[serde(default)]
     pub trash_id: Option<String>,
-    /// Populated for `batch_rename` — reversed as one undo step.
+    /// Populated for `batch_rename` â€” reversed as one undo step.
     #[serde(default)]
     pub batch: Option<Vec<RenameOp>>,
 }
@@ -572,6 +572,8 @@ struct AppState {
     // so re-selecting a PDF shows the rendered page instantly instead of
     // re-running pdfium each time. Values are Arc'd for cheap hand-off.
     pdf_page_cache: Arc<Mutex<HashMap<String, Arc<(Vec<u8>, u32, u32)>>>>,
+    /// Absolute directory paths whose on-disk contents changed since last refresh.
+    dirty_dirs: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Default for AppState {
@@ -590,6 +592,7 @@ impl Default for AppState {
             git_cache: Arc::new(Mutex::new(HashMap::new())),
             index_debounce: Arc::new(Mutex::new(HashMap::new())),
             pdf_page_cache: Arc::new(Mutex::new(HashMap::new())),
+            dirty_dirs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -603,6 +606,8 @@ struct ParsedQuery {
     content: Option<String>,
     size: Option<SizeFilter>,
     modified_after: Option<SystemTime>,
+    /// Operator tokens that were present but could not be parsed (e.g. size:foo).
+    ignored_filters: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -2046,9 +2051,9 @@ fn pdfium_library_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // Bundled next to the executable (Tauri resource) …
+            // Bundled next to the executable (Tauri resource) â€¦
             candidates.push(dir.join("pdfium.dll"));
-            // … or under a nested resources folder, depending on bundler.
+            // â€¦ or under a nested resources folder, depending on bundler.
             candidates.push(dir.join("resources").join("pdfium.dll"));
         }
     }
@@ -2684,8 +2689,24 @@ fn parse_query(query: &str) -> ParsedQuery {
                 "kind" => parsed.kind = Some(value),
                 "name" => parsed.name = Some(value),
                 "content" => parsed.content = Some(value),
-                "size" => parsed.size = parse_size_filter(&value),
-                "modified" => parsed.modified_after = parse_modified_filter(&value),
+                "size" => {
+                    if let Some(filter) = parse_size_filter(&value) {
+                        parsed.size = Some(filter);
+                    } else {
+                        parsed
+                            .ignored_filters
+                            .push(format!("size:{value}"));
+                    }
+                }
+                "modified" => {
+                    if let Some(after) = parse_modified_filter(&value) {
+                        parsed.modified_after = Some(after);
+                    } else {
+                        parsed
+                            .ignored_filters
+                            .push(format!("modified:{value}"));
+                    }
+                }
                 // Tags are stored in the frontend because they are local app metadata.
                 "tag" => {}
                 _ => parsed.terms.push(token.to_lowercase()),
@@ -2698,11 +2719,84 @@ fn parse_query(query: &str) -> ParsedQuery {
     parsed
 }
 
+fn query_filter_warnings(query: &str) -> Vec<String> {
+    let parsed = parse_query(query);
+    let mut warnings = parsed.ignored_filters;
+    if parsed.content.is_some() {
+        warnings.push(
+            "content: searches text <=1MB plus PDF/DOCX/PPTX (no OCR)".to_string(),
+        );
+    }
+    warnings
+}
+
+fn strip_xml_to_text(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len() / 4);
+    let mut in_tag = false;
+    for ch in xml.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn extract_office_openxml_text(path: &Path, inner_prefix: &str) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut combined = String::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).ok()?;
+        let name = entry.name().to_string();
+        if !name.starts_with(inner_prefix) || !name.ends_with(".xml") {
+            continue;
+        }
+        let mut buf = String::new();
+        if entry.read_to_string(&mut buf).is_err() {
+            continue;
+        }
+        combined.push(' ');
+        combined.push_str(&strip_xml_to_text(&buf));
+        if combined.len() > 512 * 1024 {
+            break;
+        }
+    }
+    if combined.trim().is_empty() {
+        None
+    } else {
+        Some(combined)
+    }
+}
+
 fn read_text_for_search(path: &Path, metadata: &fs::Metadata) -> Option<Vec<u8>> {
-    if metadata.len() > 1024 * 1024 {
+    if metadata.len() > 8 * 1024 * 1024 {
         return None;
     }
     let ext = extension(path);
+    if ext == "pdf" {
+        let text = pdf_extract::extract_text(path).ok()?;
+        let mut bytes = text.into_bytes();
+        bytes.make_ascii_lowercase();
+        return Some(bytes);
+    }
+    if ext == "docx" {
+        let text = extract_office_openxml_text(path, "word/")?;
+        let mut bytes = text.into_bytes();
+        bytes.make_ascii_lowercase();
+        return Some(bytes);
+    }
+    if ext == "pptx" {
+        let text = extract_office_openxml_text(path, "ppt/slides/")?;
+        let mut bytes = text.into_bytes();
+        bytes.make_ascii_lowercase();
+        return Some(bytes);
+    }
+    if metadata.len() > 1024 * 1024 {
+        return None;
+    }
     if !is_text_ext(&ext) {
         return None;
     }
@@ -2755,7 +2849,9 @@ fn matches_query(path: &Path, metadata: &fs::Metadata, parsed: &ParsedQuery) -> 
     }
 
     let needs_content = parsed.content.is_some()
-        || (!parsed.terms.is_empty() && metadata.is_file() && is_text_ext(&ext));
+        || (!parsed.terms.is_empty()
+            && metadata.is_file()
+            && (is_text_ext(&ext) || ext == "pdf"));
     let content = if needs_content {
         read_text_for_search(path, metadata)
     } else {
@@ -4993,16 +5089,14 @@ fn prefetch_paths(state: State<'_, AppState>, paths: Vec<String>) {
     });
 }
 
-#[tauri::command]
-fn watch_paths(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
-    let app_state = state.inner().clone();
-    let mut watchers = state
+fn ensure_watched_paths(app_state: &AppState, paths: &[String]) -> Result<(), String> {
+    let mut watchers = app_state
         .watchers
         .lock()
         .map_err(|_| "Could not lock watcher registry")?;
 
     for path in paths {
-        let path_buf = PathBuf::from(&path);
+        let path_buf = PathBuf::from(path);
         if !path_buf.is_dir() || watchers.contains_key(&cache_key(&path_buf)) {
             continue;
         }
@@ -5021,6 +5115,9 @@ fn watch_paths(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), Str
 
                     for parent in touched {
                         let parent_string = parent.to_string_lossy().to_string();
+                        if let Ok(mut dirty) = callback_state.dirty_dirs.lock() {
+                            dirty.insert(parent_string.clone());
+                        }
                         if let Ok(entries) = list_directory_uncached(&parent) {
                             callback_state.store_directory(&parent_string, entries.clone());
                             // Use debounced indexing to avoid excessive database operations
@@ -5055,6 +5152,11 @@ fn watch_paths(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), Str
     }
 
     Ok(())
+}
+
+#[tauri::command]
+fn watch_paths(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
+    ensure_watched_paths(state.inner(), &paths)
 }
 
 fn detect_npu_names() -> Vec<String> {
@@ -5174,7 +5276,7 @@ fn compute_ai_capabilities() -> AiCapabilities {
         )
     } else {
         format!(
-            "Active accelerator: {} ({}). Fallback order NPU → GPU → CPU. [{}]",
+            "Active accelerator: {} ({}). Fallback order NPU â†’ GPU â†’ CPU. [{}]",
             acceleration_kind, device_name, ort
         )
     };
@@ -6802,12 +6904,12 @@ fn storage_path_summary(path: &str) -> String {
         if let Some(idx) = lower.find(marker) {
             let tail = norm[idx + 1..].trim_start_matches('\\');
             if !tail.is_empty() {
-                return format!("…\\{tail}");
+                return format!("â€¦\\{tail}");
             }
         }
     }
     if norm.len() > 72 {
-        format!("…{}", &norm[norm.len().saturating_sub(68)..])
+        format!("â€¦{}", &norm[norm.len().saturating_sub(68)..])
     } else {
         norm
     }
@@ -7638,7 +7740,7 @@ fn undo_last_operation(state: State<'_, AppState>) -> Result<String, String> {
             Ok(format!("Moved back to '{}'", dst.display()))
         }
         "delete" => {
-            undo_delete_from_trash(op.trash_id.as_deref())?;
+            undo_delete_from_trash(op.trash_id.as_deref(), Some(op.from.as_str()))?;
             Ok(format!("Restored '{}'", op.from))
         }
         "batch_rename" => {
@@ -8389,6 +8491,11 @@ enum PendingPrompt {
     },
     StorageCleanup(Vec<String>),
     RenameTag(String),
+    /// Shift+Delete: permanently remove without Recycle Bin.
+    PermanentDelete(Vec<String>),
+    BatchTag(Vec<String>),
+    BatchNote(Vec<String>),
+    TagOne(String),
 }
 
 /// Sidebar drives + storage scan cache loaded on a background thread after
@@ -8508,12 +8615,20 @@ struct NativeController {
     thumbnail_memory: HashMap<String, slint::Image>,
     thumbnail_ready: Arc<std::sync::atomic::AtomicBool>,
     thumbnail_timer: Option<slint::Timer>,
-    toast_queue: std::collections::VecDeque<(String, String)>,
+    toast_queue: std::collections::VecDeque<(String, String, String)>,
     toast_showing: bool,
     toast_current_kind: String,
     toast_current_message: String,
+    toast_current_action: String,
     toast_last_shown: Option<std::time::Instant>,
     toast_timer: Option<slint::Timer>,
+    /// Sidebar folder-tree expansion state (absolute paths).
+    expanded_tree_paths: std::collections::HashSet<String>,
+    /// Redo stack populated when undoing.
+    redo_stack: Vec<FileOp>,
+    search_source_pref: String,
+    thumb_size_scale: f32,
+    folder_changed_pending: bool,
     git_status_ready: Arc<std::sync::atomic::AtomicBool>,
     pending_git_status: Arc<Mutex<Option<Arc<GitStatusMap>>>>,
     operation_ready: Arc<std::sync::atomic::AtomicBool>,
@@ -8565,6 +8680,11 @@ struct NativeOperationResult {
     clear_clipboard: bool,
     /// Directory paths whose listing cache must be dropped after paste/move.
     invalidate_dirs: Vec<String>,
+    /// When non-empty and a full refresh is not required, drop these paths from
+    /// the in-memory listing instead of re-navigating the whole folder.
+    optimistic_remove_paths: Vec<String>,
+    /// Optional toast action label (e.g. "Undo").
+    toast_action: String,
 }
 
 struct PaletteSpec {
@@ -8685,6 +8805,22 @@ fn lighten_color(c: Color, factor: f32) -> Color {
     let g = (c.green() as f32 + (255.0 - c.green() as f32) * factor).round() as u8;
     let b = (c.blue() as f32 + (255.0 - c.blue() as f32) * factor).round() as u8;
     Color::from_rgb_u8(r, g, b)
+}
+
+fn contrasting_on_color(c: Color) -> Color {
+    let lum = (c.red() as u32 * 299 + c.green() as u32 * 587 + c.blue() as u32 * 114) / 1000;
+    if lum > 160 {
+        color("#101318")
+    } else {
+        color("#ffffff")
+    }
+}
+
+/// Keep std-widgets (LineEdit, etc.) in sync with Pathfinder's light/dark themes.
+/// Without this, Fluent LineEdits keep the default dark palette and paint white
+/// text on light Settings / dialog panels.
+fn sync_std_widget_palette(ui: &MainWindow, light: bool) {
+    ui.invoke_sync_widget_palette(light);
 }
 
 fn theme_icons_dir() -> PathBuf {
@@ -9187,7 +9323,7 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
         if semantic_ready {
             name_paths.push((entry.path.clone(), entry.name.clone()));
         }
-        // dHash is pure CPU image hashing — works without Local AI models.
+        // dHash is pure CPU image hashing â€” works without Local AI models.
         if matches!(
             extension.as_str(),
             "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
@@ -11130,7 +11266,7 @@ const PREVIEW_READ_BYTES: usize = 64 * 1024;
 
 /// True if a preview for `path` is already sitting in the in-memory cache, so
 /// the caller can render it synchronously without a background thread hop.
-/// Only does a cheap stat (needed for the cache key) — never reads the body.
+/// Only does a cheap stat (needed for the cache key) â€” never reads the body.
 fn preview_is_cached(state: &AppState, path: &str) -> bool {
     let path_buf = PathBuf::from(path);
     let Ok(metadata) = fs::metadata(&path_buf) else {
@@ -11202,7 +11338,7 @@ fn decode_html_entities(input: &str) -> String {
         .replace("&copy;", "\u{00a9}")
         .replace("&reg;", "\u{00ae}")
         .replace("&trade;", "\u{2122}");
-    // Numeric entities like &#8217; — resolve the decimal ones we can.
+    // Numeric entities like &#8217; â€” resolve the decimal ones we can.
     if out.contains("&#") {
         let re = &NUMERIC_ENTITY_RE;
         out = re
@@ -11241,7 +11377,7 @@ fn tidy_rendered_text(input: &str) -> String {
 
 /// Convert an HTML document into readable plain text: script/style content is
 /// dropped, block tags become line breaks, list items get bullets, and entities
-/// are decoded. This is the built-in "rendered" view — there is no WebView in
+/// are decoded. This is the built-in "rendered" view â€” there is no WebView in
 /// the app by design, so this gives a fast, dependency-free approximation.
 fn render_html_to_text(html: &str) -> String {
     let chars: Vec<char> = html.chars().collect();
@@ -11440,7 +11576,7 @@ fn native_delete(state: &AppState, path: &str) -> Result<(), String> {
     native_delete_inner(state, path, true)
 }
 
-/// Recycle-bin delete without walking the tree for queue byte totals — keeps
+/// Recycle-bin delete without walking the tree for queue byte totals â€” keeps
 /// the UI thread responsive when the user confirms deleting huge folders.
 fn native_delete_fast(state: &AppState, path: &str) -> Result<(), String> {
     native_delete_inner(state, path, false)
@@ -11470,18 +11606,12 @@ fn native_delete_inner(
     };
     let op_id = state.queue_start("delete", path, None, total);
     let started = Instant::now();
+    // Do not call trash::os_limited::list() here â€” enumerating the whole
+    // Recycle Bin after every delete is O(bin_size) and made multi-select
+    // delete feel frozen. Undo resolves by original path when needed.
     trash::delete(&path_buf).map_err(|e| e.to_string())?;
-    let trash_id = trash::os_limited::list().ok().and_then(|items| {
-        items.into_iter().find(|item| {
-            same_path_string(
-                &item.original_path().to_string_lossy(),
-                &path_buf.to_string_lossy(),
-            )
-        })
-    });
-    let trash_id_str = trash_id.map(|item| item.id.to_string_lossy().into_owned());
     state.invalidate_path(&path_buf);
-    state.log_op_with_trash("delete", path, None, trash_id_str.as_deref());
+    state.log_op_with_trash("delete", path, None, None);
     state.queue_finish(
         op_id,
         "done",
@@ -11490,6 +11620,49 @@ fn native_delete_inner(
         started.elapsed(),
     );
     Ok(())
+}
+
+/// Batch-move paths to the OS Recycle Bin in one shell operation.
+/// Logs one undo entry per path without enumerating the bin (lazy undo).
+fn native_delete_all_fast(state: &AppState, paths: &[String]) -> Result<usize, String> {
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    if state.queue_cancel_requested() {
+        return Err(OP_CANCELLED.to_string());
+    }
+    if state.queue_is_paused() {
+        return Err("Operation queue is paused.".to_string());
+    }
+    let existing: Vec<String> = paths
+        .iter()
+        .filter(|p| Path::new(p).exists())
+        .cloned()
+        .collect();
+    if existing.is_empty() {
+        return Err("Nothing to delete.".to_string());
+    }
+    let n = existing.len();
+    let label = if n == 1 {
+        existing[0].clone()
+    } else {
+        format!("{n} items")
+    };
+    let op_id = state.queue_start("delete", &label, None, 0);
+    let started = Instant::now();
+    trash::delete_all(&existing).map_err(|e| e.to_string())?;
+    for path in &existing {
+        state.invalidate_path(Path::new(path));
+        state.log_op_with_trash("delete", path, None, None);
+    }
+    state.queue_finish(
+        op_id,
+        "done",
+        "Moved to Recycle Bin",
+        0,
+        started.elapsed(),
+    );
+    Ok(n)
 }
 
 fn native_create_directory(state: &AppState, path: &str) -> Result<(), String> {
@@ -11663,11 +11836,8 @@ fn format_size_short(bytes: u64) -> String {
     }
 }
 
-/// Bucket a modified timestamp into a coarse Explorer-style label. Used by the
-/// details view to draw section headers above each new bucket (Today, Yesterday,
-/// This week, Last week, Earlier this month, Earlier this year, Older). The
-/// boundaries use 24-hour windows from now rather than wall-clock midnight,
-/// which is simpler and still matches the user's mental model close enough.
+/// Bucket a modified timestamp into Explorer-style labels using local calendar
+/// midnights (Today / Yesterday / this week / â€¦), matching File Explorer.
 fn date_group_label(secs: u64) -> &'static str {
     if secs == 0 {
         return "Unknown date";
@@ -11676,27 +11846,112 @@ fn date_group_label(secs: u64) -> &'static str {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let diff = now.saturating_sub(secs);
-    // If somehow modified is in the future (clock skew / unsynced file), still
-    // bucket it as Today so it doesn't end up at the very bottom under "Older".
     if secs > now {
         return "Today";
     }
-    const DAY: u64 = 86_400;
-    if diff < DAY {
+
+    // Local midnight boundaries via offset from UTC. Windows local time is
+    // enough for grouping; we approximate with the process timezone offset.
+    let local_offset_secs = local_utc_offset_secs();
+    let day_of = |unix: u64| -> i64 {
+        ((unix as i64) + local_offset_secs).div_euclid(86_400)
+    };
+    let today = day_of(now);
+    let file_day = day_of(secs);
+    let day_diff = today - file_day;
+
+    if day_diff <= 0 {
         "Today"
-    } else if diff < 2 * DAY {
+    } else if day_diff == 1 {
         "Yesterday"
-    } else if diff < 7 * DAY {
+    } else if day_diff < 7 {
         "This week"
-    } else if diff < 14 * DAY {
+    } else if day_diff < 14 {
         "Last week"
-    } else if diff < 30 * DAY {
+    } else if day_diff < 30 {
         "Earlier this month"
-    } else if diff < 365 * DAY {
+    } else if day_diff < 365 {
         "Earlier this year"
     } else {
         "Older"
+    }
+}
+
+fn dupe_group_ui_item(id_title: &str, paths: &[String], detail: &str) -> DupeGroupItem {
+    let title = id_title
+        .split_once("::")
+        .map(|(_, t)| t.to_string())
+        .unwrap_or_else(|| id_title.to_string());
+    let size = paths
+        .first()
+        .and_then(|p| fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let reclaim = size.saturating_mul(paths.len().saturating_sub(1) as u64);
+    let keep_path = paths.first().cloned().unwrap_or_default();
+    let others: Vec<&str> = paths.iter().skip(1).take(3).map(|s| s.as_str()).collect();
+    let paths_preview = if paths.len() <= 1 {
+        String::new()
+    } else if paths.len() <= 4 {
+        format!("Also: {}", others.join(" Â· "))
+    } else {
+        format!(
+            "Also: {} Â· +{} more",
+            others.join(" Â· "),
+            paths.len().saturating_sub(4)
+        )
+    };
+    DupeGroupItem {
+        id: ss(id_title),
+        title: ss(&title),
+        detail: ss(detail),
+        count: paths.len() as i32,
+        reclaimable: ss(format_size_short(reclaim)),
+        keep_path: ss(&keep_path),
+        paths_preview: ss(&paths_preview),
+        keep_size: ss(format_size_short(size)),
+    }
+}
+
+fn home_section_label(section_id: u64) -> &'static str {
+    match section_id {
+        1 => "Drives",
+        2 => "Pinned",
+        3 => "Recent",
+        4 => "Saved searches",
+        5 => "Places",
+        _ => "",
+    }
+}
+
+fn local_utc_offset_secs() -> i64 {
+    // chrono-less: use local vs UTC wall-clock via Windows or libc when available.
+    // Fallback to 0 (UTC) so groupings still work, just shifted.
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
+        unsafe {
+            let local = GetLocalTime();
+            let utc = GetSystemTime();
+            let to_mins = |hour: u16, minute: u16| -> i64 {
+                hour as i64 * 60 + minute as i64
+            };
+            // Rough same-day offset; good enough for midnight bucketing.
+            let diff_mins = to_mins(local.wHour, local.wMinute) - to_mins(utc.wHour, utc.wMinute);
+            // Handle day wrap when local/UTC straddle midnight.
+            let adjusted = if diff_mins > 12 * 60 {
+                diff_mins - 24 * 60
+            } else if diff_mins < -12 * 60 {
+                diff_mins + 24 * 60
+            } else {
+                diff_mins
+            };
+            adjusted * 60
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
     }
 }
 
@@ -12169,6 +12424,7 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
     global.set_accent(palette.accent);
     global.set_accent_soft(palette.accent_soft);
     global.set_accent_strong(palette.accent_strong);
+    global.set_on_accent(contrasting_on_color(palette.accent));
     global.set_danger(color("#e5484d"));
     global.set_success(color("#37b26c"));
     global.set_warning(color("#e3a524"));
@@ -12202,6 +12458,7 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
     )));
     metrics.set_light_controls(palette.light_controls);
     apply_density_metrics(&metrics, &settings.density);
+    sync_std_widget_palette(ui, palette.light_controls);
 
     ui.set_active_theme(ss(&settings.theme));
     ui.set_active_accent(ss(&settings.accent));
@@ -12322,6 +12579,7 @@ fn apply_custom_theme_to_ui(ui: &MainWindow, def: &ThemeDefinition) {
         accent_c.blue(),
     ));
     global.set_accent_strong(lighten_color(accent_c, 0.2));
+    global.set_on_accent(contrasting_on_color(accent_c));
     global.set_danger(danger_c);
     global.set_success(success_c);
     global.set_warning(color("#e3a524"));
@@ -12345,6 +12603,7 @@ fn apply_custom_theme_to_ui(ui: &MainWindow, def: &ThemeDefinition) {
         normalize_mono_font_preset(def.mono_font.as_str()).as_str(),
     )));
     metrics.set_light_controls(is_light);
+    sync_std_widget_palette(ui, is_light);
 
     let base_row_h = 38.0_f32;
     // Clamp so a corrupt/imported theme can't produce a broken (huge/negative) layout.
@@ -12500,6 +12759,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "File Note", "", "note"),
     ("Tools", "Storage Treemap", "", "storage"),
     ("Tools", "Find Duplicates", "", "duplicates"),
+    ("Tools", "Find Duplicates on Drive", "", "duplicates-drive"),
     ("Tools", "Operation Log", "", "operation-log"),
     ("Tools", "Operation Queue", "", "operation-queue"),
     ("Tools", "Pause Operation Queue", "", "queue-pause"),
@@ -12572,6 +12832,11 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Settings", "Check for Updates", "", "check-updates"),
     ("Settings", "Shortcut Editor", "", "shortcut-editor"),
     ("Tools", "Undo Last Operation", "Ctrl+Z", "undo"),
+    ("Tools", "Redo Last Operation", "Ctrl+Y", "redo"),
+    ("Tools", "New Window", "Ctrl+N", "new-window"),
+    ("Tools", "Compare Two Files", "", "file-diff"),
+    ("Tools", "Batch Tag Selection", "", "batch-tag"),
+    ("Tools", "Batch Note Selection", "", "batch-note"),
     ("View", "Icon View", "Ctrl+1", "view-grid"),
     ("View", "Details View", "Ctrl+2", "view-list"),
     ("View", "Gallery View", "Ctrl+3", "view-gallery"),
@@ -12774,7 +13039,7 @@ fn resolve_cli_folder_to_string(raw: PathBuf) -> Option<String> {
 /// Path is expected lowercased.
 fn is_always_list_view_folder(lower: &str) -> bool {
     // Drive root: matches "c:", "c:\", "d:\", "x:", "\\server\share",
-    // "/" — short paths with no real folder component below the root.
+    // "/" â€” short paths with no real folder component below the root.
     let trimmed = lower.trim_end_matches('\\').trim_end_matches('/');
     let is_drive_root = trimmed.len() <= 2 && trimmed.ends_with(':');
     if is_drive_root || trimmed.is_empty() || trimmed == "/" {
@@ -13168,8 +13433,14 @@ impl NativeController {
             toast_showing: false,
             toast_current_kind: "info".to_string(),
             toast_current_message: String::new(),
+            toast_current_action: String::new(),
             toast_last_shown: None,
             toast_timer: None,
+            expanded_tree_paths: std::collections::HashSet::new(),
+            redo_stack: Vec::new(),
+            search_source_pref: "auto".to_string(),
+            thumb_size_scale: 1.0,
+            folder_changed_pending: false,
             git_status_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_git_status: Arc::new(Mutex::new(None)),
             operation_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -13357,6 +13628,9 @@ impl NativeController {
         ui.set_semantic_search_available(semantic_ready);
         ui.set_search_semantic_mode(self.settings.search_semantic_mode);
         ui.set_clip_search_enabled(self.settings.clip_search_enabled);
+        ui.set_search_source_pref(ss(&self.search_source_pref));
+        ui.set_thumb_size_scale(self.thumb_size_scale);
+        self.sync_tag_chips(ui);
     }
 
     fn sync_ai_settings_ui(&self, ui: &MainWindow) {
@@ -13367,8 +13641,8 @@ impl NativeController {
         };
         ui.set_ai_profile(ss(&profile));
         let label = match profile.as_str() {
-            "compact" => "Compact — smallest (~50 MB)",
-            "quality" => "Quality — best accuracy (~99 MB)",
+            "compact" => "Compact â€” smallest (~50 MB)",
+            "quality" => "Quality â€” best accuracy (~99 MB)",
             _ => "Balanced (recommended, ~61 MB)",
         };
         ui.set_ai_profile_label(ss(label));
@@ -13387,7 +13661,7 @@ impl NativeController {
         let m = local_ai::read_manifest();
         if !m.embedding_model_id.is_empty() {
             ui.set_ai_model_versions(ss(format!(
-                "catalog {} · {} · {}",
+                "catalog {} Â· {} Â· {}",
                 if m.catalog_version.is_empty() {
                     "bundled"
                 } else {
@@ -13421,17 +13695,17 @@ impl NativeController {
         let semantic = local_ai_semantic_ready_cached();
         let classify = semantic && crate::inference::image_classifier_available();
         ui.set_ai_feature_semantic(ss(if semantic {
-            "Ready — search by meaning across indexed files"
+            "Ready â€” search by meaning across indexed files"
         } else {
             "Install Local AI to enable"
         }));
         ui.set_ai_feature_classify(ss(if classify {
-            "Ready — auto-suggest tags for photos"
+            "Ready â€” auto-suggest tags for photos"
         } else {
             "Install Local AI to enable"
         }));
         ui.set_ai_feature_dupes(ss(
-            "Ready — near-duplicate detection uses a lightweight image hash (no model required)",
+            "Ready â€” near-duplicate detection uses a lightweight image hash (no model required)",
         ));
     }
 
@@ -13569,8 +13843,19 @@ impl NativeController {
     }
 
     fn show_toast_kind(&mut self, ui: &MainWindow, message: impl Into<String>, kind: &str) {
+        self.show_toast_action(ui, message, kind, "");
+    }
+
+    fn show_toast_action(
+        &mut self,
+        ui: &MainWindow,
+        message: impl Into<String>,
+        kind: &str,
+        action: &str,
+    ) {
         let message = user_facing_error(message.into());
-        self.toast_queue.push_back((message, kind.to_string()));
+        self.toast_queue
+            .push_back((message, kind.to_string(), action.to_string()));
         if !self.toast_showing {
             self.advance_toast_display(ui);
         }
@@ -13589,22 +13874,27 @@ impl NativeController {
 
     fn dismiss_toast(&mut self, ui: &MainWindow) {
         ui.set_toast_text(ss(""));
+        ui.set_toast_action(ss(""));
         self.toast_showing = false;
         self.toast_last_shown = None;
         self.toast_current_message.clear();
+        self.toast_current_action.clear();
         self.advance_toast_display(ui);
     }
 
     fn advance_toast_display(&mut self, ui: &MainWindow) {
-        if let Some((msg, kind)) = self.toast_queue.pop_front() {
+        if let Some((msg, kind, action)) = self.toast_queue.pop_front() {
             ui.set_toast_text(ss(&msg));
             ui.set_toast_kind(ss(&kind));
+            ui.set_toast_action(ss(&action));
             self.toast_current_kind = kind;
             self.toast_current_message = msg;
+            self.toast_current_action = action;
             self.toast_showing = true;
             self.toast_last_shown = Some(std::time::Instant::now());
         } else {
             ui.set_toast_text(ss(""));
+            ui.set_toast_action(ss(""));
             self.toast_showing = false;
             self.toast_last_shown = None;
             self.toast_current_kind = "info".to_string();
@@ -14158,19 +14448,27 @@ impl NativeController {
 
         ui.set_sort_by(ss(&self.sort_by));
         ui.set_sort_dir(ss(&self.sort_dir));
-        let show_date_groups = self.sort_by == "modified";
-        let mut last_group: &'static str = "";
+        let show_home_groups = self.current_path == "home://";
+        let show_date_groups = self.sort_by == "modified" && !show_home_groups;
+        let mut last_group = String::new();
         let items: Vec<FileItem> = self
             .visible_files
             .iter()
             .enumerate()
             .map(|(i, entry)| {
                 let mut item = self.file_item(entry, self.selected_set.contains(&i));
-                if show_date_groups {
+                if show_home_groups {
+                    let group = home_section_label(entry.modified).to_string();
+                    if !group.is_empty() {
+                        item.show_date_group_header = group != last_group;
+                        item.date_group_text = SharedString::from(group.clone());
+                        last_group = group;
+                    }
+                } else if show_date_groups {
                     let group = date_group_label(entry.modified);
                     item.show_date_group_header = group != last_group;
                     item.date_group_text = SharedString::from(group);
-                    last_group = group;
+                    last_group = group.to_string();
                 }
                 item
             })
@@ -14368,6 +14666,20 @@ impl NativeController {
             } else {
                 format_size_short(entry.size)
             }),
+            size_ratio: {
+                let max = self
+                    .visible_files
+                    .iter()
+                    .filter(|e| e.kind != FileKind::Directory)
+                    .map(|e| e.size)
+                    .max()
+                    .unwrap_or(0);
+                if entry.kind == FileKind::Directory || max == 0 {
+                    0.0
+                } else {
+                    (entry.size as f32 / max as f32).clamp(0.0, 1.0)
+                }
+            },
             modified_text: ss(if in_recycle {
                 // In the recycle view, the `modified` field carries the
                 // deletion timestamp (set by list_recycle_bin_entries).
@@ -14573,6 +14885,96 @@ impl NativeController {
         }
     }
 
+
+    fn side_row(
+        label: impl Into<String>,
+        path: impl Into<String>,
+        icon: &str,
+        active: bool,
+    ) -> SideItem {
+        SideItem {
+            label: ss(label),
+            path: ss(path),
+            icon: ss(icon),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: false,
+            active,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
+        }
+    }
+
+    fn side_header(label: &str) -> SideItem {
+        SideItem {
+            label: ss(label),
+            path: ss(""),
+            icon: ss(""),
+            count: ss(""),
+            color: rgba_u8(0, 0, 0, 0.0),
+            is_header: true,
+            active: false,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
+        }
+    }
+
+    fn push_tree_children(&self, items: &mut Vec<SideItem>, parent: &str, indent: i32) {
+        let Ok(rd) = std::fs::read_dir(parent) else {
+            return;
+        };
+        let mut dirs: Vec<(String, String)> = rd
+            .flatten()
+            .filter_map(|e| {
+                let path = e.path();
+                if !path.is_dir() {
+                    return None;
+                }
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    return None;
+                }
+                Some((name, path.to_string_lossy().to_string()))
+            })
+            .collect();
+        dirs.sort_by_key(|a| a.0.to_lowercase());
+        for (name, path) in dirs.into_iter().take(40) {
+            let expanded = self.expanded_tree_paths.contains(&path);
+            items.push(SideItem {
+                label: ss(&name),
+                path: ss(&path),
+                icon: ss("folder"),
+                count: ss(""),
+                color: rgba_u8(0, 0, 0, 0.0),
+                is_header: false,
+                active: same_path_string(&self.current_path, &path),
+                indent,
+                usage: -1.0,
+                expandable: true,
+                expanded,
+            });
+            if expanded && indent < 4 {
+                self.push_tree_children(items, &path, indent + 1);
+            }
+        }
+    }
+
+    fn toggle_side_expand(&mut self, ui: &MainWindow, path: &str) {
+        if path.is_empty() || is_virtual_nav_path(path) {
+            return;
+        }
+        if self.expanded_tree_paths.contains(path) {
+            self.expanded_tree_paths.remove(path);
+        } else {
+            self.expanded_tree_paths.insert(path.to_string());
+        }
+        self.sync_sidebar_models(ui);
+    }
+
     fn side_items(&self) -> Vec<SideItem> {
         let mut items = Vec::new();
         items.push(SideItem {
@@ -14583,8 +14985,12 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: true,
             active: false,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
-        // Home dashboard — virtual landing for drives, pins, and saved searches.
+        // Home dashboard â€” virtual landing for drives, pins, and saved searches.
         items.push(SideItem {
             label: ss("Home"),
             path: ss("home://"),
@@ -14593,6 +14999,10 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: false,
             active: self.current_path == "home://",
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
         for folder in &self.known_folders {
             // The Home landing (home://) above already represents the user's
@@ -14601,6 +15011,7 @@ impl NativeController {
             if folder.id == "home" {
                 continue;
             }
+            let folder_expanded = self.expanded_tree_paths.contains(&folder.path);
             items.push(SideItem {
                 label: ss(&folder.name),
                 path: ss(&folder.path),
@@ -14617,7 +15028,14 @@ impl NativeController {
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: false,
                 active: same_path_string(&self.current_path, &folder.path),
+                indent: 0,
+                usage: -1.0,
+                expandable: Path::new(&folder.path).is_dir(),
+                expanded: folder_expanded,
             });
+            if folder_expanded {
+                self.push_tree_children(&mut items, &folder.path, 1);
+            }
         }
 
         // Recycle Bin entry - virtual `recycle://` path. Click to browse,
@@ -14630,6 +15048,10 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: false,
             active: self.current_path == "recycle://",
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
 
         // Storage analyzer - virtual `storage://` path. Click swaps the main
@@ -14643,6 +15065,10 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: false,
             active: self.current_path == "storage://",
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
 
         if !self.user_pins.is_empty() {
@@ -14654,8 +15080,14 @@ impl NativeController {
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: true,
                 active: false,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
             });
             for pin in self.user_pins.iter().take(12) {
+                let pin_expandable = pin.kind != "file" && Path::new(&pin.path).is_dir();
+                let pin_expanded = self.expanded_tree_paths.contains(&pin.path);
                 items.push(SideItem {
                     label: ss(&pin.name),
                     path: ss(&pin.path),
@@ -14668,7 +15100,14 @@ impl NativeController {
                     color: rgba_u8(0, 0, 0, 0.0),
                     is_header: false,
                     active: same_path_string(&self.current_path, &pin.path),
+                    indent: 0,
+                    usage: -1.0,
+                    expandable: pin_expandable,
+                    expanded: pin_expanded,
                 });
+                if pin_expanded {
+                    self.push_tree_children(&mut items, &pin.path, 1);
+                }
             }
         }
 
@@ -14680,8 +15119,26 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: true,
             active: false,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
         for drive in &self.drives {
+            let space = drive_free_space(&drive.path);
+            let usage = space
+                .map(|(free, total)| {
+                    if total == 0 {
+                        -1.0
+                    } else {
+                        1.0 - (free as f32 / total as f32)
+                    }
+                })
+                .unwrap_or(-1.0);
+            let count_label = space
+                .map(|(free, _)| format!("{} free", format_size_short(free)))
+                .unwrap_or_else(|| drive.kind.clone());
+            let drive_expanded = self.expanded_tree_paths.contains(&drive.path);
             items.push(SideItem {
                 label: ss(if drive.name.is_empty() {
                     &drive.path
@@ -14690,11 +15147,18 @@ impl NativeController {
                 }),
                 path: ss(&drive.path),
                 icon: ss("drive"),
-                count: ss(&drive.kind),
+                count: ss(&count_label),
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: false,
                 active: self.current_path.starts_with(&drive.path),
+                indent: 0,
+                usage,
+                expandable: true,
+                expanded: drive_expanded,
             });
+            if drive_expanded {
+                self.push_tree_children(&mut items, &drive.path, 1);
+            }
         }
 
         if !self.recent_locations.is_empty() {
@@ -14706,6 +15170,10 @@ impl NativeController {
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: true,
                 active: false,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
             });
             for path in self.recent_locations.iter().take(5) {
                 let label_str = Path::new(path)
@@ -14720,6 +15188,10 @@ impl NativeController {
                     color: rgba_u8(0, 0, 0, 0.0),
                     is_header: false,
                     active: same_path_string(&self.current_path, path),
+                    indent: 0,
+                    usage: -1.0,
+                    expandable: false,
+                    expanded: false,
                 });
             }
         }
@@ -14733,6 +15205,10 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: true,
             active: false,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
         for folder in smart {
             items.push(SideItem {
@@ -14744,6 +15220,10 @@ impl NativeController {
                 is_header: false,
                 active: self.search_query == format!("smart:{}", folder.id)
                     || self.search_query == folder.query,
+                indent: 0,
+                usage: -1.0,
+                expandable: false,
+                expanded: false,
             });
         }
 
@@ -14757,6 +15237,10 @@ impl NativeController {
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: true,
                 active: false,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
             });
             for search in saved.into_iter().take(8) {
                 let encoded = format!("search:{}", search.name);
@@ -14768,6 +15252,10 @@ impl NativeController {
                     color: rgba_u8(0, 0, 0, 0.0),
                     is_header: false,
                     active: self.search_query == search.query,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
                 });
             }
         }
@@ -14780,6 +15268,10 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: true,
             active: false,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
         for (id, default_label) in [
             ("red", "Urgent"),
@@ -14803,6 +15295,10 @@ impl NativeController {
                 color: tag_color(id),
                 is_header: false,
                 active: self.search_query == format!("tag:{id}"),
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
             });
         }
         items
@@ -14818,6 +15314,10 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: true,
             active: false,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
         items.push(SideItem {
             label: ss("Home"),
@@ -14827,6 +15327,10 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: false,
             active: self.current_path == "home://",
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
         for folder in &self.known_folders {
             // The Home landing (home://) above already represents the user's
@@ -14851,6 +15355,10 @@ impl NativeController {
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: false,
                 active: same_path_string(&self.current_path, &folder.path),
+                indent: 0,
+                usage: -1.0,
+                expandable: false,
+                expanded: false,
             });
         }
         if !self.user_pins.is_empty() {
@@ -14862,6 +15370,10 @@ impl NativeController {
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: true,
                 active: false,
+                indent: 0,
+                usage: -1.0,
+                expandable: false,
+                expanded: false,
             });
             for pin in self.user_pins.iter().take(6) {
                 items.push(SideItem {
@@ -14876,6 +15388,10 @@ impl NativeController {
                     color: rgba_u8(0, 0, 0, 0.0),
                     is_header: false,
                     active: same_path_string(&self.current_path, &pin.path),
+                    indent: 0,
+                    usage: -1.0,
+                    expandable: false,
+                    expanded: false,
                 });
             }
         }
@@ -14887,6 +15403,10 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: true,
             active: false,
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
         for drive in &self.drives {
             items.push(SideItem {
@@ -14901,6 +15421,10 @@ impl NativeController {
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: false,
                 active: self.current_path.starts_with(&drive.path),
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
             });
         }
         items.push(SideItem {
@@ -14911,6 +15435,10 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: false,
             active: self.current_path == "recycle://",
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
         items.push(SideItem {
             label: ss("Storage"),
@@ -14920,6 +15448,10 @@ impl NativeController {
             color: rgba_u8(0, 0, 0, 0.0),
             is_header: false,
             active: self.current_path == "storage://",
+            indent: 0,
+            usage: -1.0,
+            expandable: false,
+            expanded: false,
         });
         items
     }
@@ -14998,6 +15530,7 @@ impl NativeController {
     fn prepare_navigate_loading(&mut self, ui: &MainWindow, path: &str, push_history: bool) {
         self.active_archive = None;
         ui.set_in_recycle_bin(false);
+        ui.set_is_home_view(false);
         let prev_path = self.current_path.clone();
         if !prev_path.is_empty() {
             let y = ui.get_primary_list_scroll_y();
@@ -15050,6 +15583,7 @@ impl NativeController {
     ) {
         self.active_archive = None;
         ui.set_in_recycle_bin(false);
+        let _ = ensure_watched_paths(&self.app_state, std::slice::from_ref(&path));
         let partial = page.partial;
         let skipped_entries = page.skipped_entries;
         let files = page.entries;
@@ -15501,13 +16035,16 @@ impl NativeController {
     /// Right-click an item to restore (move back to original path) or delete
     /// permanently. The view is read-only otherwise - paste/new-file disabled.
     fn open_recycle_bin_view(&mut self, ui: &MainWindow, push_history: bool) {
-        let entries = list_recycle_bin_entries();
         self.active_archive = None;
         if ui.get_is_storage_view() {
             self.close_storage_view(ui);
         }
+        if self.current_path != "recycle://" {
+            self.bump_nav_generation();
+        }
         self.current_path = "recycle://".to_string();
-        self.files = entries;
+        self.files.clear();
+        self.visible_files.clear();
         self.search_query.clear();
         self.selected_index = -1;
         self.selected_set.clear();
@@ -15521,6 +16058,42 @@ impl NativeController {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.path = "recycle://".to_string();
         }
+        ui.set_empty_state(ss("Loading Recycle Bin..."));
+        ui.set_in_recycle_bin(true);
+        ui.set_is_home_view(false);
+        self.apply_filter();
+        self.update_models(ui);
+        self.update_preview(ui);
+
+        let generation = self.nav_generation.load(Ordering::SeqCst);
+        let ready = self.directory_ready.clone();
+        let pending = self.pending_directory_result.clone();
+        std::thread::spawn(move || {
+            let entries = list_recycle_bin_entries();
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(NativeDirectoryResult {
+                    path: "recycle://".to_string(),
+                    entries,
+                    generation,
+                    partial: false,
+                    skipped_entries: 0,
+                    error: None,
+                });
+            }
+            ready.store(true, Ordering::Release);
+        });
+    }
+
+    /// Apply a finished recycle-bin listing on the UI thread.
+    fn apply_recycle_bin_listing(&mut self, ui: &MainWindow, entries: Vec<FileEntry>) {
+        if self.current_path != "recycle://" {
+            return;
+        }
+        self.files = entries;
+        self.files_model = None;
+        self.selected_index = -1;
+        self.selected_set.clear();
+        self.select_anchor = -1;
         ui.set_empty_state(ss(if self.files.is_empty() {
             "Recycle Bin is empty.".to_string()
         } else {
@@ -15543,32 +16116,68 @@ impl NativeController {
         if target_originals.is_empty() {
             return;
         }
-        let items = match trash::os_limited::list() {
-            Ok(it) => it,
-            Err(e) => {
-                self.show_toast_kind(ui, format!("Cannot read trash: {e}"), "error");
-                return;
+        ui.set_op_drawer_text(ss("Restoring from Recycle Bin..."));
+        ui.set_op_drawer_visible(true);
+        ui.set_op_drawer_progress(-1.0);
+        let operation_ready = self.operation_ready.clone();
+        let pending_result = self.pending_operation_result.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+                let to_restore: Vec<trash::TrashItem> = items
+                    .into_iter()
+                    .filter(|item| {
+                        let orig = item.original_path().to_string_lossy().into_owned();
+                        target_originals.iter().any(|t| t == &orig)
+                    })
+                    .collect();
+                let n = to_restore.len();
+                if n == 0 {
+                    return Err("Items not found in trash.".to_string());
+                }
+                for item in &to_restore {
+                    let orig = item.original_path();
+                    if orig.exists() {
+                        return Err(format!(
+                            "Cannot restore â€” '{}' already exists at the original location.",
+                            orig.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| orig.display().to_string())
+                        ));
+                    }
+                }
+                trash::os_limited::restore_all(to_restore).map_err(|e| e.to_string())?;
+                Ok(format!("Restored {n} item(s)"))
+            })();
+            let op = match result {
+                Ok(message) => NativeOperationResult {
+                    message,
+                    kind: "success".to_string(),
+                    refresh: true,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
+                },
+                Err(message) => NativeOperationResult {
+                    message,
+                    kind: "error".to_string(),
+                    refresh: false,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
+                },
+            };
+            if let Ok(mut lock) = pending_result.lock() {
+                *lock = Some(op);
             }
-        };
-        let to_restore: Vec<trash::TrashItem> = items
-            .into_iter()
-            .filter(|item| {
-                let orig = item.original_path().to_string_lossy().into_owned();
-                target_originals.iter().any(|t| t == &orig)
-            })
-            .collect();
-        let n = to_restore.len();
-        if n == 0 {
-            self.show_toast_kind(ui, "Items not found in trash.", "error");
-            return;
-        }
-        match trash::os_limited::restore_all(to_restore) {
-            Ok(()) => {
-                self.show_toast_kind(ui, format!("Restored {n} item(s)"), "success");
-                self.open_recycle_bin_view(ui, false);
-            }
-            Err(e) => self.show_toast_kind(ui, format!("Restore failed: {e}"), "error"),
-        }
+            operation_ready.store(true, Ordering::Release);
+        });
     }
 
     /// Permanently delete the currently selected recycle-bin items.
@@ -15581,54 +16190,105 @@ impl NativeController {
         if target_originals.is_empty() {
             return;
         }
-        let items = match trash::os_limited::list() {
-            Ok(it) => it,
-            Err(e) => {
-                self.show_toast_kind(ui, format!("Cannot read trash: {e}"), "error");
-                return;
+        ui.set_op_drawer_text(ss("Deleting permanently..."));
+        ui.set_op_drawer_visible(true);
+        ui.set_op_drawer_progress(-1.0);
+        let operation_ready = self.operation_ready.clone();
+        let pending_result = self.pending_operation_result.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+                let to_purge: Vec<trash::TrashItem> = items
+                    .into_iter()
+                    .filter(|item| {
+                        let orig = item.original_path().to_string_lossy().into_owned();
+                        target_originals.iter().any(|t| t == &orig)
+                    })
+                    .collect();
+                let n = to_purge.len();
+                if n == 0 {
+                    return Err("Items not found in trash.".to_string());
+                }
+                trash::os_limited::purge_all(to_purge).map_err(|e| e.to_string())?;
+                Ok(format!("Permanently deleted {n} item(s)"))
+            })();
+            let op = match result {
+                Ok(message) => NativeOperationResult {
+                    message,
+                    kind: "success".to_string(),
+                    refresh: true,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
+                },
+                Err(message) => NativeOperationResult {
+                    message,
+                    kind: "error".to_string(),
+                    refresh: false,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
+                },
+            };
+            if let Ok(mut lock) = pending_result.lock() {
+                *lock = Some(op);
             }
-        };
-        let to_purge: Vec<trash::TrashItem> = items
-            .into_iter()
-            .filter(|item| {
-                let orig = item.original_path().to_string_lossy().into_owned();
-                target_originals.iter().any(|t| t == &orig)
-            })
-            .collect();
-        let n = to_purge.len();
-        if n == 0 {
-            return;
-        }
-        match trash::os_limited::purge_all(to_purge) {
-            Ok(()) => {
-                self.show_toast_kind(ui, format!("Permanently deleted {n} item(s)"), "success");
-                self.open_recycle_bin_view(ui, false);
-            }
-            Err(e) => self.show_toast_kind(ui, format!("Purge failed: {e}"), "error"),
-        }
+            operation_ready.store(true, Ordering::Release);
+        });
     }
 
     /// Empty the entire OS recycle bin (all users see the same trash on Windows).
     fn empty_recycle_bin(&mut self, ui: &MainWindow) {
-        let items = match trash::os_limited::list() {
-            Ok(it) => it,
-            Err(e) => {
-                self.show_toast_kind(ui, format!("Cannot read trash: {e}"), "error");
-                return;
+        ui.set_op_drawer_text(ss("Emptying Recycle Bin..."));
+        ui.set_op_drawer_visible(true);
+        ui.set_op_drawer_progress(-1.0);
+        let operation_ready = self.operation_ready.clone();
+        let pending_result = self.pending_operation_result.clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+                let n = items.len();
+                if n == 0 {
+                    return Ok("Recycle Bin is already empty.".to_string());
+                }
+                trash::os_limited::purge_all(items).map_err(|e| e.to_string())?;
+                Ok(format!("Emptied recycle bin ({n} items)"))
+            })();
+            let op = match result {
+                Ok(message) => NativeOperationResult {
+                    message,
+                    kind: "success".to_string(),
+                    refresh: true,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
+                },
+                Err(message) => NativeOperationResult {
+                    message,
+                    kind: "error".to_string(),
+                    refresh: false,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
+                },
+            };
+            if let Ok(mut lock) = pending_result.lock() {
+                *lock = Some(op);
             }
-        };
-        let n = items.len();
-        if n == 0 {
-            self.show_toast(ui, "Recycle Bin is already empty.");
-            return;
-        }
-        match trash::os_limited::purge_all(items) {
-            Ok(()) => {
-                self.show_toast_kind(ui, format!("Emptied recycle bin ({n} items)"), "success");
-                self.open_recycle_bin_view(ui, false);
-            }
-            Err(e) => self.show_toast_kind(ui, format!("Empty failed: {e}"), "error"),
-        }
+            operation_ready.store(true, Ordering::Release);
+        });
     }
 
     fn schedule_full_directory_load(&mut self, path: String) {
@@ -15678,6 +16338,12 @@ impl NativeController {
     }
 
     fn refresh(&mut self, ui: &MainWindow) {
+        let path = self.current_path.clone();
+        if let Ok(mut dirty) = self.app_state.dirty_dirs.lock() {
+            dirty.retain(|p| !same_path_string(p, &path));
+        }
+        self.folder_changed_pending = false;
+        ui.set_folder_changed_banner(false);
         self.sync_active_pane(ui);
         if self.active_pane == ActivePane::Secondary {
             let path = self.secondary_path.clone();
@@ -15700,6 +16366,47 @@ impl NativeController {
             .invalidate_directory_path(Path::new(&self.current_path));
         let path = self.current_path.clone();
         self.navigate(ui, path, false);
+    }
+
+    /// Drop deleted paths from the active listing without a full directory reload.
+    fn optimistic_remove_paths(&mut self, ui: &MainWindow, paths: &[String]) {
+        if paths.is_empty() {
+            return;
+        }
+        let remove = |entries: &mut Vec<FileEntry>| {
+            entries.retain(|e| !paths.iter().any(|p| same_path_string(&e.path, p)));
+        };
+        if self.active_pane == ActivePane::Secondary {
+            remove(&mut self.secondary_files);
+            self.secondary_selected_set.clear();
+            self.secondary_selected_index = -1;
+            self.secondary_select_anchor = -1;
+            for path in paths {
+                self.app_state.invalidate_path(Path::new(path));
+            }
+            self.update_secondary_models(ui);
+            return;
+        }
+        remove(&mut self.files);
+        remove(&mut self.visible_files);
+        self.files_model = None;
+        self.selected_set.clear();
+        self.selected_index = -1;
+        self.select_anchor = -1;
+        for path in paths {
+            self.app_state.invalidate_path(Path::new(path));
+            if let Some(parent) = Path::new(path).parent() {
+                self.app_state.invalidate_directory_path(parent);
+            }
+        }
+        self.sync_selection_count_to_ui(ui);
+        ui.set_selected_index(-1);
+        if self.files.is_empty() {
+            ui.set_empty_state(ss("This folder is empty."));
+        }
+        self.apply_filter();
+        self.update_models(ui);
+        self.update_preview(ui);
     }
 
     /// Compute which file indices fall inside the marquee rectangle and update
@@ -16144,6 +16851,19 @@ impl NativeController {
         // selecting a large image.
         if ui.get_preview_is_image() {
             ui.set_preview_body(ss(""));
+            let meta = match Self::read_exif_summary(Path::new(&entry.path)) {
+                Some(exif) => format!("{base_meta}\n\nEXIF\n{exif}"),
+                None => base_meta,
+            };
+            ui.set_preview_meta(ss(meta));
+            return;
+        }
+        if is_media_ext(&ext) {
+            ui.set_preview_body(ss(format!(
+                "Media file ({ext})\n\nOpen with the system player, or use the preview action row.\n\nSize: {}\nModified: {}",
+                format_size_short(entry.size),
+                format_modified(entry.modified),
+            )));
             ui.set_preview_meta(ss(base_meta));
             return;
         }
@@ -16270,7 +16990,7 @@ impl NativeController {
             self.clear_storage_bucket_filter(ui);
             return;
         }
-        // Leave storage view → folder the user had open before Storage.
+        // Leave storage view â†’ folder the user had open before Storage.
         if self.current_path == "storage://" {
             let target = if !self.storage_path_before.is_empty() {
                 self.storage_path_before.clone()
@@ -16499,9 +17219,18 @@ impl NativeController {
 
         if trimmed.len() < 2 && !self.search_all_scope && !drive_wide {
             self.visible_files.clear();
-            ui.set_empty_state(ss(""));
+            ui.set_empty_state(ss("Type at least 2 characters to search"));
+            ui.set_status_right(ss(format!("{search_root} | type 2+ characters")));
             self.update_models(ui);
             return;
+        }
+
+        let warnings = query_filter_warnings(&trimmed);
+        if !warnings.is_empty() {
+            ui.set_status_right(ss(format!(
+                "{search_root} | {}",
+                warnings.join(" Â· ")
+            )));
         }
 
         // Index / Windows Search / live scan run on a worker thread so typing
@@ -16910,6 +17639,7 @@ impl NativeController {
         if path.is_empty() || !Path::new(&path).is_dir() {
             return;
         }
+        let _ = ensure_watched_paths(&self.app_state, std::slice::from_ref(&path));
         if push_history {
             self.secondary_history
                 .truncate(self.secondary_history_pos + 1);
@@ -17117,6 +17847,7 @@ impl NativeController {
                 }
             }
             "duplicates" => self.show_duplicates(ui),
+            "duplicates-drive" => self.show_duplicates_drive(ui),
             "operation-log" => self.show_operation_log(ui),
             "operation-queue" => self.show_operation_queue(ui),
             "queue-pause" => {
@@ -17184,7 +17915,7 @@ impl NativeController {
                 } else if paths.len() > 1 {
                     self.show_toast(
                         ui,
-                        "Open With applies to one file — select a single item.",
+                        "Open With applies to one file â€” select a single item.",
                     );
                 } else {
                     match open_with_dialog(&paths[0], Some(ui)) {
@@ -17496,14 +18227,25 @@ impl NativeController {
             },
             "shortcut-editor" => self.show_shortcuts(ui),
             "undo" => self.undo(ui),
+            "redo" => self.redo(ui),
+            "new-window" => self.open_new_window(ui),
+            "file-diff" => self.file_diff_selected(ui),
+            "batch-tag" => self.batch_tag_selected(ui),
+            "batch-note" => self.batch_note_selected(ui),
             "focus-search" => {
                 let n = ui.get_toolbar_search_focus_nonce();
                 ui.set_toolbar_search_focus_nonce(n.wrapping_add(1));
             }
             "restore" => self.restore_from_recycle_bin(ui),
-            "purge" => self.purge_from_recycle_bin(ui),
+            "purge" => {
+                if self.active_path_is_recycle_bin() {
+                    self.purge_from_recycle_bin(ui);
+                } else {
+                    self.prompt_permanent_delete(ui);
+                }
+            }
             "empty-trash" => self.empty_recycle_bin(ui),
-            _ => self.show_toast(ui, format!("Command not implemented: {command}")),
+            _ => self.show_toast(ui, format!("Unknown command: {command}")),
         }
     }
 
@@ -17533,6 +18275,7 @@ impl NativeController {
 
     fn prompt_new_folder(&mut self, ui: &MainWindow) {
         self.pending_prompt = Some(PendingPrompt::NewFolder);
+        ui.set_prompt_kind(ss("text"));
         ui.set_prompt_title(ss("New folder"));
         ui.set_prompt_value(ss("New Folder"));
         ui.set_prompt_visible(true);
@@ -17540,6 +18283,7 @@ impl NativeController {
 
     fn prompt_new_file(&mut self, ui: &MainWindow) {
         self.pending_prompt = Some(PendingPrompt::NewFile);
+        ui.set_prompt_kind(ss("text"));
         ui.set_prompt_title(ss("New file"));
         ui.set_prompt_value(ss("New Text Document.txt"));
         ui.set_prompt_visible(true);
@@ -17778,6 +18522,34 @@ impl NativeController {
         } else {
             self.show_toast(ui, "Select a file first.");
         }
+    }
+
+    fn prompt_permanent_delete(&mut self, ui: &MainWindow) {
+        if self.active_path_is_recycle_bin() {
+            self.purge_from_recycle_bin(ui);
+            return;
+        }
+        let paths = self.selected_paths();
+        let n = paths.len();
+        if n == 0 {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        }
+        self.pending_prompt = Some(PendingPrompt::PermanentDelete(paths));
+        if n == 1 {
+            let name = self
+                .selected_entry()
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "item".to_string());
+            ui.set_confirm_text(ss(format!(
+                "Permanently delete '{name}'? This cannot be undone."
+            )));
+        } else {
+            ui.set_confirm_text(ss(format!(
+                "Permanently delete {n} items? This cannot be undone."
+            )));
+        }
+        ui.set_confirm_visible(true);
     }
 
     fn accept_prompt(&mut self, ui: &MainWindow, value: String) {
@@ -18050,13 +18822,66 @@ impl NativeController {
                     self.show_toast_kind(ui, "Tag renamed", "success");
                 }
             }
-            Some(PendingPrompt::Archive) | Some(PendingPrompt::StorageCleanup(_)) | None => {}
+            Some(PendingPrompt::TagOne(path)) => {
+                let tag = value.trim().to_lowercase();
+                if tag.is_empty() {
+                    self.tags.remove(&path);
+                } else {
+                    self.tags.insert(path, tag);
+                }
+                let _ = write_native_json("tags.json", &self.tags);
+                self.sync_tag_names(ui);
+                self.sync_tag_chips(ui);
+                self.update_models(ui);
+                self.show_toast_kind(ui, "Tag saved", "success");
+            }
+            Some(PendingPrompt::BatchTag(paths)) => {
+                let tag = value.trim().to_lowercase();
+                if tag.is_empty() {
+                    for path in &paths {
+                        self.tags.remove(path);
+                    }
+                } else {
+                    for path in paths {
+                        self.tags.insert(path, tag.clone());
+                    }
+                }
+                let _ = write_native_json("tags.json", &self.tags);
+                self.sync_tag_names(ui);
+                self.sync_tag_chips(ui);
+                self.update_models(ui);
+                self.show_toast_kind(ui, "Batch tag applied", "success");
+            }
+            Some(PendingPrompt::BatchNote(paths)) => {
+                let note = value.trim().to_string();
+                if note.is_empty() {
+                    for path in &paths {
+                        self.notes.remove(path);
+                    }
+                } else {
+                    for path in paths {
+                        self.notes.insert(path, note.clone());
+                    }
+                }
+                let _ = write_native_json("notes.json", &self.notes);
+                self.update_models(ui);
+                self.show_toast_kind(ui, "Batch note applied", "success");
+            }
+            Some(PendingPrompt::Archive)
+            | Some(PendingPrompt::StorageCleanup(_))
+            | Some(PendingPrompt::PermanentDelete(_))
+            | None => {}
         }
     }
 
     fn confirm_delete(&mut self, ui: &MainWindow) {
         let cleanup_paths = match self.pending_prompt.take() {
             Some(PendingPrompt::StorageCleanup(paths)) => Some(paths),
+            Some(PendingPrompt::PermanentDelete(paths)) => {
+                ui.set_confirm_visible(false);
+                self.execute_permanent_delete(ui, paths);
+                return;
+            }
             other => {
                 self.pending_prompt = other;
                 None
@@ -18093,52 +18918,122 @@ impl NativeController {
         let app_state = self.app_state.clone();
         let operation_ready = self.operation_ready.clone();
         let pending_result = self.pending_operation_result.clone();
+        let paths_for_optimistic = paths.clone();
         std::thread::spawn(move || {
-            let mut errors = 0usize;
+            let result = match native_delete_all_fast(&app_state, &paths) {
+                Ok(deleted) => {
+                    let msg = if deleted == 1 {
+                        if from_storage_cleanup {
+                            "Cleanup item moved to Recycle Bin Â· Ctrl+Z to undo".to_string()
+                        } else {
+                            "Moved to Recycle Bin Â· Ctrl+Z to undo".to_string()
+                        }
+                    } else {
+                        format!("{deleted} items moved to Recycle Bin Â· Ctrl+Z to undo")
+                    };
+                    NativeOperationResult {
+                        message: msg,
+                        kind: "success".to_string(),
+                        // Prefer optimistic row removal over a full re-navigate.
+                        refresh: false,
+                        refresh_both_panes: false,
+                        secondary_refresh_path: None,
+                        clear_clipboard: false,
+                        invalidate_dirs: Vec::new(),
+                        optimistic_remove_paths: paths_for_optimistic,
+                        toast_action: "Undo".to_string(),
+                    }
+                }
+                Err(err) => NativeOperationResult {
+                    message: err,
+                    kind: "error".to_string(),
+                    refresh: false,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
+                },
+            };
+            if let Ok(mut lock) = pending_result.lock() {
+                *lock = Some(result);
+            }
+            operation_ready.store(true, Ordering::Release);
+        });
+    }
+
+    fn execute_permanent_delete(&mut self, ui: &MainWindow, paths: Vec<String>) {
+        if paths.is_empty() {
+            return;
+        }
+        let n = paths.len();
+        self.selected_set.clear();
+        self.secondary_selected_set.clear();
+        self.selected_index = -1;
+        self.secondary_selected_index = -1;
+        self.select_anchor = -1;
+        self.secondary_select_anchor = -1;
+        self.sync_selection_count_to_ui(ui);
+        ui.set_selected_index(-1);
+        ui.set_op_drawer_text(ss(if n == 1 {
+            "Deleting permanently...".to_string()
+        } else {
+            format!("Permanently deleting {n} items...")
+        }));
+        ui.set_op_drawer_visible(true);
+        ui.set_op_drawer_progress(-1.0);
+        let app_state = self.app_state.clone();
+        let operation_ready = self.operation_ready.clone();
+        let pending_result = self.pending_operation_result.clone();
+        let paths_for_optimistic = paths.clone();
+        std::thread::spawn(move || {
+            let mut deleted = 0usize;
             let mut first_error: Option<String> = None;
             for path in &paths {
-                match native_delete_fast(&app_state, path) {
-                    Ok(()) => {}
+                match native_delete_path(path) {
+                    Ok(()) => {
+                        app_state.invalidate_path(Path::new(path));
+                        deleted += 1;
+                    }
                     Err(e) => {
-                        errors += 1;
                         if first_error.is_none() {
                             first_error = Some(e);
                         }
                     }
                 }
             }
-            let result = if let Some(err) = first_error {
+            let result = if deleted == 0 {
                 NativeOperationResult {
-                    message: if errors == paths.len() {
-                        err
-                    } else {
-                        format!("{errors} of {n} failed to delete. {err}")
-                    },
+                    message: first_error.unwrap_or_else(|| "Delete failed".to_string()),
                     kind: "error".to_string(),
-                    refresh: errors < paths.len(),
+                    refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
                 }
             } else {
-                let msg = if n == 1 {
-                    if from_storage_cleanup {
-                        "Cleanup item moved to Recycle Bin".to_string()
-                    } else {
-                        "Moved to Recycle Bin".to_string()
-                    }
-                } else {
-                    format!("{n} items moved to Recycle Bin")
-                };
                 NativeOperationResult {
-                    message: msg,
-                    kind: "success".to_string(),
-                    refresh: true,
+                    message: if deleted == 1 {
+                        "Permanently deleted".to_string()
+                    } else {
+                        format!("Permanently deleted {deleted} items")
+                    },
+                    kind: if first_error.is_some() {
+                        "error".to_string()
+                    } else {
+                        "success".to_string()
+                    },
+                    refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: paths_for_optimistic,
+                        toast_action: String::new(),
                 }
             };
             if let Ok(mut lock) = pending_result.lock() {
@@ -18179,7 +19074,7 @@ impl NativeController {
             eprintln!("set_shell_files_clipboard: {error}");
             self.show_toast_kind(
                 ui,
-                "Clipboard sync failed — paste may not work in Explorer.".to_string(),
+                "Clipboard sync failed â€” paste may not work in Explorer.".to_string(),
                 "error",
             );
         }
@@ -18303,28 +19198,52 @@ impl NativeController {
         // and never a real folder, so we have to route it here before the
         // normal move/copy path tries to use it as a parent directory.
         if dest_dir == "recycle://" {
-            file_drag::log("drop -> Recycle Bin (trash::delete_all)");
+            file_drag::log("drop -> Recycle Bin (async trash::delete_all)");
             let count = paths.len();
-            let result: Result<(), trash::Error> = trash::delete_all(&paths);
-            match result {
-                Ok(()) => {
-                    self.invalidate_and_refresh_both_panes(ui);
-                    let kind = "success";
-                    let msg = if count == 1 {
-                        "Moved 1 item to Recycle Bin".to_string()
-                    } else {
-                        format!("Moved {count} items to Recycle Bin")
-                    };
-                    self.show_toast_kind(ui, msg, kind);
+            ui.set_op_drawer_text(ss(if count == 1 {
+                "Moving to Recycle Bin...".to_string()
+            } else {
+                format!("Moving {count} items to Recycle Bin...")
+            }));
+            ui.set_op_drawer_visible(true);
+            ui.set_op_drawer_progress(-1.0);
+            let app_state = self.app_state.clone();
+            let operation_ready = self.operation_ready.clone();
+            let pending_result = self.pending_operation_result.clone();
+            std::thread::spawn(move || {
+                let result = match native_delete_all_fast(&app_state, &paths) {
+                    Ok(deleted) => NativeOperationResult {
+                        message: if deleted == 1 {
+                            "Moved 1 item to Recycle Bin".to_string()
+                        } else {
+                            format!("Moved {deleted} items to Recycle Bin")
+                        },
+                        kind: "success".to_string(),
+                        refresh: false,
+                        refresh_both_panes: true,
+                        secondary_refresh_path: None,
+                        clear_clipboard: false,
+                        invalidate_dirs: Vec::new(),
+                        optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
+                    },
+                    Err(e) => NativeOperationResult {
+                        message: format!("Failed to send items to Recycle Bin: {e}"),
+                        kind: "error".to_string(),
+                        refresh: false,
+                        refresh_both_panes: false,
+                        secondary_refresh_path: None,
+                        clear_clipboard: false,
+                        invalidate_dirs: Vec::new(),
+                        optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
+                    },
+                };
+                if let Ok(mut lock) = pending_result.lock() {
+                    *lock = Some(result);
                 }
-                Err(e) => {
-                    self.show_toast_kind(
-                        ui,
-                        format!("Failed to send items to Recycle Bin: {e}"),
-                        "error",
-                    );
-                }
-            }
+                operation_ready.store(true, Ordering::Release);
+            });
             return;
         }
 
@@ -18628,6 +19547,8 @@ impl NativeController {
                     },
                     clear_clipboard: false,
                     invalidate_dirs,
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
                 }
             } else {
                 let verb_done = if cut { "Moved" } else { "Pasted" };
@@ -18646,6 +19567,8 @@ impl NativeController {
                     },
                     clear_clipboard: cut,
                     invalidate_dirs: invalidate_dirs_on_success,
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
                 }
             };
 
@@ -18711,30 +19634,76 @@ impl NativeController {
                     .dupe_groups_cache
                     .iter()
                     .map(|(id_title, paths)| {
-                        let title = id_title
-                            .split_once("::")
-                            .map(|(_, t)| t.to_string())
-                            .unwrap_or_else(|| id_title.clone());
-                        let size = paths
-                            .first()
-                            .and_then(|p| fs::metadata(p).ok())
-                            .map(|m| m.len())
-                            .unwrap_or(0);
-                        let reclaim = size.saturating_mul(paths.len().saturating_sub(1) as u64);
-                        DupeGroupItem {
-                            id: ss(id_title),
-                            title: ss(&title),
-                            detail: ss(format!("{} identical files", paths.len())),
-                            count: paths.len() as i32,
-                            reclaimable: ss(format_size_short(reclaim)),
-                        }
+                        dupe_group_ui_item(
+                            id_title,
+                            paths,
+                            &format!("{} identical files", paths.len()),
+                        )
                     })
                     .collect();
                 ui.set_dupe_overlay_title(ss("Duplicate files"));
                 ui.set_dupe_overlay_subtitle(ss(if items.is_empty() {
                     "No duplicate files found in this folder."
                 } else {
-                    "Keep one file per group, or delete the extras to Recycle Bin."
+                    "Review paths below. Keep the first file, or delete the extras to Recycle Bin."
+                }));
+                ui.set_dupe_groups(model_from_vec(items));
+                ui.set_dupe_overlay_visible(true);
+            }
+            Err(error) => self.show_toast(ui, error),
+        }
+    }
+
+    fn show_duplicates_drive(&mut self, ui: &MainWindow) {
+        let path = self.active_directory().to_string();
+        let root = Path::new(&path)
+            .components()
+            .next()
+            .map(|c| {
+                let mut p = PathBuf::new();
+                p.push(c);
+                // On Windows, push root so "C:" becomes "C:\"
+                #[cfg(target_os = "windows")]
+                {
+                    p.push("\\");
+                }
+                p
+            })
+            .unwrap_or_else(|| PathBuf::from(&path));
+        self.show_toast(ui, format!("Scanning drive {} for duplicates…", root.display()));
+        match find_duplicates(root.to_string_lossy().to_string(), Some(64 * 1024)) {
+            Ok(groups) => {
+                self.dupe_groups_cache = groups
+                    .iter()
+                    .enumerate()
+                    .take(200)
+                    .map(|(i, group)| {
+                        let title = group
+                            .first()
+                            .map(|f| f.name.clone())
+                            .unwrap_or_else(|| format!("Group {}", i + 1));
+                        (
+                            format!("drive-{i}::{title}"),
+                            group.iter().map(|f| f.path.clone()).collect(),
+                        )
+                    })
+                    .collect();
+                let items: Vec<DupeGroupItem> = self
+                    .dupe_groups_cache
+                    .iter()
+                    .map(|(id_title, paths)| {
+                        dupe_group_ui_item(
+                            id_title,
+                            paths,
+                            &format!("{} identical files", paths.len()),
+                        )
+                    })
+                    .collect();
+                ui.set_dupe_overlay_title(ss("Drive duplicates"));
+                ui.set_dupe_overlay_subtitle(ss(if items.is_empty() {
+                    "No large duplicates found on this drive."
+                } else {
+                    "Top groups on this drive (min 64 KB). Keep newest/largest, then delete extras."
                 }));
                 ui.set_dupe_groups(model_from_vec(items));
                 ui.set_dupe_overlay_visible(true);
@@ -18754,30 +19723,18 @@ impl NativeController {
             .dupe_groups_cache
             .iter()
             .map(|(id_title, paths)| {
-                let title = id_title
-                    .split_once("::")
-                    .map(|(_, t)| t.to_string())
-                    .unwrap_or_else(|| id_title.clone());
-                let size = paths
-                    .first()
-                    .and_then(|p| fs::metadata(p).ok())
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                let reclaim = size.saturating_mul(paths.len().saturating_sub(1) as u64);
-                DupeGroupItem {
-                    id: ss(id_title),
-                    title: ss(&title),
-                    detail: ss(format!("{} matching dHash images", paths.len())),
-                    count: paths.len() as i32,
-                    reclaimable: ss(format_size_short(reclaim)),
-                }
+                dupe_group_ui_item(
+                    id_title,
+                    paths,
+                    &format!("{} matching dHash images", paths.len()),
+                )
             })
             .collect();
         ui.set_dupe_overlay_title(ss("Duplicate images"));
         ui.set_dupe_overlay_subtitle(ss(if items.is_empty() {
-            "No exact duplicate image hashes in this folder (index more images first)."
+            "No near-duplicate image hashes in this folder (index more images first)."
         } else {
-            "Keep the first image in each group, or delete the others."
+            "Review paths. Keep the first image, or delete the others to Recycle Bin."
         }));
         ui.set_dupe_groups(model_from_vec(items));
         ui.set_dupe_overlay_visible(true);
@@ -18900,8 +19857,9 @@ impl NativeController {
             self.close_storage_view(ui);
         }
         ui.set_in_recycle_bin(false);
+        ui.set_is_home_view(true);
         let mut entries = Vec::new();
-        let push_dir = |entries: &mut Vec<FileEntry>, name: &str, path: &str| {
+        let push_dir = |entries: &mut Vec<FileEntry>, name: &str, path: &str, section: u64| {
             if path.is_empty() || !Path::new(path).exists() {
                 return;
             }
@@ -18911,7 +19869,7 @@ impl NativeController {
                 name_lower: name.to_ascii_lowercase(),
                 kind: FileKind::Directory,
                 size: 0,
-                modified: 0,
+                modified: section,
                 extension: None,
             });
         };
@@ -18921,7 +19879,7 @@ impl NativeController {
             } else {
                 format!("{} ({})", drive.name, drive.path.trim_end_matches('\\'))
             };
-            push_dir(&mut entries, &label, &drive.path);
+            push_dir(&mut entries, &label, &drive.path, 1);
         }
         for pin in self.user_pins.iter().take(12) {
             let kind = if pin.kind == "file" {
@@ -18931,11 +19889,11 @@ impl NativeController {
             };
             entries.push(FileEntry {
                 path: pin.path.clone(),
-                name: format!("Pinned · {}", pin.name),
+                name: pin.name.clone(),
                 name_lower: pin.name.to_ascii_lowercase(),
                 kind,
                 size: 0,
-                modified: pin.pinned_at,
+                modified: 2,
                 extension: Path::new(&pin.path)
                     .extension()
                     .map(|e| e.to_string_lossy().to_string()),
@@ -18949,7 +19907,7 @@ impl NativeController {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.clone());
-            push_dir(&mut entries, &format!("Recent · {label}"), path);
+            push_dir(&mut entries, &label, path, 3);
         }
         for search in read_native_json::<Vec<SavedSearch>>("searches.json", Vec::new())
             .into_iter()
@@ -18957,11 +19915,11 @@ impl NativeController {
         {
             entries.push(FileEntry {
                 path: format!("search:{}", search.name),
-                name: format!("Saved · {}", search.name),
+                name: search.name.clone(),
                 name_lower: search.name.to_ascii_lowercase(),
                 kind: FileKind::Other,
                 size: 0,
-                modified: 0,
+                modified: 4,
                 extension: None,
             });
         }
@@ -18970,6 +19928,7 @@ impl NativeController {
                 &mut entries,
                 "Downloads",
                 &downloads.to_string_lossy(),
+                5,
             );
         }
         entries.push(FileEntry {
@@ -18978,7 +19937,16 @@ impl NativeController {
             name_lower: "storage analyzer".to_string(),
             kind: FileKind::Directory,
             size: 0,
-            modified: 0,
+            modified: 5,
+            extension: None,
+        });
+        entries.push(FileEntry {
+            path: "recycle://".to_string(),
+            name: "Recycle Bin".to_string(),
+            name_lower: "recycle bin".to_string(),
+            kind: FileKind::Directory,
+            size: 0,
+            modified: 5,
             extension: None,
         });
 
@@ -19002,11 +19970,12 @@ impl NativeController {
         self.active_archive = None;
         ui.set_view_mode(ss("list"));
         ui.set_empty_state(ss(if self.files.is_empty() {
-            "Home is empty — pin folders or browse a drive to get started."
+            "Pin folders or open a drive â€” your shortcuts will land here."
         } else {
             ""
         }));
-        self.apply_filter();
+        // Keep list order as built (section groups); skip apply_filter sort.
+        self.visible_files = self.files.clone();
         self.update_models(ui);
         ui.set_side_items(model_from_vec(self.side_items()));
         ui.set_current_path(ss("Home"));
@@ -19288,6 +20257,8 @@ impl NativeController {
                     },
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
                 }
             } else {
                 let count = created.len();
@@ -19308,6 +20279,8 @@ impl NativeController {
                     },
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
                 }
             };
 
@@ -19451,6 +20424,8 @@ impl NativeController {
                     },
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
                 }
             } else {
                 NativeOperationResult {
@@ -19469,6 +20444,8 @@ impl NativeController {
                     },
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
                 }
             };
             if let Ok(mut lock) = pending.lock() {
@@ -19587,6 +20564,8 @@ impl NativeController {
                     },
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
                 },
                 Err(error) => NativeOperationResult {
                     message: error,
@@ -19596,6 +20575,8 @@ impl NativeController {
                     secondary_refresh_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
                 },
             };
             if let Ok(mut lock) = pending.lock() {
@@ -19623,7 +20604,7 @@ impl NativeController {
                 id: ss(i.to_string()),
                 title: ss(&r.name),
                 subtitle: ss(format!(
-                    "ext:{} tag:{} · {}",
+                    "ext:{} tag:{} Â· {}",
                     r.extension,
                     r.tag,
                     if r.folder.is_empty() {
@@ -19834,6 +20815,7 @@ impl NativeController {
         self.storage_show_all_state = false;
         self.current_path = "storage://".to_string();
         ui.set_in_recycle_bin(false);
+        ui.set_is_home_view(false);
         ui.set_is_storage_view(true);
         ui.set_preview_visible(false);
         ui.set_storage_show_all(false);
@@ -20297,7 +21279,7 @@ impl NativeController {
             result.scanned_files
         )));
         ui.set_storage_subtitle(ss(format!(
-            "8 categories · scanned {} ago in {:.1}s",
+            "8 categories Â· scanned {} ago in {:.1}s",
             format_relative_time(result.scanned_at),
             (result.elapsed_ms as f64) / 1000.0
         )));
@@ -20313,7 +21295,7 @@ impl NativeController {
                 0.0
             };
             ui.set_storage_disk_summary(ss(format!(
-                "{} used of {}  ·  {} free",
+                "{} used of {}  Â·  {} free",
                 format_size_short(used),
                 format_size_short(disk_total),
                 format_size_short(free)
@@ -20328,13 +21310,13 @@ impl NativeController {
             ui.set_storage_scan_coverage_pct(coverage as f32);
             let breakdown = if unaccounted > 512 * 1024 * 1024 {
                 format!(
-                    "{} scanned · {} system/other (Windows, pagefile, skipped folders)",
+                    "{} scanned Â· {} system/other (Windows, pagefile, skipped folders)",
                     format_size_short(result.total_bytes),
                     format_size_short(unaccounted)
                 )
             } else if unaccounted > 64 * 1024 * 1024 {
                 format!(
-                    "{} scanned · {} unaccounted (system files, skipped paths)",
+                    "{} scanned Â· {} unaccounted (system files, skipped paths)",
                     format_size_short(result.total_bytes),
                     format_size_short(unaccounted)
                 )
@@ -20687,41 +21669,59 @@ impl NativeController {
             self.show_toast(ui, "Nothing to delete.");
             return;
         }
-        let mut deleted = 0usize;
-        for path in paths.iter().skip(1) {
-            match trash::delete(Path::new(path)) {
-                Ok(()) => deleted += 1,
-                Err(e) => {
-                    self.show_toast_kind(ui, e.to_string(), "error");
-                    break;
-                }
-            }
-        }
+        let to_delete: Vec<String> = paths.iter().skip(1).cloned().collect();
+        let n = to_delete.len();
+        ui.set_op_drawer_text(ss(format!(
+            "Moving {n} duplicate{} to Recycle Bin...",
+            if n == 1 { "" } else { "s" }
+        )));
+        ui.set_op_drawer_visible(true);
+        ui.set_op_drawer_progress(-1.0);
+
         self.dupe_groups_cache.retain(|(k, _)| k != &id);
         let items: Vec<DupeGroupItem> = self
             .dupe_groups_cache
             .iter()
             .map(|(id_title, paths)| {
-                let title = id_title
-                    .split_once("::")
-                    .map(|(_, t)| t.to_string())
-                    .unwrap_or_else(|| id_title.clone());
-                DupeGroupItem {
-                    id: ss(id_title),
-                    title: ss(&title),
-                    detail: ss(format!("{} files", paths.len())),
-                    count: paths.len() as i32,
-                    reclaimable: ss(""),
-                }
+                dupe_group_ui_item(id_title, paths, &format!("{} files", paths.len()))
             })
             .collect();
         ui.set_dupe_groups(model_from_vec(items));
-        self.refresh(ui);
-        self.show_toast_kind(
-            ui,
-            format!("Moved {deleted} duplicate(s) to Recycle Bin"),
-            "success",
-        );
+
+        let app_state = self.app_state.clone();
+        let operation_ready = self.operation_ready.clone();
+        let pending_result = self.pending_operation_result.clone();
+        let paths_for_optimistic = to_delete.clone();
+        std::thread::spawn(move || {
+            let result = match native_delete_all_fast(&app_state, &to_delete) {
+                Ok(deleted) => NativeOperationResult {
+                    message: format!("Moved {deleted} duplicate(s) to Recycle Bin"),
+                    kind: "success".to_string(),
+                    refresh: false,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: paths_for_optimistic,
+                        toast_action: String::new(),
+                },
+                Err(e) => NativeOperationResult {
+                    message: e,
+                    kind: "error".to_string(),
+                    refresh: false,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
+                },
+            };
+            if let Ok(mut lock) = pending_result.lock() {
+                *lock = Some(result);
+            }
+            operation_ready.store(true, Ordering::Release);
+        });
     }
 
     fn search_chip_insert(&mut self, ui: &MainWindow, op: String) {
@@ -20787,7 +21787,7 @@ impl NativeController {
             } else if len > 0 {
                 format!("{len} queued")
             } else {
-                "Working…".to_string()
+                "Workingâ€¦".to_string()
             }));
         } else {
             ui.set_queue_busy_text(ss(""));
@@ -20805,6 +21805,7 @@ impl NativeController {
             self.show_toast(ui, "Nothing to undo.");
             return;
         };
+        let redo_op = op.clone();
         let kind = op.kind.clone();
         let from = op.from.clone();
         let to = op.to.clone();
@@ -20835,7 +21836,7 @@ impl NativeController {
                 .as_deref()
                 .map(native_delete_path)
                 .unwrap_or_else(|| Err("Missing copied path".to_string())),
-            "delete" => undo_delete_from_trash(op.trash_id.as_deref()),
+            "delete" => undo_delete_from_trash(op.trash_id.as_deref(), Some(from.as_str())),
             _ => Err(format!("Cannot undo '{kind}'")),
         };
         match result {
@@ -20853,7 +21854,7 @@ impl NativeController {
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| from.clone());
-                        format!("Undone: rename → {name}")
+                        format!("Undone: rename â†’ {name}")
                     }
                     "move" => {
                         let name = Path::new(&from)
@@ -20882,20 +21883,387 @@ impl NativeController {
                     }
                     other => format!("Undone: {other}"),
                 };
+                self.redo_stack.push(redo_op);
+                if self.redo_stack.len() > 50 {
+                    self.redo_stack.remove(0);
+                }
                 self.show_toast_kind(ui, detail, "success");
             }
             Err(error) => self.show_toast(ui, error),
         }
     }
+
+    fn redo(&mut self, ui: &MainWindow) {
+        let Some(op) = self.redo_stack.pop() else {
+            self.show_toast(ui, "Nothing to redo.");
+            return;
+        };
+        let kind = op.kind.clone();
+        let from = op.from.clone();
+        let to = op.to.clone();
+        let result = match kind.as_str() {
+            "rename" | "move" => {
+                let dest = to.as_deref().unwrap_or("");
+                native_move(&self.app_state, &from, dest)
+            }
+            "copy" => {
+                let dest = to.as_deref().unwrap_or("");
+                fs::copy(&from, dest)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+            "delete" => native_delete_path(&from).or_else(|_| {
+                trash::delete(&from).map_err(|e| e.to_string())
+            }),
+            "batch_rename" => match &op.batch {
+                None => Err("Missing batch rename metadata".to_string()),
+                Some(ops) => {
+                    let mut outcome = Ok(());
+                    for item in ops {
+                        let new_name = Path::new(&item.to)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| item.to.clone());
+                        if let Err(error) = native_rename(&self.app_state, &item.from, &new_name) {
+                            outcome = Err(error);
+                            break;
+                        }
+                    }
+                    outcome
+                }
+            },
+            _ => Err(format!("Cannot redo '{kind}'")),
+        };
+        match result {
+            Ok(()) => {
+                if let Ok(mut log) = self.app_state.operation_log.lock() {
+                    log.push(op);
+                }
+                self.refresh(ui);
+                self.show_toast_kind(ui, format!("Redone: {kind}"), "success");
+            }
+            Err(error) => self.show_toast(ui, error),
+        }
+    }
+
+    fn apply_dupe_keep_strategy(&mut self, ui: &MainWindow, strategy: &str) {
+        for (_id, paths) in self.dupe_groups_cache.iter_mut() {
+            if paths.len() < 2 {
+                continue;
+            }
+            paths.sort_by(|a, b| {
+                let ma = fs::metadata(a).ok();
+                let mb = fs::metadata(b).ok();
+                match strategy {
+                    "newest" => {
+                        let ta = ma.and_then(|m| m.modified().ok()).unwrap_or(SystemTime::UNIX_EPOCH);
+                        let tb = mb.and_then(|m| m.modified().ok()).unwrap_or(SystemTime::UNIX_EPOCH);
+                        tb.cmp(&ta)
+                    }
+                    "largest" => {
+                        let sa = ma.map(|m| m.len()).unwrap_or(0);
+                        let sb = mb.map(|m| m.len()).unwrap_or(0);
+                        sb.cmp(&sa)
+                    }
+                    _ => a.cmp(b),
+                }
+            });
+        }
+        let items: Vec<DupeGroupItem> = self
+            .dupe_groups_cache
+            .iter()
+            .map(|(id, paths)| dupe_group_ui_item(id, paths, "Sorted by keep strategy"))
+            .collect();
+        ui.set_dupe_groups(model_from_vec(items));
+        self.show_toast_kind(
+            ui,
+            match strategy {
+                "newest" => "Keep path set to newest in each group",
+                "largest" => "Keep path set to largest in each group",
+                _ => "Duplicate groups reordered",
+            },
+            "success",
+        );
+    }
+
+    fn sync_tag_chips(&self, ui: &MainWindow) {
+        let mut chips = Vec::new();
+        for (id, default_label) in [
+            ("red", "Urgent"),
+            ("orange", "Important"),
+            ("yellow", "Review"),
+            ("green", "Done"),
+            ("blue", "Personal"),
+            ("violet", "Code"),
+        ] {
+            let label = self
+                .tag_labels
+                .get(id)
+                .map(|s| s.as_str())
+                .unwrap_or(default_label);
+            chips.push(ChoiceItem {
+                id: ss(format!("tag:{id}")),
+                label: ss(label),
+                description: ss(id),
+                color: tag_color(id),
+            });
+        }
+        ui.set_tag_chips(model_from_vec(chips));
+    }
+
+    fn apply_tag_chip_filter(&mut self, ui: &MainWindow, chip: &str) {
+        let query = if chip.starts_with("tag:") {
+            chip.to_string()
+        } else {
+            format!("tag:{chip}")
+        };
+        ui.set_search_text(ss(&query));
+        self.search_query = query.clone();
+        self.search(ui, query);
+    }
+
+    fn show_crumb_siblings(&mut self, ui: &MainWindow, index: i32) {
+        let crumbs = build_breadcrumbs(&self.current_path);
+        let Some(crumb) = crumbs.get(index as usize) else {
+            ui.set_crumb_siblings_visible(false);
+            return;
+        };
+        let path = crumb.id.to_string();
+        let parent = Path::new(&path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+        let Ok(rd) = fs::read_dir(&parent) else {
+            ui.set_crumb_siblings_visible(false);
+            return;
+        };
+        let mut siblings: Vec<ChoiceItem> = rd
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                if !p.is_dir() {
+                    return None;
+                }
+                let name = e.file_name().to_string_lossy().to_string();
+                Some(ChoiceItem {
+                    id: ss(p.to_string_lossy().to_string()),
+                    label: ss(name),
+                    description: ss(""),
+                    color: slint::Color::from_argb_u8(0, 0, 0, 0),
+                })
+            })
+            .collect();
+        siblings.sort_by_key(|a| a.label.to_lowercase());
+        siblings.truncate(60);
+        ui.set_crumb_sibling_items(model_from_vec(siblings));
+        ui.set_crumb_siblings_index(index);
+        ui.set_crumb_siblings_visible(true);
+    }
+
+    fn preview_action(&mut self, ui: &MainWindow, action: &str) {
+        let Some(entry) = self.selected_entry() else {
+            self.show_toast(ui, "Nothing selected.");
+            return;
+        };
+        match action {
+            "open" => {
+                let _ = open::that(&entry.path);
+            }
+            "copy-path" => match copy_text_to_clipboard(&entry.path) {
+                Ok(()) => self.show_toast_kind(ui, "Path copied", "success"),
+                Err(e) => self.show_toast(ui, e),
+            },
+            "reveal" => {
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = ProcessCommand::new("explorer")
+                        .args(["/select,", &entry.path])
+                        .spawn();
+                }
+            }
+            "tag" => {
+                self.pending_prompt = Some(PendingPrompt::TagOne(entry.path.clone()));
+                ui.set_prompt_kind(ss("text"));
+                ui.set_prompt_title(ss(
+                    "Tag file (red/orange/yellow/green/blue/violet)",
+                ));
+                ui.set_prompt_value(ss(""));
+                ui.set_prompt_visible(true);
+            }
+            _ => {}
+        }
+    }
+
+    fn open_new_window(&mut self, ui: &MainWindow) {
+        let Ok(exe) = std::env::current_exe() else {
+            self.show_toast(ui, "Could not locate Pathfinder executable.");
+            return;
+        };
+        let path = self.current_path.clone();
+        match ProcessCommand::new(exe).arg(&path).spawn() {
+            Ok(_) => self.show_toast_kind(ui, "Opened new window", "success"),
+            Err(e) => self.show_toast(ui, format!("Could not open new window: {e}")),
+        }
+    }
+
+    fn file_diff_selected(&mut self, ui: &MainWindow) {
+        let paths: Vec<String> = self
+            .active_selected_indices()
+            .into_iter()
+            .filter_map(|i| self.visible_files.get(i).map(|e| e.path.clone()))
+            .collect();
+        if paths.len() != 2 {
+            self.show_toast(ui, "Select exactly two files to compare.");
+            return;
+        }
+        let left = fs::read_to_string(&paths[0]).unwrap_or_default();
+        let right = fs::read_to_string(&paths[1]).unwrap_or_default();
+        if left.len() > 400_000 || right.len() > 400_000 {
+            self.show_toast(ui, "Files are too large for in-app text diff.");
+            return;
+        }
+        let left_lines: Vec<&str> = left.lines().collect();
+        let right_lines: Vec<&str> = right.lines().collect();
+        let mut out = String::new();
+        out.push_str(&format!("Diff: {} vs {}\n\n", paths[0], paths[1]));
+        let max = left_lines.len().max(right_lines.len()).min(400);
+        for i in 0..max {
+            let l = left_lines.get(i).copied().unwrap_or("");
+            let r = right_lines.get(i).copied().unwrap_or("");
+            if l == r {
+                continue;
+            }
+            if !l.is_empty() {
+                out.push_str(&format!("- {l}\n"));
+            }
+            if !r.is_empty() {
+                out.push_str(&format!("+ {r}\n"));
+            }
+        }
+        if out.lines().count() <= 2 {
+            out.push_str("(no line differences in first 400 lines, or identical)\n");
+        }
+        ui.set_preview_visible(true);
+        ui.set_preview_title(ss("File diff"));
+        ui.set_preview_body(ss(out));
+        ui.set_preview_meta(ss(format!("{} | {}", paths[0], paths[1])));
+        ui.set_preview_is_image(false);
+    }
+
+    fn batch_tag_selected(&mut self, ui: &MainWindow) {
+        let paths: Vec<String> = self
+            .active_selected_indices()
+            .into_iter()
+            .filter_map(|i| self.visible_files.get(i).map(|e| e.path.clone()))
+            .collect();
+        if paths.is_empty() {
+            self.show_toast(ui, "Select files to tag.");
+            return;
+        }
+        self.pending_prompt = Some(PendingPrompt::BatchTag(paths));
+        ui.set_prompt_kind(ss("text"));
+        ui.set_prompt_title(ss(
+            "Batch tag (red/orange/yellow/green/blue/violet)",
+        ));
+        ui.set_prompt_value(ss("yellow"));
+        ui.set_prompt_visible(true);
+    }
+
+    fn batch_note_selected(&mut self, ui: &MainWindow) {
+        let paths: Vec<String> = self
+            .active_selected_indices()
+            .into_iter()
+            .filter_map(|i| self.visible_files.get(i).map(|e| e.path.clone()))
+            .collect();
+        if paths.is_empty() {
+            self.show_toast(ui, "Select files to annotate.");
+            return;
+        }
+        self.pending_prompt = Some(PendingPrompt::BatchNote(paths));
+        ui.set_prompt_kind(ss("text"));
+        ui.set_prompt_title(ss("Batch note for selection"));
+        ui.set_prompt_value(ss(""));
+        ui.set_prompt_visible(true);
+    }
+
+    fn check_folder_changed_banner(&mut self, ui: &MainWindow) {
+        let path = self.current_path.clone();
+        if is_virtual_nav_path(&path) {
+            self.folder_changed_pending = false;
+            ui.set_folder_changed_banner(false);
+            return;
+        }
+        let dirty = self
+            .app_state
+            .dirty_dirs
+            .lock()
+            .ok()
+            .map(|d| d.iter().any(|p| same_path_string(p, &path)))
+            .unwrap_or(false);
+        self.folder_changed_pending = dirty;
+        ui.set_folder_changed_banner(dirty);
+    }
+
+    fn refresh_folder_changed(&mut self, ui: &MainWindow) {
+        let path = self.current_path.clone();
+        if let Ok(mut dirty) = self.app_state.dirty_dirs.lock() {
+            dirty.retain(|p| !same_path_string(p, &path));
+        }
+        self.folder_changed_pending = false;
+        ui.set_folder_changed_banner(false);
+        self.refresh(ui);
+    }
+
+    fn read_exif_summary(path: &Path) -> Option<String> {
+        let file = File::open(path).ok()?;
+        let mut bufreader = std::io::BufReader::new(file);
+        let exif = exif::Reader::new()
+            .read_from_container(&mut bufreader)
+            .ok()?;
+        let mut parts = Vec::new();
+        for tag in [
+            exif::Tag::Make,
+            exif::Tag::Model,
+            exif::Tag::DateTimeOriginal,
+            exif::Tag::PixelXDimension,
+            exif::Tag::PixelYDimension,
+            exif::Tag::Orientation,
+            exif::Tag::FNumber,
+            exif::Tag::ExposureTime,
+            exif::Tag::PhotographicSensitivity,
+        ] {
+            if let Some(field) = exif.get_field(tag, exif::In::PRIMARY) {
+                parts.push(format!("{}: {}", tag, field.display_value().with_unit(&exif)));
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
+    }
 }
 
-fn undo_delete_from_trash(trash_id: Option<&str>) -> Result<(), String> {
-    let trash_id = trash_id.ok_or("Missing recycle metadata for undo")?;
+fn undo_delete_from_trash(
+    trash_id: Option<&str>,
+    original_path: Option<&str>,
+) -> Result<(), String> {
     let items = trash::os_limited::list().map_err(|e| e.to_string())?;
-    let item = items
-        .into_iter()
-        .find(|i| i.id.to_string_lossy() == trash_id)
-        .ok_or("Item is no longer in the Recycle Bin")?;
+    let item = if let Some(id) = trash_id {
+        items
+            .into_iter()
+            .find(|i| i.id.to_string_lossy() == id)
+            .ok_or_else(|| "Item is no longer in the Recycle Bin".to_string())?
+    } else if let Some(path) = original_path {
+        items
+            .into_iter()
+            .find(|i| {
+                same_path_string(&i.original_path().to_string_lossy(), path)
+            })
+            .ok_or_else(|| "Item is no longer in the Recycle Bin".to_string())?
+    } else {
+        return Err("Missing recycle metadata for undo".to_string());
+    };
     trash::os_limited::restore_all(vec![item]).map_err(|e| e.to_string())
 }
 
@@ -21952,7 +23320,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 ui.set_search_semantic_mode(false);
                 ui.set_semantic_search_available(false);
                 ctrl.save_settings();
-                ctrl.show_toast(&ui, "Install Local AI before using semantic search.");
+                ctrl.show_toast(
+                    &ui,
+                    "Install Local AI before using semantic search. Ranking uses filename embeddings â€” not OCR.",
+                );
                 return;
             }
             ctrl.settings.search_semantic_mode = !ctrl.settings.search_semantic_mode;
@@ -21974,7 +23345,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 ctrl.save_settings();
                 ctrl.show_toast(
                     &ui,
-                    "Install Local AI image models before enabling image tags in search.",
+                    "Install Local AI image models first. Image tags are approximate (no OCR).",
                 );
                 return;
             }
@@ -22376,6 +23747,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     if let Ok(ctrl) = c.try_borrow() {
                         ctrl.sync_queue_busy(&ui);
                     }
+                    if let Ok(mut ctrl) = c.try_borrow_mut() {
+                        ctrl.check_folder_changed_banner(&ui);
+                    }
                 }
 
                 // Push live progress for any currently running archive op into
@@ -22504,6 +23878,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                 if !same_path_string(&ctrl.current_path, &result.path) {
                                     return;
                                 }
+                                if result.path == "recycle://" {
+                                    ctrl.apply_recycle_bin_listing(&ui, result.entries);
+                                    return;
+                                }
                                 if let Some(err) = result.error {
                                     ui.set_empty_state(ss(format!(
                                         "Cannot open \"{}\"",
@@ -22557,12 +23935,21 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                         ui.set_empty_state(ss(""));
                                     }
                                     ui.set_status_right(ss(format!(
-                                        "{} | {}{} ({} {})",
+                                        "{} | {}{} ({} {}{})",
                                         result.path,
                                         result.source,
-                                        if result.partial { " — still searching" } else { "" },
+                                        if result.partial { " â€” still searching" } else { "" },
                                         count,
-                                        if count == 1 { "match" } else { "matches" }
+                                        if count == 1 { "match" } else { "matches" },
+                                        if !result.partial
+                                            && (count >= SEARCH_INDEX_LIMIT
+                                                || count >= SEARCH_LIVE_SCAN_LIMIT
+                                                || count >= SEARCH_DRIVE_SCAN_LIMIT)
+                                        {
+                                            " Â· showing first page"
+                                        } else {
+                                            ""
+                                        }
                                     )));
                                     if !result.partial {
                                         ctrl.show_toast_kind(
@@ -22596,13 +23983,27 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                 }
                                 if result.refresh_both_panes {
                                     ctrl.invalidate_and_refresh_both_panes(&ui);
+                                } else if !result.optimistic_remove_paths.is_empty() {
+                                    ctrl.optimistic_remove_paths(
+                                        &ui,
+                                        &result.optimistic_remove_paths,
+                                    );
                                 } else if result.refresh {
                                     ctrl.refresh(&ui);
                                 }
                                 if let Some(path) = result.secondary_refresh_path {
                                     ctrl.secondary_navigate(&ui, path);
                                 }
-                                ctrl.show_toast_kind(&ui, result.message, &result.kind);
+                                if result.toast_action.is_empty() {
+                                    ctrl.show_toast_kind(&ui, result.message, &result.kind);
+                                } else {
+                                    ctrl.show_toast_action(
+                                        &ui,
+                                        result.message,
+                                        &result.kind,
+                                        &result.toast_action,
+                                    );
+                                }
                             }
                         }
                     }
@@ -22683,6 +24084,153 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
 
     let weak = ui.as_weak();
     let c = controller.clone();
+    ui.on_toast_action_clicked(move || {
+        if let Some(ui) = weak.upgrade() {
+            let action = ui.get_toast_action().to_string();
+            let mut ctrl = c.borrow_mut();
+            ctrl.dismiss_toast(&ui);
+            if action.eq_ignore_ascii_case("undo") {
+                ctrl.undo(&ui);
+            }
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_side_expand_toggled(move |path| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().toggle_side_expand(&ui, &path);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_crumb_siblings(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().show_crumb_siblings(&ui, index);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_preview_action(move |action| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().preview_action(&ui, &action);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_tab_middle_close(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().close_tab(&ui, index);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_tab_context(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.activate_tab(&ui, index);
+            ctrl.show_toast(
+                &ui,
+                "Tab: middle-click to close · use command palette for New Window",
+            );
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_apply_tag_chip(move |chip| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().apply_tag_chip_filter(&ui, &chip);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_search_source_picked(move |source| {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.search_source_pref = source.to_string();
+            ui.set_search_source_pref(ss(&source));
+            ctrl.show_toast_kind(
+                &ui,
+                format!("Search source: {source}"),
+                "info",
+            );
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_dupe_keep_strategy(move |strategy| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().apply_dupe_keep_strategy(&ui, &strategy);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_redo_command(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().redo(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_batch_tag_selected(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().batch_tag_selected(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_batch_note_selected(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().batch_note_selected(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_folder_changed_refresh(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().refresh_folder_changed(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_new_window(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().open_new_window(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_thumb_size_changed(move |scale| {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.thumb_size_scale = scale.clamp(0.75, 1.75);
+            ui.set_thumb_size_scale(ctrl.thumb_size_scale);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_file_diff_selected(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().file_diff_selected(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_confirm_delete(move || {
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut().confirm_delete(&ui);
@@ -22725,7 +24273,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 ctrl.save_settings();
                 ctrl.show_toast(
                     &ui,
-                    "Tip: type to filter commands. Try “duplicates”, “rules”, or “home”.",
+                    "Tip: type to filter commands. Try â€œduplicatesâ€, â€œrulesâ€, or â€œhomeâ€.",
                 );
             }
         }
