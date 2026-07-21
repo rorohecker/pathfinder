@@ -11295,10 +11295,11 @@ fn build_preview_display(
     match native_read_preview(state, path, Some(PREVIEW_READ_BYTES)) {
         Ok(preview) => {
             let body = match preview.kind.as_str() {
-                "image" | "folder" => String::new(),
+                // No extractable body — never invent labels like "file file".
+                "image" | "folder" | "binary" | "file" => String::new(),
                 "text" | "svg" | "archive" | "pdf" | "font" | "media"
                 | "image-too-large" | "image-metadata" => preview.text.unwrap_or_default(),
-                other => format!("{other} file"),
+                _ => preview.text.unwrap_or_default(),
             };
             let truncated_note = if preview.truncated { " | truncated" } else { "" };
             let meta = format!(
