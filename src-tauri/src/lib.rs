@@ -14394,6 +14394,52 @@ impl NativeController {
         ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
     }
 
+    /// Map the current location to a High Fantasy empty-pane ornament kind.
+    fn fantasy_empty_kind_for_path(&self, path: &str) -> &'static str {
+        if path == "recycle://" {
+            return "cauldron";
+        }
+        if path == "home://" {
+            return "tower";
+        }
+        if path == "storage://" {
+            return "chest";
+        }
+        for kf in &self.known_folders {
+            if same_path_string(&kf.path, path) {
+                return match kf.id.as_str() {
+                    "downloads" => "potion",
+                    "documents" | "desktop" => "scroll",
+                    "pictures" => "gem",
+                    "home" => "tower",
+                    _ => "chest",
+                };
+            }
+        }
+        let base = Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match base.as_str() {
+            "downloads" => "potion",
+            "documents" | "desktop" => "scroll",
+            "pictures" | "screenshots" | "camera roll" => "gem",
+            _ => "chest",
+        }
+    }
+
+    fn sync_fantasy_empty_kind(&self, ui: &MainWindow) {
+        let kind = if ui.get_is_home_view() {
+            "tower"
+        } else if ui.get_in_recycle_bin() || self.current_path == "recycle://" {
+            "cauldron"
+        } else {
+            self.fantasy_empty_kind_for_path(&self.current_path)
+        };
+        ui.set_fantasy_empty_kind(ss(kind));
+    }
+
     fn update_file_models(&mut self, ui: &MainWindow) {
         self.update_file_models_inner(ui, true);
     }
@@ -14538,6 +14584,7 @@ impl NativeController {
     fn update_models(&mut self, ui: &MainWindow) {
         self.update_file_models(ui);
         self.sync_sidebar_models(ui);
+        self.sync_fantasy_empty_kind(ui);
     }
 
     fn bump_nav_generation(&mut self) -> u64 {

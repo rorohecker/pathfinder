@@ -5,8 +5,6 @@ import {
     FantasyIconGallery,
     FantasyEmptyOrnament,
     FantasyChestGlyph,
-    FantasyGemGlyph,
-    FantasyTowerGlyph,
     FantasyPixel,
 } from "fantasy_icons.slint";
 
@@ -554,8 +552,38 @@ component SideRow inherits Rectangle {
         }
     }
 
+    // High Fantasy: map known sidebar icons to animated pixel relics.
+    // Sparse (sidebar rows only — never ListView file rows). Timers pause off-theme.
+    property <bool> fantasy_side: ThemePalette.active_theme == "fantasy" && !root.item.is_header && root.item.icon != "tag";
+    property <string> fantasy_kind:
+        root.item.icon == "trash" ? "cauldron" :
+        (root.item.icon == "home" || root.item.icon == "drive") ? "tower" :
+        root.item.icon == "download" ? "potion" :
+        root.item.icon == "documents" ? "scroll" :
+        (root.item.icon == "search" || root.item.icon == "image") ? "gem" :
+        root.item.icon == "folder" ? "chest" :
+        "";
+    property <bool> fantasy_glyph: root.fantasy_side && root.fantasy_kind != "";
+
+    if root.fantasy_glyph: FantasyEmptyOrnament {
+        x: (root.item.expandable ? 18px : 7px) + root.item.indent * 12px;
+        y: (parent.height - self.height) / 2;
+        cell: 1.5px;
+        kind: root.fantasy_kind;
+        running: ThemePalette.active_theme == "fantasy";
+        hovered: touch.has-hover;
+        chest: FantasyIconBank.chest;
+        scroll: FantasyIconBank.scroll;
+        gem_a: FantasyIconBank.gem_a;
+        gem_b: FantasyIconBank.gem_b;
+        potion: FantasyIconBank.potion;
+        tower_a: FantasyIconBank.tower_a;
+        tower_b: FantasyIconBank.tower_b;
+        cauldron: FantasyIconBank.cauldron;
+    }
+
     SvgIcon {
-        visible: !root.item.is_header && root.item.icon != "tag";
+        visible: !root.item.is_header && root.item.icon != "tag" && !root.fantasy_glyph;
         x: (root.item.expandable ? 20px : 9px) + root.item.indent * 12px;
         y: (parent.height - 16px) / 2;
         icon_size: 16px;
@@ -3161,6 +3189,9 @@ export component MainWindow inherits Window {
     // True when the active pane is showing the virtual `recycle://` bin -
     // the file context menu surfaces Restore / Permanently Delete in that mode.
     in-out property <bool> in_recycle_bin: false;
+    // High Fantasy empty-pane ornament: chest|scroll|gem|potion|tower|cauldron.
+    // Set from Rust on navigate; UI may override for search.
+    in-out property <string> fantasy_empty_kind: "chest";
     // "primary" / "secondary" / "" - pane currently being hovered during a drag-drop;
     // overlays a thicker glowing border so the user can see where the drop will land.
     in-out property <string> drag_over_pane: "";
@@ -3801,7 +3832,7 @@ export component MainWindow inherits Window {
                 x: 10px;
                 y: 14px;
                 width: parent.width - 20px;
-                height: parent.height - 28px - (ThemePalette.active_theme == "fantasy" ? 40px : 0px);
+                height: parent.height - 28px;
                 viewport-width: self.width;
                 viewport-height: Math.max(self.height, root.side_items.length * 32px);
                 for item[index] in root.side_items: SideRow {
@@ -3817,7 +3848,7 @@ export component MainWindow inherits Window {
                 x: 10px;
                 y: 14px;
                 width: parent.width - 20px;
-                height: parent.height - 28px - (ThemePalette.active_theme == "fantasy" ? 40px : 0px);
+                height: parent.height - 28px;
                 viewport-width: self.width;
                 viewport-height: Math.max(self.height, root.side_items_simple.length * 32px);
                 for item[index] in root.side_items_simple: SideRow {
@@ -3827,34 +3858,6 @@ export component MainWindow inherits Window {
                     activated(i) => { root.side_activated(i); }
                     rename_activated(path) => { root.rename_tag_prompt(path); }
                     expand_toggled(path) => { root.side_expand_toggled(path); }
-                }
-            }
-
-            // High Fantasy sidebar ornaments — fixed pair only (never per SideRow).
-            // No TouchArea: decorative; clicks reach the ListView beneath.
-            if ThemePalette.active_theme == "fantasy": HorizontalLayout {
-                x: 14px;
-                y: parent.height - 44px;
-                width: parent.width - 28px;
-                height: 32px;
-                spacing: 10px;
-                alignment: start;
-                FantasyChestGlyph {
-                    pixels: FantasyIconBank.chest;
-                    cell: 2.5px;
-                    interactive: false;
-                }
-                FantasyGemGlyph {
-                    pixels_a: FantasyIconBank.gem_a;
-                    pixels_b: FantasyIconBank.gem_b;
-                    cell: 2.5px;
-                    running: ThemePalette.active_theme == "fantasy";
-                }
-                FantasyTowerGlyph {
-                    pixels_a: FantasyIconBank.tower_a;
-                    pixels_b: FantasyIconBank.tower_b;
-                    cell: 2.5px;
-                    running: ThemePalette.active_theme == "fantasy";
                 }
             }
 
@@ -5256,9 +5259,8 @@ export component MainWindow inherits Window {
                     height: parent.height;
                     property <bool> fantasy_on: ThemePalette.active_theme == "fantasy";
                     // Contextual glyph for empty panes (one icon — never per-row).
-                    property <string> fantasy_kind: root.in_recycle_bin ? "cauldron"
-                        : (root.search_text != "" ? "gem"
-                        : (root.is_home_view ? "tower" : "chest"));
+                    property <string> fantasy_kind: root.search_text != "" ? "gem"
+                        : (root.fantasy_empty_kind != "" ? root.fantasy_empty_kind : "chest");
                     // Soft fantasy glow behind empty-state copy (theme-gated).
                     if empty_pane.fantasy_on: Rectangle {
                         x: (parent.width - 120px) / 2;
@@ -5718,14 +5720,31 @@ export component MainWindow inherits Window {
                     y: 38px + (root.view_mode == "list" ? 32px : 0px);
                     width: parent.width;
                     height: parent.height - 38px - (root.view_mode == "list" ? 32px : 0px);
-                    Text {
-                        width: parent.width;
-                        height: parent.height;
-                        text: root.secondary_path == "" ? "Enable dual pane to browse a second location" : "Empty folder";
-                        color: ThemePalette.text_faint;
-                        font-size: 12px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                    property <bool> fantasy_on: ThemePalette.active_theme == "fantasy";
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        if fantasy_on: FantasyEmptyOrnament {
+                            x: (parent.width - self.width) / 2;
+                            cell: 5px;
+                            kind: root.secondary_path == "" ? "tower" : "chest";
+                            running: fantasy_on;
+                            chest: FantasyIconBank.chest;
+                            scroll: FantasyIconBank.scroll;
+                            gem_a: FantasyIconBank.gem_a;
+                            gem_b: FantasyIconBank.gem_b;
+                            potion: FantasyIconBank.potion;
+                            tower_a: FantasyIconBank.tower_a;
+                            tower_b: FantasyIconBank.tower_b;
+                            cauldron: FantasyIconBank.cauldron;
+                        }
+                        Text {
+                            width: parent.width;
+                            text: root.secondary_path == "" ? "Enable dual pane to browse a second location" : "Empty folder";
+                            color: ThemePalette.text_faint;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
                     }
                     TouchArea {
                         width: parent.width;
@@ -6108,16 +6127,34 @@ export component MainWindow inherits Window {
                         }
 
                         // Empty state
-                        if root.preview_body == "" && root.preview_meta == "": Text {
+                        if root.preview_body == "" && root.preview_meta == "": VerticalLayout {
                             x: 16px;
                             width: parent.width - 32px;
                             height: 200px;
-                            text: "Select a file to preview details.";
-                            color: ThemePalette.text_faint;
-                            font-size: 12.5px;
-                            font-family: AppMetrics.ui_font;
-                            vertical-alignment: center;
-                            horizontal-alignment: center;
+                            alignment: center;
+                            spacing: 10px;
+                            if ThemePalette.active_theme == "fantasy": FantasyEmptyOrnament {
+                                x: (parent.width - self.width) / 2;
+                                cell: 5px;
+                                kind: "scroll";
+                                running: ThemePalette.active_theme == "fantasy";
+                                chest: FantasyIconBank.chest;
+                                scroll: FantasyIconBank.scroll;
+                                gem_a: FantasyIconBank.gem_a;
+                                gem_b: FantasyIconBank.gem_b;
+                                potion: FantasyIconBank.potion;
+                                tower_a: FantasyIconBank.tower_a;
+                                tower_b: FantasyIconBank.tower_b;
+                                cauldron: FantasyIconBank.cauldron;
+                            }
+                            Text {
+                                width: parent.width;
+                                text: "Select a file to preview details.";
+                                color: ThemePalette.text_faint;
+                                font-size: 12.5px;
+                                font-family: AppMetrics.ui_font;
+                                horizontal-alignment: center;
+                            }
                         }
                     }
                 }
@@ -6264,19 +6301,19 @@ export component MainWindow inherits Window {
                 }
             }
         }
-    }
 
-    // High Fantasy atmosphere — divine wind + ember drift + star sparkles.
-    // Gated to the fantasy theme only. No TouchArea so clicks pass through
-    // to chrome beneath. z stays below menus/dialogs/toasts.
-    FantasyAtmosphere {
-        x: 0;
-        y: 0;
-        width: parent.width;
-        height: parent.height;
-        z: 3;
-        active: ThemePalette.active_theme == "fantasy";
-        running: ThemePalette.active_theme == "fantasy";
+        // High Fantasy atmosphere — divine wind + ember drift + star sparkles.
+        // Inside `app` so it sits above opaque chrome but below MainWindow
+        // modals (settings / welcome / dialogs). No TouchArea: clicks pass through.
+        FantasyAtmosphere {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            z: 40;
+            active: ThemePalette.active_theme == "fantasy";
+            running: ThemePalette.active_theme == "fantasy";
+        }
     }
 
     if root.context_visible: Rectangle {

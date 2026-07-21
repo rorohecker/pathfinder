@@ -1,15 +1,16 @@
 // Lean High Fantasy atmosphere for Pathfinder.
 // Wind / ember / sparkle motes — companion to fantasy_icons.slint pixel glyphs.
 // Effects (theme-gated by the caller via `active`):
-//   1. Divine wind — faint dust motes drifting diagonally
-//   2. Ember drift — warmer, slower motes (extra high-fantasy accent)
+//   1. Divine wind — parchment dust motes drifting diagonally
+//   2. Ember drift — warmer, slower rising motes
 //   3. Star sparkles — fixed points that quietly twinkle
 //
 // No TouchArea: decorative only; pointer events pass through to chrome below.
+// Parent should place this above opaque panes but below modal overlays.
 
 export component FantasyAtmosphere inherits Rectangle {
     in property <bool> active: false;
-    // When false, Timers stop so minimized / hidden windows idle cheaply.
+    // When false, Timers stop so minimized / hidden / off-theme windows idle cheaply.
     in property <bool> running: true;
 
     width: 100%;
@@ -20,20 +21,24 @@ export component FantasyAtmosphere inherits Rectangle {
     property <bool> anim_on: root.active && root.running;
 
     // --- Divine wind: cool parchment dust drifting on a slow draft ---------
+    // Opacities match the zip demo (≈0.4) so motes read on dark moss panels.
+    // Half the flock starts mid-path so motion is visible immediately.
     for m[i] in [
-        { x0: 0.06, y0: 0.10, dx: 0.07, dy: 0.04, dur: 7800ms },
-        { x0: 0.28, y0: 0.42, dx: 0.06, dy: -0.035, dur: 9200ms },
-        { x0: 0.52, y0: 0.16, dx: 0.055, dy: 0.045, dur: 8400ms },
-        { x0: 0.74, y0: 0.55, dx: 0.05, dy: -0.03, dur: 10100ms },
-        { x0: 0.88, y0: 0.22, dx: 0.04, dy: 0.035, dur: 8800ms },
-        { x0: 0.40, y0: 0.78, dx: 0.06, dy: -0.04, dur: 9600ms },
+        { x0: 0.06, y0: 0.10, dx: 0.10, dy: 0.05, dur: 7000ms },
+        { x0: 0.28, y0: 0.42, dx: 0.08, dy: -0.05, dur: 8200ms },
+        { x0: 0.52, y0: 0.16, dx: 0.07, dy: 0.06, dur: 6600ms },
+        { x0: 0.74, y0: 0.55, dx: 0.07, dy: -0.04, dur: 9400ms },
+        { x0: 0.88, y0: 0.22, dx: 0.06, dy: 0.05, dur: 7800ms },
+        { x0: 0.40, y0: 0.78, dx: 0.08, dy: -0.05, dur: 8600ms },
+        { x0: 0.15, y0: 0.60, dx: 0.09, dy: -0.03, dur: 7600ms },
+        { x0: 0.62, y0: 0.30, dx: -0.05, dy: 0.04, dur: 9000ms },
     ] : Rectangle {
-        width: 3px;
-        height: 3px;
-        border-radius: 1.5px;
+        width: 4px;
+        height: 4px;
+        border-radius: 2px;
         background: #f2e8c8;
-        opacity: 0.22;
-        property <bool> drift: false;
+        // Alternate starting phase so the flock isn't frozen until first tick.
+        property <bool> drift: Math.mod(i, 2) == 1;
         Timer {
             interval: m.dur;
             running: root.anim_on;
@@ -41,23 +46,25 @@ export component FantasyAtmosphere inherits Rectangle {
         }
         x: (drift ? m.x0 + m.dx : m.x0) * root.width;
         y: (drift ? m.y0 + m.dy : m.y0) * root.height;
+        opacity: drift ? 0.18 : 0.42;
         animate x { duration: m.dur; easing: ease-in-out; }
         animate y { duration: m.dur; easing: ease-in-out; }
+        animate opacity { duration: m.dur; easing: ease-in-out; }
     }
 
     // --- Ember drift: warmer bronze motes, larger & slower than wind ------
     for e[i] in [
-        { x0: 0.18, y0: 0.70, dx: 0.03, dy: -0.08, dur: 12000ms },
-        { x0: 0.62, y0: 0.85, dx: -0.025, dy: -0.07, dur: 14000ms },
-        { x0: 0.82, y0: 0.60, dx: 0.02, dy: -0.09, dur: 13000ms },
-        { x0: 0.35, y0: 0.90, dx: 0.035, dy: -0.06, dur: 15000ms },
+        { x0: 0.18, y0: 0.70, dx: 0.04, dy: -0.12, dur: 11000ms },
+        { x0: 0.62, y0: 0.85, dx: -0.03, dy: -0.10, dur: 13000ms },
+        { x0: 0.82, y0: 0.60, dx: 0.03, dy: -0.11, dur: 12000ms },
+        { x0: 0.35, y0: 0.90, dx: 0.04, dy: -0.09, dur: 14000ms },
+        { x0: 0.48, y0: 0.75, dx: -0.02, dy: -0.13, dur: 12500ms },
     ] : Rectangle {
         width: 5px;
         height: 5px;
         border-radius: 2.5px;
         background: #e0b23c;
-        opacity: 0.16;
-        property <bool> drift: false;
+        property <bool> drift: Math.mod(i, 2) == 0;
         Timer {
             interval: e.dur;
             running: root.anim_on;
@@ -65,20 +72,24 @@ export component FantasyAtmosphere inherits Rectangle {
         }
         x: (drift ? e.x0 + e.dx : e.x0) * root.width;
         y: (drift ? e.y0 + e.dy : e.y0) * root.height;
+        opacity: drift ? 0.10 : 0.32;
         animate x { duration: e.dur; easing: ease-in-out; }
         animate y { duration: e.dur; easing: ease-in-out; }
+        animate opacity { duration: e.dur; easing: ease-in-out; }
     }
 
     // --- Star sparkles: fixed twinkles (stardust over the canopy) ---------
     for s[i] in [
-        { x: 0.12, y: 0.06, dur: 2400ms },
-        { x: 0.34, y: 0.48, dur: 3100ms },
-        { x: 0.58, y: 0.09, dur: 2800ms },
-        { x: 0.76, y: 0.62, dur: 2200ms },
-        { x: 0.91, y: 0.28, dur: 3500ms },
-        { x: 0.05, y: 0.55, dur: 2900ms },
-        { x: 0.45, y: 0.88, dur: 3300ms },
-        { x: 0.68, y: 0.38, dur: 2600ms },
+        { x: 0.12, y: 0.06, dur: 2200ms },
+        { x: 0.34, y: 0.48, dur: 2700ms },
+        { x: 0.58, y: 0.09, dur: 3100ms },
+        { x: 0.76, y: 0.62, dur: 1900ms },
+        { x: 0.91, y: 0.28, dur: 2500ms },
+        { x: 0.05, y: 0.55, dur: 3400ms },
+        { x: 0.45, y: 0.88, dur: 2800ms },
+        { x: 0.68, y: 0.38, dur: 2300ms },
+        { x: 0.22, y: 0.72, dur: 3000ms },
+        { x: 0.85, y: 0.80, dur: 2600ms },
     ] : Rectangle {
         width: 2px;
         height: 2px;
@@ -86,13 +97,14 @@ export component FantasyAtmosphere inherits Rectangle {
         background: #e8c478;
         x: s.x * root.width;
         y: s.y * root.height;
-        property <bool> lit: false;
+        // Stagger initial lit state so the field twinkles from frame one.
+        property <bool> lit: Math.mod(i, 2) == 1;
         Timer {
             interval: s.dur;
             running: root.anim_on;
             triggered => { lit = !lit; }
         }
-        opacity: lit ? 0.55 : 0.08;
+        opacity: lit ? 0.90 : 0.12;
         animate opacity { duration: s.dur; easing: ease-in-out; }
     }
 }
