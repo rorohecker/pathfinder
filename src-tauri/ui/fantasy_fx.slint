@@ -1,0 +1,122 @@
+// Lean High Fantasy atmosphere for Pathfinder.
+// Adapted from the fantasy-explorer-icons demo (files.zip) — keeping the
+// animation ideas, discarding the demo shell and PixelIcon grid approach
+// (144 Rectangles × every file row would thrash ListView).
+//
+// Effects (theme-gated by the caller via `active`):
+//   1. Divine wind — faint dust motes drifting diagonally
+//   2. Ember drift — warmer, slower motes (extra high-fantasy accent)
+//   3. Star sparkles — fixed points that quietly twinkle
+//
+// No TouchArea: decorative only; pointer events pass through to chrome below.
+
+export component FantasyAtmosphere inherits Rectangle {
+    in property <bool> active: false;
+    // When false, Timers stop so minimized / hidden windows idle cheaply.
+    in property <bool> running: true;
+
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    visible: root.active;
+
+    property <bool> anim_on: root.active && root.running;
+
+    // --- Divine wind: cool parchment dust drifting on a slow draft ---------
+    for m[i] in [
+        { x0: 0.06, y0: 0.10, dx: 0.07, dy: 0.04, dur: 7800ms },
+        { x0: 0.28, y0: 0.42, dx: 0.06, dy: -0.035, dur: 9200ms },
+        { x0: 0.52, y0: 0.16, dx: 0.055, dy: 0.045, dur: 8400ms },
+        { x0: 0.74, y0: 0.55, dx: 0.05, dy: -0.03, dur: 10100ms },
+        { x0: 0.88, y0: 0.22, dx: 0.04, dy: 0.035, dur: 8800ms },
+        { x0: 0.40, y0: 0.78, dx: 0.06, dy: -0.04, dur: 9600ms },
+    ] : Rectangle {
+        width: 3px;
+        height: 3px;
+        border-radius: 1.5px;
+        background: #f2e8c8;
+        opacity: 0.22;
+        property <bool> drift: false;
+        Timer {
+            interval: m.dur;
+            running: root.anim_on;
+            triggered => { drift = !drift; }
+        }
+        x: (drift ? m.x0 + m.dx : m.x0) * root.width;
+        y: (drift ? m.y0 + m.dy : m.y0) * root.height;
+        animate x { duration: m.dur; easing: ease-in-out; }
+        animate y { duration: m.dur; easing: ease-in-out; }
+    }
+
+    // --- Ember drift: warmer bronze motes, larger & slower than wind ------
+    for e[i] in [
+        { x0: 0.18, y0: 0.70, dx: 0.03, dy: -0.08, dur: 12000ms },
+        { x0: 0.62, y0: 0.85, dx: -0.025, dy: -0.07, dur: 14000ms },
+        { x0: 0.82, y0: 0.60, dx: 0.02, dy: -0.09, dur: 13000ms },
+        { x0: 0.35, y0: 0.90, dx: 0.035, dy: -0.06, dur: 15000ms },
+    ] : Rectangle {
+        width: 5px;
+        height: 5px;
+        border-radius: 2.5px;
+        background: #e0b23c;
+        opacity: 0.16;
+        property <bool> drift: false;
+        Timer {
+            interval: e.dur;
+            running: root.anim_on;
+            triggered => { drift = !drift; }
+        }
+        x: (drift ? e.x0 + e.dx : e.x0) * root.width;
+        y: (drift ? e.y0 + e.dy : e.y0) * root.height;
+        animate x { duration: e.dur; easing: ease-in-out; }
+        animate y { duration: e.dur; easing: ease-in-out; }
+    }
+
+    // --- Star sparkles: fixed twinkles (stardust over the canopy) ---------
+    for s[i] in [
+        { x: 0.12, y: 0.06, dur: 2400ms },
+        { x: 0.34, y: 0.48, dur: 3100ms },
+        { x: 0.58, y: 0.09, dur: 2800ms },
+        { x: 0.76, y: 0.62, dur: 2200ms },
+        { x: 0.91, y: 0.28, dur: 3500ms },
+        { x: 0.05, y: 0.55, dur: 2900ms },
+        { x: 0.45, y: 0.88, dur: 3300ms },
+        { x: 0.68, y: 0.38, dur: 2600ms },
+    ] : Rectangle {
+        width: 2px;
+        height: 2px;
+        border-radius: 1px;
+        background: #e8c478;
+        x: s.x * root.width;
+        y: s.y * root.height;
+        property <bool> lit: false;
+        Timer {
+            interval: s.dur;
+            running: root.anim_on;
+            triggered => { lit = !lit; }
+        }
+        opacity: lit ? 0.55 : 0.08;
+        animate opacity { duration: s.dur; easing: ease-in-out; }
+    }
+}
+
+// Hover-only gold sparkles for the fantasy treasure-chest folder icon.
+// Three tiny motes — no Timer, no pixel grid. Parent supplies `lit`.
+export component FantasyChestSparkles inherits Rectangle {
+    in property <bool> lit: false;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+
+    for offset[i] in [0.28, 0.48, 0.68] : Rectangle {
+        width: 3px;
+        height: 3px;
+        border-radius: 1.5px;
+        background: #e0b23c;
+        x: offset * root.width;
+        y: root.lit ? root.height * 0.05 : root.height * 0.42;
+        opacity: root.lit ? 0.0 : 0.85;
+        animate y { duration: 550ms + i * 90ms; easing: ease-out; }
+        animate opacity { duration: 550ms + i * 90ms; easing: ease-in; }
+    }
+}

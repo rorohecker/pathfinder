@@ -1,5 +1,6 @@
 import { LineEdit, ListView, ScrollView, Slider, Palette } from "std-widgets.slint";
 export { Palette }
+import { FantasyAtmosphere, FantasyChestSparkles } from "fantasy_fx.slint";
 
 // Bundled OFL fonts (embedded via build.rs). Family names come from font metadata.
 import "fonts/PressStart2P-Regular.ttf";
@@ -633,6 +634,8 @@ component SideRow inherits Rectangle {
 component NodeVisual {
     in property <bool> is_dir;
     in property <string> extension;
+    // Hover from the parent FileRow — drives fantasy chest sparkles only.
+    in property <bool> hovered: false;
     // Folders use a clearly wider-than-tall outline so they read as a folder
     // silhouette and not a square tile. Iterations: 54x44 (1.23) was near square,
     // 62x40 (1.55) was wider but still chunky, 68x36 (1.89) is closer to the
@@ -838,8 +841,15 @@ component NodeVisual {
     // -- FANTASY: ornate wooden treasure chest with gold bands ------------
     // Clearly distinct from a folder shape: rounded lid on top of trapezoidal
     // body, two gold horizontal bands, and a small gold lock plate.
+    // Hover bounce + gold sparkles adapted from fantasy-explorer-icons (zip);
+    // no per-pixel Rectangle grid (too heavy for ListView).
     if root.is_dir && !root.use_image && ThemePalette.active_theme == "fantasy": Rectangle {
-        x: 0; y: 0; width: parent.width; height: parent.height;
+        x: 0;
+        y: root.hovered ? -2px : 0px;
+        width: parent.width;
+        height: parent.height;
+        background: transparent;
+        animate y { duration: 180ms; easing: ease-out; }
         // Lid (rounded top half)
         Rectangle {
             x: parent.width * 0.06;
@@ -908,6 +918,11 @@ component NodeVisual {
                 border-radius: 1.5px;
                 background: #2a1808;
             }
+        }
+        FantasyChestSparkles {
+            width: parent.width;
+            height: parent.height;
+            lit: root.hovered;
         }
     }
 
@@ -1224,6 +1239,7 @@ component FileRow inherits Rectangle {
         extension: root.item.extension;
         has_system_icon: root.item.has_system_icon;
         system_icon: root.item.system_icon;
+        hovered: touch.has-hover;
     }
 
     // List view responsive layout - give Name room first; meta columns shrink
@@ -1339,6 +1355,7 @@ component FileRow inherits Rectangle {
         extension: root.item.extension;
         has_system_icon: root.item.has_system_icon;
         system_icon: root.item.system_icon;
+        hovered: touch.has-hover;
     }
 
     // Grid/gallery: scale caption with cell width so dual-pane columns stay readable.
@@ -1402,6 +1419,7 @@ component FileRow inherits Rectangle {
         extension: root.item.extension;
         has_system_icon: root.item.has_system_icon;
         system_icon: root.item.system_icon;
+        hovered: touch.has-hover;
     }
 
     if root.view_mode == "compact" && !root.is_renaming: Text {
@@ -1799,6 +1817,9 @@ component DialogButton inherits Rectangle {
 }
 
 // Selectable message body - select text and Ctrl+C, or use toast Copy button.
+// When `expand` is true the block grows to the full wrapped height so a parent
+// ScrollView can scroll through long content (preview Code/View). Text is used
+// instead of TextInput in expand mode so mouse-wheel reaches the ScrollView.
 component CopyableMessageText {
     in property <string> text;
     in property <length> content-width;
@@ -1806,13 +1827,28 @@ component CopyableMessageText {
     in property <color> text-color: ThemePalette.text_muted;
     in property <bool> mono: false;
     in property <length> cap-height: 280px;
+    in property <bool> expand: false;
 
     preferred-width: root.content-width;
-    preferred-height: min(body.preferred-height + 4px, root.cap-height);
+    property <length> natural_h: measure.preferred-height + 4px;
+    preferred-height: root.expand ? root.natural_h : min(root.natural_h, root.cap-height);
     width: root.content-width;
     height: self.preferred-height;
 
-    body := TextInput {
+    // Always present for height measurement; also the visible body when expand.
+    measure := Text {
+        width: parent.width;
+        text: root.text;
+        wrap: word-wrap;
+        font-size: root.font-size;
+        color: root.text-color;
+        font-family: root.mono ? AppMetrics.mono_font : AppMetrics.ui_font;
+        vertical-alignment: top;
+        height: self.preferred-height;
+        visible: root.expand;
+    }
+
+    if !root.expand: TextInput {
         width: parent.width;
         height: parent.height;
         text: root.text;
@@ -5170,6 +5206,16 @@ export component MainWindow inherits Window {
                     visible: root.files.length == 0;
                     width: parent.width;
                     height: parent.height;
+                    // Soft fantasy glow behind empty-state copy (theme-gated).
+                    if ThemePalette.active_theme == "fantasy": Rectangle {
+                        x: (parent.width - 120px) / 2;
+                        y: (parent.height - 120px) / 2 - 40px;
+                        width: 120px;
+                        height: 120px;
+                        border-radius: 60px;
+                        background: ThemePalette.accent_soft;
+                        opacity: 0.55;
+                    }
                     VerticalLayout {
                         alignment: center;
                         spacing: 10px;
@@ -5686,10 +5732,10 @@ export component MainWindow inherits Window {
                         // under header controls:
                         //   close only → 92
                         //   + browser (svg / markup) → 125
-                        //   + Code/View toggle → 148 (no browser) / 186 (with)
+                        //   + Code/View toggle → 152 (no browser) / 198 (with)
                         width: parent.width - (
                             root.preview_can_render
-                                ? (root.preview_is_html ? 186px : 148px)
+                                ? (root.preview_is_html ? 198px : 152px)
                                 : (root.preview_is_html ? 125px : 92px)
                         );
                         height: parent.height;
@@ -5705,11 +5751,11 @@ export component MainWindow inherits Window {
                     // previously it shared the same x-band as the browser
                     // icon, so a red "open" glyph painted inside "View".
                     if root.preview_can_render: Rectangle {
-                        // Browser at width-70 → toggle ends 8px before it.
-                        // No browser → toggle ends 8px before close (width-37).
-                        x: root.preview_is_html ? parent.width - 154px : parent.width - 121px;
+                        // Browser at width-70 → leave 12px gap before it.
+                        // No browser → leave 12px before close (width-37).
+                        x: root.preview_is_html ? parent.width - 164px : parent.width - 125px;
                         y: 8px;
-                        width: 76px;
+                        width: 80px;
                         height: 30px;
                         border-radius: 6px;
                         background: ThemePalette.bg;
@@ -5760,7 +5806,8 @@ export component MainWindow inherits Window {
                         }
                     }
                     // Open-in-browser for HTML/Markdown/SVG. Kept clear of the
-                    // Code/View toggle (which ends at width-154 when both show).
+                    // Code/View toggle. tooltip_above so the tip is not covered
+                    // by the actions row / ScrollView painted after this header.
                     if root.preview_is_html: ToolButton {
                         x: parent.width - 70px;
                         y: 7px;
@@ -5768,6 +5815,7 @@ export component MainWindow inherits Window {
                         button_height: 30px;
                         icon_data: "M10 14L21 3 M21 3v7 M21 3h-7 M5 5h6 M5 19h14a2 2 0 0 0 2-2v-7";
                         tooltip: "Open rendered output in browser";
+                        tooltip_above: true;
                         clicked => { root.open_preview_in_browser(); }
                     }
                     ToolButton {
@@ -5974,7 +6022,7 @@ export component MainWindow inherits Window {
                             font-size: 11.5px;
                             text-color: ThemePalette.text_muted;
                             mono: true;
-                            cap-height: 480px;
+                            expand: true;
                         }
 
                         // Built-in rendered view for HTML / Markdown.
@@ -5985,7 +6033,7 @@ export component MainWindow inherits Window {
                             font-size: 12.5px;
                             text-color: ThemePalette.text;
                             mono: false;
-                            cap-height: 480px;
+                            expand: true;
                         }
 
                         // Empty state
@@ -6145,6 +6193,19 @@ export component MainWindow inherits Window {
                 }
             }
         }
+    }
+
+    // High Fantasy atmosphere — divine wind + ember drift + star sparkles.
+    // Gated to the fantasy theme only. No TouchArea so clicks pass through
+    // to chrome beneath. z stays below menus/dialogs/toasts.
+    FantasyAtmosphere {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: parent.height;
+        z: 3;
+        active: ThemePalette.active_theme == "fantasy";
+        running: ThemePalette.active_theme == "fantasy";
     }
 
     if root.context_visible: Rectangle {
