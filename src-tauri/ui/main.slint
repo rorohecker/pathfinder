@@ -1,6 +1,14 @@
 import { LineEdit, ListView, ScrollView, Slider, Palette } from "std-widgets.slint";
 export { Palette }
 import { FantasyAtmosphere, FantasyChestSparkles } from "fantasy_fx.slint";
+import {
+    FantasyIconGallery,
+    FantasyEmptyOrnament,
+    FantasyChestGlyph,
+    FantasyGemGlyph,
+    FantasyTowerGlyph,
+    FantasyPixel,
+} from "fantasy_icons.slint";
 
 // Bundled OFL fonts (embedded via build.rs). Family names come from font metadata.
 import "fonts/PressStart2P-Regular.ttf";
@@ -187,6 +195,18 @@ export global ThemePalette {
     // True while DoDragDrop is blocking the UI thread - selected items show glow
     in-out property <bool> is_dragging: false;
     in-out property <int> drag_count: 0;
+}
+
+// Pixel banks for High Fantasy animated icons (filled from Rust once at startup).
+export global FantasyIconBank {
+    in-out property <[FantasyPixel]> chest: [];
+    in-out property <[FantasyPixel]> scroll: [];
+    in-out property <[FantasyPixel]> gem_a: [];
+    in-out property <[FantasyPixel]> gem_b: [];
+    in-out property <[FantasyPixel]> potion: [];
+    in-out property <[FantasyPixel]> tower_a: [];
+    in-out property <[FantasyPixel]> tower_b: [];
+    in-out property <[FantasyPixel]> cauldron: [];
 }
 
 component SvgIcon {
@@ -3781,7 +3801,7 @@ export component MainWindow inherits Window {
                 x: 10px;
                 y: 14px;
                 width: parent.width - 20px;
-                height: parent.height - 28px;
+                height: parent.height - 28px - (ThemePalette.active_theme == "fantasy" ? 40px : 0px);
                 viewport-width: self.width;
                 viewport-height: Math.max(self.height, root.side_items.length * 32px);
                 for item[index] in root.side_items: SideRow {
@@ -3797,7 +3817,7 @@ export component MainWindow inherits Window {
                 x: 10px;
                 y: 14px;
                 width: parent.width - 20px;
-                height: parent.height - 28px;
+                height: parent.height - 28px - (ThemePalette.active_theme == "fantasy" ? 40px : 0px);
                 viewport-width: self.width;
                 viewport-height: Math.max(self.height, root.side_items_simple.length * 32px);
                 for item[index] in root.side_items_simple: SideRow {
@@ -3807,6 +3827,34 @@ export component MainWindow inherits Window {
                     activated(i) => { root.side_activated(i); }
                     rename_activated(path) => { root.rename_tag_prompt(path); }
                     expand_toggled(path) => { root.side_expand_toggled(path); }
+                }
+            }
+
+            // High Fantasy sidebar ornaments — fixed pair only (never per SideRow).
+            // No TouchArea: decorative; clicks reach the ListView beneath.
+            if ThemePalette.active_theme == "fantasy": HorizontalLayout {
+                x: 14px;
+                y: parent.height - 44px;
+                width: parent.width - 28px;
+                height: 32px;
+                spacing: 10px;
+                alignment: start;
+                FantasyChestGlyph {
+                    pixels: FantasyIconBank.chest;
+                    cell: 2.5px;
+                    interactive: false;
+                }
+                FantasyGemGlyph {
+                    pixels_a: FantasyIconBank.gem_a;
+                    pixels_b: FantasyIconBank.gem_b;
+                    cell: 2.5px;
+                    running: ThemePalette.active_theme == "fantasy";
+                }
+                FantasyTowerGlyph {
+                    pixels_a: FantasyIconBank.tower_a;
+                    pixels_b: FantasyIconBank.tower_b;
+                    cell: 2.5px;
+                    running: ThemePalette.active_theme == "fantasy";
                 }
             }
 
@@ -5202,12 +5250,17 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                Rectangle {
+                empty_pane := Rectangle {
                     visible: root.files.length == 0;
                     width: parent.width;
                     height: parent.height;
+                    property <bool> fantasy_on: ThemePalette.active_theme == "fantasy";
+                    // Contextual glyph for empty panes (one icon — never per-row).
+                    property <string> fantasy_kind: root.in_recycle_bin ? "cauldron"
+                        : (root.search_text != "" ? "gem"
+                        : (root.is_home_view ? "tower" : "chest"));
                     // Soft fantasy glow behind empty-state copy (theme-gated).
-                    if ThemePalette.active_theme == "fantasy": Rectangle {
+                    if empty_pane.fantasy_on: Rectangle {
                         x: (parent.width - 120px) / 2;
                         y: (parent.height - 120px) / 2 - 40px;
                         width: 120px;
@@ -5219,7 +5272,24 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         alignment: center;
                         spacing: 10px;
-                        Rectangle {
+                        // High Fantasy: animated pixel ornament (single instance).
+                        if empty_pane.fantasy_on: FantasyEmptyOrnament {
+                            x: (parent.width - self.width) / 2;
+                            cell: 6px;
+                            kind: empty_pane.fantasy_kind;
+                            running: empty_pane.fantasy_on;
+                            hovered: empty_ta.has-hover;
+                            chest: FantasyIconBank.chest;
+                            scroll: FantasyIconBank.scroll;
+                            gem_a: FantasyIconBank.gem_a;
+                            gem_b: FantasyIconBank.gem_b;
+                            potion: FantasyIconBank.potion;
+                            tower_a: FantasyIconBank.tower_a;
+                            tower_b: FantasyIconBank.tower_b;
+                            cauldron: FantasyIconBank.cauldron;
+                        }
+                        // Non-fantasy: keep the compact SVG badge.
+                        if !empty_pane.fantasy_on: Rectangle {
                             width: 56px;
                             height: 56px;
                             x: (parent.width - 56px) / 2;
@@ -5275,7 +5345,8 @@ export component MainWindow inherits Window {
                         }
                     }
                     // Covers the whole pane so clicks reach clear_selection even over the message.
-                    TouchArea {
+                    // Also feeds hover into fantasy ornaments (no per-icon TouchArea).
+                    empty_ta := TouchArea {
                         width: parent.width;
                         height: parent.height;
                         clicked => { root.clear_selection(); }
@@ -6739,6 +6810,40 @@ export component MainWindow inherits Window {
                             item: theme;
                             active: root.active_theme == theme.id;
                             picked(id) => { root.theme_selected(id); }
+                        }
+                    }
+
+                    // High Fantasy: live pixel-icon preview (hover + idle animations).
+                    // Only mounted while the fantasy theme is active — timers pause otherwise.
+                    if root.active_theme == "fantasy": Rectangle {
+                        width: parent.width;
+                        height: 92px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text {
+                            x: 12px; y: 8px; width: parent.width - 24px; height: 14px;
+                            text: "PIXEL RELICS";
+                            color: ThemePalette.text_faint;
+                            font-size: 10px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                        }
+                        FantasyIconGallery {
+                            x: max(8px, (parent.width - self.width) / 2);
+                            y: 26px;
+                            cell: 4px;
+                            gap: 8px;
+                            running: root.active_theme == "fantasy" && root.settings_visible;
+                            chest: FantasyIconBank.chest;
+                            scroll: FantasyIconBank.scroll;
+                            gem_a: FantasyIconBank.gem_a;
+                            gem_b: FantasyIconBank.gem_b;
+                            potion: FantasyIconBank.potion;
+                            tower_a: FantasyIconBank.tower_a;
+                            tower_b: FantasyIconBank.tower_b;
+                            cauldron: FantasyIconBank.cauldron;
                         }
                     }
 
@@ -8802,12 +8907,22 @@ export component MainWindow inherits Window {
                 width: parent.width - 56px;
                 spacing: 14px;
 
-                Text {
-                    text: "Welcome to Pathfinder";
-                    color: ThemePalette.text;
-                    font-size: 20px;
-                    font-weight: 700;
-                    height: self.preferred-height;
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    Text {
+                        text: "Welcome to Pathfinder";
+                        color: ThemePalette.text;
+                        font-size: 20px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                        height: self.preferred-height;
+                    }
+                    if ThemePalette.active_theme == "fantasy": FantasyChestGlyph {
+                        pixels: FantasyIconBank.chest;
+                        cell: 3px;
+                        interactive: true;
+                    }
                 }
                 Text {
                     text: root.welcome_step == 0

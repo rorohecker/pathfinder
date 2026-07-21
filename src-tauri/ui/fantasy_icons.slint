@@ -1,0 +1,374 @@
+// Animated High Fantasy pixel icons (from fantasy-explorer-icons zip).
+//
+// Each glyph is a 12×12 ASCII map rendered as Rectangles via PixelIcon.
+// Placement is intentionally sparse (empty states, theme preview, welcome,
+// sidebar ornaments) — NEVER per ListView file row (would thrash paint).
+//
+// Perf:
+//   - Shared PixelIcon; cell size scales one model to many sizes
+//   - Timers gated by `running` (false when not fantasy / not visible)
+//   - Hover TouchAreas only on dedicated preview tiles (not chrome overlays)
+
+export struct FantasyPixel {
+    gx: int,
+    gy: int,
+    color: color,
+}
+
+// Flat pixel list → grid. `cell` sets both rect size and spacing.
+export component PixelIcon inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    for p in root.pixels: Rectangle {
+        x: p.gx * root.cell;
+        y: p.gy * root.cell;
+        width: root.cell;
+        height: root.cell;
+        background: p.color;
+    }
+}
+
+// --- Individual animated glyphs ------------------------------------------------
+
+// Folder → treasure chest: bounce + gold sparkles on hover.
+export component FantasyChestGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> hovered: false;
+    // When true, local TouchArea drives hover (preview tiles only).
+    in property <bool> interactive: false;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+        y: root.lit ? -0.5 * root.cell : 0px;
+        animate y { duration: 200ms; easing: ease-out; }
+    }
+
+    for offset[i] in [0.28, 0.48, 0.68]: Rectangle {
+        width: max(2px, root.cell * 0.45);
+        height: max(2px, root.cell * 0.45);
+        background: #e0b23c;
+        x: offset * root.width;
+        y: root.lit ? -1.5 * root.cell : 3.5 * root.cell;
+        opacity: root.lit ? 0.0 : 1.0;
+        animate y { duration: 650ms + i * 120ms; easing: ease-out; }
+        animate opacity { duration: 650ms + i * 120ms; easing: ease-in; }
+    }
+
+    // On top for hit-testing; disabled when not interactive so clicks pass through.
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+    }
+}
+
+// Document → scroll: unrolls (grows) on hover.
+export component FantasyScrollGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> hovered: false;
+    in property <bool> interactive: false;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+    clip: true;
+
+    property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+        height: root.lit ? 14 * root.cell : 12 * root.cell;
+        animate height { duration: 250ms; easing: ease-out; }
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+    }
+}
+
+// Image → gem: idle twinkle (A/B pixel swap).
+export component FantasyGemGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels_a;
+    in property <[FantasyPixel]> pixels_b;
+    in property <length> cell: 5px;
+    in property <bool> running: true;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> lit: false;
+    Timer {
+        interval: 700ms;
+        running: root.running;
+        triggered => { lit = !lit; }
+    }
+    PixelIcon {
+        pixels: root.lit ? root.pixels_b : root.pixels_a;
+        cell: root.cell;
+    }
+}
+
+// App → potion: tilts + bubbles on hover.
+export component FantasyPotionGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> hovered: false;
+    in property <bool> interactive: false;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+    transform-rotation: root.lit ? -6deg : 0deg;
+    transform-origin: { x: 6 * root.cell, y: 12 * root.cell };
+    animate transform-rotation { duration: 200ms; easing: ease-out; }
+
+    property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+    }
+
+    for offset[i] in [0.42, 0.56]: Rectangle {
+        width: max(2px, root.cell * 0.45);
+        height: max(2px, root.cell * 0.45);
+        background: #3ca9c9;
+        x: offset * root.width;
+        y: root.lit ? 2.5 * root.cell : 6.5 * root.cell;
+        opacity: root.lit ? 0.0 : 1.0;
+        animate y { duration: 550ms + i * 150ms; easing: ease-in; }
+        animate opacity { duration: 550ms + i * 150ms; }
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+    }
+}
+
+// Drive → wizard tower: torch window flicker.
+export component FantasyTowerGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels_a;
+    in property <[FantasyPixel]> pixels_b;
+    in property <length> cell: 5px;
+    in property <bool> running: true;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> lit: false;
+    Timer {
+        interval: 900ms;
+        running: root.running;
+        triggered => { lit = !lit; }
+    }
+    PixelIcon {
+        pixels: root.lit ? root.pixels_b : root.pixels_a;
+        cell: root.cell;
+    }
+}
+
+// Recycle bin → cauldron: rising bubbles.
+export component FantasyCauldronGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> running: true;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> bubbling-1: false;
+    property <bool> bubbling-2: false;
+    property <bool> bubbling-3: false;
+    Timer { interval: 1100ms; running: root.running; triggered => { bubbling-1 = !bubbling-1; } }
+    Timer { interval: 1300ms; running: root.running; triggered => { bubbling-2 = !bubbling-2; } }
+    Timer { interval: 1500ms; running: root.running; triggered => { bubbling-3 = !bubbling-3; } }
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+    }
+
+    Rectangle {
+        width: max(2px, root.cell * 0.45); height: max(2px, root.cell * 0.45);
+        background: #5fae5f; x: 3.5 * root.cell;
+        y: bubbling-1 ? 2.4 * root.cell : 5.5 * root.cell;
+        opacity: bubbling-1 ? 0.0 : 1.0;
+        animate y { duration: 1000ms; easing: ease-in; }
+        animate opacity { duration: 1000ms; }
+    }
+    Rectangle {
+        width: max(2px, root.cell * 0.45); height: max(2px, root.cell * 0.45);
+        background: #5fae5f; x: 5 * root.cell;
+        y: bubbling-2 ? 2.1 * root.cell : 5.5 * root.cell;
+        opacity: bubbling-2 ? 0.0 : 1.0;
+        animate y { duration: 1200ms; easing: ease-in; }
+        animate opacity { duration: 1200ms; }
+    }
+    Rectangle {
+        width: max(2px, root.cell * 0.45); height: max(2px, root.cell * 0.45);
+        background: #5fae5f; x: 6.2 * root.cell;
+        y: bubbling-3 ? 2.6 * root.cell : 5.5 * root.cell;
+        opacity: bubbling-3 ? 0.0 : 1.0;
+        animate y { duration: 1400ms; easing: ease-in; }
+        animate opacity { duration: 1400ms; }
+    }
+}
+
+// Shared pixel banks — filled once from Rust at startup.
+// Defined in main.slint (root) so Rust can access FantasyIconBank without
+// the library-file name mangling Slint applies to imported globals.
+
+// Six interactive preview tiles (theme picker / about). Timers pause when
+// `running` is false. TouchAreas are local — do not place over real chrome.
+export component FantasyIconGallery inherits Rectangle {
+    in property <[FantasyPixel]> chest;
+    in property <[FantasyPixel]> scroll;
+    in property <[FantasyPixel]> gem_a;
+    in property <[FantasyPixel]> gem_b;
+    in property <[FantasyPixel]> potion;
+    in property <[FantasyPixel]> tower_a;
+    in property <[FantasyPixel]> tower_b;
+    in property <[FantasyPixel]> cauldron;
+    in property <bool> running: true;
+    in property <length> cell: 4px;
+    in property <length> gap: 10px;
+    background: transparent;
+
+    property <length> tile: 12 * root.cell;
+    property <length> label_h: 16px;
+    width: 6 * root.tile + 5 * root.gap;
+    height: root.tile + root.label_h + 6px;
+
+    for entry[i] in [
+        { kind: "chest", label: "Folder" },
+        { kind: "scroll", label: "Doc" },
+        { kind: "gem", label: "Image" },
+        { kind: "potion", label: "App" },
+        { kind: "tower", label: "Drive" },
+        { kind: "cauldron", label: "Bin" },
+    ]: Rectangle {
+        x: i * (root.tile + root.gap);
+        y: 0;
+        width: root.tile;
+        height: parent.height;
+        background: transparent;
+
+        if entry.kind == "chest": FantasyChestGlyph {
+            pixels: root.chest;
+            cell: root.cell;
+            interactive: true;
+        }
+        if entry.kind == "scroll": FantasyScrollGlyph {
+            pixels: root.scroll;
+            cell: root.cell;
+            interactive: true;
+        }
+        if entry.kind == "gem": FantasyGemGlyph {
+            pixels_a: root.gem_a;
+            pixels_b: root.gem_b;
+            cell: root.cell;
+            running: root.running;
+        }
+        if entry.kind == "potion": FantasyPotionGlyph {
+            pixels: root.potion;
+            cell: root.cell;
+            interactive: true;
+        }
+        if entry.kind == "tower": FantasyTowerGlyph {
+            pixels_a: root.tower_a;
+            pixels_b: root.tower_b;
+            cell: root.cell;
+            running: root.running;
+        }
+        if entry.kind == "cauldron": FantasyCauldronGlyph {
+            pixels: root.cauldron;
+            cell: root.cell;
+            running: root.running;
+        }
+
+        Text {
+            y: root.tile + 2px;
+            width: parent.width;
+            height: root.label_h;
+            text: entry.label;
+            color: #a89878;
+            font-size: 9px;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// One contextual empty-state ornament (no TouchArea — parent may cover clicks).
+export component FantasyEmptyOrnament inherits Rectangle {
+    // "chest" | "scroll" | "gem" | "potion" | "tower" | "cauldron"
+    in property <string> kind: "chest";
+    in property <[FantasyPixel]> chest;
+    in property <[FantasyPixel]> scroll;
+    in property <[FantasyPixel]> gem_a;
+    in property <[FantasyPixel]> gem_b;
+    in property <[FantasyPixel]> potion;
+    in property <[FantasyPixel]> tower_a;
+    in property <[FantasyPixel]> tower_b;
+    in property <[FantasyPixel]> cauldron;
+    in property <bool> running: true;
+    in property <bool> hovered: false;
+    in property <length> cell: 6px;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    if root.kind == "chest": FantasyChestGlyph {
+        pixels: root.chest;
+        cell: root.cell;
+        hovered: root.hovered;
+        interactive: false;
+    }
+    if root.kind == "scroll": FantasyScrollGlyph {
+        pixels: root.scroll;
+        cell: root.cell;
+        hovered: root.hovered;
+        interactive: false;
+    }
+    if root.kind == "gem": FantasyGemGlyph {
+        pixels_a: root.gem_a;
+        pixels_b: root.gem_b;
+        cell: root.cell;
+        running: root.running;
+    }
+    if root.kind == "potion": FantasyPotionGlyph {
+        pixels: root.potion;
+        cell: root.cell;
+        hovered: root.hovered;
+        interactive: false;
+    }
+    if root.kind == "tower": FantasyTowerGlyph {
+        pixels_a: root.tower_a;
+        pixels_b: root.tower_b;
+        cell: root.cell;
+        running: root.running;
+    }
+    if root.kind == "cauldron": FantasyCauldronGlyph {
+        pixels: root.cauldron;
+        cell: root.cell;
+        running: root.running;
+    }
+}

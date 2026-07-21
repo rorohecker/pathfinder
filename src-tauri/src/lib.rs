@@ -68,6 +68,7 @@ pub fn __test_detect_gpus() -> Vec<(String, u32, u64, bool, bool)> {
         })
         .collect()
 }
+mod fantasy_icons;
 mod inference;
 mod local_ai;
 mod imagenet_labels;
@@ -26038,6 +26039,7 @@ pub fn run() {
     let initial_settings: NativeSettings =
         read_native_json("settings.json", NativeSettings::default());
     let ui = MainWindow::new().expect("failed to create Pathfinder window");
+    fantasy_icons::load_fantasy_icon_bank(&ui);
     configure_native_window(&ui, &initial_settings);
     let cli_folder = parse_cli_startup_folder();
     // Pass the already-loaded settings into the controller so it doesn't pay
