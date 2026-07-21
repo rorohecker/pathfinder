@@ -5682,11 +5682,16 @@ export component MainWindow inherits Window {
                     }
                     Text {
                         x: 48px;
-                        // Reserve room on the right for the header buttons so
-                        // the title never slides under them: close only (92),
-                        // + browser (125 for svg/other html), + Code/Rendered
-                        // toggle (155 for renderable markup).
-                        width: parent.width - (root.preview_can_render ? 160px : (root.preview_is_html ? 125px : 92px));
+                        // Reserve room on the right so the title never slides
+                        // under header controls:
+                        //   close only → 92
+                        //   + browser (svg / markup) → 125
+                        //   + Code/View toggle → 148 (no browser) / 186 (with)
+                        width: parent.width - (
+                            root.preview_can_render
+                                ? (root.preview_is_html ? 186px : 148px)
+                                : (root.preview_is_html ? 125px : 92px)
+                        );
                         height: parent.height;
                         text: root.preview_title == "" ? "Preview" : root.preview_title;
                         color: ThemePalette.text;
@@ -5695,32 +5700,42 @@ export component MainWindow inherits Window {
                         overflow: elide;
                         vertical-alignment: center;
                     }
-                    // Built-in Code/Rendered toggle for HTML and Markdown. The
-                    // rendered view is produced natively (no WebView) and shown
-                    // in the pane below; source is the default.
+                    // Built-in Code/View segmented control for HTML and
+                    // Markdown. Must sit LEFT of the browser + close buttons —
+                    // previously it shared the same x-band as the browser
+                    // icon, so a red "open" glyph painted inside "View".
                     if root.preview_can_render: Rectangle {
-                        x: parent.width - 103px;
+                        // Browser at width-70 → toggle ends 8px before it.
+                        // No browser → toggle ends 8px before close (width-37).
+                        x: root.preview_is_html ? parent.width - 154px : parent.width - 121px;
                         y: 8px;
-                        width: 62px;
+                        width: 76px;
                         height: 30px;
                         border-radius: 6px;
                         background: ThemePalette.bg;
                         border-width: 1px;
                         border-color: ThemePalette.border;
+                        clip: true;
+                        // Active segment highlight
                         Rectangle {
                             x: root.preview_show_rendered ? parent.width / 2 : 0px;
                             y: 0;
                             width: parent.width / 2;
                             height: parent.height;
-                            border-radius: 6px;
                             background: ThemePalette.accent_soft;
-                            border-width: 1px;
-                            border-color: ThemePalette.accent;
+                        }
+                        // Hairline divider between Code and View
+                        Rectangle {
+                            x: parent.width / 2 - 0.5px;
+                            y: 6px;
+                            width: 1px;
+                            height: parent.height - 12px;
+                            background: ThemePalette.border;
                         }
                         Text {
                             x: 0; y: 0; width: parent.width / 2; height: parent.height;
                             text: "Code";
-                            font-size: 10px;
+                            font-size: 11px;
                             font-weight: root.preview_show_rendered ? 400 : 700;
                             color: root.preview_show_rendered ? ThemePalette.text_muted : ThemePalette.accent_strong;
                             horizontal-alignment: center; vertical-alignment: center;
@@ -5728,24 +5743,24 @@ export component MainWindow inherits Window {
                         Text {
                             x: parent.width / 2; y: 0; width: parent.width / 2; height: parent.height;
                             text: "View";
-                            font-size: 10px;
+                            font-size: 11px;
                             font-weight: root.preview_show_rendered ? 700 : 400;
                             color: root.preview_show_rendered ? ThemePalette.accent_strong : ThemePalette.text_muted;
                             horizontal-alignment: center; vertical-alignment: center;
                         }
                         TouchArea {
                             x: 0; width: parent.width / 2; height: parent.height;
+                            mouse-cursor: pointer;
                             clicked => { root.preview_show_rendered = false; }
                         }
                         TouchArea {
                             x: parent.width / 2; width: parent.width / 2; height: parent.height;
+                            mouse-cursor: pointer;
                             clicked => { root.preview_show_rendered = true; }
                         }
                     }
-                    // When the selected file is HTML or Markdown, surface a
-                    // small "Open in browser" button so the user can flip
-                    // between viewing source/rendered here and the full
-                    // rendered version in their default browser.
+                    // Open-in-browser for HTML/Markdown/SVG. Kept clear of the
+                    // Code/View toggle (which ends at width-154 when both show).
                     if root.preview_is_html: ToolButton {
                         x: parent.width - 70px;
                         y: 7px;
