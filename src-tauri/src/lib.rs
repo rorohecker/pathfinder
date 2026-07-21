@@ -14547,7 +14547,16 @@ impl NativeController {
             use slint::Model;
             for &i in changed {
                 if let Some(entry) = self.visible_files.get(i) {
-                    let item = self.file_item(entry, self.selected_set.contains(&i));
+                    // Preserve date/home group headers. Rebuilding via file_item
+                    // alone clears them and shrinks the row by ~26px, which
+                    // jumps the list upward when clicking the first file in a group.
+                    let (keep_header, keep_label) = model
+                        .row_data(i)
+                        .map(|prev| (prev.show_date_group_header, prev.date_group_text.clone()))
+                        .unwrap_or((false, SharedString::new()));
+                    let mut item = self.file_item(entry, self.selected_set.contains(&i));
+                    item.show_date_group_header = keep_header;
+                    item.date_group_text = keep_label;
                     if let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() {
                         m.set_row_data(i, item);
                     }
@@ -15011,7 +15020,7 @@ impl NativeController {
             if folder.id == "home" {
                 continue;
             }
-            let folder_expanded = self.expanded_tree_paths.contains(&folder.path);
+            let folder_expanded = false;
             items.push(SideItem {
                 label: ss(&folder.name),
                 path: ss(&folder.path),
@@ -15030,12 +15039,10 @@ impl NativeController {
                 active: same_path_string(&self.current_path, &folder.path),
                 indent: 0,
                 usage: -1.0,
-                expandable: Path::new(&folder.path).is_dir(),
+                expandable: false,
                 expanded: folder_expanded,
             });
-            if folder_expanded {
-                self.push_tree_children(&mut items, &folder.path, 1);
-            }
+            // Known folders stay flat in the sidebar (no tree chevrons).
         }
 
         // Recycle Bin entry - virtual `recycle://` path. Click to browse,
@@ -15086,8 +15093,6 @@ impl NativeController {
             expanded: false,
             });
             for pin in self.user_pins.iter().take(12) {
-                let pin_expandable = pin.kind != "file" && Path::new(&pin.path).is_dir();
-                let pin_expanded = self.expanded_tree_paths.contains(&pin.path);
                 items.push(SideItem {
                     label: ss(&pin.name),
                     path: ss(&pin.path),
@@ -15102,12 +15107,9 @@ impl NativeController {
                     active: same_path_string(&self.current_path, &pin.path),
                     indent: 0,
                     usage: -1.0,
-                    expandable: pin_expandable,
-                    expanded: pin_expanded,
+                    expandable: false,
+                    expanded: false,
                 });
-                if pin_expanded {
-                    self.push_tree_children(&mut items, &pin.path, 1);
-                }
             }
         }
 
@@ -15126,15 +15128,6 @@ impl NativeController {
         });
         for drive in &self.drives {
             let space = drive_free_space(&drive.path);
-            let usage = space
-                .map(|(free, total)| {
-                    if total == 0 {
-                        -1.0
-                    } else {
-                        1.0 - (free as f32 / total as f32)
-                    }
-                })
-                .unwrap_or(-1.0);
             let count_label = space
                 .map(|(free, _)| format!("{} free", format_size_short(free)))
                 .unwrap_or_else(|| drive.kind.clone());
@@ -15152,7 +15145,7 @@ impl NativeController {
                 is_header: false,
                 active: self.current_path.starts_with(&drive.path),
                 indent: 0,
-                usage,
+                usage: -1.0,
                 expandable: true,
                 expanded: drive_expanded,
             });
@@ -17620,7 +17613,13 @@ impl NativeController {
             use slint::Model;
             for &i in changed {
                 if let Some(entry) = self.secondary_visible_files.get(i) {
-                    let item = self.file_item(entry, self.secondary_selected_set.contains(&i));
+                    let (keep_header, keep_label) = model
+                        .row_data(i)
+                        .map(|prev| (prev.show_date_group_header, prev.date_group_text.clone()))
+                        .unwrap_or((false, SharedString::new()));
+                    let mut item = self.file_item(entry, self.secondary_selected_set.contains(&i));
+                    item.show_date_group_header = keep_header;
+                    item.date_group_text = keep_label;
                     if let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() {
                         m.set_row_data(i, item);
                     }
