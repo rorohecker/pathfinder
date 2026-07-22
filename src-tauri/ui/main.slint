@@ -207,6 +207,9 @@ export global ThemePalette {
     in-out property <int> drag_count: 0;
     // Decorative theme motion (atmospheres + idle/hover icon anims). Settings toggle.
     in-out property <bool> theme_animations: true;
+    // Shared idle bob for retro/sunset folder glyphs — one timer in MainWindow,
+    // never a per-row Timer (those stalled the UI with many folders visible).
+    in-out property <bool> folder_idle_phase: false;
 }
 
 // Pixel banks for High Fantasy animated icons (filled from Rust once at startup).
@@ -252,15 +255,23 @@ component SvgIcon {
     width: root.icon_size;
     height: root.icon_size;
 
+    // Lucide-style paths are authored in a 24×24 viewBox. Without it, strokes
+    // clip and sit off-center inside toolbar hit boxes.
     Path {
+        x: 0;
+        y: 0;
         width: root.icon_size;
         height: root.icon_size;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: 24;
+        viewbox-height: 24;
         commands: root.data;
         fill: rgba(0, 0, 0, 0);
         stroke: root.tint;
-        stroke-width: 1.5px;
+        stroke-width: 1.75px;
         stroke-line-cap: round;
-        stroke-line-join: miter;
+        stroke-line-join: round;
     }
 }
 
@@ -801,28 +812,30 @@ component NodeVisual {
         (root.extension == "exe" || root.extension == "msi" || root.extension == "bat" || root.extension == "cmd" ? #fb923c :
         ThemePalette.accent))))))));
 
-    // True when a per-theme PNG is loaded - shapes below are skipped so transparent
-    // areas of the PNG don't reveal the standard yellow folder underneath.
-    property <bool> use_image: ThemePalette.folder_icon_image.width > 0;
-
     property <bool> pixel_theme:
         ThemePalette.active_theme == "fantasy"
         || ThemePalette.active_theme == "retro"
         || ThemePalette.active_theme == "sunset";
+    // True when a per-theme PNG is loaded — skipped on pixel themes so animated
+    // procedural folders (chest / floppy / dusk) always win.
+    property <bool> use_image: ThemePalette.folder_icon_image.width > 0 && !root.pixel_theme;
+
     property <bool> archive_ext:
         root.extension == "zip" || root.extension == "7z" || root.extension == "rar"
         || root.extension == "tar" || root.extension == "gz" || root.extension == "xz";
-    // Pixel themes prefer procedural archive glyphs over the Windows zip folder icon.
-    property <bool> show_system_icon: root.has_system_icon && !(root.pixel_theme && root.archive_ext);
+    property <bool> themed_doc_ext:
+        root.archive_ext
+        || root.extension == "pdf"
+        || root.extension == "doc" || root.extension == "docx" || root.extension == "odt" || root.extension == "rtf"
+        || root.extension == "xls" || root.extension == "xlsx" || root.extension == "csv" || root.extension == "ods"
+        || root.extension == "ppt" || root.extension == "pptx" || root.extension == "odp";
+    // Pixel themes prefer procedural glyphs over shell brand icons for archives
+    // and office docs (PDF/DOCX/ZIP/etc.).
+    property <bool> show_system_icon: root.has_system_icon && !(root.pixel_theme && root.themed_doc_ext);
 
     property <bool> folder_anim: ThemePalette.theme_animations;
-    property <bool> idle_bob: false;
-    Timer {
-        interval: 2200ms;
-        running: root.folder_anim && root.is_dir
-            && (ThemePalette.active_theme == "retro" || ThemePalette.active_theme == "sunset");
-        triggered => { idle_bob = !idle_bob; }
-    }
+    // Shared phase from ThemePalette (one window timer) — not per-row Timers.
+    property <bool> idle_bob: ThemePalette.folder_idle_phase;
 
     // -- IMAGE OVERLAY -----------------------------------------------------
     // PNG saved to %APPDATA%\Pathfinder\theme_icons\<theme>.png renders here.
@@ -1344,6 +1357,15 @@ component NodeVisual {
         border-width: 1px; border-color: #ffffff;
         Rectangle { x: 5px; y: 0; width: 1px; height: parent.height; background: #ffffff; }
         Rectangle { x: 0; y: 4px; width: parent.width; height: 1px; background: #ffffff; }
+    }
+    // PRESENTATION: stacked slides
+    if !root.is_dir && !root.show_system_icon && (root.extension == "ppt" || root.extension == "pptx" || root.extension == "odp"): Rectangle {
+        x: parent.width / 2 - 7px;
+        y: parent.height / 2 - 8px;
+        width: 14px; height: 12px;
+        background: transparent;
+        Rectangle { x: 2px; y: 0; width: 12px; height: 8px; border-radius: 1px; background: #ffffff; opacity: 0.55; }
+        Rectangle { x: 0; y: 3px; width: 12px; height: 9px; border-radius: 1px; background: #ffffff; }
     }
 }
 
@@ -3386,6 +3408,14 @@ export component MainWindow inherits Window {
     in-out property <string> active_density: "cozy";
     // Decorative theme atmospheres + animated relics. Persisted in settings.json.
     in-out property <bool> theme_animations: true;
+    // Sunset sun arc — shared by atmosphere + content-pane sky wash.
+    property <bool> sunset_setting: false;
+    property <float> sunset_sun_cx: root.sunset_setting ? 0.78 : 0.22;
+    property <float> sunset_sun_cy: root.sunset_setting ? 0.58 : 0.10;
+    property <float> sunset_sun_glow: root.sunset_setting ? 0.48 : 1.0;
+    animate sunset_sun_cx { duration: 14000ms; easing: ease-in-out; }
+    animate sunset_sun_cy { duration: 14000ms; easing: ease-in-out; }
+    animate sunset_sun_glow { duration: 14000ms; easing: ease-in-out; }
     in-out property <string> active_index_mode: "low";
     in-out property <string> index_status: "";
     in-out property <string> thumbnail_status: "";
@@ -4220,9 +4250,9 @@ export component MainWindow inherits Window {
             property <length> tb_gap: 8px;
             property <length> tb_ops_w: root.search_text != "" ? 64px : 32px;
             property <length> tb_search_w: 208px;
-            property <length> tb_sort_w: 168px;
-            property <length> tb_view_x: self.width - 306px;
-            property <length> tb_min_w_search: 167px + 80px + tb_gap + tb_search_w + tb_ops_w + tb_gap + 306px;
+            property <length> tb_sort_w: 196px;
+            property <length> tb_view_x: self.width - 318px;
+            property <length> tb_min_w_search: 167px + 80px + tb_gap + tb_search_w + tb_ops_w + tb_gap + 318px;
             property <length> tb_min_w_sort: tb_min_w_search + tb_gap + tb_sort_w;
             property <bool> show_toolbar_search: !root.is_simple && self.width >= tb_min_w_search;
             property <bool> show_toolbar_sort: !root.is_simple && self.width >= tb_min_w_sort;
@@ -4817,64 +4847,86 @@ export component MainWindow inherits Window {
                 visible: toolbar.show_toolbar_sort;
                 x: toolbar.tb_sort_x;
                 y: 6px;
-                width: 168px;
+                width: 196px;
                 height: 31px;
                 border-width: 1px;
                 border-color: ThemePalette.border;
                 border-radius: AppMetrics.radius_small;
                 background: AppMetrics.light_controls ? ThemePalette.panel_solid : rgba(0, 0, 0, 0.12);
 
+                // Chip widths reserve space for the sort chevron so labels never
+                // collide with the active indicator (Date/Type were the worst).
                 Rectangle {
-                    x: 4px; y: 4px; width: 42px; height: 23px;
+                    x: 3px; y: 4px; width: 48px; height: 23px;
                     border-radius: 4px;
                     border-width: root.sort_by == "name" ? 1px : 0px;
                     border-color: ThemePalette.accent;
                     background: sort_name_touch.has-hover || root.sort_by == "name" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
-                    Text { width: parent.width; height: parent.height; text: "Name"; color: root.sort_by == "name" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                    Text {
+                        x: 2px; width: parent.width - (root.sort_by == "name" ? 14px : 4px); height: parent.height;
+                        text: "Name";
+                        color: root.sort_by == "name" ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                        font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide;
+                    }
                     if root.sort_by == "name": SvgIcon {
-                        x: parent.width - 11px; y: (parent.height - 9px) / 2; icon_size: 9px;
+                        x: parent.width - 12px; y: (parent.height - 9px) / 2; icon_size: 9px;
                         data: root.sort_dir == "asc" ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6";
                         tint: ThemePalette.accent_strong;
                     }
                     sort_name_touch := TouchArea { mouse-cursor: pointer; clicked => { root.sort_column("name"); } }
                 }
                 Rectangle {
-                    x: 48px; y: 4px; width: 36px; height: 23px;
+                    x: 52px; y: 4px; width: 42px; height: 23px;
                     border-radius: 4px;
                     border-width: root.sort_by == "size" ? 1px : 0px;
                     border-color: ThemePalette.accent;
                     background: sort_size_touch.has-hover || root.sort_by == "size" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
-                    Text { width: parent.width; height: parent.height; text: "Size"; color: root.sort_by == "size" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                    Text {
+                        x: 2px; width: parent.width - (root.sort_by == "size" ? 14px : 4px); height: parent.height;
+                        text: "Size";
+                        color: root.sort_by == "size" ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                        font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide;
+                    }
                     if root.sort_by == "size": SvgIcon {
-                        x: parent.width - 11px; y: (parent.height - 9px) / 2; icon_size: 9px;
+                        x: parent.width - 12px; y: (parent.height - 9px) / 2; icon_size: 9px;
                         data: root.sort_dir == "asc" ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6";
                         tint: ThemePalette.accent_strong;
                     }
                     sort_size_touch := TouchArea { mouse-cursor: pointer; clicked => { root.sort_column("size"); } }
                 }
                 Rectangle {
-                    x: 86px; y: 4px; width: 38px; height: 23px;
+                    x: 96px; y: 4px; width: 46px; height: 23px;
                     border-radius: 4px;
                     border-width: root.sort_by == "modified" ? 1px : 0px;
                     border-color: ThemePalette.accent;
                     background: sort_date_touch.has-hover || root.sort_by == "modified" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
-                    Text { width: parent.width; height: parent.height; text: "Date"; color: root.sort_by == "modified" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                    Text {
+                        x: 2px; width: parent.width - (root.sort_by == "modified" ? 14px : 4px); height: parent.height;
+                        text: "Date";
+                        color: root.sort_by == "modified" ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                        font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide;
+                    }
                     if root.sort_by == "modified": SvgIcon {
-                        x: parent.width - 11px; y: (parent.height - 9px) / 2; icon_size: 9px;
+                        x: parent.width - 12px; y: (parent.height - 9px) / 2; icon_size: 9px;
                         data: root.sort_dir == "asc" ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6";
                         tint: ThemePalette.accent_strong;
                     }
                     sort_date_touch := TouchArea { mouse-cursor: pointer; clicked => { root.sort_column("modified"); } }
                 }
                 Rectangle {
-                    x: 126px; y: 4px; width: 38px; height: 23px;
+                    x: 144px; y: 4px; width: 48px; height: 23px;
                     border-radius: 4px;
                     border-width: root.sort_by == "type" ? 1px : 0px;
                     border-color: ThemePalette.accent;
                     background: sort_type_touch.has-hover || root.sort_by == "type" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
-                    Text { width: parent.width; height: parent.height; text: "Type"; color: root.sort_by == "type" ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide; }
+                    Text {
+                        x: 2px; width: parent.width - (root.sort_by == "type" ? 14px : 4px); height: parent.height;
+                        text: "Type";
+                        color: root.sort_by == "type" ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                        font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide;
+                    }
                     if root.sort_by == "type": SvgIcon {
-                        x: parent.width - 11px; y: (parent.height - 9px) / 2; icon_size: 9px;
+                        x: parent.width - 12px; y: (parent.height - 9px) / 2; icon_size: 9px;
                         data: root.sort_dir == "asc" ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6";
                         tint: ThemePalette.accent_strong;
                     }
@@ -4890,11 +4942,10 @@ export component MainWindow inherits Window {
             }
 
             Rectangle { visible: !root.is_simple; x: toolbar.tb_view_x - 11px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
-            // View-mode cluster. Normal mode: compact 31x31 icons right-aligned on
-            // row 1. Simple mode: 88x38 captioned buttons left-aligned on row 2,
-            // forming the second visual bar the user asked for.
+            // View-mode cluster. 34px stride (31px button + 3px gap) so icons
+            // stay centered in their hit boxes without overlapping neighbors.
             ToolButton {
-                x: root.is_simple ? 10px : parent.width - 306px;
+                x: root.is_simple ? 10px : parent.width - 318px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z";
@@ -4907,7 +4958,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("grid"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 272px;
+                x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 284px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12";
@@ -4920,7 +4971,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("compact"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 238px;
+                x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 250px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01";
@@ -4933,7 +4984,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("list"); }
             }
             if !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid"): HorizontalLayout {
-                x: parent.width - 168px;
+                x: parent.width - 180px;
                 y: 8px;
                 height: 26px;
                 spacing: 4px;
@@ -4947,7 +4998,7 @@ export component MainWindow inherits Window {
                 }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 204px;
+                x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 216px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01";
@@ -4960,7 +5011,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("gallery"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 170px;
+                x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 182px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 4h18v16H3z M14 4v16";
@@ -4972,21 +5023,21 @@ export component MainWindow inherits Window {
                 active: root.preview_visible;
                 clicked => { root.toggle_preview(); }
             }
-            ToolButton { visible: !root.is_simple; x: parent.width - 136px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
+            ToolButton { visible: !root.is_simple; x: parent.width - 148px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
             // Clear-sort button - appears in the gap between Dual Pane and Command Palette
             // when any non-default sort is active. Resets to Name ^ (natural order).
             ToolButton {
                 visible: toolbar.tb_clear_sort;
-                x: parent.width - 101px;
+                x: parent.width - 113px;
                 y: 6px;
-                button_width: 26px;
+                button_width: 28px;
                 button_height: 31px;
                 icon_data: "M18 6L6 18 M6 6l12 12";
                 tooltip: "Clear sort (reset to Name ^)";
                 clicked => { root.sort_column("reset"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 5 * toolbar.simple_row2_step : parent.width - 68px;
+                x: root.is_simple ? 10px + 5 * toolbar.simple_row2_step : parent.width - 78px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z";
@@ -5007,17 +5058,45 @@ export component MainWindow inherits Window {
             y: root.title_h + root.toolbar_h;
             width: parent.width - root.sidebar_w;
             height: parent.height - root.title_h - root.toolbar_h - root.status_h;
-            // Sunset uses a full-opacity sky gradient. Other themes use a flat bg.
-            // Keeping this opaque (not a translucent overlay) stops icons and
-            // text from looking washed out compared to Mica Dark.
+            // Sunset sky: base dusk stack, then a soft warm radial that follows
+            // the shared sun arc (no ray graphics — glow only).
             property <brush> pane_bg: root.active_theme == "sunset"
-                ? @linear-gradient(180deg,
-                    #5c2840  0%,
-                    #3d1838 28%,
-                    #22102a 58%,
-                    #160a1a 100%)
+                ? (root.sunset_setting
+                    ? @linear-gradient(180deg,
+                        #4a2038  0%,
+                        #3a1830 22%,
+                        #241028 55%,
+                        #140818 100%)
+                    : @linear-gradient(180deg,
+                        #6e3050  0%,
+                        #4a2240 26%,
+                        #2a1430 58%,
+                        #160a1a 100%))
                 : ThemePalette.bg;
             background: pane_bg;
+            animate background { duration: 14000ms; easing: ease-in-out; }
+
+            // Warm wash near the sun disc — brighter when high, softer at dusk.
+            if root.active_theme == "sunset": Rectangle {
+                width: parent.width;
+                height: parent.height;
+                background: transparent;
+                Rectangle {
+                    width: min(520px, parent.width * 0.85);
+                    height: min(420px, parent.height * 0.70);
+                    border-radius: self.width / 2;
+                    x: root.sunset_sun_cx * parent.width - self.width / 2;
+                    y: root.sunset_sun_cy * parent.height - self.height / 2;
+                    background: @radial-gradient(circle,
+                        rgba(255, 186, 96, 0.22) 0%,
+                        rgba(242, 112, 90, 0.10) 40%,
+                        rgba(0, 0, 0, 0.0) 72%);
+                    opacity: 0.40 + root.sunset_sun_glow * 0.55;
+                    animate x { duration: 14000ms; easing: ease-in-out; }
+                    animate y { duration: 14000ms; easing: ease-in-out; }
+                    animate opacity { duration: 14000ms; easing: ease-in-out; }
+                }
+            }
 
             if root.folder_changed_banner: Rectangle {
                 x: 0;
@@ -6639,6 +6718,20 @@ export component MainWindow inherits Window {
 
         // Theme atmospheres — inside `app` so they sit above opaque chrome but
         // below MainWindow modals. No TouchArea: clicks pass through.
+        // One shared folder-idle timer (not per-row) for retro/sunset bob.
+        Timer {
+            interval: 2200ms;
+            running: ThemePalette.theme_animations
+                && (ThemePalette.active_theme == "retro" || ThemePalette.active_theme == "sunset");
+            triggered => {
+                ThemePalette.folder_idle_phase = !ThemePalette.folder_idle_phase;
+            }
+        }
+        Timer {
+            interval: 14000ms;
+            running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations;
+            triggered => { root.sunset_setting = !root.sunset_setting; }
+        }
         FantasyAtmosphere {
             x: 0;
             y: 0;
@@ -6665,6 +6758,10 @@ export component MainWindow inherits Window {
             z: 40;
             active: ThemePalette.active_theme == "sunset";
             running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations;
+            sun_cx: root.sunset_sun_cx;
+            sun_cy: root.sunset_sun_cy;
+            sun_glow: root.sunset_sun_glow;
+            setting: root.sunset_setting;
         }
     }
 
@@ -9886,7 +9983,7 @@ export global AppMetrics {
     in-out property <length> pad: 16px;
     // Right inset reserved for vertical scroll bars (beyond pad). Kept tight so
     // the bar sits near the pane edge without covering row / column text.
-    in-out property <length> scroll_gutter: 12px;
+    in-out property <length> scroll_gutter: 8px;
     in-out property <length> outer_border: 0px;
     in-out property <string> ui_font: "Noto Sans";
     in-out property <string> mono_font: "JetBrains Mono";

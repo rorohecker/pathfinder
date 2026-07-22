@@ -1,7 +1,7 @@
 // Lean High Fantasy atmosphere for Pathfinder.
 // Wind / ember / sparkle motes — companion to fantasy_icons.slint pixel glyphs.
 // Effects (theme-gated by the caller via `active`):
-//   1. Divine wind — parchment dust motes drifting diagonally
+//   1. Divine wind — parchment dust motes drifting diagonally + faint wispy trails
 //   2. Ember drift — warmer, slower rising motes
 //   3. Star sparkles — fixed points that quietly twinkle
 //
@@ -20,37 +20,74 @@ export component FantasyAtmosphere inherits Rectangle {
 
     property <bool> anim_on: root.active && root.running;
 
-    // --- Divine wind: cool parchment dust drifting on a slow draft ---------
-    // Opacities match the zip demo (≈0.4) so motes read on dark moss panels.
-    // Half the flock starts mid-path so motion is visible immediately.
-    // Modest bump vs prior drift (±~25% distance, ~12% faster) — still calm.
+    // --- Divine wind: cool parchment dust + faint elongated trails ----------
+    // Larger drift than v0.9.49/50 (~2× distance, ~25% faster). Each mote has
+    // two low-opacity trail segments that follow the same path (lagged by
+    // opposing the drift vector) so motion reads without cluttering the UI.
     for m[i] in [
-        { x0: 0.06, y0: 0.10, dx: 0.13, dy: 0.07, dur: 6200ms },
-        { x0: 0.28, y0: 0.42, dx: 0.10, dy: -0.07, dur: 7200ms },
-        { x0: 0.52, y0: 0.16, dx: 0.09, dy: 0.08, dur: 5800ms },
-        { x0: 0.74, y0: 0.55, dx: 0.09, dy: -0.06, dur: 8300ms },
-        { x0: 0.88, y0: 0.22, dx: 0.08, dy: 0.07, dur: 6900ms },
-        { x0: 0.40, y0: 0.78, dx: 0.10, dy: -0.07, dur: 7600ms },
-        { x0: 0.15, y0: 0.60, dx: 0.11, dy: -0.05, dur: 6700ms },
-        { x0: 0.62, y0: 0.30, dx: -0.07, dy: 0.06, dur: 7900ms },
+        { x0: 0.06, y0: 0.10, dx: 0.22, dy: 0.12, dur: 4800ms },
+        { x0: 0.28, y0: 0.42, dx: 0.18, dy: -0.12, dur: 5600ms },
+        { x0: 0.52, y0: 0.16, dx: 0.16, dy: 0.14, dur: 4500ms },
+        { x0: 0.74, y0: 0.55, dx: 0.15, dy: -0.11, dur: 6400ms },
+        { x0: 0.88, y0: 0.22, dx: 0.14, dy: 0.12, dur: 5200ms },
+        { x0: 0.40, y0: 0.78, dx: 0.17, dy: -0.13, dur: 5800ms },
+        { x0: 0.15, y0: 0.60, dx: 0.19, dy: -0.09, dur: 5100ms },
+        { x0: 0.62, y0: 0.30, dx: -0.14, dy: 0.11, dur: 6000ms },
     ] : Rectangle {
-        width: 4px;
-        height: 4px;
-        border-radius: 2px;
-        background: #f2e8c8;
-        // Alternate starting phase so the flock isn't frozen until first tick.
+        width: 1px;
+        height: 1px;
+        background: transparent;
         property <bool> drift: Math.mod(i, 2) == 1;
         Timer {
             interval: m.dur;
             running: root.anim_on;
             triggered => { drift = !drift; }
         }
-        x: (drift ? m.x0 + m.dx : m.x0) * root.width;
-        y: (drift ? m.y0 + m.dy : m.y0) * root.height;
-        opacity: drift ? 0.18 : 0.42;
-        animate x { duration: m.dur; easing: ease-in-out; }
-        animate y { duration: m.dur; easing: ease-in-out; }
-        animate opacity { duration: m.dur; easing: ease-in-out; }
+        property <float> mx: drift ? m.x0 + m.dx : m.x0;
+        property <float> my: drift ? m.y0 + m.dy : m.y0;
+        // Trail direction opposite the current hop so streaks trail behind.
+        property <float> tdx: drift ? -m.dx : m.dx;
+        property <float> tdy: drift ? -m.dy : m.dy;
+
+        // Far wisp (most transparent, longest).
+        Rectangle {
+            width: 18px;
+            height: 2px;
+            border-radius: 1px;
+            background: #f2e8c8;
+            opacity: drift ? 0.04 : 0.10;
+            x: (mx + tdx * 0.22) * root.width - self.width / 2;
+            y: (my + tdy * 0.22) * root.height - self.height / 2;
+            animate x { duration: m.dur; easing: ease-in-out; }
+            animate y { duration: m.dur; easing: ease-in-out; }
+            animate opacity { duration: m.dur; easing: ease-in-out; }
+        }
+        // Near wisp.
+        Rectangle {
+            width: 10px;
+            height: 2px;
+            border-radius: 1px;
+            background: #f2e8c8;
+            opacity: drift ? 0.07 : 0.16;
+            x: (mx + tdx * 0.10) * root.width - self.width / 2;
+            y: (my + tdy * 0.10) * root.height - self.height / 2;
+            animate x { duration: m.dur; easing: ease-in-out; }
+            animate y { duration: m.dur; easing: ease-in-out; }
+            animate opacity { duration: m.dur; easing: ease-in-out; }
+        }
+        // Mote head.
+        Rectangle {
+            width: 4px;
+            height: 4px;
+            border-radius: 2px;
+            background: #f2e8c8;
+            x: mx * root.width - 2px;
+            y: my * root.height - 2px;
+            opacity: drift ? 0.18 : 0.44;
+            animate x { duration: m.dur; easing: ease-in-out; }
+            animate y { duration: m.dur; easing: ease-in-out; }
+            animate opacity { duration: m.dur; easing: ease-in-out; }
+        }
     }
 
     // --- Ember drift: warmer bronze motes, larger & slower than wind ------

@@ -8669,6 +8669,10 @@ struct PreviewResult {
     // Rasterized PDF first page (RGBA + dimensions), built off the UI thread
     // and turned into a Slint image when the poll tick applies the result.
     pdf_image: Option<Arc<(Vec<u8>, u32, u32)>>,
+    // Thumbnail / image preview pixels (also built off the UI thread — never
+    // decode or EXIF-parse on the Slint event loop).
+    image_rgba: Option<Arc<(Vec<u8>, u32, u32)>>,
+    is_image: bool,
 }
 
 #[derive(Clone)]
@@ -16877,14 +16881,13 @@ impl NativeController {
             return;
         }
 
-        // Try to load image preview from thumbnail cache
         let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
         ui.set_preview_is_pdf(ext == "pdf");
         ui.set_preview_is_media(is_media_ext(&ext));
         ui.set_quick_look_path(ss(&entry.path));
 
-        // PDF: show a previously-rasterized first page instantly (no flicker)
-        // if it's cached; otherwise clear it until the async render lands.
+        // PDF: show a previously-rasterized first page instantly (mutex + image
+        // wrap only — never rasterize here). Cold renders stay on the worker.
         if ext == "pdf" {
             if let Some(rgba) =
                 pdf_page_cached_only(&self.app_state, &entry.path, entry.modified, PDF_PREVIEW_WIDTH)
@@ -16897,23 +16900,10 @@ impl NativeController {
         } else {
             ui.set_preview_has_pdf_page(false);
         }
-        let is_image = is_thumbnail_image_ext(&ext);
-        if is_image {
-            let disk_key = thumbnail_cache_key(Path::new(&entry.path), entry.modified, 160);
-            let thumb_path = thumbnail_cache_dir().join(format!("{disk_key}.jpg"));
-            if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
-                let (w, h) = img.dimensions();
-                let raw = img.into_raw();
-                let buf =
-                    slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
-                ui.set_preview_image(slint::Image::from_rgba8(buf));
-                ui.set_preview_is_image(true);
-            } else {
-                ui.set_preview_is_image(false);
-            }
-        } else {
-            ui.set_preview_is_image(false);
-        }
+
+        // Never decode thumbnails or read EXIF on the UI thread — that blocked
+        // the event loop on every image click (v0.9.50 freeze).
+        ui.set_preview_is_image(false);
 
         let type_label = entry_type(&entry);
         let base_meta = format!(
@@ -16924,18 +16914,7 @@ impl NativeController {
             format_modified(entry.modified),
         );
 
-        // A thumbnail already renders above, so skip the body read entirely.
-        // This avoids a full-file base64 encode (and the freeze it caused) when
-        // selecting a large image.
-        if ui.get_preview_is_image() {
-            ui.set_preview_body(ss(""));
-            let meta = match Self::read_exif_summary(Path::new(&entry.path)) {
-                Some(exif) => format!("{base_meta}\n\nEXIF\n{exif}"),
-                None => base_meta,
-            };
-            ui.set_preview_meta(ss(meta));
-            return;
-        }
+        // Media + folders: metadata-only, no disk body read.
         if is_media_ext(&ext) {
             ui.set_preview_body(ss(format!(
                 "Media file ({ext})\n\nOpen with the system player, or use the preview action row.\n\nSize: {}\nModified: {}",
@@ -16945,32 +16924,17 @@ impl NativeController {
             ui.set_preview_meta(ss(base_meta));
             return;
         }
-
-        // Fast path: already cached, so format it inline with no flicker. A
-        // cache hit means `build_preview_display` does no disk read beyond the
-        // stat we just did, so it stays snappy. PDFs always take the async path
-        // so the (slow) page rasterization never runs on the UI thread.
-        if ext != "pdf" && preview_is_cached(&self.app_state, &entry.path) {
-            let (body, meta, rendered) = build_preview_display(
-                &self.app_state,
-                &entry.path,
-                &ext,
-                &type_label,
-                entry.size,
-                entry.modified,
-            );
-            ui.set_preview_body(ss(body));
-            ui.set_preview_meta(ss(meta));
-            ui.set_preview_rendered(ss(rendered));
+        if entry.kind == FileKind::Directory {
+            ui.set_preview_body(ss(""));
+            ui.set_preview_meta(ss(base_meta));
             return;
         }
 
-        // Cold path: show meta immediately and read the body on a background
-        // thread. The poll tick applies the result, dropping it if the
-        // selection changed in the meantime. This is what keeps rapid clicks
-        // and slow files (PDF, archives) from ever freezing the UI thread.
+        // All file bodies (text, PDF, docs, images+EXIF, archives): background
+        // thread. Cache hits are cheap there; misses never stall the UI.
+        // `preview_generation` cancels stale results when the user clicks ahead.
         ui.set_preview_body(ss(""));
-        ui.set_preview_meta(ss(base_meta));
+        ui.set_preview_meta(ss(base_meta.clone()));
 
         let generation = self.preview_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let path = entry.path.clone();
@@ -16981,11 +16945,32 @@ impl NativeController {
         let gen_check = self.preview_generation.clone();
         let size = entry.size;
         let modified = entry.modified;
+        let type_label_owned = type_label.clone();
         std::thread::spawn(move || {
-            let (body, meta, rendered) =
-                build_preview_display(&app_state, &path, &ext_owned, &type_label, size, modified);
-            // Rasterize the PDF first page (cached) so the pane shows the real
-            // document, not just extracted text.
+            let is_image = is_thumbnail_image_ext(&ext_owned);
+            let mut image_rgba = None;
+            let (body, meta, rendered) = if is_image {
+                let disk_key = thumbnail_cache_key(Path::new(&path), modified, 160);
+                let thumb_path = thumbnail_cache_dir().join(format!("{disk_key}.jpg"));
+                if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
+                    let (w, h) = img.dimensions();
+                    image_rgba = Some(Arc::new((img.into_raw(), w, h)));
+                }
+                let meta = match NativeController::read_exif_summary(Path::new(&path)) {
+                    Some(exif) => format!("{base_meta}\n\nEXIF\n{exif}"),
+                    None => base_meta,
+                };
+                (String::new(), meta, String::new())
+            } else {
+                build_preview_display(
+                    &app_state,
+                    &path,
+                    &ext_owned,
+                    &type_label_owned,
+                    size,
+                    modified,
+                )
+            };
             let pdf_image = if ext_owned == "pdf" {
                 pdf_page_rgba_cached(&app_state, &path, modified, PDF_PREVIEW_WIDTH)
             } else {
@@ -17001,6 +16986,8 @@ impl NativeController {
                     meta,
                     rendered,
                     pdf_image,
+                    image_rgba,
+                    is_image,
                 });
             }
             ready.store(true, Ordering::Release);
@@ -23954,6 +23941,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                     ui.set_preview_pdf_page(rgba_to_slint_image(&rgba));
                                     ui.set_preview_has_pdf_page(true);
                                 }
+                                if result.is_image {
+                                    if let Some(rgba) = result.image_rgba {
+                                        ui.set_preview_image(rgba_to_slint_image(&rgba));
+                                        ui.set_preview_is_image(true);
+                                    } else {
+                                        ui.set_preview_is_image(false);
+                                    }
+                                }
                             }
                         }
                     }
@@ -25410,7 +25405,7 @@ struct PaneGridGeom {
 #[cfg(target_os = "windows")]
 fn pane_grid_geometry(pane_w: f32, view_mode: &str, grid_w: f32, grid_h: f32) -> PaneGridGeom {
     const PAD: f32 = 16.0;
-    const SCROLLBAR: f32 = 12.0;
+    const SCROLLBAR: f32 = 8.0;
     let file_area_w = (pane_w - PAD * 2.0 - SCROLLBAR).max(1.0);
     let compact = view_mode == "compact";
     let cell_w_target = if compact { 200.0 } else { grid_w.max(96.0) };
@@ -25497,7 +25492,7 @@ fn hit_test_list_folder_drop(
         return None;
     }
     const PAD: f32 = 16.0;
-    const SCROLLBAR: f32 = 12.0;
+    const SCROLLBAR: f32 = 8.0;
     let view = ui.get_view_mode();
     let view_str = view.as_str();
     let left = pane_left + PAD;
