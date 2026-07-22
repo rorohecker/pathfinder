@@ -1,5 +1,5 @@
 // Lean Sunset atmosphere for Pathfinder.
-// Horizon sun + sparse birds — companion to sunset_icons.slint.
+// Horizon sun drives warm radiance — companion to sunset_icons.slint.
 // Theme-gated by the caller via `active`. No TouchArea: clicks pass through.
 
 export component SunsetAtmosphere inherits Rectangle {
@@ -13,31 +13,117 @@ export component SunsetAtmosphere inherits Rectangle {
 
     property <bool> anim_on: root.active && root.running;
 
-    // Soft horizon glow band (static atmosphere, cheap).
+    // Shared sun state — glow / radiance follow this disc.
+    property <bool> setting: false;
+    property <float> sun_cx: 0.48;
+    property <float> sun_cy: setting ? 0.58 : 0.12;
+    // Brighter when high; softer when low on the horizon.
+    property <float> sun_glow: setting ? 0.55 : 1.0;
+    Timer {
+        interval: 12000ms;
+        running: root.anim_on;
+        triggered => { setting = !setting; }
+    }
+    animate sun_cy { duration: 12000ms; easing: ease-in-out; }
+    animate sun_glow { duration: 12000ms; easing: ease-in-out; }
+
+    // Soft horizon glow band — brighter when the sun is lower (setting).
     Rectangle {
         x: 0;
-        y: root.height * 0.72;
+        y: root.height * 0.68;
         width: root.width;
-        height: root.height * 0.28;
-        background: @linear-gradient(180deg, rgba(232, 98, 63, 0.0) 0%, rgba(242, 161, 61, 0.10) 55%, rgba(242, 112, 138, 0.08) 100%);
+        height: root.height * 0.32;
+        background: @linear-gradient(180deg,
+            rgba(232, 98, 63, 0.0) 0%,
+            rgba(242, 161, 61, 0.14) 55%,
+            rgba(242, 112, 138, 0.10) 100%);
+        opacity: root.setting ? 1.0 : 0.55;
+        animate opacity { duration: 12000ms; easing: ease-in-out; }
     }
 
-    // Sun slowly setting / rising behind the chrome.
+    // Large warm radiance halo around the sun (the light source).
+    Rectangle {
+        width: 240px;
+        height: 240px;
+        border-radius: 120px;
+        x: root.sun_cx * root.width - self.width / 2;
+        y: root.sun_cy * root.height - self.height / 2;
+        background: @radial-gradient(circle,
+            rgba(255, 200, 90, 0.42) 0%,
+            rgba(255, 120, 70, 0.14) 45%,
+            rgba(255, 80, 100, 0.0) 72%);
+        opacity: 0.35 + root.sun_glow * 0.45;
+        animate x { duration: 12000ms; easing: ease-in-out; }
+        animate y { duration: 12000ms; easing: ease-in-out; }
+        animate opacity { duration: 12000ms; easing: ease-in-out; }
+    }
+
+    // Mid halo — tighter pulse tied to sun brightness.
+    Rectangle {
+        width: 120px;
+        height: 120px;
+        border-radius: 60px;
+        x: root.sun_cx * root.width - self.width / 2;
+        y: root.sun_cy * root.height - self.height / 2;
+        background: @radial-gradient(circle,
+            rgba(255, 224, 120, 0.70) 0%,
+            rgba(255, 140, 60, 0.22) 50%,
+            rgba(255, 100, 80, 0.0) 100%);
+        opacity: 0.40 + root.sun_glow * 0.50;
+        animate x { duration: 12000ms; easing: ease-in-out; }
+        animate y { duration: 12000ms; easing: ease-in-out; }
+        animate opacity { duration: 12000ms; easing: ease-in-out; }
+    }
+
+    // Soft ray streaks from the sun (opacity follows sun).
+    Rectangle {
+        width: 3px; height: root.height * 0.42; border-radius: 1.5px;
+        background: #ffb060; opacity: 0.08 + root.sun_glow * 0.12;
+        x: root.sun_cx * root.width - 1.5px; y: root.sun_cy * root.height;
+        transform-origin: { x: 1.5px, y: 0px }; transform-rotation: -28deg;
+        animate opacity { duration: 12000ms; easing: ease-in-out; }
+        animate x { duration: 12000ms; easing: ease-in-out; }
+        animate y { duration: 12000ms; easing: ease-in-out; }
+    }
+    Rectangle {
+        width: 3px; height: root.height * 0.55; border-radius: 1.5px;
+        background: #ffb060; opacity: 0.10 + root.sun_glow * 0.14;
+        x: root.sun_cx * root.width - 1.5px; y: root.sun_cy * root.height;
+        transform-origin: { x: 1.5px, y: 0px }; transform-rotation: -8deg;
+        animate opacity { duration: 12000ms; easing: ease-in-out; }
+        animate x { duration: 12000ms; easing: ease-in-out; }
+        animate y { duration: 12000ms; easing: ease-in-out; }
+    }
+    Rectangle {
+        width: 3px; height: root.height * 0.48; border-radius: 1.5px;
+        background: #ffb060; opacity: 0.09 + root.sun_glow * 0.13;
+        x: root.sun_cx * root.width - 1.5px; y: root.sun_cy * root.height;
+        transform-origin: { x: 1.5px, y: 0px }; transform-rotation: 12deg;
+        animate opacity { duration: 12000ms; easing: ease-in-out; }
+        animate x { duration: 12000ms; easing: ease-in-out; }
+        animate y { duration: 12000ms; easing: ease-in-out; }
+    }
+    Rectangle {
+        width: 3px; height: root.height * 0.38; border-radius: 1.5px;
+        background: #ffb060; opacity: 0.07 + root.sun_glow * 0.11;
+        x: root.sun_cx * root.width - 1.5px; y: root.sun_cy * root.height;
+        transform-origin: { x: 1.5px, y: 0px }; transform-rotation: 32deg;
+        animate opacity { duration: 12000ms; easing: ease-in-out; }
+        animate x { duration: 12000ms; easing: ease-in-out; }
+        animate y { duration: 12000ms; easing: ease-in-out; }
+    }
+
+    // Sun disc.
     Rectangle {
         width: 36px;
         height: 36px;
         border-radius: 18px;
         background: #ffe066;
-        opacity: 0.22;
-        x: root.width * 0.48;
-        property <bool> setting: false;
-        Timer {
-            interval: 12000ms;
-            running: root.anim_on;
-            triggered => { setting = !setting; }
-        }
-        y: setting ? root.height * 0.58 : root.height * 0.12;
+        opacity: 0.18 + root.sun_glow * 0.14;
+        x: root.sun_cx * root.width - 18px;
+        y: root.sun_cy * root.height - 18px;
         animate y { duration: 12000ms; easing: ease-in-out; }
+        animate opacity { duration: 12000ms; easing: ease-in-out; }
     }
 
     // Two birds gliding across (sparse — not a flock).

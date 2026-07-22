@@ -1,6 +1,9 @@
 // Lean Retro Arcade atmosphere for Pathfinder.
-// CRT scanline + faint VHS tracking glitches — companion to retro_icons.slint.
+// CRT scanline only — companion to retro_icons.slint.
 // Theme-gated by the caller via `active`. No TouchArea: clicks pass through.
+//
+// Earlier builds also drew sparse magenta VHS glitch bands; those read as a
+// broken purple bar flickering near pane edges/dividers, so they were removed.
 
 export component RetroAtmosphere inherits Rectangle {
     in property <bool> active: false;
@@ -13,12 +16,12 @@ export component RetroAtmosphere inherits Rectangle {
 
     property <bool> anim_on: root.active && root.running;
 
-    // CRT scanline sweeping down the window.
+    // CRT scanline sweeping down the window (quiet cyan, not magenta).
     Rectangle {
         width: root.width;
         height: 2px;
         background: #2fe0ff;
-        opacity: 0.14;
+        opacity: 0.10;
         property <bool> down: false;
         Timer {
             interval: 3400ms;
@@ -27,27 +30,5 @@ export component RetroAtmosphere inherits Rectangle {
         }
         y: down ? root.height - 2px : -2px;
         animate y { duration: 3400ms; easing: linear; }
-    }
-
-    // Sparse VHS tracking glitch bands (3 only — not dense noise).
-    for gband[i] in [
-        { x: 0.08, y: 0.22, w: 0.18, dur: 2600ms },
-        { x: 0.55, y: 0.48, w: 0.14, dur: 3200ms },
-        { x: 0.32, y: 0.72, w: 0.12, dur: 2100ms },
-    ]: Rectangle {
-        y: gband.y * root.height;
-        width: gband.w * root.width;
-        height: 4px;
-        background: #ff2fb0;
-        property <bool> glitch: Math.mod(i, 2) == 1;
-        Timer {
-            interval: gband.dur;
-            running: root.anim_on;
-            triggered => { glitch = !glitch; }
-        }
-        opacity: glitch ? 0.28 : 0.06;
-        x: (glitch ? gband.x + 0.012 : gband.x) * root.width;
-        animate opacity { duration: 120ms; easing: ease-in-out; }
-        animate x { duration: 120ms; easing: ease-in-out; }
     }
 }

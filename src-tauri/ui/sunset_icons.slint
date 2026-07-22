@@ -7,31 +7,38 @@
 
 import { FantasyPixel, PixelIcon } from "fantasy_icons.slint";
 
-// Folder → sunset folder: lift + soft glow on hover.
+// Folder → sunset folder: lift + soft glow on hover; idle breathe when running.
 export component SunsetFolderGlyph inherits Rectangle {
     in property <[FantasyPixel]> pixels;
     in property <length> cell: 5px;
     in property <bool> hovered: false;
     in property <bool> interactive: false;
+    in property <bool> running: true;
     width: 12 * root.cell;
     height: 12 * root.cell;
     background: transparent;
 
     property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+    property <bool> pulse: false;
+    Timer {
+        interval: 1600ms;
+        running: root.running && !root.lit;
+        triggered => { pulse = !pulse; }
+    }
 
     Rectangle {
         width: parent.width;
         height: parent.height;
         border-radius: parent.width / 2;
         background: #ffe066;
-        opacity: root.lit ? 0.22 : 0.0;
+        opacity: root.lit ? 0.22 : (root.running && root.pulse ? 0.14 : 0.0);
         animate opacity { duration: 200ms; }
     }
 
     PixelIcon {
         pixels: root.pixels;
         cell: root.cell;
-        y: root.lit ? -0.45 * root.cell : 0px;
+        y: root.lit ? -0.45 * root.cell : (root.running && root.pulse ? -0.15 * root.cell : 0px);
         animate y { duration: 200ms; easing: ease-out; }
     }
 
@@ -207,6 +214,7 @@ export component SunsetIconGallery inherits Rectangle {
             pixels: root.folder;
             cell: root.cell;
             interactive: true;
+            running: root.running;
         }
         if entry.kind == "postcard": SunsetPostcardGlyph {
             pixels: root.postcard;
@@ -272,6 +280,7 @@ export component SunsetEmptyOrnament inherits Rectangle {
         cell: root.cell;
         hovered: root.hovered;
         interactive: false;
+        running: root.running;
     }
     if root.kind == "postcard": SunsetPostcardGlyph {
         pixels: root.postcard;

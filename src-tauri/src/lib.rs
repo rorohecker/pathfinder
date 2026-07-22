@@ -8266,6 +8266,10 @@ struct NativeSettings {
     /// from the preset id so the hex survives switching to a preset and back.
     #[serde(default)]
     custom_accent_hex: Option<String>,
+    /// Decorative theme motion: atmospheres + idle/hover relic animations.
+    /// Default on; when false, themed icons stay static and FX timers pause.
+    #[serde(default = "default_true")]
+    theme_animations: bool,
 }
 
 fn default_ai_profile() -> String {
@@ -8310,6 +8314,7 @@ impl Default for NativeSettings {
             palette_tip_shown: false,
             folder_color: None,
             custom_accent_hex: None,
+            theme_animations: true,
         }
     }
 }
@@ -12386,6 +12391,9 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
             ui.set_active_theme(ss("custom"));
             ui.set_active_accent(ss(&settings.accent));
             ui.set_active_density(ss(&settings.density));
+            ui.global::<ThemePalette>()
+                .set_theme_animations(settings.theme_animations);
+            ui.set_theme_animations(settings.theme_animations);
             return;
         }
     }
@@ -12445,6 +12453,8 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
     global.set_icon_folder_2(folder_2);
     global.set_active_theme(ss(&settings.theme));
     global.set_folder_icon_image(load_theme_folder_icon(&settings.theme));
+    global.set_theme_animations(settings.theme_animations);
+    ui.set_theme_animations(settings.theme_animations);
 
     let metrics = ui.global::<AppMetrics>();
     metrics.set_radius(palette.radius);
@@ -23091,6 +23101,19 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 ctrl.show_hidden = new_state;
             }
             c.borrow_mut().refresh(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c_anim = controller.clone();
+    ui.on_toggle_theme_animations(move || {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c_anim.borrow_mut();
+            ctrl.settings.theme_animations = !ctrl.settings.theme_animations;
+            let on = ctrl.settings.theme_animations;
+            ctrl.save_settings();
+            ui.global::<ThemePalette>().set_theme_animations(on);
+            ui.set_theme_animations(on);
         }
     });
 
