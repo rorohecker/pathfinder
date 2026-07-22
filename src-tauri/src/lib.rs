@@ -69,6 +69,8 @@ pub fn __test_detect_gpus() -> Vec<(String, u32, u64, bool, bool)> {
         .collect()
 }
 mod fantasy_icons;
+mod retro_icons;
+mod sunset_icons;
 mod inference;
 mod local_ai;
 mod imagenet_labels;
@@ -5119,16 +5121,11 @@ fn ensure_watched_paths(app_state: &AppState, paths: &[String]) -> Result<(), St
                         if let Ok(mut dirty) = callback_state.dirty_dirs.lock() {
                             dirty.insert(parent_string.clone());
                         }
-                        if let Ok(entries) = list_directory_uncached(&parent) {
-                            callback_state.store_directory(&parent_string, entries.clone());
-                            // Use debounced indexing to avoid excessive database operations
-                            // when rapid file system events occur (e.g., after delete/recycle bin).
-                            schedule_index_directory_debounced(
-                                &callback_state,
-                                parent_string,
-                                entries,
-                            );
-                        }
+                        // Mark dirty + invalidate only. A sync re-list here
+                        // competed with Recycle Bin / batch deletes and made
+                        // the UI feel stuck; the next soft refresh / navigate
+                        // refill the directory cache.
+                        callback_state.invalidate_directory_path(&parent);
                     }
                 }
             },
@@ -11636,14 +11633,9 @@ fn native_delete_all_fast(state: &AppState, paths: &[String]) -> Result<usize, S
     if state.queue_is_paused() {
         return Err("Operation queue is paused.".to_string());
     }
-    let existing: Vec<String> = paths
-        .iter()
-        .filter(|p| Path::new(p).exists())
-        .cloned()
-        .collect();
-    if existing.is_empty() {
-        return Err("Nothing to delete.".to_string());
-    }
+    // Trust the shell op for missing paths — a serial exists() walk over large
+    // selections was adding noticeable latency before IFileOperation even started.
+    let existing: Vec<String> = paths.to_vec();
     let n = existing.len();
     let label = if n == 1 {
         existing[0].clone()
@@ -11653,9 +11645,17 @@ fn native_delete_all_fast(state: &AppState, paths: &[String]) -> Result<usize, S
     let op_id = state.queue_start("delete", &label, None, 0);
     let started = Instant::now();
     trash::delete_all(&existing).map_err(|e| e.to_string())?;
+    let mut parents = HashSet::new();
     for path in &existing {
-        state.invalidate_path(Path::new(path));
+        let pb = Path::new(path);
+        state.invalidate_path(pb);
+        if let Some(parent) = pb.parent() {
+            parents.insert(parent.to_path_buf());
+        }
         state.log_op_with_trash("delete", path, None, None);
+    }
+    for parent in parents {
+        state.invalidate_directory_path(&parent);
     }
     state.queue_finish(
         op_id,
@@ -16081,17 +16081,19 @@ impl NativeController {
         if ui.get_is_storage_view() {
             self.close_storage_view(ui);
         }
-        if self.current_path != "recycle://" {
+        let already_in_bin = self.current_path == "recycle://";
+        if !already_in_bin {
             self.bump_nav_generation();
+            self.files.clear();
+            self.visible_files.clear();
+            self.files_model = None;
+            ui.set_empty_state(ss("Loading Recycle Bin..."));
         }
         self.current_path = "recycle://".to_string();
-        self.files.clear();
-        self.visible_files.clear();
         self.search_query.clear();
         self.selected_index = -1;
         self.selected_set.clear();
         self.select_anchor = -1;
-        self.files_model = None;
         if push_history {
             self.history.truncate(self.history_index + 1);
             self.history.push("recycle://".to_string());
@@ -16100,12 +16102,14 @@ impl NativeController {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.path = "recycle://".to_string();
         }
-        ui.set_empty_state(ss("Loading Recycle Bin..."));
         ui.set_in_recycle_bin(true);
         ui.set_is_home_view(false);
-        self.apply_filter();
-        self.update_models(ui);
-        self.update_preview(ui);
+        if !already_in_bin {
+            self.apply_filter();
+            self.update_models(ui);
+            self.update_preview(ui);
+        }
+        self.sync_nav_chrome(ui);
 
         let generation = self.nav_generation.load(Ordering::SeqCst);
         let ready = self.directory_ready.clone();
@@ -16376,6 +16380,17 @@ impl NativeController {
             // Final cache + index population once everything is in.
             state.store_directory(&path, accumulated.clone());
             let _ = index_directory_entries(&path, &accumulated);
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(NativeDirectoryResult {
+                    path: path.clone(),
+                    entries: accumulated,
+                    generation,
+                    partial: false,
+                    skipped_entries: 0,
+                    error: None,
+                });
+            }
+            ready.store(true, Ordering::Release);
         });
     }
 
@@ -16389,6 +16404,8 @@ impl NativeController {
         self.sync_active_pane(ui);
         if self.active_pane == ActivePane::Secondary {
             let path = self.secondary_path.clone();
+            self.app_state
+                .invalidate_directory_path(Path::new(&path));
             self.secondary_navigate(ui, path);
             return;
         }
@@ -16397,6 +16414,7 @@ impl NativeController {
             return;
         }
         if self.current_path == "recycle://" {
+            // Soft refresh: keep current rows until the background list lands.
             self.open_recycle_bin_view(ui, false);
             return;
         }
@@ -16404,10 +16422,18 @@ impl NativeController {
             self.open_archive_view(ui, archive.archive_path, archive.prefix, false);
             return;
         }
-        self.app_state
-            .invalidate_directory_path(Path::new(&self.current_path));
+        // Soft F5: keep the current listing painted, invalidate cache, then
+        // stream a fresh disk list in the background. Skipping the index
+        // partial paint + prepare_navigate_loading flash makes refresh feel
+        // snappy even on large folders.
         let path = self.current_path.clone();
-        self.navigate(ui, path, false);
+        if path.is_empty() || is_virtual_nav_path(&path) {
+            return;
+        }
+        self.bump_nav_generation();
+        self.app_state
+            .invalidate_directory_path(Path::new(&path));
+        self.schedule_full_directory_load(path);
     }
 
     /// Drop deleted paths from the active listing without a full directory reload.
@@ -16493,7 +16519,7 @@ impl NativeController {
                 row_h,
             )
         } else {
-            let file_area_w = (ui.get_primary_pane_w() - pad * 2.0 - 14.0).max(1.0);
+            let file_area_w = (ui.get_primary_pane_w() - pad * 2.0 - 12.0).max(1.0);
             let compact = view.as_str() == "compact";
             let cell_w_target = if compact { 200.0 } else { grid_w };
             let cols = (file_area_w / cell_w_target).floor().max(1.0) as usize;
@@ -17701,24 +17727,23 @@ impl NativeController {
         self.secondary_selected_index = -1;
         self.secondary_selected_set.clear();
         self.secondary_select_anchor = -1;
-        match fs::read_dir(&path) {
-            Ok(rd) => {
-                let entries: Vec<FileEntry> = rd
-                    .filter_map(Result::ok)
-                    .filter_map(|e| {
-                        let p = e.path();
-                        fs::metadata(&p).ok().map(|m| path_to_entry(&p, &m))
-                    })
-                    .collect();
-                self.secondary_files = entries.clone();
-                self.secondary_visible_files = entries;
-                self.apply_secondary_sort();
+
+        // Prefer cache for instant dual-pane paints. Soft F5 invalidates first
+        // (see refresh), so a refresh still hits disk via list_directory_uncached.
+        let entries = if let Some(cached) = self.app_state.cached_directory(&path) {
+            cached
+        } else {
+            match list_directory_uncached(Path::new(&path)) {
+                Ok(entries) => {
+                    self.app_state.store_directory(&path, entries.clone());
+                    entries
+                }
+                Err(_) => Vec::new(),
             }
-            Err(_) => {
-                self.secondary_files = Vec::new();
-                self.secondary_visible_files = Vec::new();
-            }
-        }
+        };
+        self.secondary_files = entries.clone();
+        self.secondary_visible_files = entries;
+        self.apply_secondary_sort();
         self.update_secondary_models(ui);
         self.sync_selection_count_to_ui(ui);
     }
@@ -18963,45 +18988,49 @@ impl NativeController {
         ui.set_op_drawer_visible(true);
         ui.set_op_drawer_progress(-1.0);
 
+        // Optimistic remove before the shell op finishes so the pane doesn't
+        // feel frozen waiting on IFileOperation + the 200ms poller.
+        self.optimistic_remove_paths(ui, &paths);
+
         let app_state = self.app_state.clone();
         let operation_ready = self.operation_ready.clone();
         let pending_result = self.pending_operation_result.clone();
-        let paths_for_optimistic = paths.clone();
         std::thread::spawn(move || {
             let result = match native_delete_all_fast(&app_state, &paths) {
                 Ok(deleted) => {
                     let msg = if deleted == 1 {
                         if from_storage_cleanup {
-                            "Cleanup item moved to Recycle Bin Â· Ctrl+Z to undo".to_string()
+                            "Cleanup item moved to Recycle Bin · Ctrl+Z to undo".to_string()
                         } else {
-                            "Moved to Recycle Bin Â· Ctrl+Z to undo".to_string()
+                            "Moved to Recycle Bin · Ctrl+Z to undo".to_string()
                         }
                     } else {
-                        format!("{deleted} items moved to Recycle Bin Â· Ctrl+Z to undo")
+                        format!("{deleted} items moved to Recycle Bin · Ctrl+Z to undo")
                     };
                     NativeOperationResult {
                         message: msg,
                         kind: "success".to_string(),
-                        // Prefer optimistic row removal over a full re-navigate.
                         refresh: false,
                         refresh_both_panes: false,
                         secondary_refresh_path: None,
                         clear_clipboard: false,
                         invalidate_dirs: Vec::new(),
-                        optimistic_remove_paths: paths_for_optimistic,
+                        // Already removed optimistically above.
+                        optimistic_remove_paths: Vec::new(),
                         toast_action: "Undo".to_string(),
                     }
                 }
                 Err(err) => NativeOperationResult {
                     message: err,
                     kind: "error".to_string(),
-                    refresh: false,
+                    // Restore listing if the shell op failed after optimistic remove.
+                    refresh: true,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 },
             };
             if let Ok(mut lock) = pending_result.lock() {
@@ -19255,6 +19284,7 @@ impl NativeController {
             }));
             ui.set_op_drawer_visible(true);
             ui.set_op_drawer_progress(-1.0);
+            self.optimistic_remove_paths(ui, &paths);
             let app_state = self.app_state.clone();
             let operation_ready = self.operation_ready.clone();
             let pending_result = self.pending_operation_result.clone();
@@ -19268,7 +19298,7 @@ impl NativeController {
                         },
                         kind: "success".to_string(),
                         refresh: false,
-                        refresh_both_panes: true,
+                        refresh_both_panes: false,
                         secondary_refresh_path: None,
                         clear_clipboard: false,
                         invalidate_dirs: Vec::new(),
@@ -19278,7 +19308,7 @@ impl NativeController {
                     Err(e) => NativeOperationResult {
                         message: format!("Failed to send items to Recycle Bin: {e}"),
                         kind: "error".to_string(),
-                        refresh: false,
+                        refresh: true,
                         refresh_both_panes: false,
                         secondary_refresh_path: None,
                         clear_clipboard: false,
@@ -23952,13 +23982,26 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                         true,
                                     );
                                 } else {
+                                    // Soft refresh / progressive load: swap rows
+                                    // without clearing the pane or re-running
+                                    // the heavy navigate chrome path.
+                                    let partial = result.partial;
                                     ctrl.files = result.entries;
+                                    ctrl.files_model = None;
                                     ctrl.apply_filter();
                                     ctrl.update_file_models(&ui);
-                                    ui.set_empty_state(ss(format!(
-                                        "Showing the first {} items while the full folder loads.",
-                                        ctrl.files.len()
-                                    )));
+                                    if partial {
+                                        ui.set_empty_state(ss(format!(
+                                            "Showing the first {} items while the full folder loads.",
+                                            ctrl.files.len()
+                                        )));
+                                    } else if ctrl.files.is_empty() {
+                                        ui.set_empty_state(ss("This folder is empty."));
+                                    } else {
+                                        ui.set_empty_state(ss(""));
+                                    }
+                                    ctrl.sync_fantasy_empty_kind(&ui);
+                                    ctrl.update_status(&ui);
                                 }
                             }
                         }
@@ -25344,7 +25387,7 @@ struct PaneGridGeom {
 #[cfg(target_os = "windows")]
 fn pane_grid_geometry(pane_w: f32, view_mode: &str, grid_w: f32, grid_h: f32) -> PaneGridGeom {
     const PAD: f32 = 16.0;
-    const SCROLLBAR: f32 = 14.0;
+    const SCROLLBAR: f32 = 12.0;
     let file_area_w = (pane_w - PAD * 2.0 - SCROLLBAR).max(1.0);
     let compact = view_mode == "compact";
     let cell_w_target = if compact { 200.0 } else { grid_w.max(96.0) };
@@ -25431,7 +25474,7 @@ fn hit_test_list_folder_drop(
         return None;
     }
     const PAD: f32 = 16.0;
-    const SCROLLBAR: f32 = 14.0;
+    const SCROLLBAR: f32 = 12.0;
     let view = ui.get_view_mode();
     let view_str = view.as_str();
     let left = pane_left + PAD;
@@ -26087,6 +26130,8 @@ pub fn run() {
         read_native_json("settings.json", NativeSettings::default());
     let ui = MainWindow::new().expect("failed to create Pathfinder window");
     fantasy_icons::load_fantasy_icon_bank(&ui);
+    retro_icons::load_retro_icon_bank(&ui);
+    sunset_icons::load_sunset_icon_bank(&ui);
     configure_native_window(&ui, &initial_settings);
     let cli_folder = parse_cli_startup_folder();
     // Pass the already-loaded settings into the controller so it doesn't pay

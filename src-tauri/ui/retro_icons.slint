@@ -1,0 +1,329 @@
+// Animated Retro Arcade pixel icons (from retro-explorer-icons zip).
+//
+// Same performance rules as High Fantasy:
+//   - Shared PixelIcon; cell size scales one model to many sizes
+//   - Timers gated by `running` (false when not retro / not visible)
+//   - Sparse placement only (sidebar, empty, theme preview, welcome)
+//   - NEVER per ListView file row
+
+import { FantasyPixel, PixelIcon } from "fantasy_icons.slint";
+
+// Folder → floppy: bounce + blink drive light on hover.
+export component RetroFloppyGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> hovered: false;
+    in property <bool> interactive: false;
+    in property <bool> running: true;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+    property <bool> blink: false;
+    Timer {
+        interval: 200ms;
+        running: root.running && root.lit;
+        triggered => { blink = !blink; }
+    }
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+        y: root.lit ? 0.4 * root.cell : 0px;
+        animate y { duration: 180ms; easing: ease-out; }
+    }
+
+    Rectangle {
+        width: max(2px, root.cell * 0.55);
+        height: max(2px, root.cell * 0.55);
+        border-radius: max(1px, root.cell * 0.28);
+        background: #ff3b6b;
+        x: 10.5 * root.cell;
+        y: 10.5 * root.cell;
+        opacity: root.lit ? (blink ? 1.0 : 0.2) : 0.0;
+        animate opacity { duration: 80ms; }
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+    }
+}
+
+// Document → cassette: continuous reel glint (A/B swap).
+export component RetroCassetteGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels_a;
+    in property <[FantasyPixel]> pixels_b;
+    in property <length> cell: 5px;
+    in property <bool> running: true;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> spin: false;
+    Timer {
+        interval: 350ms;
+        running: root.running;
+        triggered => { spin = !spin; }
+    }
+    PixelIcon {
+        pixels: root.spin ? root.pixels_b : root.pixels_a;
+        cell: root.cell;
+    }
+}
+
+// Image → CRT TV: channel-static flicker.
+export component RetroTvGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels_a;
+    in property <[FantasyPixel]> pixels_b;
+    in property <length> cell: 5px;
+    in property <bool> running: true;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> snow: false;
+    Timer {
+        interval: 220ms;
+        running: root.running;
+        triggered => { snow = !snow; }
+    }
+    PixelIcon {
+        pixels: root.snow ? root.pixels_b : root.pixels_a;
+        cell: root.cell;
+    }
+}
+
+// App → joystick: wiggle on hover.
+export component RetroJoystickGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> hovered: false;
+    in property <bool> interactive: false;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+    transform-rotation: root.lit ? 8deg : 0deg;
+    transform-origin: { x: 6 * root.cell, y: 10 * root.cell };
+    animate transform-rotation { duration: 140ms; easing: ease-in-out; }
+
+    property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+    }
+}
+
+// Drive → boombox: equalizer bars on hover.
+export component RetroBoomboxGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> hovered: false;
+    in property <bool> interactive: false;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+    }
+
+    for bar[i] in [
+        { x: 2.8, base: 1.4 },
+        { x: 4.2, base: 2.2 },
+        { x: 5.6, base: 1.1 },
+        { x: 7.0, base: 2.0 },
+    ]: Rectangle {
+        width: max(2px, root.cell * 0.55);
+        x: bar.x * root.cell;
+        background: #38f2ff;
+        height: root.lit ? (bar.base + i * 0.35) * root.cell : 0.4 * root.cell;
+        y: 0.5 * root.cell;
+        animate height { duration: 260ms + i * 60ms; easing: ease-in-out; }
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+    }
+}
+
+// Recycle → retro trash: bounce on hover.
+export component RetroTrashGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> hovered: false;
+    in property <bool> interactive: false;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+        y: root.lit ? -0.45 * root.cell : 0px;
+        animate y { duration: 150ms; easing: ease-out; }
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+    }
+}
+
+export component RetroIconGallery inherits Rectangle {
+    in property <[FantasyPixel]> floppy;
+    in property <[FantasyPixel]> cassette_a;
+    in property <[FantasyPixel]> cassette_b;
+    in property <[FantasyPixel]> tv_a;
+    in property <[FantasyPixel]> tv_b;
+    in property <[FantasyPixel]> joystick;
+    in property <[FantasyPixel]> boombox;
+    in property <[FantasyPixel]> trash;
+    in property <bool> running: true;
+    in property <length> cell: 4px;
+    in property <length> gap: 10px;
+    background: transparent;
+
+    property <length> tile: 12 * root.cell;
+    property <length> label_h: 16px;
+    width: 6 * root.tile + 5 * root.gap;
+    height: root.tile + root.label_h + 6px;
+
+    for entry[i] in [
+        { kind: "floppy", label: "Folder" },
+        { kind: "cassette", label: "Doc" },
+        { kind: "tv", label: "Image" },
+        { kind: "joystick", label: "App" },
+        { kind: "boombox", label: "Drive" },
+        { kind: "trash", label: "Bin" },
+    ]: Rectangle {
+        x: i * (root.tile + root.gap);
+        y: 0;
+        width: root.tile;
+        height: parent.height;
+        background: transparent;
+
+        if entry.kind == "floppy": RetroFloppyGlyph {
+            pixels: root.floppy;
+            cell: root.cell;
+            interactive: true;
+            running: root.running;
+        }
+        if entry.kind == "cassette": RetroCassetteGlyph {
+            pixels_a: root.cassette_a;
+            pixels_b: root.cassette_b;
+            cell: root.cell;
+            running: root.running;
+        }
+        if entry.kind == "tv": RetroTvGlyph {
+            pixels_a: root.tv_a;
+            pixels_b: root.tv_b;
+            cell: root.cell;
+            running: root.running;
+        }
+        if entry.kind == "joystick": RetroJoystickGlyph {
+            pixels: root.joystick;
+            cell: root.cell;
+            interactive: true;
+        }
+        if entry.kind == "boombox": RetroBoomboxGlyph {
+            pixels: root.boombox;
+            cell: root.cell;
+            interactive: true;
+        }
+        if entry.kind == "trash": RetroTrashGlyph {
+            pixels: root.trash;
+            cell: root.cell;
+            interactive: true;
+        }
+
+        Text {
+            y: root.tile + 2px;
+            width: parent.width;
+            height: root.label_h;
+            text: entry.label;
+            color: #2fe0ff;
+            font-size: 9px;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+export component RetroEmptyOrnament inherits Rectangle {
+    // "floppy" | "cassette" | "tv" | "joystick" | "boombox" | "trash"
+    in property <string> kind: "floppy";
+    in property <[FantasyPixel]> floppy;
+    in property <[FantasyPixel]> cassette_a;
+    in property <[FantasyPixel]> cassette_b;
+    in property <[FantasyPixel]> tv_a;
+    in property <[FantasyPixel]> tv_b;
+    in property <[FantasyPixel]> joystick;
+    in property <[FantasyPixel]> boombox;
+    in property <[FantasyPixel]> trash;
+    in property <bool> running: true;
+    in property <bool> hovered: false;
+    in property <length> cell: 6px;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    if root.kind == "floppy": RetroFloppyGlyph {
+        pixels: root.floppy;
+        cell: root.cell;
+        hovered: root.hovered;
+        interactive: false;
+        running: root.running;
+    }
+    if root.kind == "cassette": RetroCassetteGlyph {
+        pixels_a: root.cassette_a;
+        pixels_b: root.cassette_b;
+        cell: root.cell;
+        running: root.running;
+    }
+    if root.kind == "tv": RetroTvGlyph {
+        pixels_a: root.tv_a;
+        pixels_b: root.tv_b;
+        cell: root.cell;
+        running: root.running;
+    }
+    if root.kind == "joystick": RetroJoystickGlyph {
+        pixels: root.joystick;
+        cell: root.cell;
+        hovered: root.hovered;
+        interactive: false;
+    }
+    if root.kind == "boombox": RetroBoomboxGlyph {
+        pixels: root.boombox;
+        cell: root.cell;
+        hovered: root.hovered;
+        interactive: false;
+    }
+    if root.kind == "trash": RetroTrashGlyph {
+        pixels: root.trash;
+        cell: root.cell;
+        hovered: root.hovered;
+        interactive: false;
+    }
+}

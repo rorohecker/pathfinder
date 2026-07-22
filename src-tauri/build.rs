@@ -10,6 +10,10 @@ fn main() {
     .expect("failed to compile Slint UI");
     println!("cargo:rerun-if-changed=ui/fantasy_fx.slint");
     println!("cargo:rerun-if-changed=ui/fantasy_icons.slint");
+    println!("cargo:rerun-if-changed=ui/retro_fx.slint");
+    println!("cargo:rerun-if-changed=ui/retro_icons.slint");
+    println!("cargo:rerun-if-changed=ui/sunset_fx.slint");
+    println!("cargo:rerun-if-changed=ui/sunset_icons.slint");
     println!("cargo:rerun-if-changed=ui/fonts/PressStart2P-Regular.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/NotoSans-Regular.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/NotoSansMono-Regular.ttf");

@@ -7,6 +7,18 @@ import {
     FantasyChestGlyph,
     FantasyPixel,
 } from "fantasy_icons.slint";
+import { RetroAtmosphere } from "retro_fx.slint";
+import {
+    RetroIconGallery,
+    RetroEmptyOrnament,
+    RetroFloppyGlyph,
+} from "retro_icons.slint";
+import { SunsetAtmosphere } from "sunset_fx.slint";
+import {
+    SunsetIconGallery,
+    SunsetEmptyOrnament,
+    SunsetFolderGlyph,
+} from "sunset_icons.slint";
 
 // Bundled OFL fonts (embedded via build.rs). Family names come from font metadata.
 import "fonts/PressStart2P-Regular.ttf";
@@ -205,6 +217,30 @@ export global FantasyIconBank {
     in-out property <[FantasyPixel]> tower_a: [];
     in-out property <[FantasyPixel]> tower_b: [];
     in-out property <[FantasyPixel]> cauldron: [];
+}
+
+// Pixel banks for Retro Arcade animated icons (filled from Rust once at startup).
+export global RetroIconBank {
+    in-out property <[FantasyPixel]> floppy: [];
+    in-out property <[FantasyPixel]> cassette_a: [];
+    in-out property <[FantasyPixel]> cassette_b: [];
+    in-out property <[FantasyPixel]> tv_a: [];
+    in-out property <[FantasyPixel]> tv_b: [];
+    in-out property <[FantasyPixel]> joystick: [];
+    in-out property <[FantasyPixel]> boombox: [];
+    in-out property <[FantasyPixel]> trash: [];
+}
+
+// Pixel banks for Sunset animated icons (filled from Rust once at startup).
+export global SunsetIconBank {
+    in-out property <[FantasyPixel]> folder: [];
+    in-out property <[FantasyPixel]> postcard: [];
+    in-out property <[FantasyPixel]> sun_a: [];
+    in-out property <[FantasyPixel]> sun_b: [];
+    in-out property <[FantasyPixel]> surfboard: [];
+    in-out property <[FantasyPixel]> palm_a: [];
+    in-out property <[FantasyPixel]> palm_b: [];
+    in-out property <[FantasyPixel]> wavebin: [];
 }
 
 component SvgIcon {
@@ -486,16 +522,16 @@ component SideRow inherits Rectangle {
     height: root.item.is_header ? 24px : 32px;
     background: rgba(0, 0, 0, 0);
 
-    // Visual highlight pill. Sits inside the row but pulls a 20 px gutter
+    // Visual highlight pill. Sits inside the row but pulls a scroll_gutter
     // in from the right edge so the sidebar ListView's scroll bar paints
-    // in its own lane with visible breathing room from the pill. When this
-    // row is the current drop target, a brighter accent_soft fills the pill
-    // and a thin accent border outlines it so the user can tell exactly
-    // where the file will land.
+    // in its own lane without covering the pill. When this row is the
+    // current drop target, a brighter accent_soft fills the pill and a
+    // thin accent border outlines it so the user can tell exactly where
+    // the file will land.
     Rectangle {
         x: 0;
         y: 0;
-        width: parent.width - 20px;
+        width: parent.width - AppMetrics.scroll_gutter;
         height: parent.height;
         border-radius: AppMetrics.radius_small;
         border-width: root.is_drop_target ? 2px : 0px;
@@ -552,8 +588,8 @@ component SideRow inherits Rectangle {
         }
     }
 
-    // High Fantasy: map known sidebar icons to animated pixel relics.
-    // Sparse (sidebar rows only — never ListView file rows). Timers pause off-theme.
+    // Theme pixel ornaments: sparse sidebar only — never ListView file rows.
+    // Timers pause when off-theme.
     property <bool> fantasy_side: ThemePalette.active_theme == "fantasy" && !root.item.is_header && root.item.icon != "tag";
     property <string> fantasy_kind:
         root.item.icon == "trash" ? "cauldron" :
@@ -564,6 +600,30 @@ component SideRow inherits Rectangle {
         root.item.icon == "folder" ? "chest" :
         "";
     property <bool> fantasy_glyph: root.fantasy_side && root.fantasy_kind != "";
+
+    property <bool> retro_side: ThemePalette.active_theme == "retro" && !root.item.is_header && root.item.icon != "tag";
+    property <string> retro_kind:
+        root.item.icon == "trash" ? "trash" :
+        (root.item.icon == "home" || root.item.icon == "drive") ? "boombox" :
+        root.item.icon == "download" ? "joystick" :
+        root.item.icon == "documents" ? "cassette" :
+        (root.item.icon == "search" || root.item.icon == "image") ? "tv" :
+        root.item.icon == "folder" ? "floppy" :
+        "";
+    property <bool> retro_glyph: root.retro_side && root.retro_kind != "";
+
+    property <bool> sunset_side: ThemePalette.active_theme == "sunset" && !root.item.is_header && root.item.icon != "tag";
+    property <string> sunset_kind:
+        root.item.icon == "trash" ? "wavebin" :
+        (root.item.icon == "home" || root.item.icon == "drive") ? "palm" :
+        root.item.icon == "download" ? "surfboard" :
+        root.item.icon == "documents" ? "postcard" :
+        (root.item.icon == "search" || root.item.icon == "image") ? "sun" :
+        root.item.icon == "folder" ? "folder" :
+        "";
+    property <bool> sunset_glyph: root.sunset_side && root.sunset_kind != "";
+
+    property <bool> theme_pixel_glyph: root.fantasy_glyph || root.retro_glyph || root.sunset_glyph;
 
     if root.fantasy_glyph: FantasyEmptyOrnament {
         x: (root.item.expandable ? 18px : 7px) + root.item.indent * 12px;
@@ -582,8 +642,42 @@ component SideRow inherits Rectangle {
         cauldron: FantasyIconBank.cauldron;
     }
 
+    if root.retro_glyph: RetroEmptyOrnament {
+        x: (root.item.expandable ? 18px : 7px) + root.item.indent * 12px;
+        y: (parent.height - self.height) / 2;
+        cell: 1.5px;
+        kind: root.retro_kind;
+        running: ThemePalette.active_theme == "retro";
+        hovered: touch.has-hover;
+        floppy: RetroIconBank.floppy;
+        cassette_a: RetroIconBank.cassette_a;
+        cassette_b: RetroIconBank.cassette_b;
+        tv_a: RetroIconBank.tv_a;
+        tv_b: RetroIconBank.tv_b;
+        joystick: RetroIconBank.joystick;
+        boombox: RetroIconBank.boombox;
+        trash: RetroIconBank.trash;
+    }
+
+    if root.sunset_glyph: SunsetEmptyOrnament {
+        x: (root.item.expandable ? 18px : 7px) + root.item.indent * 12px;
+        y: (parent.height - self.height) / 2;
+        cell: 1.5px;
+        kind: root.sunset_kind;
+        running: ThemePalette.active_theme == "sunset";
+        hovered: touch.has-hover;
+        folder: SunsetIconBank.folder;
+        postcard: SunsetIconBank.postcard;
+        sun_a: SunsetIconBank.sun_a;
+        sun_b: SunsetIconBank.sun_b;
+        surfboard: SunsetIconBank.surfboard;
+        palm_a: SunsetIconBank.palm_a;
+        palm_b: SunsetIconBank.palm_b;
+        wavebin: SunsetIconBank.wavebin;
+    }
+
     SvgIcon {
-        visible: !root.item.is_header && root.item.icon != "tag" && !root.fantasy_glyph;
+        visible: !root.item.is_header && root.item.icon != "tag" && !root.theme_pixel_glyph;
         x: (root.item.expandable ? 20px : 9px) + root.item.indent * 12px;
         y: (parent.height - 16px) / 2;
         icon_size: 16px;
@@ -620,10 +714,9 @@ component SideRow inherits Rectangle {
     Text {
         visible: !root.item.is_header && !(root.item.icon == "tag" && touch.has-hover);
         // Count text (tag counts, drive labels like "local") sits inside the
-        // highlight pill, not past its right edge. The pill ends 20 px from
-        // the row's right edge, so the count is anchored to parent.width - 62
-        // and ends at parent.width - 24, leaving a small inset inside the pill.
-        x: parent.width - 62px;
+        // highlight pill, not past its right edge. The pill ends scroll_gutter
+        // from the row's right edge; keep a small inset inside the pill.
+        x: parent.width - AppMetrics.scroll_gutter - 42px;
         width: 38px;
         height: parent.height;
         text: root.item.count;
@@ -639,7 +732,7 @@ component SideRow inherits Rectangle {
     // Positioned inside the highlight pill so the click target is visible
     // when the row is highlighted.
     if !root.item.is_header && root.item.icon == "tag" && touch.has-hover: Rectangle {
-        x: parent.width - 44px;
+        x: parent.width - AppMetrics.scroll_gutter - 24px;
         y: (parent.height - 22px) / 2;
         width: 22px; height: 22px;
         border-radius: AppMetrics.radius_small;
@@ -652,16 +745,16 @@ component SideRow inherits Rectangle {
         }
     }
 
-    // Match the highlight pill's width (which reserves 20px on the right for
-    // the sidebar scrollbar). Previously this TouchArea covered the full row,
-    // so hovering the rightmost 20px registered hover but the pill rendered
-    // only over the first parent.width-20 - the highlight looked broken in
-    // that lane. Shrinking the hit area keeps hover and visual highlight
-    // exactly aligned across the full clickable region.
+    // Match the highlight pill's width (which reserves scroll_gutter on the
+    // right for the sidebar scrollbar). Previously this TouchArea covered the
+    // full row, so hovering the rightmost gutter registered hover but the
+    // pill rendered only over the first parent.width-gutter - the highlight
+    // looked broken in that lane. Shrinking the hit area keeps hover and
+    // visual highlight exactly aligned across the full clickable region.
     touch := TouchArea {
         x: 0;
         y: 0;
-        width: parent.width - 20px;
+        width: parent.width - AppMetrics.scroll_gutter;
         height: parent.height;
         enabled: !root.item.is_header;
         mouse-cursor: pointer;
@@ -1363,9 +1456,9 @@ component FileRow inherits Rectangle {
 
     if root.view_mode == "list": Rectangle {
         visible: root.item.has_tag;
-        // Pull the dot 28px in from the right edge so it does not get hidden
-        // by the ListView's scroll bar (~14px wide on a Mica window).
-        x: parent.width - 28px;
+        // Pull the dot in from the right edge so it does not get hidden
+        // by the ListView's scroll bar (~scroll_gutter wide).
+        x: parent.width - AppMetrics.scroll_gutter - 14px;
         y: root.group_header_h + (parent.height - root.group_header_h - 9px) / 2;
         width: 9px;
         height: 9px;
@@ -3629,12 +3722,12 @@ export component MainWindow inherits Window {
     out property <length> pane_splitter_w: root.dual_pane ? 6px : 0px;
     out property <length> primary_pane_w: root.dual_pane ? (root.main_content_w - root.pane_splitter_w) * root.split_ratio : root.main_content_w;
     out property <length> secondary_pane_w: root.dual_pane ? root.main_content_w - root.primary_pane_w - root.pane_splitter_w : 0px;
-    // Pane width minus padding on both sides, minus a 14px scroll bar
-    // reserve on the right. Grid and gallery views compute column count and
-    // cell width off this, so reserving here keeps the rightmost cell from
-    // sitting under the scroll bar without needing per-view tweaks.
-    property <length> file_area_w: root.primary_pane_w - AppMetrics.pad * 2 - 18px;
-    property <length> secondary_file_area_w: root.secondary_pane_w - AppMetrics.pad * 2 - 18px;
+    // Pane width minus padding on both sides, minus scroll_gutter on the
+    // right. Grid and gallery views compute column count and cell width off
+    // this, so reserving here keeps the rightmost cell from sitting under
+    // the scroll bar without needing per-view tweaks.
+    property <length> file_area_w: root.primary_pane_w - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
+    property <length> secondary_file_area_w: root.secondary_pane_w - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
     property <int> grid_columns: Math.max(1, Math.floor(root.file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
     property <int> secondary_grid_columns: Math.max(1, Math.floor(root.secondary_file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
     property <length> grid_cell_w: root.file_area_w / root.grid_columns;
@@ -4904,9 +4997,9 @@ export component MainWindow inherits Window {
                 if root.view_mode == "list": ListHeader {
                     x: AppMetrics.pad;
                     y: AppMetrics.pad;
-                    // Match the ListView width below (which reserves 14px for
-                    // its scroll bar) so the column headers line up with rows.
-                    width: parent.width - AppMetrics.pad * 2 - 18px;
+                    // Match the ListView width below (which reserves scroll_gutter
+                    // for its scroll bar) so the column headers line up with rows.
+                    width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     sort_by: root.sort_by;
                     sort_dir: root.sort_dir;
                     sort_col(col) => { root.sort_column(col); }
@@ -4915,9 +5008,9 @@ export component MainWindow inherits Window {
                 if root.view_mode == "list": ListView {
                     x: AppMetrics.pad;
                     y: AppMetrics.pad + 32px;
-                    // Reserve 14px on the right for the scroll bar so column
-                    // text and the tag dot never sit under it.
-                    width: parent.width - AppMetrics.pad * 2 - 18px;
+                    // Reserve scroll_gutter on the right for the scroll bar so
+                    // column text and the tag dot never sit under it.
+                    width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     height: parent.height - AppMetrics.pad * 2 - 32px;
                     // Two-way binding so Rust can save/restore the scroll
                     // position per folder. Lets Back / Up land where the user
@@ -4982,7 +5075,7 @@ export component MainWindow inherits Window {
                     z: 12;
                     x: AppMetrics.pad;
                     y: AppMetrics.pad + 32px;
-                    width: parent.width - AppMetrics.pad * 2 - 18px;
+                    width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     height: parent.height - AppMetrics.pad * 2 - 32px;
                     TouchArea {
                         width: parent.width;
@@ -5258,11 +5351,26 @@ export component MainWindow inherits Window {
                     width: parent.width;
                     height: parent.height;
                     property <bool> fantasy_on: ThemePalette.active_theme == "fantasy";
+                    property <bool> retro_on: ThemePalette.active_theme == "retro";
+                    property <bool> sunset_on: ThemePalette.active_theme == "sunset";
+                    property <bool> themed_empty: empty_pane.fantasy_on || empty_pane.retro_on || empty_pane.sunset_on;
                     // Contextual glyph for empty panes (one icon — never per-row).
                     property <string> fantasy_kind: root.search_text != "" ? "gem"
                         : (root.fantasy_empty_kind != "" ? root.fantasy_empty_kind : "chest");
-                    // Soft fantasy glow behind empty-state copy (theme-gated).
-                    if empty_pane.fantasy_on: Rectangle {
+                    property <string> retro_kind: root.search_text != "" ? "tv"
+                        : (root.fantasy_empty_kind == "cauldron" ? "trash"
+                        : (root.fantasy_empty_kind == "tower" ? "boombox"
+                        : (root.fantasy_empty_kind == "potion" ? "joystick"
+                        : (root.fantasy_empty_kind == "scroll" ? "cassette"
+                        : (root.fantasy_empty_kind == "gem" ? "tv" : "floppy")))));
+                    property <string> sunset_kind: root.search_text != "" ? "sun"
+                        : (root.fantasy_empty_kind == "cauldron" ? "wavebin"
+                        : (root.fantasy_empty_kind == "tower" ? "palm"
+                        : (root.fantasy_empty_kind == "potion" ? "surfboard"
+                        : (root.fantasy_empty_kind == "scroll" ? "postcard"
+                        : (root.fantasy_empty_kind == "gem" ? "sun" : "folder")))));
+                    // Soft theme glow behind empty-state copy (theme-gated).
+                    if empty_pane.themed_empty: Rectangle {
                         x: (parent.width - 120px) / 2;
                         y: (parent.height - 120px) / 2 - 40px;
                         width: 120px;
@@ -5274,7 +5382,7 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         alignment: center;
                         spacing: 10px;
-                        // High Fantasy: animated pixel ornament (single instance).
+                        // Themed: animated pixel ornament (single instance).
                         if empty_pane.fantasy_on: FantasyEmptyOrnament {
                             x: (parent.width - self.width) / 2;
                             cell: 6px;
@@ -5290,8 +5398,38 @@ export component MainWindow inherits Window {
                             tower_b: FantasyIconBank.tower_b;
                             cauldron: FantasyIconBank.cauldron;
                         }
-                        // Non-fantasy: keep the compact SVG badge.
-                        if !empty_pane.fantasy_on: Rectangle {
+                        if empty_pane.retro_on: RetroEmptyOrnament {
+                            x: (parent.width - self.width) / 2;
+                            cell: 6px;
+                            kind: empty_pane.retro_kind;
+                            running: empty_pane.retro_on;
+                            hovered: empty_ta.has-hover;
+                            floppy: RetroIconBank.floppy;
+                            cassette_a: RetroIconBank.cassette_a;
+                            cassette_b: RetroIconBank.cassette_b;
+                            tv_a: RetroIconBank.tv_a;
+                            tv_b: RetroIconBank.tv_b;
+                            joystick: RetroIconBank.joystick;
+                            boombox: RetroIconBank.boombox;
+                            trash: RetroIconBank.trash;
+                        }
+                        if empty_pane.sunset_on: SunsetEmptyOrnament {
+                            x: (parent.width - self.width) / 2;
+                            cell: 6px;
+                            kind: empty_pane.sunset_kind;
+                            running: empty_pane.sunset_on;
+                            hovered: empty_ta.has-hover;
+                            folder: SunsetIconBank.folder;
+                            postcard: SunsetIconBank.postcard;
+                            sun_a: SunsetIconBank.sun_a;
+                            sun_b: SunsetIconBank.sun_b;
+                            surfboard: SunsetIconBank.surfboard;
+                            palm_a: SunsetIconBank.palm_a;
+                            palm_b: SunsetIconBank.palm_b;
+                            wavebin: SunsetIconBank.wavebin;
+                        }
+                        // Non-themed: keep the compact SVG badge.
+                        if !empty_pane.themed_empty: Rectangle {
                             width: 56px;
                             height: 56px;
                             x: (parent.width - 56px) / 2;
@@ -5611,9 +5749,9 @@ export component MainWindow inherits Window {
                 if root.view_mode == "list": ListHeader {
                     x: AppMetrics.pad;
                     y: 38px;
-                    // Match the ListView width below (which reserves 14px for
-                    // its scroll bar) so the column headers line up with rows.
-                    width: parent.width - AppMetrics.pad * 2 - 18px;
+                    // Match the ListView width below (which reserves scroll_gutter
+                    // for its scroll bar) so the column headers line up with rows.
+                    width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     sort_by: root.secondary_sort_by;
                     sort_dir: root.secondary_sort_dir;
                     sort_col(col) => { root.secondary_sort_column(col); }
@@ -5652,10 +5790,10 @@ export component MainWindow inherits Window {
                 if root.view_mode == "list": ListView {
                     x: AppMetrics.pad;
                     y: 38px + 32px;
-                    // Reserve 14px on the right for the scroll bar - matches
-                    // the primary pane's list view so the rightmost column
-                    // and tag dot stay clear of the scroll handle.
-                    width: parent.width - AppMetrics.pad * 2 - 18px;
+                    // Reserve scroll_gutter on the right for the scroll bar -
+                    // matches the primary pane's list view so the rightmost
+                    // column and tag dot stay clear of the scroll handle.
+                    width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     height: parent.height - 38px - 32px - AppMetrics.pad;
                     viewport-y <=> root.secondary_list_scroll_y;
                     for file[index] in root.secondary_files: FileRow {
@@ -5721,6 +5859,8 @@ export component MainWindow inherits Window {
                     width: parent.width;
                     height: parent.height - 38px - (root.view_mode == "list" ? 32px : 0px);
                     property <bool> fantasy_on: ThemePalette.active_theme == "fantasy";
+                    property <bool> retro_on: ThemePalette.active_theme == "retro";
+                    property <bool> sunset_on: ThemePalette.active_theme == "sunset";
                     VerticalLayout {
                         alignment: center;
                         spacing: 8px;
@@ -5737,6 +5877,34 @@ export component MainWindow inherits Window {
                             tower_a: FantasyIconBank.tower_a;
                             tower_b: FantasyIconBank.tower_b;
                             cauldron: FantasyIconBank.cauldron;
+                        }
+                        if retro_on: RetroEmptyOrnament {
+                            x: (parent.width - self.width) / 2;
+                            cell: 5px;
+                            kind: root.secondary_path == "" ? "boombox" : "floppy";
+                            running: retro_on;
+                            floppy: RetroIconBank.floppy;
+                            cassette_a: RetroIconBank.cassette_a;
+                            cassette_b: RetroIconBank.cassette_b;
+                            tv_a: RetroIconBank.tv_a;
+                            tv_b: RetroIconBank.tv_b;
+                            joystick: RetroIconBank.joystick;
+                            boombox: RetroIconBank.boombox;
+                            trash: RetroIconBank.trash;
+                        }
+                        if sunset_on: SunsetEmptyOrnament {
+                            x: (parent.width - self.width) / 2;
+                            cell: 5px;
+                            kind: root.secondary_path == "" ? "palm" : "folder";
+                            running: sunset_on;
+                            folder: SunsetIconBank.folder;
+                            postcard: SunsetIconBank.postcard;
+                            sun_a: SunsetIconBank.sun_a;
+                            sun_b: SunsetIconBank.sun_b;
+                            surfboard: SunsetIconBank.surfboard;
+                            palm_a: SunsetIconBank.palm_a;
+                            palm_b: SunsetIconBank.palm_b;
+                            wavebin: SunsetIconBank.wavebin;
                         }
                         Text {
                             width: parent.width;
@@ -5992,12 +6160,12 @@ export component MainWindow inherits Window {
                     height: parent.height - 76px;
 
                     VerticalLayout {
-                        // Inner content shrinks by 20 px so the scroll bar has
-                        // a visible gutter on the right. Setting viewport-width
+                        // Inner content shrinks by scroll_gutter so the scroll
+                        // bar has a lane on the right. Setting viewport-width
                         // here caused the renderer to draw a visible divider at
                         // the viewport edge, so we shrink the layout instead.
                         x: 0;
-                        width: parent.width - 20px;
+                        width: parent.width - AppMetrics.scroll_gutter;
                         padding: 0;
                         spacing: 0;
 
@@ -6146,6 +6314,34 @@ export component MainWindow inherits Window {
                                 tower_a: FantasyIconBank.tower_a;
                                 tower_b: FantasyIconBank.tower_b;
                                 cauldron: FantasyIconBank.cauldron;
+                            }
+                            if ThemePalette.active_theme == "retro": RetroEmptyOrnament {
+                                x: (parent.width - self.width) / 2;
+                                cell: 5px;
+                                kind: "cassette";
+                                running: ThemePalette.active_theme == "retro";
+                                floppy: RetroIconBank.floppy;
+                                cassette_a: RetroIconBank.cassette_a;
+                                cassette_b: RetroIconBank.cassette_b;
+                                tv_a: RetroIconBank.tv_a;
+                                tv_b: RetroIconBank.tv_b;
+                                joystick: RetroIconBank.joystick;
+                                boombox: RetroIconBank.boombox;
+                                trash: RetroIconBank.trash;
+                            }
+                            if ThemePalette.active_theme == "sunset": SunsetEmptyOrnament {
+                                x: (parent.width - self.width) / 2;
+                                cell: 5px;
+                                kind: "postcard";
+                                running: ThemePalette.active_theme == "sunset";
+                                folder: SunsetIconBank.folder;
+                                postcard: SunsetIconBank.postcard;
+                                sun_a: SunsetIconBank.sun_a;
+                                sun_b: SunsetIconBank.sun_b;
+                                surfboard: SunsetIconBank.surfboard;
+                                palm_a: SunsetIconBank.palm_a;
+                                palm_b: SunsetIconBank.palm_b;
+                                wavebin: SunsetIconBank.wavebin;
                             }
                             Text {
                                 width: parent.width;
@@ -6302,9 +6498,8 @@ export component MainWindow inherits Window {
             }
         }
 
-        // High Fantasy atmosphere — divine wind + ember drift + star sparkles.
-        // Inside `app` so it sits above opaque chrome but below MainWindow
-        // modals (settings / welcome / dialogs). No TouchArea: clicks pass through.
+        // Theme atmospheres — inside `app` so they sit above opaque chrome but
+        // below MainWindow modals. No TouchArea: clicks pass through.
         FantasyAtmosphere {
             x: 0;
             y: 0;
@@ -6313,6 +6508,24 @@ export component MainWindow inherits Window {
             z: 40;
             active: ThemePalette.active_theme == "fantasy";
             running: ThemePalette.active_theme == "fantasy";
+        }
+        RetroAtmosphere {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            z: 40;
+            active: ThemePalette.active_theme == "retro";
+            running: ThemePalette.active_theme == "retro";
+        }
+        SunsetAtmosphere {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            z: 40;
+            active: ThemePalette.active_theme == "sunset";
+            running: ThemePalette.active_theme == "sunset";
         }
     }
 
@@ -6829,10 +7042,10 @@ export component MainWindow inherits Window {
                 height: parent.height - 136px;
 
                 VerticalLayout {
-                    // Inner content stops 20 px short of the ScrollView right
-                    // edge so the scroll bar lives in its own gutter rather
+                    // Inner content stops scroll_gutter short of the ScrollView
+                    // right edge so the scroll bar lives in its own lane rather
                     // than painting on top of the theme tile right column.
-                    width: parent.width - 20px;
+                    width: parent.width - AppMetrics.scroll_gutter;
                     spacing: 18px;
                     padding-bottom: 16px;
 
@@ -6850,8 +7063,8 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    // High Fantasy: live pixel-icon preview (hover + idle animations).
-                    // Only mounted while the fantasy theme is active — timers pause otherwise.
+                    // Theme live pixel-icon previews (hover + idle animations).
+                    // Only mounted while that theme is active — timers pause otherwise.
                     if root.active_theme == "fantasy": Rectangle {
                         width: parent.width;
                         height: 92px;
@@ -6881,6 +7094,68 @@ export component MainWindow inherits Window {
                             tower_a: FantasyIconBank.tower_a;
                             tower_b: FantasyIconBank.tower_b;
                             cauldron: FantasyIconBank.cauldron;
+                        }
+                    }
+                    if root.active_theme == "retro": Rectangle {
+                        width: parent.width;
+                        height: 92px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text {
+                            x: 12px; y: 8px; width: parent.width - 24px; height: 14px;
+                            text: "ARCADE ICONS";
+                            color: ThemePalette.text_faint;
+                            font-size: 10px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                        }
+                        RetroIconGallery {
+                            x: max(8px, (parent.width - self.width) / 2);
+                            y: 26px;
+                            cell: 4px;
+                            gap: 8px;
+                            running: root.active_theme == "retro" && root.settings_visible;
+                            floppy: RetroIconBank.floppy;
+                            cassette_a: RetroIconBank.cassette_a;
+                            cassette_b: RetroIconBank.cassette_b;
+                            tv_a: RetroIconBank.tv_a;
+                            tv_b: RetroIconBank.tv_b;
+                            joystick: RetroIconBank.joystick;
+                            boombox: RetroIconBank.boombox;
+                            trash: RetroIconBank.trash;
+                        }
+                    }
+                    if root.active_theme == "sunset": Rectangle {
+                        width: parent.width;
+                        height: 92px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text {
+                            x: 12px; y: 8px; width: parent.width - 24px; height: 14px;
+                            text: "SUNSET ICONS";
+                            color: ThemePalette.text_faint;
+                            font-size: 10px;
+                            font-weight: 700;
+                            letter-spacing: 1px;
+                        }
+                        SunsetIconGallery {
+                            x: max(8px, (parent.width - self.width) / 2);
+                            y: 26px;
+                            cell: 4px;
+                            gap: 8px;
+                            running: root.active_theme == "sunset" && root.settings_visible;
+                            folder: SunsetIconBank.folder;
+                            postcard: SunsetIconBank.postcard;
+                            sun_a: SunsetIconBank.sun_a;
+                            sun_b: SunsetIconBank.sun_b;
+                            surfboard: SunsetIconBank.surfboard;
+                            palm_a: SunsetIconBank.palm_a;
+                            palm_b: SunsetIconBank.palm_b;
+                            wavebin: SunsetIconBank.wavebin;
                         }
                     }
 
@@ -7688,7 +7963,7 @@ export component MainWindow inherits Window {
                 height: parent.height - 136px;
 
                 VerticalLayout {
-                width: parent.width - 20px;
+                width: parent.width - AppMetrics.scroll_gutter;
                 spacing: 12px;
                 padding-bottom: 16px;
 
@@ -7824,7 +8099,7 @@ export component MainWindow inherits Window {
                 height: parent.height - 136px;
 
                 VerticalLayout {
-                    width: parent.width - 20px;
+                    width: parent.width - AppMetrics.scroll_gutter;
                     spacing: 14px;
                     padding-bottom: 16px;
 
@@ -7908,7 +8183,7 @@ export component MainWindow inherits Window {
                 height: parent.height - 136px;
 
                 VerticalLayout {
-                    width: parent.width - 20px;
+                    width: parent.width - AppMetrics.scroll_gutter;
                     spacing: 14px;
                     padding-bottom: 16px;
 
@@ -8960,6 +9235,17 @@ export component MainWindow inherits Window {
                         cell: 3px;
                         interactive: true;
                     }
+                    if ThemePalette.active_theme == "retro": RetroFloppyGlyph {
+                        pixels: RetroIconBank.floppy;
+                        cell: 3px;
+                        interactive: true;
+                        running: true;
+                    }
+                    if ThemePalette.active_theme == "sunset": SunsetFolderGlyph {
+                        pixels: SunsetIconBank.folder;
+                        cell: 3px;
+                        interactive: true;
+                    }
                 }
                 Text {
                     text: root.welcome_step == 0
@@ -9420,6 +9706,9 @@ export global AppMetrics {
     in-out property <length> grid_w: 136px;
     in-out property <length> grid_h: 122px;
     in-out property <length> pad: 16px;
+    // Right inset reserved for vertical scroll bars (beyond pad). Kept tight so
+    // the bar sits near the pane edge without covering row / column text.
+    in-out property <length> scroll_gutter: 12px;
     in-out property <length> outer_border: 0px;
     in-out property <string> ui_font: "Noto Sans";
     in-out property <string> mono_font: "JetBrains Mono";

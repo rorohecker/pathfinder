@@ -1,0 +1,62 @@
+// Lean Sunset atmosphere for Pathfinder.
+// Horizon sun + sparse birds — companion to sunset_icons.slint.
+// Theme-gated by the caller via `active`. No TouchArea: clicks pass through.
+
+export component SunsetAtmosphere inherits Rectangle {
+    in property <bool> active: false;
+    in property <bool> running: true;
+
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    visible: root.active;
+
+    property <bool> anim_on: root.active && root.running;
+
+    // Soft horizon glow band (static atmosphere, cheap).
+    Rectangle {
+        x: 0;
+        y: root.height * 0.72;
+        width: root.width;
+        height: root.height * 0.28;
+        background: @linear-gradient(180deg, rgba(232, 98, 63, 0.0) 0%, rgba(242, 161, 61, 0.10) 55%, rgba(242, 112, 138, 0.08) 100%);
+    }
+
+    // Sun slowly setting / rising behind the chrome.
+    Rectangle {
+        width: 36px;
+        height: 36px;
+        border-radius: 18px;
+        background: #ffe066;
+        opacity: 0.22;
+        x: root.width * 0.48;
+        property <bool> setting: false;
+        Timer {
+            interval: 12000ms;
+            running: root.anim_on;
+            triggered => { setting = !setting; }
+        }
+        y: setting ? root.height * 0.58 : root.height * 0.12;
+        animate y { duration: 12000ms; easing: ease-in-out; }
+    }
+
+    // Two birds gliding across (sparse — not a flock).
+    for bird[i] in [
+        { x0: 0.08, y: 0.14, dx: 0.72, dur: 9000ms },
+        { x0: 0.70, y: 0.28, dx: -0.55, dur: 7000ms },
+    ]: Rectangle {
+        width: 6px;
+        height: 2px;
+        background: #241428;
+        opacity: 0.35;
+        y: bird.y * root.height;
+        property <bool> flown: Math.mod(i, 2) == 0;
+        Timer {
+            interval: bird.dur;
+            running: root.anim_on;
+            triggered => { flown = !flown; }
+        }
+        x: (flown ? bird.x0 + bird.dx : bird.x0) * root.width;
+        animate x { duration: bird.dur; easing: linear; }
+    }
+}

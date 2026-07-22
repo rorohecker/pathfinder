@@ -1,0 +1,306 @@
+// Animated Sunset pixel icons (from sunset-explorer-icons zip).
+//
+// Same performance rules as High Fantasy / Retro:
+//   - Shared PixelIcon; cell size scales one model to many sizes
+//   - Timers gated by `running`
+//   - Sparse placement only — NEVER per ListView file row
+
+import { FantasyPixel, PixelIcon } from "fantasy_icons.slint";
+
+// Folder → sunset folder: lift + soft glow on hover.
+export component SunsetFolderGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> hovered: false;
+    in property <bool> interactive: false;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: parent.width / 2;
+        background: #ffe066;
+        opacity: root.lit ? 0.22 : 0.0;
+        animate opacity { duration: 200ms; }
+    }
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+        y: root.lit ? -0.45 * root.cell : 0px;
+        animate y { duration: 200ms; easing: ease-out; }
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+    }
+}
+
+// Document → postcard: tilt on hover.
+export component SunsetPostcardGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> hovered: false;
+    in property <bool> interactive: false;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+    transform-rotation: root.lit ? 6deg : 0deg;
+    transform-origin: { x: 6 * root.cell, y: 6 * root.cell };
+    animate transform-rotation { duration: 220ms; easing: ease-in-out; }
+
+    property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+    }
+}
+
+// Image → sun: slow glow pulse (A/B).
+export component SunsetSunGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels_a;
+    in property <[FantasyPixel]> pixels_b;
+    in property <length> cell: 5px;
+    in property <bool> running: true;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> glow: false;
+    Timer {
+        interval: 1400ms;
+        running: root.running;
+        triggered => { glow = !glow; }
+    }
+    PixelIcon {
+        pixels: root.glow ? root.pixels_b : root.pixels_a;
+        cell: root.cell;
+    }
+}
+
+// App → surfboard: rock on hover.
+export component SunsetSurfboardGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> hovered: false;
+    in property <bool> interactive: false;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+    transform-rotation: root.lit ? -10deg : 0deg;
+    transform-origin: { x: 6 * root.cell, y: 6 * root.cell };
+    animate transform-rotation { duration: 260ms; easing: ease-in-out; }
+
+    property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+    }
+}
+
+// Drive → palm: continuous sway (A/B).
+export component SunsetPalmGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels_a;
+    in property <[FantasyPixel]> pixels_b;
+    in property <length> cell: 5px;
+    in property <bool> running: true;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> lean: false;
+    Timer {
+        interval: 1100ms;
+        running: root.running;
+        triggered => { lean = !lean; }
+    }
+    PixelIcon {
+        pixels: root.lean ? root.pixels_b : root.pixels_a;
+        cell: root.cell;
+    }
+}
+
+// Recycle → wave bucket: bob on hover.
+export component SunsetWavebinGlyph inherits Rectangle {
+    in property <[FantasyPixel]> pixels;
+    in property <length> cell: 5px;
+    in property <bool> hovered: false;
+    in property <bool> interactive: false;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    property <bool> lit: root.interactive ? ta.has-hover : root.hovered;
+
+    PixelIcon {
+        pixels: root.pixels;
+        cell: root.cell;
+        y: root.lit ? -0.45 * root.cell : 0px;
+        animate y { duration: 900ms; easing: ease-in-out; }
+    }
+
+    ta := TouchArea {
+        width: parent.width;
+        height: parent.height;
+        enabled: root.interactive;
+        mouse-cursor: pointer;
+    }
+}
+
+export component SunsetIconGallery inherits Rectangle {
+    in property <[FantasyPixel]> folder;
+    in property <[FantasyPixel]> postcard;
+    in property <[FantasyPixel]> sun_a;
+    in property <[FantasyPixel]> sun_b;
+    in property <[FantasyPixel]> surfboard;
+    in property <[FantasyPixel]> palm_a;
+    in property <[FantasyPixel]> palm_b;
+    in property <[FantasyPixel]> wavebin;
+    in property <bool> running: true;
+    in property <length> cell: 4px;
+    in property <length> gap: 10px;
+    background: transparent;
+
+    property <length> tile: 12 * root.cell;
+    property <length> label_h: 16px;
+    width: 6 * root.tile + 5 * root.gap;
+    height: root.tile + root.label_h + 6px;
+
+    for entry[i] in [
+        { kind: "folder", label: "Folder" },
+        { kind: "postcard", label: "Doc" },
+        { kind: "sun", label: "Image" },
+        { kind: "surfboard", label: "App" },
+        { kind: "palm", label: "Drive" },
+        { kind: "wavebin", label: "Bin" },
+    ]: Rectangle {
+        x: i * (root.tile + root.gap);
+        y: 0;
+        width: root.tile;
+        height: parent.height;
+        background: transparent;
+
+        if entry.kind == "folder": SunsetFolderGlyph {
+            pixels: root.folder;
+            cell: root.cell;
+            interactive: true;
+        }
+        if entry.kind == "postcard": SunsetPostcardGlyph {
+            pixels: root.postcard;
+            cell: root.cell;
+            interactive: true;
+        }
+        if entry.kind == "sun": SunsetSunGlyph {
+            pixels_a: root.sun_a;
+            pixels_b: root.sun_b;
+            cell: root.cell;
+            running: root.running;
+        }
+        if entry.kind == "surfboard": SunsetSurfboardGlyph {
+            pixels: root.surfboard;
+            cell: root.cell;
+            interactive: true;
+        }
+        if entry.kind == "palm": SunsetPalmGlyph {
+            pixels_a: root.palm_a;
+            pixels_b: root.palm_b;
+            cell: root.cell;
+            running: root.running;
+        }
+        if entry.kind == "wavebin": SunsetWavebinGlyph {
+            pixels: root.wavebin;
+            cell: root.cell;
+            interactive: true;
+        }
+
+        Text {
+            y: root.tile + 2px;
+            width: parent.width;
+            height: root.label_h;
+            text: entry.label;
+            color: #fbe7c6;
+            font-size: 9px;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+export component SunsetEmptyOrnament inherits Rectangle {
+    // "folder" | "postcard" | "sun" | "surfboard" | "palm" | "wavebin"
+    in property <string> kind: "folder";
+    in property <[FantasyPixel]> folder;
+    in property <[FantasyPixel]> postcard;
+    in property <[FantasyPixel]> sun_a;
+    in property <[FantasyPixel]> sun_b;
+    in property <[FantasyPixel]> surfboard;
+    in property <[FantasyPixel]> palm_a;
+    in property <[FantasyPixel]> palm_b;
+    in property <[FantasyPixel]> wavebin;
+    in property <bool> running: true;
+    in property <bool> hovered: false;
+    in property <length> cell: 6px;
+    width: 12 * root.cell;
+    height: 12 * root.cell;
+    background: transparent;
+
+    if root.kind == "folder": SunsetFolderGlyph {
+        pixels: root.folder;
+        cell: root.cell;
+        hovered: root.hovered;
+        interactive: false;
+    }
+    if root.kind == "postcard": SunsetPostcardGlyph {
+        pixels: root.postcard;
+        cell: root.cell;
+        hovered: root.hovered;
+        interactive: false;
+    }
+    if root.kind == "sun": SunsetSunGlyph {
+        pixels_a: root.sun_a;
+        pixels_b: root.sun_b;
+        cell: root.cell;
+        running: root.running;
+    }
+    if root.kind == "surfboard": SunsetSurfboardGlyph {
+        pixels: root.surfboard;
+        cell: root.cell;
+        hovered: root.hovered;
+        interactive: false;
+    }
+    if root.kind == "palm": SunsetPalmGlyph {
+        pixels_a: root.palm_a;
+        pixels_b: root.palm_b;
+        cell: root.cell;
+        running: root.running;
+    }
+    if root.kind == "wavebin": SunsetWavebinGlyph {
+        pixels: root.wavebin;
+        cell: root.cell;
+        hovered: root.hovered;
+        interactive: false;
+    }
+}

@@ -23,15 +23,16 @@ export component FantasyAtmosphere inherits Rectangle {
     // --- Divine wind: cool parchment dust drifting on a slow draft ---------
     // Opacities match the zip demo (≈0.4) so motes read on dark moss panels.
     // Half the flock starts mid-path so motion is visible immediately.
+    // Modest bump vs prior drift (±~25% distance, ~12% faster) — still calm.
     for m[i] in [
-        { x0: 0.06, y0: 0.10, dx: 0.10, dy: 0.05, dur: 7000ms },
-        { x0: 0.28, y0: 0.42, dx: 0.08, dy: -0.05, dur: 8200ms },
-        { x0: 0.52, y0: 0.16, dx: 0.07, dy: 0.06, dur: 6600ms },
-        { x0: 0.74, y0: 0.55, dx: 0.07, dy: -0.04, dur: 9400ms },
-        { x0: 0.88, y0: 0.22, dx: 0.06, dy: 0.05, dur: 7800ms },
-        { x0: 0.40, y0: 0.78, dx: 0.08, dy: -0.05, dur: 8600ms },
-        { x0: 0.15, y0: 0.60, dx: 0.09, dy: -0.03, dur: 7600ms },
-        { x0: 0.62, y0: 0.30, dx: -0.05, dy: 0.04, dur: 9000ms },
+        { x0: 0.06, y0: 0.10, dx: 0.13, dy: 0.07, dur: 6200ms },
+        { x0: 0.28, y0: 0.42, dx: 0.10, dy: -0.07, dur: 7200ms },
+        { x0: 0.52, y0: 0.16, dx: 0.09, dy: 0.08, dur: 5800ms },
+        { x0: 0.74, y0: 0.55, dx: 0.09, dy: -0.06, dur: 8300ms },
+        { x0: 0.88, y0: 0.22, dx: 0.08, dy: 0.07, dur: 6900ms },
+        { x0: 0.40, y0: 0.78, dx: 0.10, dy: -0.07, dur: 7600ms },
+        { x0: 0.15, y0: 0.60, dx: 0.11, dy: -0.05, dur: 6700ms },
+        { x0: 0.62, y0: 0.30, dx: -0.07, dy: 0.06, dur: 7900ms },
     ] : Rectangle {
         width: 4px;
         height: 4px;
