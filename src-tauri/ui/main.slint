@@ -3408,14 +3408,22 @@ export component MainWindow inherits Window {
     in-out property <string> active_density: "cozy";
     // Decorative theme atmospheres + animated relics. Persisted in settings.json.
     in-out property <bool> theme_animations: true;
-    // Sunset sun arc — shared by atmosphere + content-pane sky wash.
-    property <bool> sunset_setting: false;
-    property <float> sunset_sun_cx: root.sunset_setting ? 0.78 : 0.22;
-    property <float> sunset_sun_cy: root.sunset_setting ? 0.58 : 0.10;
-    property <float> sunset_sun_glow: root.sunset_setting ? 0.48 : 1.0;
-    animate sunset_sun_cx { duration: 14000ms; easing: ease-in-out; }
-    animate sunset_sun_cy { duration: 14000ms; easing: ease-in-out; }
-    animate sunset_sun_glow { duration: 14000ms; easing: ease-in-out; }
+    // Sunset solar cycle — shared by atmosphere + content-pane sky wash.
+    // Phase 0 = late afternoon (high), 1 = on the horizon. Ping-pongs slowly.
+    // Position/glow/warmth are derived each frame so the path is a real arc
+    // (not a diagonal lerp between two keyframes) and the sky tracks altitude.
+    property <bool> sunset_descending: false;
+    property <float> sunset_phase: root.sunset_descending ? 1.0 : 0.0;
+    animate sunset_phase { duration: 52000ms; easing: ease-in-out; }
+    // Western arc: drifts right while falling on a soft parabola.
+    property <float> sunset_sun_cx: 0.16 + root.sunset_phase * 0.68;
+    property <float> sunset_sun_cy: 0.06 + root.sunset_phase * root.sunset_phase * 0.58;
+    property <float> sunset_sun_alt: 1.0 - root.sunset_phase;
+    // Golden-hour peak near ~phase 0.72, then soft twilight.
+    property <float> sunset_sun_glow: Math.max(0.28, 0.95 - Math.abs(root.sunset_phase - 0.72) * 1.15);
+    // Warmth of atmospheric scatter — stronger as the sun lowers.
+    property <float> sunset_warmth: Math.min(1.0, root.sunset_phase * 1.25);
+    property <float> sunset_sky_bright: 0.22 + root.sunset_sun_alt * 0.78;
     in-out property <string> active_index_mode: "low";
     in-out property <string> index_status: "";
     in-out property <string> thumbnail_status: "";
@@ -5058,29 +5066,60 @@ export component MainWindow inherits Window {
             y: root.title_h + root.toolbar_h;
             width: parent.width - root.sidebar_w;
             height: parent.height - root.title_h - root.toolbar_h - root.status_h;
-            // Sunset sky: base dusk stack, then a soft warm radial that follows
-            // the shared sun arc (no ray graphics — glow only).
-            property <brush> pane_bg: root.active_theme == "sunset"
-                ? (root.sunset_setting
-                    ? @linear-gradient(180deg,
-                        #4a2038  0%,
-                        #3a1830 22%,
-                        #241028 55%,
-                        #140818 100%)
-                    : @linear-gradient(180deg,
-                        #6e3050  0%,
-                        #4a2240 26%,
-                        #2a1430 58%,
-                        #160a1a 100%))
-                : ThemePalette.bg;
-            background: pane_bg;
-            animate background { duration: 14000ms; easing: ease-in-out; }
+            // Sunset sky: deep base + altitude-driven washes (matches atmosphere).
+            // Non-sunset themes keep a flat ThemePalette.bg.
+            background: root.active_theme == "sunset" ? #140818 : ThemePalette.bg;
 
-            // Warm wash near the sun disc — brighter when high, softer at dusk.
             if root.active_theme == "sunset": Rectangle {
                 width: parent.width;
                 height: parent.height;
                 background: transparent;
+                // Late-afternoon zenith — brighter mauve while the sun is high.
+                Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+                    background: @linear-gradient(180deg,
+                        #6e3050  0%,
+                        #4a2240 28%,
+                        #2a1430 60%,
+                        #140818 100%);
+                    opacity: root.sunset_sky_bright * 0.92;
+                }
+                // Golden scatter layer — strengthens as warmth rises.
+                Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+                    background: @linear-gradient(180deg,
+                        #8a4038  0%,
+                        #5a2838 30%,
+                        #301428 65%,
+                        #140818 100%);
+                    opacity: root.sunset_warmth * 0.70;
+                }
+                // Twilight veil — deep aubergine as altitude approaches zero.
+                Rectangle {
+                    width: parent.width;
+                    height: parent.height;
+                    background: @linear-gradient(180deg,
+                        #3a1830  0%,
+                        #241028 35%,
+                        #160a1a 70%,
+                        #0c0410 100%);
+                    opacity: (1.0 - root.sunset_sun_alt) * (1.0 - root.sunset_sun_alt) * 0.85;
+                }
+                // Horizon strip — brighter when the sun is low.
+                Rectangle {
+                    x: 0;
+                    y: parent.height * (0.55 + root.sunset_sun_alt * 0.20);
+                    width: parent.width;
+                    height: parent.height * 0.45;
+                    background: @linear-gradient(180deg,
+                        rgba(255, 140, 70, 0.0) 0%,
+                        rgba(255, 150, 80, 0.14) 40%,
+                        rgba(200, 70, 110, 0.10) 100%);
+                    opacity: 0.25 + root.sunset_warmth * 0.75;
+                }
+                // Warm wash near the sun disc — follows the arc; peaks at golden hour.
                 Rectangle {
                     width: min(520px, parent.width * 0.85);
                     height: min(420px, parent.height * 0.70);
@@ -5088,13 +5127,10 @@ export component MainWindow inherits Window {
                     x: root.sunset_sun_cx * parent.width - self.width / 2;
                     y: root.sunset_sun_cy * parent.height - self.height / 2;
                     background: @radial-gradient(circle,
-                        rgba(255, 186, 96, 0.22) 0%,
-                        rgba(242, 112, 90, 0.10) 40%,
+                        rgba(255, 186, 96, 0.26) 0%,
+                        rgba(242, 112, 90, 0.12) 40%,
                         rgba(0, 0, 0, 0.0) 72%);
-                    opacity: 0.40 + root.sunset_sun_glow * 0.55;
-                    animate x { duration: 14000ms; easing: ease-in-out; }
-                    animate y { duration: 14000ms; easing: ease-in-out; }
-                    animate opacity { duration: 14000ms; easing: ease-in-out; }
+                    opacity: 0.35 + root.sunset_sun_glow * 0.60;
                 }
             }
 
@@ -5121,7 +5157,8 @@ export component MainWindow inherits Window {
                 y: root.folder_changed_banner ? 28px : 0;
                 width: root.primary_pane_w;
                 height: parent.height;
-                background: parent.pane_bg;
+                // Transparent so the parent sunset sky wash (or ThemePalette.bg) shows through.
+                background: transparent;
                 opacity: root.nav_opacity;
 
                 // Marquee state for click-and-drag rectangle selection.
@@ -5880,7 +5917,8 @@ export component MainWindow inherits Window {
                 y: 0;
                 width: root.secondary_pane_w;
                 height: parent.height;
-                background: ThemePalette.bg_soft;
+                // Transparent under sunset so both panes share the animated sky.
+                background: root.active_theme == "sunset" ? transparent : ThemePalette.bg_soft;
                 border-width: 0px;
 
                 // Header bar
@@ -6728,9 +6766,9 @@ export component MainWindow inherits Window {
             }
         }
         Timer {
-            interval: 14000ms;
+            interval: 52000ms;
             running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations;
-            triggered => { root.sunset_setting = !root.sunset_setting; }
+            triggered => { root.sunset_descending = !root.sunset_descending; }
         }
         FantasyAtmosphere {
             x: 0;
@@ -6761,7 +6799,9 @@ export component MainWindow inherits Window {
             sun_cx: root.sunset_sun_cx;
             sun_cy: root.sunset_sun_cy;
             sun_glow: root.sunset_sun_glow;
-            setting: root.sunset_setting;
+            sun_alt: root.sunset_sun_alt;
+            warmth: root.sunset_warmth;
+            sky_bright: root.sunset_sky_bright;
         }
     }
 
@@ -7395,8 +7435,28 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    Text { text: "ACCENT COLOR"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
-                    Rectangle {
+                    Text {
+                        text: "ACCENT COLOR";
+                        color: ThemePalette.text_faint;
+                        font-size: 10px;
+                        font-weight: 700;
+                        letter-spacing: 1px;
+                        // Locked themes keep a fixed brand accent.
+                        visible: root.active_theme != "sunset"
+                            && root.active_theme != "fantasy"
+                            && root.active_theme != "retro"
+                            && root.active_theme != "cyberpunk"
+                            && root.active_theme != "warm"
+                            && root.active_theme != "terminal"
+                            && root.active_theme != "paper";
+                    }
+                    if root.active_theme != "sunset"
+                        && root.active_theme != "fantasy"
+                        && root.active_theme != "retro"
+                        && root.active_theme != "cyberpunk"
+                        && root.active_theme != "warm"
+                        && root.active_theme != "terminal"
+                        && root.active_theme != "paper": Rectangle {
                         property <int> ac_cols: 4;
                         property <length> ac_gap: 6px;
                         property <length> ac_cell_w: (parent.width - (ac_cols - 1) * ac_gap) / ac_cols;
@@ -7416,7 +7476,13 @@ export component MainWindow inherits Window {
                     // here switches the active accent to "custom" and stores the
                     // exact colour. Invalid or partial entries are ignored, so the
                     // current accent stays unchanged while the user is typing.
-                    Rectangle {
+                    if root.active_theme != "sunset"
+                        && root.active_theme != "fantasy"
+                        && root.active_theme != "retro"
+                        && root.active_theme != "cyberpunk"
+                        && root.active_theme != "warm"
+                        && root.active_theme != "terminal"
+                        && root.active_theme != "paper": Rectangle {
                         width: parent.width;
                         height: 42px;
                         border-radius: AppMetrics.radius_small;

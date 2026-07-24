@@ -1,16 +1,23 @@
-// Lean Sunset atmosphere for Pathfinder.
-// Horizon sun moves across the sky and drives warm radiance — no ray streaks.
+// Sunset atmosphere for Pathfinder.
+// Sun follows a slow western arc; layered sky washes track solar altitude
+// the way real dusk light works (brighter zenith when high, warm horizon
+// scatter as it sets, deeper twilight after). No ray streaks.
 // Theme-gated by the caller via `active`. No TouchArea: clicks pass through.
 
 export component SunsetAtmosphere inherits Rectangle {
     in property <bool> active: false;
     in property <bool> running: true;
     // Sun state driven by the host (MainWindow) so the content-pane sky
-    // gradient can stay in sync without a second timer.
+    // can stay in sync without a second timer.
     in property <float> sun_cx: 0.48;
     in property <float> sun_cy: 0.12;
     in property <float> sun_glow: 1.0;
-    in property <bool> setting: false;
+    // 1 = high / late afternoon, 0 = on the horizon.
+    in property <float> sun_alt: 1.0;
+    // 0 = cooler afternoon, 1 = strong warm scatter near set.
+    in property <float> warmth: 0.0;
+    // Overall sky brightness (dims into twilight).
+    in property <float> sky_bright: 1.0;
 
     width: 100%;
     height: 100%;
@@ -19,82 +26,124 @@ export component SunsetAtmosphere inherits Rectangle {
 
     property <bool> anim_on: root.active && root.running;
 
-    // Soft sky wash — warmer/brighter near the sun, dusk deeper as it sets.
-    // Sits under the disc/halos; low opacity so chrome stays readable.
+    // Zenith wash — cooler mauve when the sun is high; fades as altitude drops
+    // (real sky: overhead darkens into blue/purple while the sun sinks).
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height * 0.62;
+        background: @linear-gradient(180deg,
+            rgba(180, 120, 160, 0.22) 0%,
+            rgba(120, 70, 110, 0.10) 55%,
+            rgba(40, 18, 48, 0.0) 100%);
+        opacity: 0.20 + root.sun_alt * root.sky_bright * 0.70;
+    }
+
+    // Golden / amber scatter — strengthens as the sun lowers (Rayleigh warm-up).
     Rectangle {
         x: 0;
         y: 0;
         width: root.width;
         height: root.height;
         background: @linear-gradient(165deg,
-            rgba(255, 176, 96, 0.16) 0%,
-            rgba(232, 98, 63, 0.08) 38%,
-            rgba(90, 40, 72, 0.04) 72%,
+            rgba(255, 186, 96, 0.20) 0%,
+            rgba(242, 120, 70, 0.12) 40%,
+            rgba(90, 40, 72, 0.04) 78%,
             rgba(22, 10, 26, 0.0) 100%);
-        opacity: 0.35 + root.sun_glow * 0.45;
-        animate opacity { duration: 14000ms; easing: ease-in-out; }
+        opacity: 0.18 + root.warmth * root.sun_glow * 0.72;
     }
 
-    // Horizon glow band — brighter when the sun is lower (setting).
+    // Deep twilight veil — takes over once the sun is near/below the horizon.
     Rectangle {
         x: 0;
-        y: root.height * 0.68;
+        y: 0;
         width: root.width;
-        height: root.height * 0.32;
+        height: root.height;
+        background: @linear-gradient(180deg,
+            rgba(60, 24, 72, 0.0) 0%,
+            rgba(40, 14, 52, 0.18) 45%,
+            rgba(18, 6, 28, 0.42) 100%);
+        opacity: (1.0 - root.sun_alt) * (1.0 - root.sun_alt) * 0.95;
+    }
+
+    // Horizon glow band — rises toward the sun and brightens as altitude falls
+    // (the bright strip of sky you see at real dusk).
+    Rectangle {
+        x: 0;
+        y: root.height * (0.52 + root.sun_alt * 0.22);
+        width: root.width;
+        height: root.height * (0.48 - root.sun_alt * 0.18);
         background: @linear-gradient(180deg,
             rgba(232, 98, 63, 0.0) 0%,
-            rgba(242, 161, 61, 0.16) 55%,
-            rgba(242, 112, 138, 0.12) 100%);
-        opacity: root.setting ? 1.0 : 0.50;
-        animate opacity { duration: 14000ms; easing: ease-in-out; }
+            rgba(255, 160, 70, 0.22) 42%,
+            rgba(242, 100, 130, 0.16) 78%,
+            rgba(80, 30, 70, 0.10) 100%);
+        opacity: 0.28 + root.warmth * 0.72;
     }
 
     // Warm radiance halo around the sun (the light source) — no ray spikes.
+    // Larger / softer when high; tighter & warmer near the horizon.
     Rectangle {
-        width: 260px;
-        height: 260px;
-        border-radius: 130px;
+        width: 200px + root.sun_alt * 100px;
+        height: 200px + root.sun_alt * 100px;
+        border-radius: self.width / 2;
         x: root.sun_cx * root.width - self.width / 2;
         y: root.sun_cy * root.height - self.height / 2;
         background: @radial-gradient(circle,
-            rgba(255, 200, 90, 0.46) 0%,
-            rgba(255, 120, 70, 0.16) 42%,
+            rgba(255, 200, 90, 0.50) 0%,
+            rgba(255, 120, 70, 0.18) 40%,
             rgba(255, 80, 100, 0.0) 72%);
-        opacity: 0.30 + root.sun_glow * 0.50;
-        animate x { duration: 14000ms; easing: ease-in-out; }
-        animate y { duration: 14000ms; easing: ease-in-out; }
-        animate opacity { duration: 14000ms; easing: ease-in-out; }
+        opacity: 0.28 + root.sun_glow * 0.55;
     }
 
-    // Mid halo — tighter pulse tied to sun brightness.
+    // Mid halo — tighter pulse tied to sun brightness / golden hour.
     Rectangle {
-        width: 120px;
-        height: 120px;
-        border-radius: 60px;
+        width: 90px + root.warmth * 40px;
+        height: 90px + root.warmth * 40px;
+        border-radius: self.width / 2;
         x: root.sun_cx * root.width - self.width / 2;
         y: root.sun_cy * root.height - self.height / 2;
         background: @radial-gradient(circle,
-            rgba(255, 224, 120, 0.72) 0%,
-            rgba(255, 140, 60, 0.22) 50%,
+            rgba(255, 230, 140, 0.82) 0%,
+            rgba(255, 150, 60, 0.28) 48%,
             rgba(255, 100, 80, 0.0) 100%);
-        opacity: 0.38 + root.sun_glow * 0.50;
-        animate x { duration: 14000ms; easing: ease-in-out; }
-        animate y { duration: 14000ms; easing: ease-in-out; }
-        animate opacity { duration: 14000ms; easing: ease-in-out; }
+        opacity: 0.40 + root.sun_glow * 0.50;
     }
 
-    // Sun disc.
+    // Sun disc — clearer when high, warmer as it kisses the horizon.
     Rectangle {
-        width: 36px;
-        height: 36px;
-        border-radius: 18px;
+        width: 28px + root.sun_alt * 10px;
+        height: 28px + root.sun_alt * 10px;
+        border-radius: self.width / 2;
         background: #ffe066;
-        opacity: 0.18 + root.sun_glow * 0.16;
-        x: root.sun_cx * root.width - 18px;
-        y: root.sun_cy * root.height - 18px;
-        animate x { duration: 14000ms; easing: ease-in-out; }
-        animate y { duration: 14000ms; easing: ease-in-out; }
-        animate opacity { duration: 14000ms; easing: ease-in-out; }
+        opacity: 0.42 + root.sun_glow * 0.38;
+        x: root.sun_cx * root.width - self.width / 2;
+        y: root.sun_cy * root.height - self.height / 2;
+    }
+
+    // Warm limb as the sun nears the horizon (atmospheric reddening).
+    Rectangle {
+        width: 28px + root.sun_alt * 10px;
+        height: 28px + root.sun_alt * 10px;
+        border-radius: self.width / 2;
+        background: #ff9a4a;
+        opacity: root.warmth * 0.55;
+        x: root.sun_cx * root.width - self.width / 2;
+        y: root.sun_cy * root.height - self.height / 2;
+    }
+
+    // Soft under-glow on the disc when near the horizon (atmospheric bloom).
+    Rectangle {
+        width: 56px;
+        height: 28px;
+        border-radius: 14px;
+        x: root.sun_cx * root.width - 28px;
+        y: root.sun_cy * root.height - 6px;
+        background: @radial-gradient(circle,
+            rgba(255, 140, 60, 0.55) 0%,
+            rgba(255, 80, 90, 0.0) 100%);
+        opacity: Math.max(0.0, 0.45 - root.sun_alt) * 1.6;
     }
 
     // Two birds gliding across (sparse — not a flock).
@@ -105,7 +154,7 @@ export component SunsetAtmosphere inherits Rectangle {
         width: 6px;
         height: 2px;
         background: #241428;
-        opacity: 0.35;
+        opacity: 0.28 + root.sun_alt * 0.18;
         y: bird.y * root.height;
         property <bool> flown: Math.mod(i, 2) == 0;
         Timer {
