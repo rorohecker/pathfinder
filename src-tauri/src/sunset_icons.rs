@@ -1,10 +1,13 @@
 //! Sunset pixel-icon banks (12×12 ASCII maps from sunset-explorer-icons).
-//! Converted once at startup into Slint `FantasyPixel` models for `SunsetIconBank`.
+//! Converted once at startup into:
+//!   - Slint `FantasyPixel` models for sparse animated glyphs (settings / empty /
+//!     welcome / sidebar) — NEVER mounted per file-row
+//!   - A baked RGBA `Image` for folder rows (one shared texture, cheap to paint)
 
-use slint::{Color, ComponentHandle, ModelRc, VecModel};
+use slint::{Color, ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 use std::collections::HashMap;
 
-use crate::{FantasyPixel, MainWindow, SunsetIconBank};
+use crate::{FantasyPixel, MainWindow, SunsetIconBank, ThemePalette};
 
 const FOLDER: [&str; 12] = [
     "..BBBB......",
@@ -159,7 +162,41 @@ fn pixels_from_map(rows: &[&str], pal: &HashMap<char, Color>) -> ModelRc<Fantasy
     ModelRc::new(VecModel::from(out))
 }
 
-/// Load ASCII pixel maps into the Slint `SunsetIconBank` global (once at startup).
+/// Nearest-neighbor bake of a 12×12 ASCII map → one shared GPU texture.
+/// List/grid folder rows paint this image instead of hundreds of pixel Rectangles.
+fn image_from_map(rows: &[&str], pal: &HashMap<char, Color>, scale: u32) -> Image {
+    let scale = scale.max(1);
+    let w = 12 * scale;
+    let h = 12 * scale;
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for (row_index, row) in rows.iter().enumerate() {
+        for (col_index, ch) in row.chars().enumerate() {
+            let Some(color) = pal.get(&ch) else {
+                continue;
+            };
+            let r = color.red();
+            let g = color.green();
+            let b = color.blue();
+            let a = color.alpha();
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    let x = col_index as u32 * scale + dx;
+                    let y = row_index as u32 * scale + dy;
+                    let i = ((y * w + x) * 4) as usize;
+                    rgba[i] = r;
+                    rgba[i + 1] = g;
+                    rgba[i + 2] = b;
+                    rgba[i + 3] = a;
+                }
+            }
+        }
+    }
+    let buf = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&rgba, w, h);
+    Image::from_rgba8(buf)
+}
+
+/// Load ASCII pixel maps into the Slint `SunsetIconBank` global (once at startup)
+/// and bake the folder glyph for cheap per-row display.
 pub fn load_sunset_icon_bank(ui: &MainWindow) {
     let pal = palette();
     let bank = ui.global::<SunsetIconBank>();
@@ -171,4 +208,8 @@ pub fn load_sunset_icon_bank(ui: &MainWindow) {
     bank.set_palm_a(pixels_from_map(&PALM_A, &pal));
     bank.set_palm_b(pixels_from_map(&PALM_B, &pal));
     bank.set_wavebin(pixels_from_map(&WAVEBIN, &pal));
+
+    // 6× scale → 72² texture; crisp at list + grid sizes without per-pixel rects.
+    ui.global::<ThemePalette>()
+        .set_sunset_folder_image(image_from_map(&FOLDER, &pal, 6));
 }

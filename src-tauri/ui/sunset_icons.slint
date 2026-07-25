@@ -1,9 +1,10 @@
 // Animated Sunset pixel icons (from sunset-explorer-icons zip).
 //
 // Same performance rules as High Fantasy / Retro:
-//   - Shared PixelIcon; cell size scales one model to many sizes
+//   - Shared PixelIcon for sparse tiles only (settings / empty / welcome / sidebar)
+//   - File-row folders use a baked Image on ThemePalette.sunset_folder_image
 //   - Timers gated by `running`
-//   - Sparse placement only — NEVER per ListView file row
+//   - NEVER mount PixelIcon / per-glyph Timers on ListView or grid file rows
 
 import { FantasyPixel, PixelIcon } from "fantasy_icons.slint";
 

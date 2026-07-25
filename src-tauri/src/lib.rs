@@ -6541,7 +6541,7 @@ fn scan_storage_with_progress(
                     }
 
                     if let Some(p) = progress_ref.as_ref()
-                        && file_count_total.is_multiple_of(4096)
+                        && file_count_total.is_multiple_of(1024)
                     {
                         p.files.store(file_count_total, Ordering::Relaxed);
                         p.bytes.store(
@@ -10330,10 +10330,126 @@ fn installer_suffix_from_url(url: &str) -> &'static str {
 /// Prevents overlapping Install clicks from racing on the same temp path and
 /// truncating the installer (observed as ~2–3 MB partial PE files).
 static UPDATE_INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static UPDATE_BYTES_COPIED: AtomicU64 = AtomicU64::new(0);
+static UPDATE_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-fn download_release_installer(url: &str, dest: &Path) -> Result<u64, String> {
+fn update_download_progress_fraction() -> f32 {
+    let copied = UPDATE_BYTES_COPIED.load(Ordering::Relaxed);
+    let total = UPDATE_BYTES_TOTAL.load(Ordering::Relaxed);
+    if total == 0 {
+        return 0.0;
+    }
+    ((copied as f64) / (total as f64)).clamp(0.0, 1.0) as f32
+}
+
+fn format_update_progress_label() -> String {
+    let copied = UPDATE_BYTES_COPIED.load(Ordering::Relaxed);
+    let total = UPDATE_BYTES_TOTAL.load(Ordering::Relaxed);
+    if total > 0 {
+        let pct = ((copied as f64 / total as f64) * 100.0).clamp(0.0, 100.0) as u32;
+        format!(
+            "Downloading update… {pct}% ({} / {})",
+            format_size_short(copied),
+            format_size_short(total)
+        )
+    } else if copied > 0 {
+        format!("Downloading update… {}", format_size_short(copied))
+    } else {
+        "Downloading update… connecting".to_string()
+    }
+}
+
+fn probe_download_content_length(url: &str) -> Option<u64> {
+    let resp = ureq::head(url)
+        .set("User-Agent", &github_http_user_agent())
+        .set("Accept", "application/octet-stream")
+        .timeout(std::time::Duration::from_secs(20))
+        .call()
+        .ok()?;
+    if !(200..300).contains(&resp.status()) {
+        return None;
+    }
+    resp.header("Content-Length")
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+}
+
+/// Prefer Windows curl.exe for large release assets — typically much faster
+/// than ureq on GitHub CDN links. Polls the growing file for UI progress.
+#[cfg(windows)]
+fn download_release_installer_curl(url: &str, dest: &Path, expected: Option<u64>) -> Result<u64, String> {
     let _ = fs::remove_file(dest);
-    updater_log(&format!("download start → {}", dest.display()));
+    let dest_str = dest.to_string_lossy().to_string();
+    updater_log(&format!("curl download start → {dest_str}"));
+    let mut child = ProcessCommand::new("curl.exe")
+        .args([
+            "-L",
+            "--fail",
+            "--retry",
+            "2",
+            "--retry-delay",
+            "1",
+            "--connect-timeout",
+            "20",
+            "--max-time",
+            "900",
+            "-A",
+            &github_http_user_agent(),
+            "-o",
+            &dest_str,
+            url,
+        ])
+        .no_window()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("curl spawn failed: {e}"))?;
+
+    loop {
+        if let Ok(meta) = fs::metadata(dest) {
+            UPDATE_BYTES_COPIED.store(meta.len(), Ordering::Relaxed);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    let _ = fs::remove_file(dest);
+                    return Err(format!("curl exited with {status}"));
+                }
+                break;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(150)),
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!("curl wait failed: {e}"));
+            }
+        }
+    }
+
+    let copied = fs::metadata(dest)
+        .map(|m| m.len())
+        .map_err(|e| format!("curl output missing: {e}"))?;
+    UPDATE_BYTES_COPIED.store(copied, Ordering::Relaxed);
+    if let Some(exp) = expected {
+        if copied != exp {
+            let _ = fs::remove_file(dest);
+            return Err(format!(
+                "incomplete download: got {copied} of {exp} bytes (network interrupted)"
+            ));
+        }
+    }
+    if copied < 1_000_000 {
+        let _ = fs::remove_file(dest);
+        return Err(format!(
+            "downloaded file is too small ({copied} bytes) to be a valid installer"
+        ));
+    }
+    updater_log(&format!("curl download complete: {copied} bytes"));
+    Ok(copied)
+}
+
+fn download_release_installer_ureq(url: &str, dest: &Path, expected_hint: Option<u64>) -> Result<u64, String> {
+    let _ = fs::remove_file(dest);
+    updater_log(&format!("ureq download start → {}", dest.display()));
     // Slow GitHub CDNs often take 60–120s for a ~12 MB NSIS build. Use a long
     // overall budget and treat Content-Length mismatches as hard failures so we
     // never launch a truncated installer.
@@ -10350,8 +10466,10 @@ fn download_release_installer(url: &str, dest: &Path) -> Result<u64, String> {
     let expected = resp
         .header("Content-Length")
         .and_then(|s| s.parse::<u64>().ok())
-        .filter(|&n| n > 0);
+        .filter(|&n| n > 0)
+        .or(expected_hint);
     if let Some(n) = expected {
+        UPDATE_BYTES_TOTAL.store(n, Ordering::Relaxed);
         updater_log(&format!("Content-Length={n}"));
     } else {
         updater_log("Content-Length missing; will validate minimum size only");
@@ -10359,7 +10477,8 @@ fn download_release_installer(url: &str, dest: &Path) -> Result<u64, String> {
 
     let mut reader = resp.into_reader();
     let mut out = fs::File::create(dest).map_err(|e| format!("create installer file: {e}"))?;
-    let mut buf = [0u8; 64 * 1024];
+    // 256 KiB buffer — fewer syscalls on multi‑MB installers.
+    let mut buf = [0u8; 256 * 1024];
     let mut copied: u64 = 0;
     let mut last_logged_mb: u64 = 0;
     loop {
@@ -10372,6 +10491,7 @@ fn download_release_installer(url: &str, dest: &Path) -> Result<u64, String> {
         out.write_all(&buf[..n])
             .map_err(|e| format!("write installer file: {e}"))?;
         copied += n as u64;
+        UPDATE_BYTES_COPIED.store(copied, Ordering::Relaxed);
         let mb = copied / (1024 * 1024);
         if mb > last_logged_mb {
             last_logged_mb = mb;
@@ -10404,6 +10524,29 @@ fn download_release_installer(url: &str, dest: &Path) -> Result<u64, String> {
     }
     updater_log(&format!("download complete: {copied} bytes"));
     Ok(copied)
+}
+
+fn download_release_installer(url: &str, dest: &Path) -> Result<u64, String> {
+    UPDATE_BYTES_COPIED.store(0, Ordering::Relaxed);
+    let expected = probe_download_content_length(url);
+    if let Some(n) = expected {
+        UPDATE_BYTES_TOTAL.store(n, Ordering::Relaxed);
+    } else {
+        UPDATE_BYTES_TOTAL.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(windows)]
+    {
+        match download_release_installer_curl(url, dest, expected) {
+            Ok(n) => return Ok(n),
+            Err(e) => {
+                updater_log(&format!("curl path failed ({e}); falling back to ureq"));
+                let _ = fs::remove_file(dest);
+                UPDATE_BYTES_COPIED.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+    download_release_installer_ureq(url, dest, expected)
 }
 
 fn download_and_install_update(url: &str) -> Result<(), String> {
@@ -14573,7 +14716,7 @@ impl NativeController {
         }
         // Pre-load cached thumbnails for the first visible image files in any view.
         if enrich_visible {
-            for entry in self.visible_files.iter().take(24) {
+            for entry in self.visible_files.iter().take(12) {
                 let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
                 if !is_thumbnail_image_ext(&ext) || self.thumbnail_memory.contains_key(&entry.path)
                 {
@@ -14613,13 +14756,22 @@ impl NativeController {
         ui.set_sort_dir(ss(&self.sort_dir));
         let show_home_groups = self.current_path == "home://";
         let show_date_groups = self.sort_by == "modified" && !show_home_groups;
+        // Precompute once — file_item used to rescan all visible files per row (O(n²)).
+        let max_file_size = self
+            .visible_files
+            .iter()
+            .filter(|e| e.kind != FileKind::Directory)
+            .map(|e| e.size)
+            .max()
+            .unwrap_or(0);
         let mut last_group = String::new();
         let items: Vec<FileItem> = self
             .visible_files
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                let mut item = self.file_item(entry, self.selected_set.contains(&i));
+                let mut item =
+                    self.file_item(entry, self.selected_set.contains(&i), max_file_size);
                 if show_home_groups {
                     let group = home_section_label(entry.modified).to_string();
                     if !group.is_empty() {
@@ -14711,16 +14863,23 @@ impl NativeController {
             use slint::Model;
             for &i in changed {
                 if let Some(entry) = self.visible_files.get(i) {
-                    // Preserve date/home group headers. Rebuilding via file_item
-                    // alone clears them and shrinks the row by ~26px, which
-                    // jumps the list upward when clicking the first file in a group.
-                    let (keep_header, keep_label) = model
+                    // Preserve date/home group headers and size_ratio. Rebuilding
+                    // via file_item alone clears headers (list jump) and would
+                    // otherwise re-scan all files for max size.
+                    let (keep_header, keep_label, keep_ratio) = model
                         .row_data(i)
-                        .map(|prev| (prev.show_date_group_header, prev.date_group_text.clone()))
-                        .unwrap_or((false, SharedString::new()));
-                    let mut item = self.file_item(entry, self.selected_set.contains(&i));
+                        .map(|prev| {
+                            (
+                                prev.show_date_group_header,
+                                prev.date_group_text.clone(),
+                                prev.size_ratio,
+                            )
+                        })
+                        .unwrap_or((false, SharedString::new(), 0.0));
+                    let mut item = self.file_item(entry, self.selected_set.contains(&i), 0);
                     item.show_date_group_header = keep_header;
                     item.date_group_text = keep_label;
+                    item.size_ratio = keep_ratio;
                     if let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() {
                         m.set_row_data(i, item);
                     }
@@ -14783,7 +14942,7 @@ impl NativeController {
         }
     }
 
-    fn file_item(&self, entry: &FileEntry, selected: bool) -> FileItem {
+    fn file_item(&self, entry: &FileEntry, selected: bool, max_file_size: u64) -> FileItem {
         let in_recycle = self.current_path == "recycle://";
         let tag_id = self.tags.get(&entry.path).cloned().unwrap_or_default();
         let git_status = self.git_for_entry(entry);
@@ -14840,17 +14999,10 @@ impl NativeController {
                 format_size_short(entry.size)
             }),
             size_ratio: {
-                let max = self
-                    .visible_files
-                    .iter()
-                    .filter(|e| e.kind != FileKind::Directory)
-                    .map(|e| e.size)
-                    .max()
-                    .unwrap_or(0);
-                if entry.kind == FileKind::Directory || max == 0 {
+                if entry.kind == FileKind::Directory || max_file_size == 0 {
                     0.0
                 } else {
-                    (entry.size as f32 / max as f32).clamp(0.0, 1.0)
+                    (entry.size as f32 / max_file_size as f32).clamp(0.0, 1.0)
                 }
             },
             modified_text: ss(if in_recycle {
@@ -17769,11 +17921,24 @@ impl NativeController {
     }
 
     fn update_secondary_models(&mut self, ui: &MainWindow) {
+        let max_file_size = self
+            .secondary_visible_files
+            .iter()
+            .filter(|e| e.kind != FileKind::Directory)
+            .map(|e| e.size)
+            .max()
+            .unwrap_or(0);
         let items: Vec<FileItem> = self
             .secondary_visible_files
             .iter()
             .enumerate()
-            .map(|(i, entry)| self.file_item(entry, self.secondary_selected_set.contains(&i)))
+            .map(|(i, entry)| {
+                self.file_item(
+                    entry,
+                    self.secondary_selected_set.contains(&i),
+                    max_file_size,
+                )
+            })
             .collect();
         let model = model_from_vec(items);
         ui.set_secondary_files(model.clone());
@@ -17786,13 +17951,21 @@ impl NativeController {
             use slint::Model;
             for &i in changed {
                 if let Some(entry) = self.secondary_visible_files.get(i) {
-                    let (keep_header, keep_label) = model
+                    let (keep_header, keep_label, keep_ratio) = model
                         .row_data(i)
-                        .map(|prev| (prev.show_date_group_header, prev.date_group_text.clone()))
-                        .unwrap_or((false, SharedString::new()));
-                    let mut item = self.file_item(entry, self.secondary_selected_set.contains(&i));
+                        .map(|prev| {
+                            (
+                                prev.show_date_group_header,
+                                prev.date_group_text.clone(),
+                                prev.size_ratio,
+                            )
+                        })
+                        .unwrap_or((false, SharedString::new(), 0.0));
+                    let mut item =
+                        self.file_item(entry, self.secondary_selected_set.contains(&i), 0);
                     item.show_date_group_header = keep_header;
                     item.date_group_text = keep_label;
+                    item.size_ratio = keep_ratio;
                     if let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() {
                         m.set_row_data(i, item);
                     }
@@ -23658,10 +23831,25 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let _ = open::that(GITHUB_RELEASES_URL);
                 return;
             }
+            UPDATE_BYTES_COPIED.store(0, Ordering::Relaxed);
+            UPDATE_BYTES_TOTAL.store(0, Ordering::Relaxed);
             ui.set_update_installing(true);
-            // Show toast on the event loop thread where Rc is accessible.
-            c.borrow_mut()
-                .show_toast(&ui, "Downloading update — this can take a minute...");
+            ui.set_update_download_progress(0.0);
+            // Pin this toast for the whole download — the normal toast timer
+            // would dismiss it in ~6s while the CDN transfer can take a minute.
+            let initial = format_update_progress_label();
+            ui.set_toast_text(ss(&initial));
+            ui.set_toast_kind(ss("info"));
+            ui.set_toast_action(ss(""));
+            {
+                let mut ctrl = c.borrow_mut();
+                ctrl.toast_queue.clear();
+                ctrl.toast_showing = true;
+                ctrl.toast_current_kind = "info".to_string();
+                ctrl.toast_current_message = initial;
+                ctrl.toast_current_action.clear();
+                ctrl.toast_last_shown = Some(std::time::Instant::now());
+            }
             let weak2 = weak.clone();
             let url_fallback = url.clone();
             std::thread::spawn(move || {
@@ -23670,8 +23858,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak2.upgrade() {
                                 ui.set_update_installing(false);
+                                ui.set_update_download_progress(1.0);
                                 ui.set_toast_text(ss(
-                                    "Update ready - installing and relaunching Pathfinder...",
+                                    "Update ready — installing and relaunching Pathfinder…",
                                 ));
                                 ui.set_toast_kind(ss("info"));
                             }
@@ -23689,8 +23878,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak2.upgrade() {
                                 ui.set_update_installing(false);
+                                ui.set_update_download_progress(0.0);
                                 ui.set_toast_text(ss(&format!(
-                                    "Update failed: {e} — opening download page..."
+                                    "Update failed: {e} — opening download page…"
                                 )));
                                 ui.set_toast_kind(ss("error"));
                             }
@@ -24164,7 +24354,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                         "{} | {}{} ({} {}{})",
                                         result.path,
                                         result.source,
-                                        if result.partial { " â€” still searching" } else { "" },
+                                        if result.partial { " — still searching" } else { "" },
                                         count,
                                         if count == 1 { "match" } else { "matches" },
                                         if !result.partial
@@ -24172,23 +24362,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                                 || count >= SEARCH_LIVE_SCAN_LIMIT
                                                 || count >= SEARCH_DRIVE_SCAN_LIMIT)
                                         {
-                                            " Â· showing first page"
+                                            " · showing first page"
                                         } else {
                                             ""
                                         }
                                     )));
-                                    if !result.partial {
-                                        ctrl.show_toast_kind(
-                                            &ui,
-                                            format!(
-                                                "{} match{} from {}",
-                                                count,
-                                                if count == 1 { "" } else { "es" },
-                                                result.source
-                                            ),
-                                            "info",
-                                        );
-                                    }
+                                    // Status bar already shows the match count;
+                                    // skip the ephemeral toast so it can't steal
+                                    // focus from more important notices (updates).
                                 }
                             }
                         }
@@ -24244,7 +24425,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         controller.borrow_mut().thumbnail_timer = Some(timer);
     }
 
-    // Toast queue advancement: poll every 500ms, advance when current toast has been shown >= 3.2s
+    // Toast queue advancement: poll every 500ms, advance when current toast
+    // has been shown long enough. Never auto-dismiss while an app update is
+    // downloading — that toast is pinned and refreshed with byte progress.
     {
         let weak = ui.as_weak();
         let c = controller.clone();
@@ -24253,6 +24436,24 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             slint::TimerMode::Repeated,
             Duration::from_millis(500),
             move || {
+                if let Some(ui) = weak.upgrade() {
+                    if ui.get_update_installing() {
+                        let label = format_update_progress_label();
+                        let progress = update_download_progress_fraction();
+                        ui.set_update_download_progress(progress);
+                        ui.set_toast_text(ss(&label));
+                        ui.set_toast_kind(ss("info"));
+                        if let Ok(mut ctrl) = c.try_borrow_mut() {
+                            ctrl.toast_showing = true;
+                            ctrl.toast_current_message = label;
+                            ctrl.toast_current_kind = "info".to_string();
+                            // Keep resetting the clock so queued toasts can't
+                            // steal the slot mid-download.
+                            ctrl.toast_last_shown = Some(std::time::Instant::now());
+                        }
+                        return;
+                    }
+                }
                 let should_advance = {
                     let ctrl = c.borrow();
                     ctrl.toast_showing
