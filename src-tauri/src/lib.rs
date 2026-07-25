@@ -10327,61 +10327,149 @@ fn installer_suffix_from_url(url: &str) -> &'static str {
     }
 }
 
-fn download_and_install_update(url: &str) -> Result<(), String> {
-    let suffix = installer_suffix_from_url(url);
-    let installer = std::env::temp_dir().join(format!("pathfinder_update{suffix}"));
-    let _ = fs::remove_file(&installer);
-    // Native HTTPS via ureq instead of PowerShell. GitHub release downloads
-    // redirect to objects.githubusercontent.com, and ureq follows redirects
-    // by default, so we just stream the final body to the installer path.
+/// Prevents overlapping Install clicks from racing on the same temp path and
+/// truncating the installer (observed as ~2–3 MB partial PE files).
+static UPDATE_INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+fn download_release_installer(url: &str, dest: &Path) -> Result<u64, String> {
+    let _ = fs::remove_file(dest);
+    updater_log(&format!("download start → {}", dest.display()));
+    // Slow GitHub CDNs often take 60–120s for a ~12 MB NSIS build. Use a long
+    // overall budget and treat Content-Length mismatches as hard failures so we
+    // never launch a truncated installer.
     let resp = ureq::get(url)
         .set("User-Agent", &github_http_user_agent())
         .set("Accept", "application/octet-stream")
-        .timeout(std::time::Duration::from_secs(180))
+        .timeout(std::time::Duration::from_secs(900))
         .call()
         .map_err(|e| format!("download HTTP error: {e}"))?;
-    if !(200..300).contains(&resp.status()) {
-        return Err(format!("download HTTP {}", resp.status()));
+    let status = resp.status();
+    if !(200..300).contains(&status) {
+        return Err(format!("download HTTP {status}"));
     }
-    let mut reader = resp.into_reader();
-    let mut out =
-        fs::File::create(&installer).map_err(|e| format!("create installer file: {e}"))?;
-    std::io::copy(&mut reader, &mut out).map_err(|e| format!("write installer file: {e}"))?;
-    drop(out);
-    let meta = fs::metadata(&installer).map_err(|e| format!("Download not found on disk: {e}"))?;
-    if meta.len() < 64 * 1024 {
-        let _ = fs::remove_file(&installer);
-        return Err(
-            "Downloaded file is too small to be a valid installer (possible network or GitHub error)."
-                .into(),
-        );
+    let expected = resp
+        .header("Content-Length")
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0);
+    if let Some(n) = expected {
+        updater_log(&format!("Content-Length={n}"));
+    } else {
+        updater_log("Content-Length missing; will validate minimum size only");
     }
 
-    #[cfg(windows)]
+    let mut reader = resp.into_reader();
+    let mut out = fs::File::create(dest).map_err(|e| format!("create installer file: {e}"))?;
+    let mut buf = [0u8; 64 * 1024];
+    let mut copied: u64 = 0;
+    let mut last_logged_mb: u64 = 0;
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("read installer stream: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n])
+            .map_err(|e| format!("write installer file: {e}"))?;
+        copied += n as u64;
+        let mb = copied / (1024 * 1024);
+        if mb > last_logged_mb {
+            last_logged_mb = mb;
+            updater_log(&format!(
+                "download progress: {copied} bytes{}",
+                expected
+                    .map(|e| format!(" / {e}"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    out.flush().map_err(|e| format!("flush installer file: {e}"))?;
+    drop(out);
+
+    if let Some(exp) = expected {
+        if copied != exp {
+            let _ = fs::remove_file(dest);
+            return Err(format!(
+                "incomplete download: got {copied} of {exp} bytes (network interrupted)"
+            ));
+        }
+    }
+    // Real NSIS/MSI builds are multi-MB; anything smaller is a truncated body
+    // or an HTML error page that slipped past status checks.
+    if copied < 1_000_000 {
+        let _ = fs::remove_file(dest);
+        return Err(format!(
+            "downloaded file is too small ({copied} bytes) to be a valid installer"
+        ));
+    }
+    updater_log(&format!("download complete: {copied} bytes"));
+    Ok(copied)
+}
+
+fn download_and_install_update(url: &str) -> Result<(), String> {
+    if UPDATE_INSTALL_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
     {
-        // Silent, hands-off update: a tiny batch helper waits for this app to
-        // exit (so the running .exe is unlocked), runs the installer with no
-        // UI, then relaunches Pathfinder. The user only ever sees the app
-        // close and reopen on the new version - no wizard, no reinstall.
-        let app_exe = std::env::current_exe()
-            .map_err(|e| format!("Could not resolve current executable: {e}"))?;
-        let pid = std::process::id();
-        let installer_str = installer.to_string_lossy().replace('"', "");
-        let app_exe_str = app_exe.to_string_lossy().replace('"', "");
-        let install_cmd = if suffix == ".msi" {
-            // MSI upgrades in place when the UpgradeCode matches; /qn is silent.
-            format!("msiexec.exe /i \"{installer_str}\" /qn /norestart")
-        } else {
-            // Tauri's NSIS installer: `/S` is silent, `/UPDATE` makes it patch
-            // the existing install in place - it skips running the previous
-            // version's uninstaller, preserves app data, and does not recreate
-            // shortcuts. Without `/UPDATE`, even a silent run first executes the
-            // old uninstaller, which is the "uninstall then reinstall" the user
-            // was seeing.
-            format!("\"{installer_str}\" /S /UPDATE")
-        };
-        let script = format!(
-            "@echo off\r\n\
+        return Err("Update download already in progress — please wait.".into());
+    }
+    let result = (|| {
+        updater_log(&format!("install requested: {url}"));
+        let suffix = installer_suffix_from_url(url);
+        let installer = std::env::temp_dir().join(format!(
+            "pathfinder_update_{}{suffix}",
+            std::process::id()
+        ));
+
+        let mut last_err = String::new();
+        for attempt in 1..=3 {
+            updater_log(&format!("download attempt {attempt}/3"));
+            match download_release_installer(url, &installer) {
+                Ok(_) => {
+                    last_err.clear();
+                    break;
+                }
+                Err(e) => {
+                    updater_log(&format!("download attempt {attempt} failed: {e}"));
+                    last_err = e;
+                    let _ = fs::remove_file(&installer);
+                    if attempt < 3 {
+                        std::thread::sleep(std::time::Duration::from_secs(2 * attempt as u64));
+                    }
+                }
+            }
+        }
+        if !last_err.is_empty() {
+            return Err(last_err);
+        }
+
+        #[cfg(windows)]
+        {
+            // Silent, hands-off update: a tiny batch helper waits for this app to
+            // exit (so the running .exe is unlocked), runs the installer with no
+            // UI, then relaunches Pathfinder. The user only ever sees the app
+            // close and reopen on the new version - no wizard, no reinstall.
+            let app_exe = std::env::current_exe()
+                .map_err(|e| format!("Could not resolve current executable: {e}"))?;
+            let pid = std::process::id();
+            let installer_str = installer.to_string_lossy().replace('"', "");
+            let app_exe_str = app_exe.to_string_lossy().replace('"', "");
+            let log_path = native_data_file("updater.log");
+            let log_str = log_path.to_string_lossy().replace('"', "");
+            let install_cmd = if suffix == ".msi" {
+                // MSI upgrades in place when the UpgradeCode matches; /qn is silent.
+                format!("msiexec.exe /i \"{installer_str}\" /qn /norestart")
+            } else {
+                // Tauri's NSIS installer: `/S` is silent, `/UPDATE` makes it patch
+                // the existing install in place - it skips running the previous
+                // version's uninstaller, preserves app data, and does not recreate
+                // shortcuts. Without `/UPDATE`, even a silent run first executes the
+                // old uninstaller, which is the "uninstall then reinstall" the user
+                // was seeing.
+                format!("\"{installer_str}\" /S /UPDATE")
+            };
+            let script = format!(
+                "@echo off\r\n\
 setlocal\r\n\
 set \"PID={pid}\"\r\n\
 :waitloop\r\n\
@@ -10390,27 +10478,40 @@ if not errorlevel 1 (\r\n\
   timeout /t 1 /nobreak >nul\r\n\
   goto waitloop\r\n\
 )\r\n\
+echo [%DATE% %TIME%] running installer >> \"{log_str}\"\r\n\
 {install_cmd}\r\n\
+set \"ERR=%ERRORLEVEL%\"\r\n\
+echo [%DATE% %TIME%] installer exit=%ERR% >> \"{log_str}\"\r\n\
+if not \"%ERR%\"==\"0\" (\r\n\
+  echo [%DATE% %TIME%] installer failed - relaunching previous build >> \"{log_str}\"\r\n\
+)\r\n\
 timeout /t 1 /nobreak >nul\r\n\
 start \"\" \"{app_exe_str}\"\r\n\
+del \"{installer_str}\" >nul 2>&1\r\n\
 del \"%~f0\"\r\n"
-        );
-        let script_path = std::env::temp_dir().join(format!("pathfinder_update_{pid}.cmd"));
-        fs::write(&script_path, script)
-            .map_err(|e| format!("Could not stage update helper: {e}"))?;
-        ProcessCommand::new("cmd.exe")
-            .arg("/c")
-            .arg(&script_path)
-            .no_window()
-            .spawn()
-            .map_err(|e| format!("Could not start update helper: {e}"))?;
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = installer;
-        return Err("In-app update install is only supported on Windows.".into());
-    }
-    Ok(())
+            );
+            let script_path = std::env::temp_dir().join(format!("pathfinder_update_{pid}.cmd"));
+            fs::write(&script_path, script)
+                .map_err(|e| format!("Could not stage update helper: {e}"))?;
+            ProcessCommand::new("cmd.exe")
+                .arg("/c")
+                .arg(&script_path)
+                .no_window()
+                .spawn()
+                .map_err(|e| format!("Could not start update helper: {e}"))?;
+            updater_log(&format!(
+                "update helper spawned; will install after pid {pid} exits"
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = installer;
+            return Err("In-app update install is only supported on Windows.".into());
+        }
+        Ok(())
+    })();
+    UPDATE_INSTALL_IN_PROGRESS.store(false, Ordering::SeqCst);
+    result
 }
 
 #[tauri::command]
@@ -23547,19 +23648,28 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_install_update(move || {
         if let Some(ui) = weak.upgrade() {
+            if ui.get_update_installing() {
+                c.borrow_mut()
+                    .show_toast(&ui, "Update download already in progress...");
+                return;
+            }
             let url = ui.get_update_download_url().to_string();
             if url.is_empty() {
                 let _ = open::that(GITHUB_RELEASES_URL);
                 return;
             }
+            ui.set_update_installing(true);
             // Show toast on the event loop thread where Rc is accessible.
-            c.borrow_mut().show_toast(&ui, "Downloading update...");
+            c.borrow_mut()
+                .show_toast(&ui, "Downloading update — this can take a minute...");
             let weak2 = weak.clone();
+            let url_fallback = url.clone();
             std::thread::spawn(move || {
                 match download_and_install_update(&url) {
                     Ok(()) => {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak2.upgrade() {
+                                ui.set_update_installing(false);
                                 ui.set_toast_text(ss(
                                     "Update ready - installing and relaunching Pathfinder...",
                                 ));
@@ -23574,11 +23684,18 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         });
                     }
                     Err(e) => {
+                        updater_log(&format!("install failed: {e}"));
+                        let open_url = url_fallback;
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak2.upgrade() {
-                                ui.set_toast_text(ss(&format!("Update failed: {e}")));
+                                ui.set_update_installing(false);
+                                ui.set_toast_text(ss(&format!(
+                                    "Update failed: {e} — opening download page..."
+                                )));
                                 ui.set_toast_kind(ss("error"));
                             }
+                            // Last resort: browser download so the user is never stuck.
+                            let _ = open::that(&open_url);
                         });
                     }
                 }

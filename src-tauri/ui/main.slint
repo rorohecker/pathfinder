@@ -3834,6 +3834,8 @@ export component MainWindow inherits Window {
     in-out property <bool> update_available: false;
     in-out property <string> update_version: "";
     in-out property <string> update_download_url: "";
+    // True while an Install click is downloading the release asset.
+    in-out property <bool> update_installing: false;
     callback install_update();
 
     // Splitter targets update every frame while dragging; layout reads the
@@ -6718,10 +6720,12 @@ export component MainWindow inherits Window {
                         x: parent.width - 52px; y: 1px;
                         width: 50px; height: parent.height - 2px;
                         border-radius: 8px;
-                        background: rgba(0, 0, 0, 0.25);
+                        background: root.update_installing
+                            ? rgba(0, 0, 0, 0.45)
+                            : rgba(0, 0, 0, 0.25);
                         Text {
                             width: parent.width; height: parent.height;
-                            text: "Install";
+                            text: root.update_installing ? "…" : "Install";
                             color: white;
                             font-size: 10px;
                             font-weight: 700;
@@ -6736,7 +6740,11 @@ export component MainWindow inherits Window {
                             width: parent.width + 8px;
                             height: parent.height + 4px;
                             mouse-cursor: pointer;
-                            clicked => { root.install_update(); }
+                            clicked => {
+                                if (!root.update_installing) {
+                                    root.install_update();
+                                }
+                            }
                         }
                     }
                 }
@@ -6774,7 +6782,8 @@ export component MainWindow inherits Window {
             x: 0;
             y: 0;
             width: parent.width;
-            height: parent.height;
+            // Keep the status bar (Install pill) clear of atmosphere overlays.
+            height: parent.height - root.status_h;
             z: 40;
             active: ThemePalette.active_theme == "fantasy";
             running: ThemePalette.active_theme == "fantasy" && ThemePalette.theme_animations;
@@ -6783,7 +6792,7 @@ export component MainWindow inherits Window {
             x: 0;
             y: 0;
             width: parent.width;
-            height: parent.height;
+            height: parent.height - root.status_h;
             z: 40;
             active: ThemePalette.active_theme == "retro";
             running: ThemePalette.active_theme == "retro" && ThemePalette.theme_animations;
@@ -6792,7 +6801,7 @@ export component MainWindow inherits Window {
             x: 0;
             y: 0;
             width: parent.width;
-            height: parent.height;
+            height: parent.height - root.status_h;
             z: 40;
             active: ThemePalette.active_theme == "sunset";
             running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations;
