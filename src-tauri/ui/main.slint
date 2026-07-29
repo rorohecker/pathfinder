@@ -3398,19 +3398,20 @@ export component MainWindow inherits Window {
     in-out property <bool> theme_animations: true;
     // Sunset solar cycle — shared by atmosphere + content-pane sky wash.
     // Phase 0 = late afternoon (high), 1 = on the horizon.
-    // Advanced by a low-rate timer (not a continuous Slint property animation)
-    // so sky layers don't invalidate every frame for ~52s.
-    property <bool> sunset_descending: true;
-    property <float> sunset_phase: 0.0;
+    // Continuous Slint animation (not stepped) so the disc and sky washes
+    // ease smoothly; the timer only flips the target endpoint.
+    property <bool> sunset_descending: false;
+    property <float> sunset_phase: root.sunset_descending ? 1.0 : 0.0;
+    animate sunset_phase { duration: 70000ms; easing: linear; }
     // Western arc: drifts right while falling on a soft parabola.
-    property <float> sunset_sun_cx: 0.16 + root.sunset_phase * 0.68;
-    property <float> sunset_sun_cy: 0.06 + root.sunset_phase * root.sunset_phase * 0.58;
+    property <float> sunset_sun_cx: 0.14 + root.sunset_phase * 0.72;
+    property <float> sunset_sun_cy: 0.05 + root.sunset_phase * root.sunset_phase * 0.62;
     property <float> sunset_sun_alt: 1.0 - root.sunset_phase;
     // Golden-hour peak near ~phase 0.72, then soft twilight.
-    property <float> sunset_sun_glow: Math.max(0.28, 0.95 - Math.abs(root.sunset_phase - 0.72) * 1.15);
+    property <float> sunset_sun_glow: Math.max(0.22, 0.98 - Math.abs(root.sunset_phase - 0.72) * 1.25);
     // Warmth of atmospheric scatter — stronger as the sun lowers.
-    property <float> sunset_warmth: Math.min(1.0, root.sunset_phase * 1.25);
-    property <float> sunset_sky_bright: 0.22 + root.sunset_sun_alt * 0.78;
+    property <float> sunset_warmth: Math.min(1.0, root.sunset_phase * 1.35);
+    property <float> sunset_sky_bright: 0.12 + root.sunset_sun_alt * 0.88;
     in-out property <string> active_index_mode: "low";
     in-out property <string> index_status: "";
     in-out property <string> thumbnail_status: "";
@@ -5065,63 +5066,64 @@ export component MainWindow inherits Window {
                 width: parent.width;
                 height: parent.height;
                 background: transparent;
-                // Late-afternoon zenith — brighter mauve while the sun is high.
+                // Late-afternoon zenith — bright mauve while the sun is high,
+                // fades hard as altitude drops so the sky visibly tracks the disc.
                 Rectangle {
                     width: parent.width;
                     height: parent.height;
                     background: @linear-gradient(180deg,
-                        #6e3050  0%,
-                        #4a2240 28%,
-                        #2a1430 60%,
+                        #8a4060  0%,
+                        #5a2848 26%,
+                        #2a1430 58%,
                         #140818 100%);
-                    opacity: root.sunset_sky_bright * 0.92;
+                    opacity: 0.15 + root.sunset_sky_bright * 0.85;
                 }
-                // Golden scatter layer — strengthens as warmth rises.
+                // Golden scatter — takes over through golden hour / late phase.
                 Rectangle {
                     width: parent.width;
                     height: parent.height;
                     background: @linear-gradient(180deg,
-                        #8a4038  0%,
-                        #5a2838 30%,
-                        #301428 65%,
+                        #c06040  0%,
+                        #7a3038 28%,
+                        #3a1828 62%,
                         #140818 100%);
-                    opacity: root.sunset_warmth * 0.70;
+                    opacity: root.sunset_warmth * 0.82;
                 }
-                // Twilight veil — deep aubergine as altitude approaches zero.
+                // Twilight veil — deep aubergine as the sun nears the horizon.
                 Rectangle {
                     width: parent.width;
                     height: parent.height;
                     background: @linear-gradient(180deg,
                         #3a1830  0%,
-                        #241028 35%,
-                        #160a1a 70%,
-                        #0c0410 100%);
-                    opacity: (1.0 - root.sunset_sun_alt) * (1.0 - root.sunset_sun_alt) * 0.85;
+                        #241028 32%,
+                        #120814 68%,
+                        #08040c 100%);
+                    opacity: (1.0 - root.sunset_sun_alt) * (1.0 - root.sunset_sun_alt) * 0.95;
                 }
-                // Horizon strip — brighter when the sun is low.
+                // Horizon strip — lifts and brightens as the sun sinks.
                 Rectangle {
                     x: 0;
-                    y: parent.height * (0.55 + root.sunset_sun_alt * 0.20);
+                    y: parent.height * (0.48 + root.sunset_sun_alt * 0.28);
                     width: parent.width;
-                    height: parent.height * 0.45;
+                    height: parent.height * (0.52 - root.sunset_sun_alt * 0.18);
                     background: @linear-gradient(180deg,
                         rgba(255, 140, 70, 0.0) 0%,
-                        rgba(255, 150, 80, 0.14) 40%,
-                        rgba(200, 70, 110, 0.10) 100%);
-                    opacity: 0.25 + root.sunset_warmth * 0.75;
+                        rgba(255, 160, 80, 0.22) 38%,
+                        rgba(220, 70, 120, 0.16) 100%);
+                    opacity: 0.18 + root.sunset_warmth * 0.82;
                 }
-                // Warm wash near the sun disc — follows the arc; peaks at golden hour.
+                // Warm wash locked to the sun disc — the local light source.
                 Rectangle {
-                    width: min(520px, parent.width * 0.85);
-                    height: min(420px, parent.height * 0.70);
+                    width: min(560px, parent.width * 0.90);
+                    height: min(460px, parent.height * 0.75);
                     border-radius: self.width / 2;
                     x: root.sunset_sun_cx * parent.width - self.width / 2;
                     y: root.sunset_sun_cy * parent.height - self.height / 2;
                     background: @radial-gradient(circle,
-                        rgba(255, 186, 96, 0.26) 0%,
-                        rgba(242, 112, 90, 0.12) 40%,
+                        rgba(255, 200, 110, 0.34) 0%,
+                        rgba(242, 120, 80, 0.16) 38%,
                         rgba(0, 0, 0, 0.0) 72%);
-                    opacity: 0.35 + root.sunset_sun_glow * 0.60;
+                    opacity: 0.30 + root.sunset_sun_glow * 0.70;
                 }
             }
 
@@ -6777,24 +6779,12 @@ export component MainWindow inherits Window {
                 ThemePalette.folder_idle_phase = !ThemePalette.folder_idle_phase;
             }
         }
-        // Sunset sun arc: step phase ~4×/sec instead of animating every frame.
-        // 0.005 × (1000/250) ≈ 0.02 phase/sec → ~50s dusk / dawn.
+        // Sunset sun arc: flip the phase target every 70s; Slint animates
+        // sunset_phase continuously so the disc + sky washes stay smooth.
         Timer {
-            interval: 250ms;
+            interval: 70000ms;
             running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations;
-            triggered => {
-                if (root.sunset_descending) {
-                    root.sunset_phase = Math.min(1.0, root.sunset_phase + 0.005);
-                    if (root.sunset_phase >= 0.999) {
-                        root.sunset_descending = false;
-                    }
-                } else {
-                    root.sunset_phase = Math.max(0.0, root.sunset_phase - 0.005);
-                    if (root.sunset_phase <= 0.001) {
-                        root.sunset_descending = true;
-                    }
-                }
-            }
+            triggered => { root.sunset_descending = !root.sunset_descending; }
         }
         FantasyAtmosphere {
             x: 0;

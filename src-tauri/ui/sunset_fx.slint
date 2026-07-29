@@ -26,18 +26,17 @@ export component SunsetAtmosphere inherits Rectangle {
 
     property <bool> anim_on: root.active && root.running;
 
-    // Zenith wash — cooler mauve when the sun is high; fades as altitude drops
-    // (real sky: overhead darkens into blue/purple while the sun sinks).
+    // Zenith wash — cooler mauve when the sun is high; fades as altitude drops.
     Rectangle {
         x: 0;
         y: 0;
         width: root.width;
-        height: root.height * 0.62;
+        height: root.height * 0.65;
         background: @linear-gradient(180deg,
-            rgba(180, 120, 160, 0.22) 0%,
-            rgba(120, 70, 110, 0.10) 55%,
+            rgba(200, 130, 170, 0.28) 0%,
+            rgba(130, 70, 120, 0.12) 50%,
             rgba(40, 18, 48, 0.0) 100%);
-        opacity: 0.20 + root.sun_alt * root.sky_bright * 0.70;
+        opacity: 0.12 + root.sun_alt * root.sky_bright * 0.88;
     }
 
     // Golden / amber scatter — strengthens as the sun lowers (Rayleigh warm-up).
@@ -47,14 +46,14 @@ export component SunsetAtmosphere inherits Rectangle {
         width: root.width;
         height: root.height;
         background: @linear-gradient(165deg,
-            rgba(255, 186, 96, 0.20) 0%,
-            rgba(242, 120, 70, 0.12) 40%,
-            rgba(90, 40, 72, 0.04) 78%,
+            rgba(255, 186, 96, 0.28) 0%,
+            rgba(242, 120, 70, 0.16) 36%,
+            rgba(90, 40, 72, 0.06) 74%,
             rgba(22, 10, 26, 0.0) 100%);
-        opacity: 0.18 + root.warmth * root.sun_glow * 0.72;
+        opacity: 0.10 + root.warmth * root.sun_glow * 0.88;
     }
 
-    // Deep twilight veil — takes over once the sun is near/below the horizon.
+    // Deep twilight veil — takes over once the sun is near the horizon.
     Rectangle {
         x: 0;
         y: 0;
@@ -62,88 +61,86 @@ export component SunsetAtmosphere inherits Rectangle {
         height: root.height;
         background: @linear-gradient(180deg,
             rgba(60, 24, 72, 0.0) 0%,
-            rgba(40, 14, 52, 0.18) 45%,
-            rgba(18, 6, 28, 0.42) 100%);
-        opacity: (1.0 - root.sun_alt) * (1.0 - root.sun_alt) * 0.95;
+            rgba(40, 14, 52, 0.22) 42%,
+            rgba(14, 4, 22, 0.50) 100%);
+        opacity: (1.0 - root.sun_alt) * (1.0 - root.sun_alt) * 1.0;
     }
 
-    // Horizon glow band — rises toward the sun and brightens as altitude falls
-    // (the bright strip of sky you see at real dusk).
+    // Horizon glow band — rises toward the sun and brightens as altitude falls.
     Rectangle {
         x: 0;
-        y: root.height * (0.52 + root.sun_alt * 0.22);
+        y: root.height * (0.48 + root.sun_alt * 0.26);
         width: root.width;
-        height: root.height * (0.48 - root.sun_alt * 0.18);
+        height: root.height * (0.52 - root.sun_alt * 0.16);
         background: @linear-gradient(180deg,
             rgba(232, 98, 63, 0.0) 0%,
-            rgba(255, 160, 70, 0.22) 42%,
-            rgba(242, 100, 130, 0.16) 78%,
+            rgba(255, 170, 70, 0.28) 40%,
+            rgba(242, 90, 130, 0.18) 78%,
             rgba(80, 30, 70, 0.10) 100%);
-        opacity: 0.28 + root.warmth * 0.72;
+        opacity: 0.16 + root.warmth * 0.84;
     }
 
     // Warm radiance halo around the sun (the light source) — no ray spikes.
-    // Larger / softer when high; tighter & warmer near the horizon.
     Rectangle {
-        width: 200px + root.sun_alt * 100px;
-        height: 200px + root.sun_alt * 100px;
+        width: 180px + root.sun_alt * 140px;
+        height: 180px + root.sun_alt * 140px;
         border-radius: self.width / 2;
         x: root.sun_cx * root.width - self.width / 2;
         y: root.sun_cy * root.height - self.height / 2;
         background: @radial-gradient(circle,
-            rgba(255, 200, 90, 0.50) 0%,
-            rgba(255, 120, 70, 0.18) 40%,
+            rgba(255, 200, 90, 0.55) 0%,
+            rgba(255, 120, 70, 0.20) 40%,
             rgba(255, 80, 100, 0.0) 72%);
-        opacity: 0.28 + root.sun_glow * 0.55;
+        opacity: 0.25 + root.sun_glow * 0.60;
     }
 
     // Mid halo — tighter pulse tied to sun brightness / golden hour.
     Rectangle {
-        width: 90px + root.warmth * 40px;
-        height: 90px + root.warmth * 40px;
+        width: 80px + root.warmth * 50px;
+        height: 80px + root.warmth * 50px;
         border-radius: self.width / 2;
         x: root.sun_cx * root.width - self.width / 2;
         y: root.sun_cy * root.height - self.height / 2;
         background: @radial-gradient(circle,
-            rgba(255, 230, 140, 0.82) 0%,
-            rgba(255, 150, 60, 0.28) 48%,
+            rgba(255, 230, 140, 0.88) 0%,
+            rgba(255, 150, 60, 0.30) 48%,
             rgba(255, 100, 80, 0.0) 100%);
-        opacity: 0.40 + root.sun_glow * 0.50;
+        opacity: 0.38 + root.sun_glow * 0.55;
     }
 
     // Sun disc — clearer when high, warmer as it kisses the horizon.
     Rectangle {
-        width: 28px + root.sun_alt * 10px;
-        height: 28px + root.sun_alt * 10px;
+        width: 26px + root.sun_alt * 12px;
+        height: 26px + root.sun_alt * 12px;
         border-radius: self.width / 2;
         background: #ffe066;
-        opacity: 0.42 + root.sun_glow * 0.38;
+        opacity: 0.48 + root.sun_glow * 0.40;
         x: root.sun_cx * root.width - self.width / 2;
         y: root.sun_cy * root.height - self.height / 2;
     }
 
     // Warm limb as the sun nears the horizon (atmospheric reddening).
     Rectangle {
-        width: 28px + root.sun_alt * 10px;
-        height: 28px + root.sun_alt * 10px;
+        width: 26px + root.sun_alt * 12px;
+        height: 26px + root.sun_alt * 12px;
         border-radius: self.width / 2;
         background: #ff9a4a;
-        opacity: root.warmth * 0.55;
+        opacity: root.warmth * 0.62;
         x: root.sun_cx * root.width - self.width / 2;
         y: root.sun_cy * root.height - self.height / 2;
     }
 
     // Soft under-glow on the disc when near the horizon (atmospheric bloom).
     Rectangle {
-        width: 56px;
-        height: 28px;
-        border-radius: 14px;
-        x: root.sun_cx * root.width - 28px;
+        width: 64px;
+        height: 30px;
+        border-radius: 15px;
+        x: root.sun_cx * root.width - 32px;
         y: root.sun_cy * root.height - 6px;
         background: @radial-gradient(circle,
-            rgba(255, 140, 60, 0.55) 0%,
+            rgba(255, 140, 60, 0.60) 0%,
             rgba(255, 80, 90, 0.0) 100%);
-        opacity: Math.max(0.0, 0.45 - root.sun_alt) * 1.6;
+        opacity: Math.max(0.0, 0.48 - root.sun_alt) * 1.7;
     }
 
     // Two birds gliding across (sparse — not a flock).

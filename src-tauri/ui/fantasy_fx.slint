@@ -1,7 +1,7 @@
 // Lean High Fantasy atmosphere for Pathfinder.
 // Wind / ember / sparkle motes — companion to fantasy_icons.slint pixel glyphs.
 // Effects (theme-gated by the caller via `active`):
-//   1. Divine wind — parchment dust motes drifting diagonally + faint wispy trails
+//   1. Divine wind — parchment dust streaming one way across the canopy
 //   2. Ember drift — warmer, slower rising motes
 //   3. Star sparkles — fixed points that quietly twinkle
 //
@@ -20,100 +20,111 @@ export component FantasyAtmosphere inherits Rectangle {
 
     property <bool> anim_on: root.active && root.running;
 
-    // --- Divine wind: cool parchment dust + faint elongated trails ----------
-    // Larger drift than v0.9.49/50 (~2× distance, ~25% faster). Each mote has
-    // two low-opacity trail segments that follow the same path (lagged by
-    // opposing the drift vector) so motion reads without cluttering the UI.
+    // Shared wind clock — wraps 0→1. Motes sample this with a phase offset so
+    // the stream never reverses (no ease-in-out ping-pong / "spring" feel).
+    // ~20 Hz is enough for soft dust; much cheaper than per-mote reverse tweens.
+    property <float> wind_t: 0.0;
+    Timer {
+        interval: 50ms;
+        running: root.anim_on;
+        triggered => {
+            // Full sweep ~12.5s (0.004 × 20/s).
+            wind_t = Math.mod(root.wind_t + 0.004, 1.0);
+        }
+    }
+
+    // --- Divine wind: cool parchment dust streaming left → right ----------
+    // Each mote enters off the left, exits off the right, then wraps. Soft
+    // sine lift keeps it organic; fade in/out at the edges. Trails are long
+    // and thin along the wind vector — like breath across the forest.
     for m[i] in [
-        { x0: 0.06, y0: 0.10, dx: 0.22, dy: 0.12, dur: 4800ms },
-        { x0: 0.28, y0: 0.42, dx: 0.18, dy: -0.12, dur: 5600ms },
-        { x0: 0.52, y0: 0.16, dx: 0.16, dy: 0.14, dur: 4500ms },
-        { x0: 0.74, y0: 0.55, dx: 0.15, dy: -0.11, dur: 6400ms },
-        { x0: 0.88, y0: 0.22, dx: 0.14, dy: 0.12, dur: 5200ms },
-        { x0: 0.40, y0: 0.78, dx: 0.17, dy: -0.13, dur: 5800ms },
-        { x0: 0.15, y0: 0.60, dx: 0.19, dy: -0.09, dur: 5100ms },
-        { x0: 0.62, y0: 0.30, dx: -0.14, dy: 0.11, dur: 6000ms },
+        { phase: 0.00, y0: 0.12, dy: 0.04, amp: 0.018 },
+        { phase: 0.12, y0: 0.28, dy: 0.03, amp: 0.022 },
+        { phase: 0.25, y0: 0.18, dy: 0.05, amp: 0.015 },
+        { phase: 0.38, y0: 0.48, dy: 0.02, amp: 0.020 },
+        { phase: 0.50, y0: 0.36, dy: 0.04, amp: 0.016 },
+        { phase: 0.62, y0: 0.58, dy: 0.03, amp: 0.019 },
+        { phase: 0.74, y0: 0.22, dy: 0.05, amp: 0.014 },
+        { phase: 0.86, y0: 0.70, dy: 0.02, amp: 0.021 },
     ] : Rectangle {
         width: 1px;
         height: 1px;
         background: transparent;
-        property <bool> drift: Math.mod(i, 2) == 1;
-        Timer {
-            interval: m.dur;
-            running: root.anim_on;
-            triggered => { drift = !drift; }
-        }
-        property <float> mx: drift ? m.x0 + m.dx : m.x0;
-        property <float> my: drift ? m.y0 + m.dy : m.y0;
-        // Trail direction opposite the current hop so streaks trail behind.
-        property <float> tdx: drift ? -m.dx : m.dx;
-        property <float> tdy: drift ? -m.dy : m.dy;
+        // Progress along the sweep (wraps independently per mote).
+        property <float> t: Math.mod(root.wind_t + m.phase, 1.0);
+        // Enter at -8% width, exit at 108% — wrap jump is off-screen.
+        property <float> mx: -0.08 + t * 1.16;
+        property <float> my: m.y0 + t * m.dy
+            + m.amp * Math.sin(t * 720deg + m.phase * 360deg);
+        // Soft fade at entry / exit so motes dissolve like breath.
+        property <float> fade: t < 0.10
+            ? (t / 0.10)
+            : (t > 0.88 ? ((1.0 - t) / 0.12) : 1.0);
 
-        // Far wisp (most transparent, longest).
+        // Far wisp — long soft streak behind the mote along the wind.
         Rectangle {
-            width: 18px;
-            height: 2px;
+            width: 22px;
+            height: 1.5px;
             border-radius: 1px;
             background: #f2e8c8;
-            opacity: drift ? 0.04 : 0.10;
-            x: (mx + tdx * 0.22) * root.width - self.width / 2;
-            y: (my + tdy * 0.22) * root.height - self.height / 2;
-            animate x { duration: m.dur; easing: ease-in-out; }
-            animate y { duration: m.dur; easing: ease-in-out; }
-            animate opacity { duration: m.dur; easing: ease-in-out; }
+            opacity: 0.06 * fade;
+            x: mx * root.width - self.width - 2px;
+            y: my * root.height - self.height / 2;
         }
         // Near wisp.
         Rectangle {
-            width: 10px;
-            height: 2px;
+            width: 12px;
+            height: 1.5px;
             border-radius: 1px;
             background: #f2e8c8;
-            opacity: drift ? 0.07 : 0.16;
-            x: (mx + tdx * 0.10) * root.width - self.width / 2;
-            y: (my + tdy * 0.10) * root.height - self.height / 2;
-            animate x { duration: m.dur; easing: ease-in-out; }
-            animate y { duration: m.dur; easing: ease-in-out; }
-            animate opacity { duration: m.dur; easing: ease-in-out; }
+            opacity: 0.11 * fade;
+            x: mx * root.width - self.width - 1px;
+            y: my * root.height - self.height / 2;
         }
-        // Mote head.
+        // Mote head — soft parchment dust.
         Rectangle {
-            width: 4px;
-            height: 4px;
-            border-radius: 2px;
+            width: 3px;
+            height: 3px;
+            border-radius: 1.5px;
             background: #f2e8c8;
-            x: mx * root.width - 2px;
-            y: my * root.height - 2px;
-            opacity: drift ? 0.18 : 0.44;
-            animate x { duration: m.dur; easing: ease-in-out; }
-            animate y { duration: m.dur; easing: ease-in-out; }
-            animate opacity { duration: m.dur; easing: ease-in-out; }
+            x: mx * root.width - 1.5px;
+            y: my * root.height - 1.5px;
+            opacity: 0.28 * fade;
         }
     }
 
-    // --- Ember drift: warmer bronze motes, larger & slower than wind ------
-    for e[i] in [
-        { x0: 0.18, y0: 0.70, dx: 0.04, dy: -0.12, dur: 11000ms },
-        { x0: 0.62, y0: 0.85, dx: -0.03, dy: -0.10, dur: 13000ms },
-        { x0: 0.82, y0: 0.60, dx: 0.03, dy: -0.11, dur: 12000ms },
-        { x0: 0.35, y0: 0.90, dx: 0.04, dy: -0.09, dur: 14000ms },
-        { x0: 0.48, y0: 0.75, dx: -0.02, dy: -0.13, dur: 12500ms },
-    ] : Rectangle {
-        width: 5px;
-        height: 5px;
-        border-radius: 2.5px;
-        background: #e0b23c;
-        property <bool> drift: Math.mod(i, 2) == 0;
-        Timer {
-            interval: e.dur;
-            running: root.anim_on;
-            triggered => { drift = !drift; }
+    // --- Ember drift: warmer bronze motes, rising slowly (still linear) ---
+    // One-way upward wrap — not a bounce — so they feel like rising ash.
+    property <float> ember_t: 0.0;
+    Timer {
+        interval: 50ms;
+        running: root.anim_on;
+        triggered => {
+            // Full rise ~15s (0.0033 × 20/s).
+            ember_t = Math.mod(root.ember_t + 0.0033, 1.0);
         }
-        x: (drift ? e.x0 + e.dx : e.x0) * root.width;
-        y: (drift ? e.y0 + e.dy : e.y0) * root.height;
-        opacity: drift ? 0.10 : 0.32;
-        animate x { duration: e.dur; easing: ease-in-out; }
-        animate y { duration: e.dur; easing: ease-in-out; }
-        animate opacity { duration: e.dur; easing: ease-in-out; }
+    }
+    for e[i] in [
+        { phase: 0.05, x0: 0.18, dx: 0.04 },
+        { phase: 0.28, x0: 0.42, dx: -0.03 },
+        { phase: 0.47, x0: 0.62, dx: 0.025 },
+        { phase: 0.66, x0: 0.78, dx: -0.02 },
+        { phase: 0.84, x0: 0.33, dx: 0.03 },
+    ] : Rectangle {
+        width: 4px;
+        height: 4px;
+        border-radius: 2px;
+        background: #e0b23c;
+        property <float> t: Math.mod(root.ember_t + e.phase, 1.0);
+        // Rise from below the floor to above the canopy, wrap off-screen.
+        property <float> ey: 1.05 - t * 1.20;
+        property <float> ex: e.x0 + t * e.dx;
+        property <float> fade: t < 0.12
+            ? (t / 0.12)
+            : (t > 0.85 ? ((1.0 - t) / 0.15) : 1.0);
+        x: ex * root.width - 2px;
+        y: ey * root.height - 2px;
+        opacity: 0.26 * fade;
     }
 
     // --- Star sparkles: fixed twinkles (stardust over the canopy) ---------
