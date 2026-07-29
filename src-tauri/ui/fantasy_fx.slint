@@ -22,14 +22,14 @@ export component FantasyAtmosphere inherits Rectangle {
 
     // Shared wind clock — wraps 0→1. Motes sample this with a phase offset so
     // the stream never reverses (no ease-in-out ping-pong / "spring" feel).
-    // ~20 Hz is enough for soft dust; much cheaper than per-mote reverse tweens.
+    // 33ms (~30 Hz) keeps dust silky without matching full display refresh.
     property <float> wind_t: 0.0;
     Timer {
-        interval: 50ms;
+        interval: 33ms;
         running: root.anim_on;
         triggered => {
-            // Full sweep ~12.5s (0.004 × 20/s).
-            wind_t = Math.mod(root.wind_t + 0.004, 1.0);
+            // Full sweep ~14s (0.0023 × ~30/s).
+            wind_t = Math.mod(root.wind_t + 0.0023, 1.0);
         }
     }
 
@@ -97,11 +97,11 @@ export component FantasyAtmosphere inherits Rectangle {
     // One-way upward wrap — not a bounce — so they feel like rising ash.
     property <float> ember_t: 0.0;
     Timer {
-        interval: 50ms;
+        interval: 33ms;
         running: root.anim_on;
         triggered => {
-            // Full rise ~15s (0.0033 × 20/s).
-            ember_t = Math.mod(root.ember_t + 0.0033, 1.0);
+            // Full rise ~15s (0.0022 × ~30/s).
+            ember_t = Math.mod(root.ember_t + 0.0022, 1.0);
         }
     }
     for e[i] in [
@@ -129,16 +129,16 @@ export component FantasyAtmosphere inherits Rectangle {
 
     // --- Star sparkles: fixed twinkles (stardust over the canopy) ---------
     for s[i] in [
-        { x: 0.12, y: 0.06, dur: 2200ms },
-        { x: 0.34, y: 0.48, dur: 2700ms },
-        { x: 0.58, y: 0.09, dur: 3100ms },
-        { x: 0.76, y: 0.62, dur: 1900ms },
-        { x: 0.91, y: 0.28, dur: 2500ms },
-        { x: 0.05, y: 0.55, dur: 3400ms },
-        { x: 0.45, y: 0.88, dur: 2800ms },
-        { x: 0.68, y: 0.38, dur: 2300ms },
-        { x: 0.22, y: 0.72, dur: 3000ms },
-        { x: 0.85, y: 0.80, dur: 2600ms },
+        { x: 0.12, y: 0.06, dur: 2800ms },
+        { x: 0.34, y: 0.48, dur: 3400ms },
+        { x: 0.58, y: 0.09, dur: 3800ms },
+        { x: 0.76, y: 0.62, dur: 2400ms },
+        { x: 0.91, y: 0.28, dur: 3200ms },
+        { x: 0.05, y: 0.55, dur: 4000ms },
+        { x: 0.45, y: 0.88, dur: 3600ms },
+        { x: 0.68, y: 0.38, dur: 3000ms },
+        { x: 0.22, y: 0.72, dur: 3700ms },
+        { x: 0.85, y: 0.80, dur: 3300ms },
     ] : Rectangle {
         width: 2px;
         height: 2px;

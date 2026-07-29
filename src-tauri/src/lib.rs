@@ -96,7 +96,7 @@ const STORAGE_TIPS_LIMIT: usize = 12;
 const STORAGE_CACHE_MAX_DRIVES: usize = 6;
 const STORAGE_DUPLICATE_MIN_SIZE: u64 = 64 * 1024 * 1024;
 const INDEX_DB_FILE: &str = ".pathfinder-index.sqlite3";
-const THUMBNAIL_CACHE_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
+const THUMBNAIL_CACHE_LIMIT_BYTES: u64 = 40 * 1024 * 1024;
 const INDEX_ESTIMATE_BYTES_PER_FILE: u64 = 420;
 const MAX_OPERATION_QUEUE_ITEMS: usize = 200;
 // Cap on concurrent heavy background jobs (duplicate scans, preview cache
@@ -8294,7 +8294,7 @@ impl Default for NativeSettings {
             // up scan to expand coverage.
             index_mode: "max".to_string(),
             index_roots: Vec::new(),
-            thumbnail_cache_limit_mb: 50,
+            thumbnail_cache_limit_mb: 40,
             // Auto-update check runs once at startup and lights up the green
             // status-bar pill if a newer release is available. Default true so
             // new installs hear about patches without having to dig into Settings.
@@ -8638,11 +8638,18 @@ struct NativeController {
     pending_operation_result: Arc<Mutex<Option<NativeOperationResult>>>,
     directory_ready: Arc<std::sync::atomic::AtomicBool>,
     pending_directory_result: Arc<Mutex<Option<NativeDirectoryResult>>>,
+    /// Dual-pane secondary async loads (mirrors primary nav_generation).
+    secondary_nav_generation: Arc<AtomicU64>,
+    secondary_directory_ready: Arc<std::sync::atomic::AtomicBool>,
+    pending_secondary_directory_result: Arc<Mutex<Option<NativeDirectoryResult>>>,
     search_ready: Arc<std::sync::atomic::AtomicBool>,
     pending_search_result: Arc<Mutex<Option<NativeSearchResult>>>,
     pending_deferred_startup: Arc<Mutex<Option<DeferredStartupData>>>,
     /// Deferred shell-icon + thumbnail disk reads after the first file list paints.
     enrich_visible_pending: bool,
+    /// Scroll-aware thumb warm for the current grid/list viewport window.
+    enrich_viewport_start: usize,
+    enrich_viewport_end: usize,
     compare_hide_same: bool,
     compare_left: String,
     compare_right: String,
@@ -13707,10 +13714,15 @@ impl NativeController {
             pending_operation_result: Arc::new(Mutex::new(None)),
             directory_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_directory_result: Arc::new(Mutex::new(None)),
+            secondary_nav_generation: Arc::new(AtomicU64::new(0)),
+            secondary_directory_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pending_secondary_directory_result: Arc::new(Mutex::new(None)),
             search_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_search_result: Arc::new(Mutex::new(None)),
             pending_deferred_startup: Arc::new(Mutex::new(None)),
             enrich_visible_pending: false,
+            enrich_viewport_start: 0,
+            enrich_viewport_end: 0,
             compare_hide_same: true,
             compare_left: String::new(),
             compare_right: String::new(),
@@ -14734,8 +14746,8 @@ impl NativeController {
                         slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
                     self.thumbnail_memory
                         .insert(entry.path.clone(), slint::Image::from_rgba8(buf));
-                    // Evict oldest entries when memory cache exceeds 256 thumbnails (~40 MB at 160px)
-                    const MAX_THUMB_CACHE: usize = 256;
+                    // Evict oldest entries when memory cache exceeds ~180 thumbs (~28 MB at 160px)
+                    const MAX_THUMB_CACHE: usize = 180;
                     if self.thumbnail_memory.len() > MAX_THUMB_CACHE {
                         let remove_count = self.thumbnail_memory.len() - MAX_THUMB_CACHE;
                         let keys: Vec<String> = self
@@ -14813,6 +14825,7 @@ impl NativeController {
                 .unwrap_or_else(|| build_breadcrumbs(&self.current_path)),
         ));
         self.update_status(ui);
+        self.sync_grid_window(ui, false);
     }
 
     fn sync_nav_chrome(&mut self, ui: &MainWindow) {
@@ -14846,6 +14859,175 @@ impl NativeController {
         }
         self.enrich_visible_pending = false;
         self.update_file_models(ui);
+    }
+
+    /// Build a viewport-sized FileItem window for grid/gallery so Slint only
+    /// mounts ~visible cells instead of every row in a large folder.
+    fn sync_grid_window(&mut self, ui: &MainWindow, secondary: bool) {
+        let view = ui.get_view_mode().to_string();
+        if view == "list" {
+            if secondary {
+                ui.set_secondary_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
+                ui.set_secondary_grid_window_start(0);
+            } else {
+                ui.set_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
+                ui.set_grid_window_start(0);
+            }
+            return;
+        }
+
+        let cols = if secondary {
+            ui.get_secondary_grid_columns().max(1) as usize
+        } else {
+            ui.get_grid_columns().max(1) as usize
+        };
+        let item_h = if secondary {
+            ui.get_secondary_grid_item_h()
+        } else {
+            ui.get_grid_item_h()
+        };
+        let gap = if secondary {
+            ui.get_secondary_grid_gap()
+        } else {
+            ui.get_grid_gap()
+        };
+        let row_stride = (item_h + gap).max(1.0);
+        let scroll_y = if secondary {
+            ui.get_secondary_list_scroll_y()
+        } else {
+            ui.get_primary_grid_scroll_y()
+        }
+        .abs();
+        let viewport_h = if secondary {
+            ui.get_secondary_grid_viewport_h()
+        } else {
+            ui.get_primary_grid_viewport_h()
+        }
+        .max(120.0);
+
+        let files = if secondary {
+            &self.secondary_visible_files
+        } else {
+            &self.visible_files
+        };
+        let selected = if secondary {
+            &self.secondary_selected_set
+        } else {
+            &self.selected_set
+        };
+        let total = files.len();
+        if total == 0 || cols == 0 {
+            if secondary {
+                ui.set_secondary_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
+                ui.set_secondary_grid_window_start(0);
+            } else {
+                ui.set_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
+                ui.set_grid_window_start(0);
+            }
+            return;
+        }
+
+        let first_row = ((scroll_y / row_stride) as isize - 1).max(0) as usize;
+        let visible_rows = ((viewport_h / row_stride).ceil() as usize).saturating_add(3);
+        let start = (first_row * cols).min(total);
+        let end = (start + visible_rows * cols).min(total);
+
+        // Warm disk thumbs for the window (cheap exists()+decode).
+        for entry in files.iter().take(end).skip(start) {
+            let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
+            if !is_thumbnail_image_ext(&ext) || self.thumbnail_memory.contains_key(&entry.path) {
+                continue;
+            }
+            let disk_key = thumbnail_cache_key(Path::new(&entry.path), entry.modified, 160);
+            let thumb_path = thumbnail_cache_dir().join(format!("{disk_key}.jpg"));
+            if !thumb_path.exists() {
+                continue;
+            }
+            if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
+                let (w, h) = img.dimensions();
+                let raw = img.into_raw();
+                let buf =
+                    slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
+                self.thumbnail_memory
+                    .insert(entry.path.clone(), slint::Image::from_rgba8(buf));
+            }
+        }
+
+        let max_file_size = files
+            .iter()
+            .filter(|e| e.kind != FileKind::Directory)
+            .map(|e| e.size)
+            .max()
+            .unwrap_or(0);
+        let items: Vec<FileItem> = files[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                self.file_item(entry, selected.contains(&(start + i)), max_file_size)
+            })
+            .collect();
+
+        if secondary {
+            ui.set_secondary_grid_window_start(start as i32);
+            ui.set_secondary_grid_window_files(model_from_vec(items));
+        } else {
+            ui.set_grid_window_start(start as i32);
+            ui.set_grid_window_files(model_from_vec(items));
+        }
+        self.enrich_viewport_start = start;
+        self.enrich_viewport_end = end;
+
+        // Generate missing thumbs for newly visible images (off UI thread).
+        let image_entries: Vec<(String, u64)> = files[start..end]
+            .iter()
+            .filter(|e| is_thumbnail_image_ext(e.extension.as_deref().unwrap_or("")))
+            .filter(|e| !self.thumbnail_memory.contains_key(&e.path))
+            .take(32)
+            .map(|e| (e.path.clone(), e.modified))
+            .collect();
+        if !image_entries.is_empty() {
+            let ready_flag = self.thumbnail_ready.clone();
+            THUMBNAIL_POOL.spawn(move || {
+                for (path, mtime) in image_entries {
+                    let pb = PathBuf::from(&path);
+                    let ck = thumbnail_cache_key(&pb, mtime, 160);
+                    let thumb = thumbnail_cache_dir().join(format!("{ck}.jpg"));
+                    if thumb.exists() {
+                        continue;
+                    }
+                    if let Ok(img) = image::open(&pb) {
+                        if img.width() <= 8192 && img.height() <= 8192 {
+                            let t = img.thumbnail(160, 160);
+                            let mut buf = Vec::new();
+                            if t
+                                .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+                                .is_ok()
+                            {
+                                let _ = store_thumbnail_on_disk(
+                                    &pb,
+                                    mtime,
+                                    160,
+                                    &buf,
+                                    THUMBNAIL_CACHE_LIMIT_BYTES,
+                                );
+                            }
+                        }
+                    }
+                }
+                ready_flag.store(true, Ordering::Release);
+            });
+        }
+    }
+
+    /// Apply a scroll/viewport sync request from Slint (debounced there).
+    fn on_sync_grid_windows(&mut self, ui: &MainWindow) {
+        if ui.get_view_mode().as_str() == "list" {
+            return;
+        }
+        self.sync_grid_window(ui, false);
+        if ui.get_dual_pane() {
+            self.sync_grid_window(ui, true);
+        }
     }
 
     fn update_models(&mut self, ui: &MainWindow) {
@@ -14889,6 +15071,9 @@ impl NativeController {
         ui.set_selected_index(self.selected_index);
         self.sync_selection_count_to_ui(ui);
         self.update_status(ui);
+        if ui.get_view_mode().as_str() != "list" {
+            self.sync_grid_window(ui, false);
+        }
     }
 
     /// Pull system icons for the first `max_entries` visible files. Per-path
@@ -17360,9 +17545,13 @@ impl NativeController {
             tab.view = mode.to_string();
         }
         self.save_session();
-        // If switching to grid/gallery, trigger thumbnail loading
+        // If switching to grid/gallery, trigger thumbnail loading + window rebuild
         if mode != "list" {
             self.update_models(ui);
+            self.on_sync_grid_windows(ui);
+        } else {
+            ui.set_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
+            ui.set_secondary_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
         }
     }
 
@@ -17547,7 +17736,7 @@ impl NativeController {
         if !warnings.is_empty() {
             ui.set_status_right(ss(format!(
                 "{search_root} | {}",
-                warnings.join(" Â· ")
+                warnings.join(" · ")
             )));
         }
 
@@ -17592,8 +17781,53 @@ impl NativeController {
         };
         let prefer_live_first = self.search_all_scope || is_drive_root;
         std::thread::spawn(move || {
+            // Run index, Windows Search, and live scan concurrently. Merge and
+            // publish as each finishes so drive-wide queries paint fast hits
+            // without waiting on the disk walk.
+            enum Part {
+                Index(Vec<FileEntry>),
+                Windows(Vec<FileEntry>),
+                Live(Vec<FileEntry>),
+            }
+            let (tx, rx) = std::sync::mpsc::channel::<Part>();
+
+            let index_limit = if prefer_live_first { 400.max(limit / 4) } else { limit };
+            {
+                let tx = tx.clone();
+                let path = path.clone();
+                let query = query.clone();
+                std::thread::spawn(move || {
+                    let indexed = index_search(&path, &query, index_limit).unwrap_or_default();
+                    let _ = tx.send(Part::Index(indexed));
+                });
+            }
+            {
+                let tx = tx.clone();
+                let path = path.clone();
+                let query = query.clone();
+                std::thread::spawn(move || {
+                    let windows =
+                        windows_index_search_impl(&query, &path, limit).unwrap_or_default();
+                    let _ = tx.send(Part::Windows(windows));
+                });
+            }
+            {
+                let tx = tx.clone();
+                let state = state.clone();
+                let path = path.clone();
+                let query = query.clone();
+                std::thread::spawn(move || {
+                    let live = live_search_scan(&state, &path, &query, limit, token);
+                    let _ = tx.send(Part::Live(live));
+                });
+            }
+            drop(tx);
+
             let mut results = Vec::new();
             let mut source = String::new();
+            let mut got_index = false;
+            let mut got_windows = false;
+            let mut got_live = false;
 
             let emit = |entries: &[FileEntry], source: &str, partial: bool| {
                 if entries.is_empty() && partial {
@@ -17612,88 +17846,53 @@ impl NativeController {
                 );
             };
 
-            if prefer_live_first {
-                let live = live_search_scan(&state, &path, &query, limit, token);
+            let push_source = |source: &mut String, label: &str| {
+                if source.is_empty() {
+                    *source = label.to_string();
+                } else if !source.contains(label) {
+                    source.push_str(" + ");
+                    source.push_str(label);
+                }
+            };
+
+            while let Ok(part) = rx.recv() {
                 if state.search_generation.load(Ordering::SeqCst) != token {
                     return;
                 }
-                if !live.is_empty() {
-                    let _ = upsert_index_entries(&live);
-                    merge_search_entries(&mut results, live, limit);
-                    source = "live scan".to_string();
-                    emit(&results, &source, true);
-                }
-            }
-
-            if results.len() < limit {
-                if let Ok(indexed) =
-                    index_search(&path, &query, limit.saturating_sub(results.len()))
-                {
-                    if !indexed.is_empty() {
-                        merge_search_entries(&mut results, indexed, limit);
-                        source = if source.is_empty() {
-                            "Pathfinder index".to_string()
-                        } else {
-                            format!("{source} + Pathfinder index")
-                        };
-                        emit(&results, &source, true);
+                match part {
+                    Part::Index(indexed) => {
+                        got_index = true;
+                        if !indexed.is_empty() {
+                            merge_search_entries(&mut results, indexed, limit);
+                            push_source(&mut source, "Pathfinder index");
+                            emit(&results, &source, true);
+                        }
+                    }
+                    Part::Windows(windows_results) => {
+                        got_windows = true;
+                        if !windows_results.is_empty() {
+                            let _ = upsert_index_entries(&windows_results);
+                            merge_search_entries(&mut results, windows_results, limit);
+                            push_source(&mut source, "Windows Search");
+                            emit(&results, &source, true);
+                        }
+                    }
+                    Part::Live(live) => {
+                        got_live = true;
+                        if !live.is_empty() {
+                            let _ = upsert_index_entries(&live);
+                            merge_search_entries(&mut results, live, limit);
+                            push_source(&mut source, "live scan");
+                            emit(&results, &source, true);
+                        }
                     }
                 }
-            }
-
-            if state.search_generation.load(Ordering::SeqCst) != token {
-                return;
-            }
-
-            if results.is_empty() {
-                if let Ok(windows_results) = windows_index_search_impl(&query, &path, limit) {
-                    if !windows_results.is_empty() {
-                        let _ = upsert_index_entries(&windows_results);
-                        merge_search_entries(&mut results, windows_results, limit);
-                        source = "Windows Search".to_string();
-                        emit(&results, &source, true);
-                    }
+                if got_index && got_windows && got_live {
+                    break;
                 }
-            } else if let Ok(windows_results) = windows_index_search_impl(&query, &path, limit) {
-                if !windows_results.is_empty() {
-                    let _ = upsert_index_entries(&windows_results);
-                    merge_search_entries(&mut results, windows_results, limit);
-                    source = if source.is_empty() {
-                        "Windows Search".to_string()
-                    } else {
-                        format!("{source} + Windows Search")
-                    };
-                    emit(&results, &source, true);
-                }
-            }
-
-            if state.search_generation.load(Ordering::SeqCst) != token {
-                return;
-            }
-
-            if results.len() < limit && !prefer_live_first {
-                let live = live_search_scan(
-                    &state,
-                    &path,
-                    &query,
-                    limit.saturating_sub(results.len()),
-                    token,
-                );
-                if state.search_generation.load(Ordering::SeqCst) != token {
-                    return;
-                }
-                if !live.is_empty() {
-                    let _ = upsert_index_entries(&live);
-                    merge_search_entries(&mut results, live, limit);
-                    source = if source.contains("Windows") {
-                        "Pathfinder index + Windows Search + live scan".to_string()
-                    } else if source.is_empty() {
-                        "live scan".to_string()
-                    } else {
-                        format!("{source} + live scan")
-                    };
-                    emit(&results, &source, true);
-                }
+                // Folder-scoped: once index+Windows arrived with enough hits,
+                // we still wait for live (already running) but UI already painted.
+                let _ = prefer_live_first;
             }
 
             if state.search_generation.load(Ordering::SeqCst) != token {
@@ -17944,6 +18143,7 @@ impl NativeController {
         ui.set_secondary_files(model.clone());
         ui.set_secondary_path(ss(&self.secondary_path));
         self.secondary_files_model = Some(model);
+        self.sync_grid_window(ui, true);
     }
 
     fn update_secondary_selection_in_model(&mut self, ui: &MainWindow, changed: &[usize]) {
@@ -17974,6 +18174,9 @@ impl NativeController {
         }
         ui.set_selected_index(self.secondary_selected_index);
         self.sync_selection_count_to_ui(ui);
+        if ui.get_view_mode().as_str() != "list" {
+            self.sync_grid_window(ui, true);
+        }
     }
 
     fn secondary_navigate(&mut self, ui: &MainWindow, path: String) {
@@ -17998,25 +18201,173 @@ impl NativeController {
         self.secondary_selected_index = -1;
         self.secondary_selected_set.clear();
         self.secondary_select_anchor = -1;
+        self.sync_active_pane(ui);
 
-        // Prefer cache for instant dual-pane paints. Soft F5 invalidates first
-        // (see refresh), so a refresh still hits disk via list_directory_uncached.
-        let entries = if let Some(cached) = self.app_state.cached_directory(&path) {
-            cached
-        } else {
-            match list_directory_uncached(Path::new(&path)) {
-                Ok(entries) => {
-                    self.app_state.store_directory(&path, entries.clone());
-                    entries
+        // Cache hit: paint immediately (same as primary).
+        if let Some(cached) = self.app_state.cached_directory(&path) {
+            self.secondary_files = cached.clone();
+            self.secondary_visible_files = cached;
+            self.apply_secondary_sort();
+            self.update_secondary_models(ui);
+            self.sync_selection_count_to_ui(ui);
+            self.schedule_secondary_viewport_thumbs(ui);
+            return;
+        }
+
+        // Async chunked load — mirrors primary so large folders don't freeze.
+        let token = self
+            .secondary_nav_generation
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        self.secondary_files.clear();
+        self.secondary_visible_files.clear();
+        self.secondary_files_model = None;
+        ui.set_secondary_files(model_from_vec(Vec::<FileItem>::new()));
+        ui.set_secondary_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
+        ui.set_secondary_grid_window_start(0);
+        ui.set_secondary_path(ss(&path));
+        self.sync_selection_count_to_ui(ui);
+
+        let ready = self.secondary_directory_ready.clone();
+        let pending = self.pending_secondary_directory_result.clone();
+        let generation = self.secondary_nav_generation.clone();
+        let state = self.app_state.clone();
+        std::thread::spawn(move || {
+            let page = match list_directory_chunk(Path::new(&path), FIRST_DIRECTORY_CHUNK) {
+                Ok(page) => page,
+                Err(err) => {
+                    if generation.load(Ordering::SeqCst) != token {
+                        return;
+                    }
+                    if let Ok(mut lock) = pending.lock() {
+                        *lock = Some(NativeDirectoryResult {
+                            path: path.clone(),
+                            entries: Vec::new(),
+                            generation: token,
+                            partial: false,
+                            skipped_entries: 0,
+                            error: Some(err),
+                        });
+                    }
+                    ready.store(true, Ordering::Release);
+                    return;
                 }
-                Err(_) => Vec::new(),
+            };
+            if generation.load(Ordering::SeqCst) != token {
+                return;
             }
-        };
-        self.secondary_files = entries.clone();
-        self.secondary_visible_files = entries;
+            if !page.partial {
+                state.store_directory(&path, page.entries.clone());
+                schedule_index_directory(path.clone(), page.entries.clone());
+            }
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(NativeDirectoryResult {
+                    path: path.clone(),
+                    entries: page.entries,
+                    generation: token,
+                    partial: page.partial,
+                    skipped_entries: page.skipped_entries,
+                    error: None,
+                });
+            }
+            ready.store(true, Ordering::Release);
+        });
+    }
+
+    fn apply_secondary_directory_listing(
+        &mut self,
+        ui: &MainWindow,
+        path: String,
+        page: DirectoryPage,
+    ) {
+        if !same_path_string(&self.secondary_path, &path) {
+            return;
+        }
+        let partial = page.partial;
+        self.secondary_files = page.entries.clone();
+        self.secondary_visible_files = page.entries;
         self.apply_secondary_sort();
         self.update_secondary_models(ui);
         self.sync_selection_count_to_ui(ui);
+        self.schedule_secondary_viewport_thumbs(ui);
+        if partial {
+            self.schedule_full_secondary_directory_load(path);
+        }
+    }
+
+    fn schedule_full_secondary_directory_load(&mut self, path: String) {
+        let state = self.app_state.clone();
+        let ready = self.secondary_directory_ready.clone();
+        let pending = self.pending_secondary_directory_result.clone();
+        let generation = self.secondary_nav_generation.load(Ordering::SeqCst);
+        std::thread::spawn(move || {
+            match list_directory_uncached(Path::new(&path)) {
+                Ok(entries) => {
+                    state.store_directory(&path, entries.clone());
+                    let _ = index_directory_entries(&path, &entries);
+                    if let Ok(mut lock) = pending.lock() {
+                        *lock = Some(NativeDirectoryResult {
+                            path,
+                            entries,
+                            generation,
+                            partial: false,
+                            skipped_entries: 0,
+                            error: None,
+                        });
+                    }
+                    ready.store(true, Ordering::Release);
+                }
+                Err(_) => {}
+            }
+        });
+    }
+
+    fn schedule_secondary_viewport_thumbs(&mut self, ui: &MainWindow) {
+        let start = self.enrich_viewport_start;
+        let end = self.enrich_viewport_end.max(start).min(self.secondary_visible_files.len());
+        let image_entries: Vec<(String, u64)> = self
+            .secondary_visible_files
+            .get(start..end)
+            .into_iter()
+            .flatten()
+            .filter(|e| is_thumbnail_image_ext(e.extension.as_deref().unwrap_or("")))
+            .take(48)
+            .map(|e| (e.path.clone(), e.modified))
+            .collect();
+        if image_entries.is_empty() {
+            return;
+        }
+        let ready_flag = self.thumbnail_ready.clone();
+        THUMBNAIL_POOL.spawn(move || {
+            for (path, mtime) in image_entries {
+                let pb = PathBuf::from(&path);
+                let ck = thumbnail_cache_key(&pb, mtime, 160);
+                let thumb = thumbnail_cache_dir().join(format!("{ck}.jpg"));
+                if thumb.exists() {
+                    continue;
+                }
+                if let Ok(img) = image::open(&pb) {
+                    if img.width() <= 8192 && img.height() <= 8192 {
+                        let t = img.thumbnail(160, 160);
+                        let mut buf = Vec::new();
+                        if t
+                            .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+                            .is_ok()
+                        {
+                            let _ = store_thumbnail_on_disk(
+                                &pb,
+                                mtime,
+                                160,
+                                &buf,
+                                THUMBNAIL_CACHE_LIMIT_BYTES,
+                            );
+                        }
+                    }
+                }
+            }
+            ready_flag.store(true, Ordering::Release);
+        });
+        let _ = ui;
     }
 
     fn secondary_go_back(&mut self, ui: &MainWindow) {
@@ -22886,7 +23237,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
-    // Debounce: keystroke fires search_requested -> 200ms timer -> search()
+    // Debounce: keystroke fires search_requested -> short timer -> search().
+    // Drive-wide queries use a slightly longer debounce so rapid typing
+    // doesn't spawn overlapping whole-drive live scans.
     let search_debounce = Rc::new(slint::Timer::default());
     let weak = ui.as_weak();
     let c = controller.clone();
@@ -22895,9 +23248,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let q = query.to_string();
         let weak2 = weak.clone();
         let c2 = c.clone();
+        let drive_wide = c
+            .borrow()
+            .search_all_scope
+            || is_filesystem_root(std::path::Path::new(&c.borrow().search_root()));
+        let delay_ms = if drive_wide { 280 } else { 160 };
         sd.start(
             slint::TimerMode::SingleShot,
-            Duration::from_millis(200),
+            Duration::from_millis(delay_ms),
             move || {
                 if let Some(ui) = weak2.upgrade() {
                     c2.borrow_mut().search(&ui, q.clone());
@@ -22906,10 +23264,12 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         );
     });
 
-    // Enter key: immediate search without debounce
+    // Enter key: cancel pending debounce, then search immediately.
     let weak = ui.as_weak();
     let c = controller.clone();
+    let sd_imm = search_debounce.clone();
     ui.on_search_immediate(move |query| {
+        sd_imm.stop();
         if let Some(ui) = weak.upgrade() {
             let q = query.to_string();
             let mut ctrl = c.borrow_mut();
@@ -22955,6 +23315,24 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut().set_view(&ui, &mode);
         }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    let grid_sync_debounce = Rc::new(slint::Timer::default());
+    let gsd = grid_sync_debounce.clone();
+    ui.on_sync_grid_windows(move || {
+        let weak2 = weak.clone();
+        let c2 = c.clone();
+        gsd.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(40),
+            move || {
+                if let Some(ui) = weak2.upgrade() {
+                    c2.borrow_mut().on_sync_grid_windows(&ui);
+                }
+            },
+        );
     });
 
     let weak = ui.as_weak();
@@ -24075,6 +24453,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let ai_progress_for_ui = controller.borrow().ai_progress.clone();
         let dir_ready = controller.borrow().directory_ready.clone();
         let pending_dir = controller.borrow().pending_directory_result.clone();
+        let sec_dir_ready = controller.borrow().secondary_directory_ready.clone();
+        let pending_sec_dir = controller.borrow().pending_secondary_directory_result.clone();
         let search_ready = controller.borrow().search_ready.clone();
         let pending_search = controller.borrow().pending_search_result.clone();
         let preview_ready = controller.borrow().preview_ready.clone();
@@ -24085,12 +24465,40 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let idle_poll_skips = Rc::new(Cell::new(0u8));
         let idle_skips_cell = idle_poll_skips.clone();
         // 200ms tick when work is pending; skips every other tick when idle.
+        // When minimized, skip more aggressively and pause theme atmospheres.
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(200),
             move || {
                 if let Some(ui) = weak.upgrade() {
-                    if let Ok(mut ctrl) = c.try_borrow_mut() {
+                    let mut minimized = false;
+                    #[cfg(target_os = "windows")]
+                    {
+                        use i_slint_backend_winit::WinitWindowAccessor;
+                        minimized = ui
+                            .window()
+                            .with_winit_window(|w| w.is_minimized().unwrap_or(false))
+                            .unwrap_or(false);
+                        if ui.get_window_occluded() != minimized {
+                            ui.set_window_occluded(minimized);
+                        }
+                        // Battery check is cheap but not free — sample every ~5s.
+                        let skips = idle_skips_cell.get();
+                        if skips.is_multiple_of(25) {
+                            let saver = !indexing_permitted();
+                            if ui.get_power_saver() != saver {
+                                ui.set_power_saver(saver);
+                            }
+                        }
+                    }
+                    if minimized {
+                        // Keep ready flags; only pump every 5th idle tick.
+                        let skips = idle_skips_cell.get();
+                        if !skips.is_multiple_of(5) {
+                            idle_skips_cell.set(skips.wrapping_add(1));
+                            return;
+                        }
+                    } else if let Ok(mut ctrl) = c.try_borrow_mut() {
                         ctrl.apply_deferred_startup_if_ready(&ui);
                         ctrl.pump_visible_enrichment(&ui);
                     }
@@ -24100,6 +24508,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let git_fired = git_ready.swap(false, Ordering::AcqRel);
                 let op_fired = op_ready.swap(false, Ordering::AcqRel);
                 let dir_pending = dir_ready.load(Ordering::Acquire);
+                let sec_dir_pending = sec_dir_ready.load(Ordering::Acquire);
                 let search_pending = search_ready.load(Ordering::Acquire);
                 let preview_pending = preview_ready.load(Ordering::Acquire);
                 let storage_pending = {
@@ -24114,13 +24523,23 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     || git_fired
                     || op_fired
                     || dir_pending
+                    || sec_dir_pending
                     || search_pending
                     || preview_pending
                     || storage_pending;
                 if !work_pending {
                     let skips = idle_skips_cell.get();
                     idle_skips_cell.set(skips.wrapping_add(1));
-                    if skips.is_multiple_of(2) {
+                    // When minimized we already gated on %5 above; don't
+                    // double-skip with the normal every-other-tick idle gate.
+                    #[cfg(target_os = "windows")]
+                    let minimized_now = weak
+                        .upgrade()
+                        .map(|ui| ui.get_window_occluded())
+                        .unwrap_or(false);
+                    #[cfg(not(target_os = "windows"))]
+                    let minimized_now = false;
+                    if !minimized_now && skips.is_multiple_of(2) {
                         return;
                     }
                 } else {
@@ -24225,6 +24644,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     prev_ai_cell.set(ai_state);
                 }
                 let dir_fired = dir_ready.swap(false, Ordering::AcqRel);
+                let sec_dir_fired = sec_dir_ready.swap(false, Ordering::AcqRel);
                 let search_fired = search_ready.swap(false, Ordering::AcqRel);
                 let preview_fired = preview_ready.swap(false, Ordering::AcqRel);
                 if preview_fired {
@@ -24331,6 +24751,31 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                             }
                         }
                     }
+                    if sec_dir_fired {
+                        let result = pending_sec_dir.lock().ok().and_then(|mut lock| lock.take());
+                        if let Some(result) = result {
+                            if let Ok(mut ctrl) = c.try_borrow_mut() {
+                                if ctrl.secondary_nav_generation.load(Ordering::SeqCst)
+                                    != result.generation
+                                {
+                                    // Stale secondary nav — ignore.
+                                } else if same_path_string(&ctrl.secondary_path, &result.path) {
+                                    if let Some(err) = result.error {
+                                        ctrl.show_toast_kind(&ui, err, "error");
+                                    } else {
+                                        let page = DirectoryPage {
+                                            entries: result.entries,
+                                            partial: result.partial,
+                                            skipped_entries: result.skipped_entries,
+                                        };
+                                        ctrl.apply_secondary_directory_listing(
+                                            &ui, result.path, page,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if search_fired {
                         let result = pending_search.lock().ok().and_then(|mut lock| lock.take());
                         if let Some(result) = result {
@@ -24417,6 +24862,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     if thumb_fired || git_fired {
                         if let Ok(mut ctrl) = c.try_borrow_mut() {
                             ctrl.update_file_models(&ui);
+                            if ui.get_view_mode().as_str() != "list" {
+                                ctrl.on_sync_grid_windows(&ui);
+                            }
                         }
                     }
                 }
@@ -26459,6 +26907,9 @@ pub fn run() {
     }
 
     let _ = slint::platform::set_platform(Box::new(
+        // FemtoVG (OpenGL) — vsync is on by default via winit/glutin, which
+        // caps theme animation cost to the display refresh and saves power.
+        // Skia is faster but currently fails to link against windows-rs ICU.
         i_slint_backend_winit::Backend::new().expect("failed to create Slint winit backend"),
     ));
 

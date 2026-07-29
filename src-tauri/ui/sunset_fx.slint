@@ -145,8 +145,8 @@ export component SunsetAtmosphere inherits Rectangle {
 
     // Two birds gliding across (sparse — not a flock).
     for bird[i] in [
-        { x0: 0.08, y: 0.14, dx: 0.72, dur: 9000ms },
-        { x0: 0.70, y: 0.28, dx: -0.55, dur: 7000ms },
+        { x0: 0.08, y: 0.14, dx: 0.72, dur: 11000ms },
+        { x0: 0.70, y: 0.28, dx: -0.55, dur: 9000ms },
     ]: Rectangle {
         width: 6px;
         height: 2px;
@@ -160,6 +160,7 @@ export component SunsetAtmosphere inherits Rectangle {
             triggered => { flown = !flown; }
         }
         x: (flown ? bird.x0 + bird.dx : bird.x0) * root.width;
-        animate x { duration: bird.dur; easing: linear; }
+        // Soft ease keeps glides from looking stepped on low refresh.
+        animate x { duration: bird.dur; easing: ease-in-out; }
     }
 }

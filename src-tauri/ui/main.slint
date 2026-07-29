@@ -956,8 +956,8 @@ component NodeVisual {
         height: parent.height;
         background: transparent;
         animate y {
-            duration: root.hovered ? 160ms : 0ms;
-            easing: ease-out;
+            duration: root.hovered ? 260ms : 0ms;
+            easing: ease-in-out;
         }
         // Folder tab - chunky block on top-left
         Rectangle {
@@ -1045,8 +1045,8 @@ component NodeVisual {
         height: parent.height;
         background: transparent;
         animate y {
-            duration: root.hovered ? 160ms : 0ms;
-            easing: ease-out;
+            duration: root.hovered ? 260ms : 0ms;
+            easing: ease-in-out;
         }
         // Soft sun glow only while hovered — avoids continuous opacity work on every row.
         if root.hovered: Rectangle {
@@ -1090,7 +1090,7 @@ component NodeVisual {
         width: parent.width;
         height: parent.height;
         background: transparent;
-        animate y { duration: 180ms; easing: ease-out; }
+        animate y { duration: 260ms; easing: ease-in-out; }
         // Lid (rounded top half)
         Rectangle {
             x: parent.width * 0.06;
@@ -3373,6 +3373,10 @@ export component MainWindow inherits Window {
     forward-focus: keys;
 
     in-out property <[FileItem]> files;
+    // Viewport window for grid/gallery — only these cells are mounted.
+    in-out property <[FileItem]> grid_window_files;
+    in-out property <int> grid_window_start: 0;
+    in-out property <length> primary_grid_viewport_h: 400px;
     in-out property <[SideItem]> side_items;
     in-out property <[TabItem]> tabs;
     in-out property <[ChoiceItem]> theme_choices;
@@ -3394,15 +3398,20 @@ export component MainWindow inherits Window {
     in-out property <string> active_theme: "mica-dark";
     in-out property <string> active_accent: "blue";
     in-out property <string> active_density: "cozy";
+    // True while the OS window is minimized/occluded — atmospheres pause so
+    // we don't burn GPU/CPU on invisible theme motion.
+    in-out property <bool> window_occluded: false;
+    // True on low battery (unplugged, <20%) — pauses decorative atmospheres.
+    in-out property <bool> power_saver: false;
     // Decorative theme atmospheres + animated relics. Persisted in settings.json.
     in-out property <bool> theme_animations: true;
     // Sunset solar cycle — shared by atmosphere + content-pane sky wash.
     // Phase 0 = late afternoon (high), 1 = on the horizon.
-    // Continuous Slint animation (not stepped) so the disc and sky washes
-    // ease smoothly; the timer only flips the target endpoint.
+    // Continuous Slint animation so the disc and sky washes ease smoothly;
+    // ease-in-out slows near the horizon like real solar motion.
     property <bool> sunset_descending: false;
     property <float> sunset_phase: root.sunset_descending ? 1.0 : 0.0;
-    animate sunset_phase { duration: 70000ms; easing: linear; }
+    animate sunset_phase { duration: 75000ms; easing: ease-in-out; }
     // Western arc: drifts right while falling on a soft parabola.
     property <float> sunset_sun_cx: 0.14 + root.sunset_phase * 0.72;
     property <float> sunset_sun_cy: 0.05 + root.sunset_phase * root.sunset_phase * 0.62;
@@ -3668,6 +3677,9 @@ export component MainWindow inherits Window {
     // a negative value means indeterminate (show a pulsing bar instead).
     in-out property <float> op_drawer_progress: -1;
     in-out property <[FileItem]> secondary_files;
+    in-out property <[FileItem]> secondary_grid_window_files;
+    in-out property <int> secondary_grid_window_start: 0;
+    in-out property <length> secondary_grid_viewport_h: 400px;
     in-out property <string> secondary_path: "";
     in-out property <string> secondary_sort_by: "modified";
     in-out property <string> secondary_sort_dir: "desc";
@@ -3704,6 +3716,7 @@ export component MainWindow inherits Window {
     callback set_clip_search_enabled(bool);
     callback address_changed(string);
     callback set_view(string);
+    callback sync_grid_windows();
     callback toggle_preview();
     callback toggle_dual_pane();
     callback toggle_hidden();
@@ -3833,15 +3846,15 @@ export component MainWindow inherits Window {
     property <length> sidebar_w_target: 238px;
     out property <length> sidebar_w: sidebar_w_target;
     animate sidebar_w {
-        duration: 72ms;
-        easing: ease-out;
+        duration: 140ms;
+        easing: ease-in-out;
     }
 
     property <float> split_ratio_target: 0.5;
     property <float> split_ratio: split_ratio_target;
     animate split_ratio {
-        duration: 64ms;
-        easing: ease-out;
+        duration: 130ms;
+        easing: ease-in-out;
     }
     property <length> title_h: 36px;
     // Simple mode uses a true two-row toolbar: navigation cluster + address bar
@@ -3862,8 +3875,8 @@ export component MainWindow inherits Window {
     property <length> preview_w_user_target: 326px;
     in-out property <length> preview_w_user: preview_w_user_target;
     animate preview_w_user {
-        duration: 72ms;
-        easing: ease-out;
+        duration: 140ms;
+        easing: ease-in-out;
     }
     property <length> preview_w: root.preview_visible ? max(220px, min(640px, root.preview_w_user)) : 0px;
     property <length> main_content_w: root.width - root.sidebar_w - root.preview_w;
@@ -3876,19 +3889,20 @@ export component MainWindow inherits Window {
     // the scroll bar without needing per-view tweaks.
     property <length> file_area_w: root.primary_pane_w - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
     property <length> secondary_file_area_w: root.secondary_pane_w - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
-    property <int> grid_columns: Math.max(1, Math.floor(root.file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
-    property <int> secondary_grid_columns: Math.max(1, Math.floor(root.secondary_file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
+    // `out` so Rust can read geometry when building the grid viewport window.
+    out property <int> grid_columns: Math.max(1, Math.floor(root.file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
+    out property <int> secondary_grid_columns: Math.max(1, Math.floor(root.secondary_file_area_w / (root.view_mode == "compact" ? 200px : AppMetrics.grid_w)));
     property <length> grid_cell_w: root.file_area_w / root.grid_columns;
     property <length> secondary_grid_cell_w: root.secondary_file_area_w / root.secondary_grid_columns;
-    property <length> grid_item_h: root.view_mode == "gallery"
+    out property <length> grid_item_h: root.view_mode == "gallery"
         ? (154px * root.thumb_size_scale)
         : (root.view_mode == "compact" ? 32px : (AppMetrics.grid_h * root.thumb_size_scale));
-    property <length> secondary_grid_item_h: root.grid_item_h;
+    out property <length> secondary_grid_item_h: root.grid_item_h;
     property <int> grid_rows: (root.files.length + root.grid_columns - 1) / root.grid_columns;
     property <int> secondary_grid_rows: (root.secondary_files.length + root.secondary_grid_columns - 1) / root.secondary_grid_columns;
     // gap on each side of each grid cell for uniform spacing
-    property <length> grid_gap: root.view_mode == "compact" ? 2px : 8px;
-    property <length> secondary_grid_gap: root.grid_gap;
+    out property <length> grid_gap: root.view_mode == "compact" ? 2px : 8px;
+    out property <length> secondary_grid_gap: root.grid_gap;
 
     in-out property <float> nav_opacity: 1.0;
 
@@ -5459,6 +5473,13 @@ export component MainWindow inherits Window {
                     viewport-y <=> root.primary_grid_scroll_y;
                     viewport-width: parent.width - AppMetrics.pad * 2;
                     viewport-height: Math.max(parent.height - AppMetrics.pad * 2, root.grid_rows * (root.grid_item_h + root.grid_gap));
+                    changed height => {
+                        root.primary_grid_viewport_h = self.height;
+                        root.sync_grid_windows();
+                    }
+                    changed viewport-y => {
+                        root.sync_grid_windows();
+                    }
 
                     // Background marquee + click-to-deselect underneath grid/gallery
                     // rows. Same drag-rectangle behavior as the list view; marquee
@@ -5540,12 +5561,13 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    for file[index] in root.files: FileRow {
-                        x: Math.mod(index, root.grid_columns) * root.grid_cell_w + root.grid_gap / 2;
-                        y: Math.floor(index / root.grid_columns) * (root.grid_item_h + root.grid_gap);
+                    // Windowed cells — absolute index = grid_window_start + index.
+                    for file[index] in root.grid_window_files: FileRow {
+                        x: Math.mod(root.grid_window_start + index, root.grid_columns) * root.grid_cell_w + root.grid_gap / 2;
+                        y: Math.floor((root.grid_window_start + index) / root.grid_columns) * (root.grid_item_h + root.grid_gap);
                         width: root.grid_cell_w - root.grid_gap;
                         item: file;
-                        index: index;
+                        index: root.grid_window_start + index;
                         view_mode: root.view_mode;
                         rename_index: root.active_pane == "primary" ? root.rename_index : -1;
                         drag_target_path: root.drag_target_path;
@@ -6076,13 +6098,20 @@ export component MainWindow inherits Window {
                     viewport-y <=> root.secondary_list_scroll_y;
                     viewport-width: parent.width - AppMetrics.pad * 2;
                     viewport-height: Math.max(parent.height - 38px - AppMetrics.pad * 2, root.secondary_grid_rows * (root.secondary_grid_item_h + root.secondary_grid_gap));
+                    changed height => {
+                        root.secondary_grid_viewport_h = self.height;
+                        root.sync_grid_windows();
+                    }
+                    changed viewport-y => {
+                        root.sync_grid_windows();
+                    }
 
-                    for file[index] in root.secondary_files: FileRow {
-                        x: Math.mod(index, root.secondary_grid_columns) * root.secondary_grid_cell_w + root.secondary_grid_gap / 2;
-                        y: Math.floor(index / root.secondary_grid_columns) * (root.secondary_grid_item_h + root.secondary_grid_gap);
+                    for file[index] in root.secondary_grid_window_files: FileRow {
+                        x: Math.mod(root.secondary_grid_window_start + index, root.secondary_grid_columns) * root.secondary_grid_cell_w + root.secondary_grid_gap / 2;
+                        y: Math.floor((root.secondary_grid_window_start + index) / root.secondary_grid_columns) * (root.secondary_grid_item_h + root.secondary_grid_gap);
                         width: root.secondary_grid_cell_w - root.secondary_grid_gap;
                         item: file;
-                        index: index;
+                        index: root.secondary_grid_window_start + index;
                         view_mode: root.view_mode;
                         rename_index: root.active_pane == "secondary" ? root.rename_index : -1;
                         drag_target_path: root.drag_target_path;
@@ -6774,16 +6803,21 @@ export component MainWindow inherits Window {
         Timer {
             interval: 3600ms;
             running: ThemePalette.theme_animations
+                && !root.window_occluded
+                && !root.power_saver
                 && (ThemePalette.active_theme == "retro" || ThemePalette.active_theme == "sunset");
             triggered => {
                 ThemePalette.folder_idle_phase = !ThemePalette.folder_idle_phase;
             }
         }
-        // Sunset sun arc: flip the phase target every 70s; Slint animates
+        // Sunset sun arc: flip the phase target every 75s; Slint animates
         // sunset_phase continuously so the disc + sky washes stay smooth.
         Timer {
-            interval: 70000ms;
-            running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations;
+            interval: 75000ms;
+            running: ThemePalette.active_theme == "sunset"
+                && ThemePalette.theme_animations
+                && !root.window_occluded
+                && !root.power_saver;
             triggered => { root.sunset_descending = !root.sunset_descending; }
         }
         FantasyAtmosphere {
@@ -6794,7 +6828,10 @@ export component MainWindow inherits Window {
             height: parent.height - root.status_h;
             z: 40;
             active: ThemePalette.active_theme == "fantasy";
-            running: ThemePalette.active_theme == "fantasy" && ThemePalette.theme_animations;
+            running: ThemePalette.active_theme == "fantasy"
+                && ThemePalette.theme_animations
+                && !root.window_occluded
+                && !root.power_saver;
         }
         RetroAtmosphere {
             x: 0;
@@ -6803,7 +6840,10 @@ export component MainWindow inherits Window {
             height: parent.height - root.status_h;
             z: 40;
             active: ThemePalette.active_theme == "retro";
-            running: ThemePalette.active_theme == "retro" && ThemePalette.theme_animations;
+            running: ThemePalette.active_theme == "retro"
+                && ThemePalette.theme_animations
+                && !root.window_occluded
+                && !root.power_saver;
         }
         SunsetAtmosphere {
             x: 0;
@@ -6812,7 +6852,10 @@ export component MainWindow inherits Window {
             height: parent.height - root.status_h;
             z: 40;
             active: ThemePalette.active_theme == "sunset";
-            running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations;
+            running: ThemePalette.active_theme == "sunset"
+                && ThemePalette.theme_animations
+                && !root.window_occluded
+                && !root.power_saver;
             sun_cx: root.sunset_sun_cx;
             sun_cy: root.sunset_sun_cy;
             sun_glow: root.sunset_sun_glow;
