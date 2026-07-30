@@ -268,6 +268,32 @@ struct DirectoryPage {
     skipped_entries: u32,
 }
 
+fn publish_directory_pending(
+    pending: &Mutex<Option<NativeDirectoryResult>>,
+    ready: &std::sync::atomic::AtomicBool,
+    result: NativeDirectoryResult,
+) {
+    if let Ok(mut lock) = pending.lock() {
+        // Never let a stale generation (or a partial after a final) clobber
+        // a newer navigation result waiting on the poll tick.
+        let skip = match lock.as_ref() {
+            Some(existing) if existing.generation > result.generation => true,
+            Some(existing)
+                if existing.generation == result.generation
+                    && !existing.partial
+                    && result.partial =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if !skip {
+            *lock = Some(result);
+            ready.store(true, Ordering::Release);
+        }
+    }
+}
+
 #[derive(Clone)]
 struct NativeDirectoryResult {
     path: String,
@@ -8647,9 +8673,11 @@ struct NativeController {
     pending_deferred_startup: Arc<Mutex<Option<DeferredStartupData>>>,
     /// Deferred shell-icon + thumbnail disk reads after the first file list paints.
     enrich_visible_pending: bool,
-    /// Scroll-aware thumb warm for the current grid/list viewport window.
+    /// Scroll-aware thumb warm for primary / secondary grid windows.
     enrich_viewport_start: usize,
     enrich_viewport_end: usize,
+    enrich_secondary_viewport_start: usize,
+    enrich_secondary_viewport_end: usize,
     compare_hide_same: bool,
     compare_left: String,
     compare_right: String,
@@ -13723,6 +13751,8 @@ impl NativeController {
             enrich_visible_pending: false,
             enrich_viewport_start: 0,
             enrich_viewport_end: 0,
+            enrich_secondary_viewport_start: 0,
+            enrich_secondary_viewport_end: 0,
             compare_hide_same: true,
             compare_left: String::new(),
             compare_right: String::new(),
@@ -14929,7 +14959,12 @@ impl NativeController {
 
         let first_row = ((scroll_y / row_stride) as isize - 1).max(0) as usize;
         let visible_rows = ((viewport_h / row_stride).ceil() as usize).saturating_add(3);
-        let start = (first_row * cols).min(total);
+        let mut start = first_row.saturating_mul(cols);
+        if start >= total {
+            // Scroll position past end (e.g. after navigate without reset) —
+            // clamp to the last visible window so the grid isn't blank.
+            start = total.saturating_sub(visible_rows.saturating_mul(cols));
+        }
         let end = (start + visible_rows * cols).min(total);
 
         // Warm disk thumbs for the window (cheap exists()+decode).
@@ -14970,12 +15005,14 @@ impl NativeController {
         if secondary {
             ui.set_secondary_grid_window_start(start as i32);
             ui.set_secondary_grid_window_files(model_from_vec(items));
+            self.enrich_secondary_viewport_start = start;
+            self.enrich_secondary_viewport_end = end;
         } else {
             ui.set_grid_window_start(start as i32);
             ui.set_grid_window_files(model_from_vec(items));
+            self.enrich_viewport_start = start;
+            self.enrich_viewport_end = end;
         }
-        self.enrich_viewport_start = start;
-        self.enrich_viewport_end = end;
 
         // Generate missing thumbs for newly visible images (off UI thread).
         let image_entries: Vec<(String, u64)> = files[start..end]
@@ -16062,6 +16099,9 @@ impl NativeController {
         self.files_model = None;
         ui.set_empty_state(ss("Loading folder..."));
         ui.set_primary_list_scroll_y(0.0);
+        ui.set_primary_grid_scroll_y(0.0);
+        ui.set_grid_window_start(0);
+        ui.set_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
         ui.set_files(model_from_vec(Vec::<FileItem>::new()));
         self.sync_nav_chrome(ui);
         self.sync_sidebar_models(ui);
@@ -16200,6 +16240,11 @@ impl NativeController {
 
         let restore_y = self.path_scroll.get(&path).copied().unwrap_or(0.0);
         ui.set_primary_list_scroll_y(restore_y);
+        // Grid keeps its own scroll; clamp window after restore so we never
+        // land past the end of a shorter folder.
+        if ui.get_view_mode().as_str() != "list" {
+            self.sync_grid_window(ui, false);
+        }
 
         if partial {
             self.schedule_full_directory_load(path.clone());
@@ -16287,17 +16332,18 @@ impl NativeController {
                     if generation.load(Ordering::SeqCst) != token {
                         return;
                     }
-                    if let Ok(mut lock) = pending.lock() {
-                        *lock = Some(NativeDirectoryResult {
+                    publish_directory_pending(
+                        &pending,
+                        &ready,
+                        NativeDirectoryResult {
                             path: path.clone(),
                             entries: Vec::new(),
                             generation: token,
                             partial: false,
                             skipped_entries: 0,
                             error: Some(err),
-                        });
-                    }
-                    ready.store(true, Ordering::Release);
+                        },
+                    );
                     return;
                 }
             };
@@ -16308,17 +16354,18 @@ impl NativeController {
                 state.store_directory(&path, page.entries.clone());
                 schedule_index_directory(path.clone(), page.entries.clone());
             }
-            if let Ok(mut lock) = pending.lock() {
-                *lock = Some(NativeDirectoryResult {
+            publish_directory_pending(
+                &pending,
+                &ready,
+                NativeDirectoryResult {
                     path: path.clone(),
                     entries: page.entries,
                     generation: token,
                     partial: page.partial,
                     skipped_entries: page.skipped_entries,
                     error: None,
-                });
-            }
-            ready.store(true, Ordering::Release);
+                },
+            );
         });
     }
 
@@ -16817,32 +16864,34 @@ impl NativeController {
                     })
                     .collect();
                 accumulated = merge_sorted_file_entries(accumulated, entries);
-                if let Ok(mut lock) = pending.lock() {
-                    *lock = Some(NativeDirectoryResult {
+                publish_directory_pending(
+                    &pending,
+                    &ready,
+                    NativeDirectoryResult {
                         path: path.clone(),
                         entries: accumulated.clone(),
                         generation,
                         partial: true,
                         skipped_entries: 0,
                         error: None,
-                    });
-                }
-                ready.store(true, Ordering::Release);
+                    },
+                );
             }
             // Final cache + index population once everything is in.
             state.store_directory(&path, accumulated.clone());
             let _ = index_directory_entries(&path, &accumulated);
-            if let Ok(mut lock) = pending.lock() {
-                *lock = Some(NativeDirectoryResult {
+            publish_directory_pending(
+                &pending,
+                &ready,
+                NativeDirectoryResult {
                     path: path.clone(),
                     entries: accumulated,
                     generation,
                     partial: false,
                     skipped_entries: 0,
                     error: None,
-                });
-            }
-            ready.store(true, Ordering::Release);
+                },
+            );
         });
     }
 
@@ -18225,6 +18274,7 @@ impl NativeController {
         ui.set_secondary_files(model_from_vec(Vec::<FileItem>::new()));
         ui.set_secondary_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
         ui.set_secondary_grid_window_start(0);
+        ui.set_secondary_list_scroll_y(0.0);
         ui.set_secondary_path(ss(&path));
         self.sync_selection_count_to_ui(ui);
 
@@ -18239,17 +18289,18 @@ impl NativeController {
                     if generation.load(Ordering::SeqCst) != token {
                         return;
                     }
-                    if let Ok(mut lock) = pending.lock() {
-                        *lock = Some(NativeDirectoryResult {
+                    publish_directory_pending(
+                        &pending,
+                        &ready,
+                        NativeDirectoryResult {
                             path: path.clone(),
                             entries: Vec::new(),
                             generation: token,
                             partial: false,
                             skipped_entries: 0,
                             error: Some(err),
-                        });
-                    }
-                    ready.store(true, Ordering::Release);
+                        },
+                    );
                     return;
                 }
             };
@@ -18260,17 +18311,18 @@ impl NativeController {
                 state.store_directory(&path, page.entries.clone());
                 schedule_index_directory(path.clone(), page.entries.clone());
             }
-            if let Ok(mut lock) = pending.lock() {
-                *lock = Some(NativeDirectoryResult {
+            publish_directory_pending(
+                &pending,
+                &ready,
+                NativeDirectoryResult {
                     path: path.clone(),
                     entries: page.entries,
                     generation: token,
                     partial: page.partial,
                     skipped_entries: page.skipped_entries,
                     error: None,
-                });
-            }
-            ready.store(true, Ordering::Release);
+                },
+            );
         });
     }
 
@@ -18305,17 +18357,18 @@ impl NativeController {
                 Ok(entries) => {
                     state.store_directory(&path, entries.clone());
                     let _ = index_directory_entries(&path, &entries);
-                    if let Ok(mut lock) = pending.lock() {
-                        *lock = Some(NativeDirectoryResult {
+                    publish_directory_pending(
+                        &pending,
+                        &ready,
+                        NativeDirectoryResult {
                             path,
                             entries,
                             generation,
                             partial: false,
                             skipped_entries: 0,
                             error: None,
-                        });
-                    }
-                    ready.store(true, Ordering::Release);
+                        },
+                    );
                 }
                 Err(_) => {}
             }
@@ -18323,8 +18376,17 @@ impl NativeController {
     }
 
     fn schedule_secondary_viewport_thumbs(&mut self, ui: &MainWindow) {
-        let start = self.enrich_viewport_start;
-        let end = self.enrich_viewport_end.max(start).min(self.secondary_visible_files.len());
+        let start = self.enrich_secondary_viewport_start;
+        let end = self
+            .enrich_secondary_viewport_end
+            .max(start)
+            .min(self.secondary_visible_files.len());
+        // If the secondary window hasn't been synced yet, warm the top of the list.
+        let (start, end) = if start == 0 && end == 0 {
+            (0, self.secondary_visible_files.len().min(48))
+        } else {
+            (start, end)
+        };
         let image_entries: Vec<(String, u64)> = self
             .secondary_visible_files
             .get(start..end)
@@ -24695,58 +24757,53 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         let result = pending_dir.lock().ok().and_then(|mut lock| lock.take());
                         if let Some(result) = result {
                             if let Ok(mut ctrl) = c.try_borrow_mut() {
-                                if ctrl.nav_generation.load(Ordering::SeqCst) != result.generation {
-                                    return;
-                                }
-                                if !same_path_string(&ctrl.current_path, &result.path) {
-                                    return;
-                                }
-                                if result.path == "recycle://" {
-                                    ctrl.apply_recycle_bin_listing(&ui, result.entries);
-                                    return;
-                                }
-                                if let Some(err) = result.error {
-                                    ui.set_empty_state(ss(format!(
-                                        "Cannot open \"{}\"",
-                                        result.path
-                                    )));
-                                    ctrl.show_toast_kind(&ui, err, "error");
-                                    return;
-                                }
-                                if ctrl.files.is_empty() {
-                                    let page = DirectoryPage {
-                                        entries: result.entries,
-                                        partial: result.partial,
-                                        skipped_entries: result.skipped_entries,
-                                    };
-                                    ctrl.apply_directory_listing(
-                                        &ui,
-                                        result.path,
-                                        page,
-                                        false,
-                                        true,
-                                    );
-                                } else {
-                                    // Soft refresh / progressive load: swap rows
-                                    // without clearing the pane or re-running
-                                    // the heavy navigate chrome path.
-                                    let partial = result.partial;
-                                    ctrl.files = result.entries;
-                                    ctrl.files_model = None;
-                                    ctrl.apply_filter();
-                                    ctrl.update_file_models(&ui);
-                                    if partial {
+                                let stale = ctrl.nav_generation.load(Ordering::SeqCst)
+                                    != result.generation
+                                    || !same_path_string(&ctrl.current_path, &result.path);
+                                if !stale {
+                                    if result.path == "recycle://" {
+                                        ctrl.apply_recycle_bin_listing(&ui, result.entries);
+                                    } else if let Some(err) = result.error {
                                         ui.set_empty_state(ss(format!(
-                                            "Showing the first {} items while the full folder loads.",
-                                            ctrl.files.len()
+                                            "Cannot open \"{}\"",
+                                            result.path
                                         )));
+                                        ctrl.show_toast_kind(&ui, err, "error");
                                     } else if ctrl.files.is_empty() {
-                                        ui.set_empty_state(ss("This folder is empty."));
+                                        let page = DirectoryPage {
+                                            entries: result.entries,
+                                            partial: result.partial,
+                                            skipped_entries: result.skipped_entries,
+                                        };
+                                        ctrl.apply_directory_listing(
+                                            &ui,
+                                            result.path,
+                                            page,
+                                            false,
+                                            true,
+                                        );
                                     } else {
-                                        ui.set_empty_state(ss(""));
+                                        // Soft refresh / progressive load: swap rows
+                                        // without clearing the pane or re-running
+                                        // the heavy navigate chrome path.
+                                        let partial = result.partial;
+                                        ctrl.files = result.entries;
+                                        ctrl.files_model = None;
+                                        ctrl.apply_filter();
+                                        ctrl.update_file_models(&ui);
+                                        if partial {
+                                            ui.set_empty_state(ss(format!(
+                                                "Showing the first {} items while the full folder loads.",
+                                                ctrl.files.len()
+                                            )));
+                                        } else if ctrl.files.is_empty() {
+                                            ui.set_empty_state(ss("This folder is empty."));
+                                        } else {
+                                            ui.set_empty_state(ss(""));
+                                        }
+                                        ctrl.sync_fantasy_empty_kind(&ui);
+                                        ctrl.update_status(&ui);
                                     }
-                                    ctrl.sync_fantasy_empty_kind(&ui);
-                                    ctrl.update_status(&ui);
                                 }
                             }
                         }

@@ -3407,11 +3407,10 @@ export component MainWindow inherits Window {
     in-out property <bool> theme_animations: true;
     // Sunset solar cycle — shared by atmosphere + content-pane sky wash.
     // Phase 0 = late afternoon (high), 1 = on the horizon.
-    // Continuous Slint animation so the disc and sky washes ease smoothly;
-    // ease-in-out slows near the horizon like real solar motion.
-    property <bool> sunset_descending: false;
-    property <float> sunset_phase: root.sunset_descending ? 1.0 : 0.0;
-    animate sunset_phase { duration: 75000ms; easing: ease-in-out; }
+    // Driven by a low-rate timer (not a one-shot flip) so motion starts
+    // immediately and never sits idle at either end of the arc.
+    property <bool> sunset_descending: true;
+    property <float> sunset_phase: 0.0;
     // Western arc: drifts right while falling on a soft parabola.
     property <float> sunset_sun_cx: 0.14 + root.sunset_phase * 0.72;
     property <float> sunset_sun_cy: 0.05 + root.sunset_phase * root.sunset_phase * 0.62;
@@ -6810,15 +6809,28 @@ export component MainWindow inherits Window {
                 ThemePalette.folder_idle_phase = !ThemePalette.folder_idle_phase;
             }
         }
-        // Sunset sun arc: flip the phase target every 75s; Slint animates
-        // sunset_phase continuously so the disc + sky washes stay smooth.
+        // Sunset sun arc: nudge phase every tick so the disc drifts slowly and
+        // continuously (~2 min high→horizon, then back). Keeps moving even on
+        // battery; only pauses when minimized or theme animations are off.
         Timer {
-            interval: 75000ms;
+            interval: 50ms;
             running: ThemePalette.active_theme == "sunset"
                 && ThemePalette.theme_animations
-                && !root.window_occluded
-                && !root.power_saver;
-            triggered => { root.sunset_descending = !root.sunset_descending; }
+                && !root.window_occluded;
+            triggered => {
+                // 0.00042 × 20 Hz ≈ full arc in ~119s.
+                if (root.sunset_descending) {
+                    root.sunset_phase = Math.min(1.0, root.sunset_phase + 0.00042);
+                    if (root.sunset_phase >= 1.0) {
+                        root.sunset_descending = false;
+                    }
+                } else {
+                    root.sunset_phase = Math.max(0.0, root.sunset_phase - 0.00042);
+                    if (root.sunset_phase <= 0.0) {
+                        root.sunset_descending = true;
+                    }
+                }
+            }
         }
         FantasyAtmosphere {
             x: 0;
