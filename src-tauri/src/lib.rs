@@ -18353,24 +18353,21 @@ impl NativeController {
         let pending = self.pending_secondary_directory_result.clone();
         let generation = self.secondary_nav_generation.load(Ordering::SeqCst);
         std::thread::spawn(move || {
-            match list_directory_uncached(Path::new(&path)) {
-                Ok(entries) => {
-                    state.store_directory(&path, entries.clone());
-                    let _ = index_directory_entries(&path, &entries);
-                    publish_directory_pending(
-                        &pending,
-                        &ready,
-                        NativeDirectoryResult {
-                            path,
-                            entries,
-                            generation,
-                            partial: false,
-                            skipped_entries: 0,
-                            error: None,
-                        },
-                    );
-                }
-                Err(_) => {}
+            if let Ok(entries) = list_directory_uncached(Path::new(&path)) {
+                state.store_directory(&path, entries.clone());
+                let _ = index_directory_entries(&path, &entries);
+                publish_directory_pending(
+                    &pending,
+                    &ready,
+                    NativeDirectoryResult {
+                        path,
+                        entries,
+                        generation,
+                        partial: false,
+                        skipped_entries: 0,
+                        error: None,
+                    },
+                );
             }
         });
     }
@@ -24533,11 +24530,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             Duration::from_millis(200),
             move || {
                 if let Some(ui) = weak.upgrade() {
-                    let mut minimized = false;
                     #[cfg(target_os = "windows")]
-                    {
+                    let minimized = {
                         use i_slint_backend_winit::WinitWindowAccessor;
-                        minimized = ui
+                        let minimized = ui
                             .window()
                             .with_winit_window(|w| w.is_minimized().unwrap_or(false))
                             .unwrap_or(false);
@@ -24552,7 +24548,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                 ui.set_power_saver(saver);
                             }
                         }
-                    }
+                        minimized
+                    };
+                    #[cfg(not(target_os = "windows"))]
+                    let minimized = false;
                     if minimized {
                         // Keep ready flags; only pump every 5th idle tick.
                         let skips = idle_skips_cell.get();
