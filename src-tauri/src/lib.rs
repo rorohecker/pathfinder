@@ -2406,6 +2406,28 @@ impl AppState {
                 item.eta_secs = None;
                 item.finished_at = Some(now_unix_secs());
             }
+            // Keep a short history for the queue viewer, but drop older finished
+            // entries so the status-bar busy pill doesn't stick forever.
+            const KEEP_FINISHED: usize = 24;
+            let finished = queue
+                .iter()
+                .filter(|i| i.status != "running" && i.status != "queued")
+                .count();
+            if finished > KEEP_FINISHED {
+                let drop_n = finished - KEEP_FINISHED;
+                let mut dropped = 0usize;
+                queue.retain(|i| {
+                    if dropped >= drop_n {
+                        return true;
+                    }
+                    if i.status != "running" && i.status != "queued" {
+                        dropped += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
         }
     }
 
@@ -11884,16 +11906,17 @@ fn native_delete_inner(
     if !path_buf.exists() {
         return Err(format!("Path does not exist: {path}"));
     }
-    let total = if measure_folder_bytes {
-        folder_size_quick(&path_buf, 25_000)
-    } else if path_buf.is_file() {
-        fs::metadata(&path_buf).map(|m| m.len()).unwrap_or(0)
-    } else {
-        0
-    };
+    // Fast path (recycle UI): skip folder size walk + queue bookkeeping.
+    if !measure_folder_bytes {
+        trash::delete(&path_buf).map_err(|e| e.to_string())?;
+        state.invalidate_path(&path_buf);
+        state.log_op_with_trash("delete", path, None, None);
+        return Ok(());
+    }
+    let total = folder_size_quick(&path_buf, 25_000);
     let op_id = state.queue_start("delete", path, None, total);
     let started = Instant::now();
-    // Do not call trash::os_limited::list() here â€” enumerating the whole
+    // Do not call trash::os_limited::list() here — enumerating the whole
     // Recycle Bin after every delete is O(bin_size) and made multi-select
     // delete feel frozen. Undo resolves by original path when needed.
     trash::delete(&path_buf).map_err(|e| e.to_string())?;
@@ -11911,6 +11934,8 @@ fn native_delete_inner(
 
 /// Batch-move paths to the OS Recycle Bin in one shell operation.
 /// Logs one undo entry per path without enumerating the bin (lazy undo).
+/// Skips the operation-queue UI — recycle deletes are fire-and-forget with
+/// optimistic list updates, and queue noise made deletes feel stuck.
 fn native_delete_all_fast(state: &AppState, paths: &[String]) -> Result<usize, String> {
     if paths.is_empty() {
         return Ok(0);
@@ -11925,13 +11950,6 @@ fn native_delete_all_fast(state: &AppState, paths: &[String]) -> Result<usize, S
     // selections was adding noticeable latency before IFileOperation even started.
     let existing: Vec<String> = paths.to_vec();
     let n = existing.len();
-    let label = if n == 1 {
-        existing[0].clone()
-    } else {
-        format!("{n} items")
-    };
-    let op_id = state.queue_start("delete", &label, None, 0);
-    let started = Instant::now();
     trash::delete_all(&existing).map_err(|e| e.to_string())?;
     let mut parents = HashSet::new();
     for path in &existing {
@@ -11945,13 +11963,6 @@ fn native_delete_all_fast(state: &AppState, paths: &[String]) -> Result<usize, S
     for parent in parents {
         state.invalidate_directory_path(&parent);
     }
-    state.queue_finish(
-        op_id,
-        "done",
-        "Moved to Recycle Bin",
-        0,
-        started.elapsed(),
-    );
     Ok(n)
 }
 
@@ -19648,7 +19659,6 @@ impl NativeController {
         }
         ui.set_confirm_visible(false);
 
-        let n = paths.len();
         if from_storage_cleanup {
             self.storage_caches.remove(&self.storage_current_root);
         }
@@ -19661,16 +19671,8 @@ impl NativeController {
         self.sync_selection_count_to_ui(ui);
         ui.set_selected_index(-1);
 
-        ui.set_op_drawer_text(ss(if n == 1 {
-            "Moving to Recycle Bin...".to_string()
-        } else {
-            format!("Moving {n} items to Recycle Bin...")
-        }));
-        ui.set_op_drawer_visible(true);
-        ui.set_op_drawer_progress(-1.0);
-
-        // Optimistic remove before the shell op finishes so the pane doesn't
-        // feel frozen waiting on IFileOperation + the 200ms poller.
+        // No op drawer — items vanish immediately via optimistic remove; a
+        // toast reports the result when the shell op finishes.
         self.optimistic_remove_paths(ui, &paths);
 
         let app_state = self.app_state.clone();
@@ -19957,14 +19959,6 @@ impl NativeController {
         // normal move/copy path tries to use it as a parent directory.
         if dest_dir == "recycle://" {
             file_drag::log("drop -> Recycle Bin (async trash::delete_all)");
-            let count = paths.len();
-            ui.set_op_drawer_text(ss(if count == 1 {
-                "Moving to Recycle Bin...".to_string()
-            } else {
-                format!("Moving {count} items to Recycle Bin...")
-            }));
-            ui.set_op_drawer_visible(true);
-            ui.set_op_drawer_progress(-1.0);
             self.optimistic_remove_paths(ui, &paths);
             let app_state = self.app_state.clone();
             let operation_ready = self.operation_ready.clone();
@@ -19973,9 +19967,9 @@ impl NativeController {
                 let result = match native_delete_all_fast(&app_state, &paths) {
                     Ok(deleted) => NativeOperationResult {
                         message: if deleted == 1 {
-                            "Moved 1 item to Recycle Bin".to_string()
+                            "Moved 1 item to Recycle Bin · Ctrl+Z to undo".to_string()
                         } else {
-                            format!("Moved {deleted} items to Recycle Bin")
+                            format!("Moved {deleted} items to Recycle Bin · Ctrl+Z to undo")
                         },
                         kind: "success".to_string(),
                         refresh: false,
@@ -19984,7 +19978,7 @@ impl NativeController {
                         clear_clipboard: false,
                         invalidate_dirs: Vec::new(),
                         optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                        toast_action: "Undo".to_string(),
                     },
                     Err(e) => NativeOperationResult {
                         message: format!("Failed to send items to Recycle Bin: {e}"),
@@ -22429,13 +22423,6 @@ impl NativeController {
             return;
         }
         let to_delete: Vec<String> = paths.iter().skip(1).cloned().collect();
-        let n = to_delete.len();
-        ui.set_op_drawer_text(ss(format!(
-            "Moving {n} duplicate{} to Recycle Bin...",
-            if n == 1 { "" } else { "s" }
-        )));
-        ui.set_op_drawer_visible(true);
-        ui.set_op_drawer_progress(-1.0);
 
         self.dupe_groups_cache.retain(|(k, _)| k != &id);
         let items: Vec<DupeGroupItem> = self
@@ -22454,7 +22441,10 @@ impl NativeController {
         std::thread::spawn(move || {
             let result = match native_delete_all_fast(&app_state, &to_delete) {
                 Ok(deleted) => NativeOperationResult {
-                    message: format!("Moved {deleted} duplicate(s) to Recycle Bin"),
+                    message: format!(
+                        "Moved {deleted} duplicate{} to Recycle Bin",
+                        if deleted == 1 { "" } else { "s" }
+                    ),
                     kind: "success".to_string(),
                     refresh: false,
                     refresh_both_panes: false,
@@ -22462,7 +22452,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: paths_for_optimistic,
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 },
                 Err(e) => NativeOperationResult {
                     message: e,
@@ -22473,7 +22463,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 },
             };
             if let Ok(mut lock) = pending_result.lock() {
@@ -22529,24 +22519,28 @@ impl NativeController {
     }
 
     fn sync_queue_busy(&self, ui: &MainWindow) {
-        let (len, paused) = (
+        let (running, paused) = (
             self.app_state
                 .operation_queue
                 .lock()
-                .map(|q| q.len())
+                .map(|q| {
+                    q.iter()
+                        .filter(|i| i.status == "running" || i.status == "queued")
+                        .count()
+                })
                 .unwrap_or(0),
             self.app_state.queue_is_paused(),
         );
         let active = ACTIVE_HEAVY_OPS.load(Ordering::SeqCst);
-        let busy = len > 0 || active > 0;
+        let busy = running > 0 || active > 0;
         ui.set_queue_busy(busy);
         if busy {
             ui.set_queue_busy_text(ss(if paused {
-                format!("Queue paused ({len})")
-            } else if len > 0 {
-                format!("{len} queued")
+                format!("Queue paused ({running})")
+            } else if running > 0 {
+                format!("{running} running")
             } else {
-                "Workingâ€¦".to_string()
+                "Working…".to_string()
             }));
         } else {
             ui.set_queue_busy_text(ss(""));
