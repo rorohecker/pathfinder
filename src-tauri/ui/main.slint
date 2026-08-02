@@ -327,6 +327,10 @@ component ToolButton inherits Rectangle {
         (root.active ? ThemePalette.accent_soft :
         (touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0))));
 
+    // Prefer explicit tooltip; fall back to the caption so icon-only buttons
+    // still name themselves on hover.
+    property <string> tip_text: root.tooltip != "" ? root.tooltip : root.text_label;
+
     // Two captioned layouts:
     //   - Wide button (width >= 72 px): icon on the left, label to the
     //     right. Used by the simple-mode toolbar where each button is 88x38 and
@@ -392,15 +396,15 @@ component ToolButton inherits Rectangle {
         clicked => { root.clicked(); }
     }
 
-    if root.tooltip != "" && touch.has-hover: Rectangle {
-        z: 500;
+    if root.tip_text != "" && touch.has-hover: Rectangle {
+        z: 900;
         // Selection bar and bottom toolbar rows clip or cover downward
         // tooltips; flip above the button when requested.
-        x: root.tooltip_above
-            ? Math.max(-40px, (parent.width - (tip_text.preferred-width + 16px)) / 2)
-            : Math.min(0px, parent.width - (tip_text.preferred-width + 16px));
+        // Prefer right-align when the tip is wider than the button so
+        // right-anchored icons (Clear, Empty, window chrome) stay on-screen.
+        x: Math.min(0px, parent.width - (tip_label.preferred-width + 16px));
         y: root.tooltip_above ? -34px : parent.height + 6px;
-        width: tip_text.preferred-width + 16px;
+        width: tip_label.preferred-width + 16px;
         height: 26px;
         border-radius: AppMetrics.radius_small;
         border-width: 1px;
@@ -409,11 +413,11 @@ component ToolButton inherits Rectangle {
         drop-shadow-blur: 18px;
         drop-shadow-color: rgba(0, 0, 0, 0.35);
 
-        tip_text := Text {
+        tip_label := Text {
             x: 8px;
             width: parent.width - 16px;
             height: parent.height;
-            text: root.tooltip;
+            text: root.tip_text;
             color: ThemePalette.text;
             font-size: 11.5px;
             vertical-alignment: center;
@@ -4039,6 +4043,7 @@ export component MainWindow inherits Window {
                 button_height: 36px;
                 icon_data: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z";
                 tooltip: "Settings";
+                tooltip_above: true;
                 clicked => { root.settings_visible = true; }
             }
 
@@ -4048,6 +4053,8 @@ export component MainWindow inherits Window {
                 button_width: 46px;
                 button_height: 36px;
                 icon_data: "M5 12h14";
+                tooltip: "Minimize";
+                tooltip_above: true;
                 clicked => { root.minimize(); }
             }
 
@@ -4057,6 +4064,8 @@ export component MainWindow inherits Window {
                 button_width: 46px;
                 button_height: 36px;
                 icon_data: "M7 7h10v10H7z";
+                tooltip: "Maximize";
+                tooltip_above: true;
                 clicked => { root.maximize(); }
             }
 
@@ -4067,6 +4076,8 @@ export component MainWindow inherits Window {
                 button_height: 36px;
                 icon_data: "M18 6L6 18 M6 6l12 12";
                 danger: true;
+                tooltip: "Close";
+                tooltip_above: true;
                 clicked => { root.close(); }
             }
 
@@ -4140,11 +4151,123 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Selection action bar - replaces the toolbar contents whenever one
-        // or more files are selected. Pinned at toolbar height/position so the
-        // page layout below stays exactly the same and there is no jump.
-        if root.selected_count > 0 && !root.is_storage_view: Rectangle {
-            property <int> sel_shift: (root.selection_has_archive && !root.in_recycle_bin) ? 1 : 0;
+        // Selection action bar - replaces the toolbar when files are selected.
+        // Recycle Bin gets a restore-focused bar; normal folders keep the usual actions.
+        // No clip so hover tooltips can draw above the strip.
+        if root.selected_count > 0 && !root.is_storage_view && root.in_recycle_bin: Rectangle {
+            property <length> sel_gap: 4px;
+            property <length> sel_clear_w: root.is_simple ? 54px : 44px;
+            property <length> sel_norm_step: 34px;
+            property <length> sel_bar_w: root.width - root.sidebar_w;
+            property <length> sel_right: sel_bar_w - 10px;
+            property <bool> sel_show_select_all: !root.is_simple && sel_bar_w >= 420px;
+            property <bool> sel_show_empty: !root.is_simple && sel_bar_w >= 380px;
+            property <int> sel_trim: (sel_show_select_all ? 0 : 1) + (sel_show_empty ? 0 : 1);
+            property <int> sel_btn_count: 6 - sel_trim;
+            property <length> sel_btns_left: root.is_simple
+                ? 0px
+                : (sel_right - sel_clear_w - (sel_btn_count - 1) * sel_norm_step - sel_norm_step);
+            property <length> sel_label_w: root.is_simple
+                ? min(220px, max(96px, sel_bar_w * 0.22))
+                : (sel_btns_left < 116px ? 0px : min(220px, sel_btns_left - 16px));
+            property <length> sel_btn_w: root.is_simple
+                ? min(root.simple_btn_w, max(54px, (sel_bar_w - sel_label_w - sel_clear_w - 24px - (sel_btn_count - 1) * sel_gap) / sel_btn_count))
+                : 31px;
+            property <length> sel_step: root.is_simple ? (sel_btn_w + sel_gap) : sel_norm_step;
+            property <length> sel_left: sel_label_w + 10px;
+            property <length> sel_r: sel_right - sel_clear_w - sel_norm_step;
+            property <bool> sel_tooltip_above: true;
+
+            x: root.sidebar_w;
+            y: root.title_h;
+            width: sel_bar_w;
+            height: root.toolbar_h;
+            z: 15;
+            background: ThemePalette.panel_solid;
+            Rectangle {
+                x: 0; y: 0; width: parent.width; height: parent.height;
+                background: ThemePalette.accent_soft;
+            }
+            TouchArea { width: parent.width; height: parent.height; clicked => {} }
+            Rectangle { x: 0; y: 0; width: 3px; height: parent.height; background: ThemePalette.accent; }
+            Text {
+                x: 18px;
+                visible: parent.sel_label_w > 8px;
+                width: max(0px, parent.sel_label_w - 8px);
+                height: parent.height;
+                text: root.selected_count == 1 ? "1 item in Recycle Bin" : (root.selected_count + " items in Recycle Bin");
+                color: ThemePalette.accent_strong;
+                font-size: 13px;
+                font-weight: 600;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            ToolButton {
+                x: root.is_simple ? parent.sel_left : parent.sel_r - (4 - parent.sel_trim) * parent.sel_norm_step;
+                y: root.is_simple ? 16px : 6px;
+                button_width: parent.sel_btn_w; button_height: root.is_simple ? 56px : 31px;
+                tooltip_above: parent.sel_tooltip_above;
+                icon_data: "M3 12a9 9 0 1 0 9-9 M3 4v5h5 M3 9l6-6";
+                text_label: "Restore"; show_caption: root.is_simple;
+                tooltip: "Restore selected to original location";
+                clicked => { root.command("restore"); }
+            }
+            ToolButton {
+                x: root.is_simple ? parent.sel_left + parent.sel_step : parent.sel_r - (3 - parent.sel_trim) * parent.sel_norm_step;
+                y: root.is_simple ? 16px : 6px;
+                button_width: parent.sel_btn_w; button_height: root.is_simple ? 56px : 31px;
+                tooltip_above: parent.sel_tooltip_above;
+                icon_data: "M3 12a9 9 0 1 0 9-9 M3 4v5h5 M3 9l6-6 M16 12h5 M18.5 9.5v5";
+                text_label: "All"; show_caption: root.is_simple;
+                tooltip: "Restore all items in Recycle Bin";
+                clicked => { root.command("restore-all"); }
+            }
+            ToolButton {
+                x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.sel_r - (2 - parent.sel_trim) * parent.sel_norm_step;
+                y: root.is_simple ? 16px : 6px;
+                button_width: parent.sel_btn_w; button_height: root.is_simple ? 56px : 31px;
+                tooltip_above: parent.sel_tooltip_above; danger: true;
+                icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2";
+                text_label: "Delete"; show_caption: root.is_simple;
+                tooltip: "Delete selected permanently";
+                clicked => { root.command("purge"); }
+            }
+            ToolButton {
+                visible: parent.sel_show_select_all || root.is_simple;
+                x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.sel_r - (1 - (parent.sel_show_empty ? 0 : 1)) * parent.sel_norm_step;
+                y: root.is_simple ? 16px : 6px;
+                button_width: parent.sel_btn_w; button_height: root.is_simple ? 56px : 31px;
+                tooltip_above: parent.sel_tooltip_above;
+                icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11";
+                text_label: "Select all"; show_caption: root.is_simple;
+                tooltip: "Select all (Ctrl+A)";
+                clicked => { root.command("select-all"); }
+            }
+            ToolButton {
+                visible: parent.sel_show_empty || root.is_simple;
+                x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_r;
+                y: root.is_simple ? 16px : 6px;
+                button_width: parent.sel_btn_w; button_height: root.is_simple ? 56px : 31px;
+                tooltip_above: parent.sel_tooltip_above; danger: true;
+                icon_data: "M3 6h18 M8 6V4h8v2 M19 6l-1 14H6L5 6 M10 11v6 M14 11v6";
+                text_label: "Empty"; show_caption: root.is_simple;
+                tooltip: "Empty Recycle Bin";
+                clicked => { root.command("empty-trash"); }
+            }
+            ToolButton {
+                x: parent.sel_right - parent.sel_clear_w;
+                y: root.is_simple ? 16px : 6px;
+                button_width: parent.sel_clear_w; button_height: root.is_simple ? 56px : 31px;
+                tooltip_above: parent.sel_tooltip_above;
+                icon_data: "M18 6L6 18 M6 6l12 12";
+                text_label: "Clear"; show_caption: root.is_simple;
+                tooltip: "Clear selection (Esc)";
+                clicked => { root.clear_selection(); }
+            }
+        }
+
+        if root.selected_count > 0 && !root.is_storage_view && !root.in_recycle_bin: Rectangle {
+            property <int> sel_shift: root.selection_has_archive ? 1 : 0;
             property <int> sel_btn_count: 10 + sel_shift;
             property <length> sel_gap: 4px;
             property <length> sel_clear_w: root.is_simple ? 54px : 44px;
@@ -4194,7 +4317,6 @@ export component MainWindow inherits Window {
             property <length> sel_step: root.is_simple ? (sel_btn_w + sel_gap) : sel_norm_step;
             property <length> sel_left: sel_label_w + 10px;
             property <bool> sel_tooltip_above: true;
-            clip: true;
 
             x: root.sidebar_w;
             y: root.title_h;
@@ -4227,8 +4349,8 @@ export component MainWindow inherits Window {
             ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left + parent.sel_step : parent.sel_r - (7 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
             ToolButton { visible: parent.sel_show_paste; x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.sel_r - (6 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
             ToolButton { visible: parent.sel_show_rename; x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.sel_r - (5 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_r - (4 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: root.in_recycle_bin ? "Delete permanently" : "Delete (Del)"; clicked => { root.command(root.in_recycle_bin ? "purge" : "delete"); } }
-            if root.selection_has_archive && !root.in_recycle_bin: ToolButton {
+            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_r - (4 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Delete (Del)"; clicked => { root.command("delete"); } }
+            if root.selection_has_archive: ToolButton {
                 x: root.is_simple ? parent.sel_left + 5 * parent.sel_step : parent.sel_r - (4 - parent.sel_left_trim) * parent.sel_norm_step;
                 y: root.is_simple ? 16px : 6px;
                 button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above;
@@ -4612,6 +4734,7 @@ export component MainWindow inherits Window {
                     button_width: 22px;
                     button_height: 22px;
                     icon_data: "M18 6L6 18 M6 6l12 12";
+                    tooltip: "Clear search";
                     clicked => {
                         root.search_text = "";
                         root.search_requested("");
@@ -4724,6 +4847,7 @@ export component MainWindow inherits Window {
                     button_width: 22px;
                     button_height: 22px;
                     icon_data: "M18 6L6 18 M6 6l12 12";
+                    tooltip: "Clear search";
                     clicked => {
                         root.search_text = "";
                         root.search_requested("");
@@ -6917,6 +7041,7 @@ export component MainWindow inherits Window {
             // Surfaced only when browsing `recycle://`; replace the standard
             // open/copy/cut chain because those don't apply to trash items.
             if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Restore"; command_name: "restore"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Restore All"; command_name: "restore-all"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Delete Permanently"; command_name: "purge"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
             if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Empty Recycle Bin"; command_name: "empty-trash"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -7059,6 +7184,7 @@ export component MainWindow inherits Window {
             y: 5px;
             spacing: 2px;
             // Recycle-bin empty-area shortcut.
+            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Restore All"; command_name: "restore-all"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Empty Recycle Bin"; command_name: "empty-trash"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Select All"; command_name: "select-all"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
@@ -7273,6 +7399,7 @@ export component MainWindow inherits Window {
                     button_width: 26px;
                     button_height: 26px;
                     text_label: "X";
+                    tooltip: "Clear or close";
                     clicked => {
                         if (root.command_filter != "") {
                             root.command_filter = "";
@@ -9590,6 +9717,7 @@ export component MainWindow inherits Window {
             button_width: 26px;
             button_height: 26px;
             icon_data: "M18 6L6 18 M6 6l12 12";
+            tooltip: "Dismiss";
             clicked => { root.op_drawer_visible = false; }
         }
     }

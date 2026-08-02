@@ -8544,6 +8544,8 @@ enum PendingPrompt {
     RenameTag(String),
     /// Shift+Delete: permanently remove without Recycle Bin.
     PermanentDelete(Vec<String>),
+    /// Empty the entire OS Recycle Bin (confirm required).
+    EmptyRecycleBin,
     BatchTag(Vec<String>),
     BatchNote(Vec<String>),
     TagOne(String),
@@ -13077,6 +13079,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Open in Terminal", "", "open-terminal"),
     ("Tools", "Open With", "", "open-with"),
     ("Files", "Restore from Recycle Bin", "", "restore"),
+    ("Files", "Restore All from Recycle Bin", "", "restore-all"),
     ("Files", "Permanently Delete", "Shift+Del", "purge"),
     ("Files", "Empty Recycle Bin", "", "empty-trash"),
     ("Tools", "Scan with Microsoft Defender", "", "defender-scan"),
@@ -16664,58 +16667,124 @@ impl NativeController {
     /// Restore the currently selected recycle-bin items back to their original
     /// paths. Looks up each file by its original_path against `trash::os_limited::list()`.
     fn restore_from_recycle_bin(&mut self, ui: &MainWindow) {
-        let virtual_paths = self.selected_paths();
-        let target_originals: Vec<String> = virtual_paths
+        let target_originals: Vec<String> = self
+            .selected_paths()
             .iter()
             .filter_map(|p| p.strip_prefix("recycle://").map(|s| s.to_string()))
             .collect();
         if target_originals.is_empty() {
+            self.show_toast(ui, "Select items to restore.");
             return;
         }
-        ui.set_op_drawer_text(ss("Restoring from Recycle Bin..."));
+        self.restore_recycle_bin_items(ui, Some(target_originals));
+    }
+
+    fn restore_all_from_recycle_bin(&mut self, ui: &MainWindow) {
+        if !self.active_path_is_recycle_bin() {
+            self.show_toast(ui, "Open the Recycle Bin to restore all items.");
+            return;
+        }
+        self.restore_recycle_bin_items(ui, None);
+    }
+
+    /// Restore Recycle Bin items. `targets` filters by original path; `None` restores everything.
+    /// Conflicts (original path already occupied) are skipped so a mass restore can still finish.
+    fn restore_recycle_bin_items(&mut self, ui: &MainWindow, targets: Option<Vec<String>>) {
+        let all = targets.is_none();
+        ui.set_op_drawer_text(ss(if all {
+            "Restoring all from Recycle Bin..."
+        } else {
+            "Restoring from Recycle Bin..."
+        }));
         ui.set_op_drawer_visible(true);
         ui.set_op_drawer_progress(-1.0);
         let operation_ready = self.operation_ready.clone();
         let pending_result = self.pending_operation_result.clone();
         std::thread::spawn(move || {
-            let result = (|| -> Result<String, String> {
+            let result = (|| -> Result<(String, Vec<String>, Vec<String>), String> {
                 let items = trash::os_limited::list().map_err(|e| e.to_string())?;
-                let to_restore: Vec<trash::TrashItem> = items
-                    .into_iter()
-                    .filter(|item| {
-                        let orig = item.original_path().to_string_lossy().into_owned();
-                        target_originals.iter().any(|t| t == &orig)
-                    })
-                    .collect();
-                let n = to_restore.len();
-                if n == 0 {
-                    return Err("Items not found in trash.".to_string());
+                let candidates: Vec<trash::TrashItem> = match &targets {
+                    Some(target_originals) => items
+                        .into_iter()
+                        .filter(|item| {
+                            let orig = item.original_path().to_string_lossy().into_owned();
+                            target_originals
+                                .iter()
+                                .any(|t| same_path_string(t, &orig))
+                        })
+                        .collect(),
+                    None => items,
+                };
+                if candidates.is_empty() {
+                    return Err(if all {
+                        "Recycle Bin is empty.".to_string()
+                    } else {
+                        "Items not found in trash.".to_string()
+                    });
                 }
-                for item in &to_restore {
+
+                let mut restored = 0usize;
+                let mut skipped = 0usize;
+                let mut failures = 0usize;
+                let mut removed_virtual: Vec<String> = Vec::new();
+                let mut invalidate_dirs: Vec<String> = Vec::new();
+                for item in candidates {
                     let orig = item.original_path();
+                    let orig_display = orig.to_string_lossy().into_owned();
                     if orig.exists() {
-                        return Err(format!(
-                            "Cannot restore â€” '{}' already exists at the original location.",
-                            orig.file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| orig.display().to_string())
-                        ));
+                        skipped += 1;
+                        continue;
+                    }
+                    match trash::os_limited::restore_all(vec![item]) {
+                        Ok(()) => {
+                            restored += 1;
+                            removed_virtual.push(format!("recycle://{orig_display}"));
+                            if let Some(parent) = Path::new(&orig_display).parent() {
+                                let parent_s = parent.to_string_lossy().into_owned();
+                                if !parent_s.is_empty()
+                                    && !invalidate_dirs
+                                        .iter()
+                                        .any(|d| same_path_string(d, &parent_s))
+                                {
+                                    invalidate_dirs.push(parent_s);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            failures += 1;
+                        }
                     }
                 }
-                trash::os_limited::restore_all(to_restore).map_err(|e| e.to_string())?;
-                Ok(format!("Restored {n} item(s)"))
+
+                if restored == 0 && failures == 0 && skipped > 0 {
+                    return Err(format!(
+                        "Cannot restore — {skipped} item(s) already exist at their original location."
+                    ));
+                }
+                if restored == 0 && failures > 0 {
+                    return Err(format!("Restore failed for {failures} item(s)."));
+                }
+
+                let mut message = format!("Restored {restored} item(s)");
+                if skipped > 0 {
+                    message.push_str(&format!(", skipped {skipped} (already exist)"));
+                }
+                if failures > 0 {
+                    message.push_str(&format!(", {failures} failed"));
+                }
+                Ok((message, removed_virtual, invalidate_dirs))
             })();
             let op = match result {
-                Ok(message) => NativeOperationResult {
+                Ok((message, optimistic_remove_paths, invalidate_dirs)) => NativeOperationResult {
                     message,
                     kind: "success".to_string(),
                     refresh: true,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
-                    invalidate_dirs: Vec::new(),
-                    optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    invalidate_dirs,
+                    optimistic_remove_paths,
+                    toast_action: String::new(),
                 },
                 Err(message) => NativeOperationResult {
                     message,
@@ -16726,7 +16795,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 },
             };
             if let Ok(mut lock) = pending_result.lock() {
@@ -16736,9 +16805,43 @@ impl NativeController {
         });
     }
 
-    /// Permanently delete the currently selected recycle-bin items.
-    fn purge_from_recycle_bin(&mut self, ui: &MainWindow) {
-        let virtual_paths = self.selected_paths();
+    fn prompt_purge_recycle_bin(&mut self, ui: &MainWindow) {
+        let paths = self.selected_paths();
+        let n = paths
+            .iter()
+            .filter(|p| p.starts_with("recycle://"))
+            .count();
+        if n == 0 {
+            self.show_toast(ui, "Select items to delete permanently.");
+            return;
+        }
+        self.pending_prompt = Some(PendingPrompt::PermanentDelete(paths));
+        if n == 1 {
+            let name = self
+                .selected_entry()
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| "item".to_string());
+            ui.set_confirm_text(ss(format!(
+                "Permanently delete '{name}' from the Recycle Bin? This cannot be undone."
+            )));
+        } else {
+            ui.set_confirm_text(ss(format!(
+                "Permanently delete {n} items from the Recycle Bin? This cannot be undone."
+            )));
+        }
+        ui.set_confirm_visible(true);
+    }
+
+    fn prompt_empty_recycle_bin(&mut self, ui: &MainWindow) {
+        self.pending_prompt = Some(PendingPrompt::EmptyRecycleBin);
+        ui.set_confirm_text(ss(
+            "Empty the Recycle Bin? This permanently deletes all items and cannot be undone.",
+        ));
+        ui.set_confirm_visible(true);
+    }
+
+    /// Permanently delete recycle-bin items identified by `recycle://` virtual paths.
+    fn purge_recycle_paths(&mut self, ui: &MainWindow, virtual_paths: Vec<String>) {
         let target_originals: Vec<String> = virtual_paths
             .iter()
             .filter_map(|p| p.strip_prefix("recycle://").map(|s| s.to_string()))
@@ -16746,6 +16849,8 @@ impl NativeController {
         if target_originals.is_empty() {
             return;
         }
+        // Vanish from the list immediately; background purge finishes the OS delete.
+        self.optimistic_remove_paths(ui, &virtual_paths);
         ui.set_op_drawer_text(ss("Deleting permanently..."));
         ui.set_op_drawer_visible(true);
         ui.set_op_drawer_progress(-1.0);
@@ -16758,7 +16863,9 @@ impl NativeController {
                     .into_iter()
                     .filter(|item| {
                         let orig = item.original_path().to_string_lossy().into_owned();
-                        target_originals.iter().any(|t| t == &orig)
+                        target_originals
+                            .iter()
+                            .any(|t| same_path_string(t, &orig))
                     })
                     .collect();
                 let n = to_purge.len();
@@ -16772,24 +16879,24 @@ impl NativeController {
                 Ok(message) => NativeOperationResult {
                     message,
                     kind: "success".to_string(),
-                    refresh: true,
-                    refresh_both_panes: false,
-                    secondary_refresh_path: None,
-                    clear_clipboard: false,
-                    invalidate_dirs: Vec::new(),
-                    optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
-                },
-                Err(message) => NativeOperationResult {
-                    message,
-                    kind: "error".to_string(),
                     refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
+                },
+                Err(message) => NativeOperationResult {
+                    message,
+                    kind: "error".to_string(),
+                    refresh: true,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                    toast_action: String::new(),
                 },
             };
             if let Ok(mut lock) = pending_result.lock() {
@@ -16799,8 +16906,22 @@ impl NativeController {
         });
     }
 
+    /// Permanently delete the currently selected recycle-bin items.
+    fn purge_from_recycle_bin(&mut self, ui: &MainWindow) {
+        self.purge_recycle_paths(ui, self.selected_paths());
+    }
+
     /// Empty the entire OS recycle bin (all users see the same trash on Windows).
     fn empty_recycle_bin(&mut self, ui: &MainWindow) {
+        let virtual_paths: Vec<String> = self
+            .files
+            .iter()
+            .map(|e| e.path.clone())
+            .filter(|p| p.starts_with("recycle://"))
+            .collect();
+        if !virtual_paths.is_empty() && self.active_path_is_recycle_bin() {
+            self.optimistic_remove_paths(ui, &virtual_paths);
+        }
         ui.set_op_drawer_text(ss("Emptying Recycle Bin..."));
         ui.set_op_drawer_visible(true);
         ui.set_op_drawer_progress(-1.0);
@@ -16820,24 +16941,24 @@ impl NativeController {
                 Ok(message) => NativeOperationResult {
                     message,
                     kind: "success".to_string(),
-                    refresh: true,
-                    refresh_both_panes: false,
-                    secondary_refresh_path: None,
-                    clear_clipboard: false,
-                    invalidate_dirs: Vec::new(),
-                    optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
-                },
-                Err(message) => NativeOperationResult {
-                    message,
-                    kind: "error".to_string(),
                     refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
+                },
+                Err(message) => NativeOperationResult {
+                    message,
+                    kind: "error".to_string(),
+                    refresh: true,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                    toast_action: String::new(),
                 },
             };
             if let Ok(mut lock) = pending_result.lock() {
@@ -16957,22 +17078,59 @@ impl NativeController {
             entries.retain(|e| !paths.iter().any(|p| same_path_string(&e.path, p)));
         };
         if self.active_pane == ActivePane::Secondary {
+            let kept_paths: Vec<String> = self
+                .secondary_selected_set
+                .iter()
+                .filter_map(|&i| self.secondary_visible_files.get(i).map(|e| e.path.clone()))
+                .filter(|p| !paths.iter().any(|r| same_path_string(p, r)))
+                .collect();
             remove(&mut self.secondary_files);
+            remove(&mut self.secondary_visible_files);
             self.secondary_selected_set.clear();
             self.secondary_selected_index = -1;
             self.secondary_select_anchor = -1;
+            for (i, entry) in self.secondary_visible_files.iter().enumerate() {
+                if kept_paths
+                    .iter()
+                    .any(|p| same_path_string(p, &entry.path))
+                {
+                    self.secondary_selected_set.insert(i);
+                    if self.secondary_selected_index < 0 {
+                        self.secondary_selected_index = i as i32;
+                        self.secondary_select_anchor = i as i32;
+                    }
+                }
+            }
             for path in paths {
                 self.app_state.invalidate_path(Path::new(path));
             }
             self.update_secondary_models(ui);
             return;
         }
+        let kept_paths: Vec<String> = self
+            .selected_set
+            .iter()
+            .filter_map(|&i| self.visible_files.get(i).map(|e| e.path.clone()))
+            .filter(|p| !paths.iter().any(|r| same_path_string(p, r)))
+            .collect();
         remove(&mut self.files);
         remove(&mut self.visible_files);
         self.files_model = None;
         self.selected_set.clear();
         self.selected_index = -1;
         self.select_anchor = -1;
+        for (i, entry) in self.visible_files.iter().enumerate() {
+            if kept_paths
+                .iter()
+                .any(|p| same_path_string(p, &entry.path))
+            {
+                self.selected_set.insert(i);
+                if self.selected_index < 0 {
+                    self.selected_index = i as i32;
+                    self.select_anchor = i as i32;
+                }
+            }
+        }
         for path in paths {
             self.app_state.invalidate_path(Path::new(path));
             if let Some(parent) = Path::new(path).parent() {
@@ -16980,9 +17138,14 @@ impl NativeController {
             }
         }
         self.sync_selection_count_to_ui(ui);
-        ui.set_selected_index(-1);
+        ui.set_selected_index(self.selected_index);
         if self.files.is_empty() {
-            ui.set_empty_state(ss("This folder is empty."));
+            if self.current_path == "recycle://" {
+                ui.set_empty_state(ss("Recycle Bin is empty."));
+            } else {
+                ui.set_empty_state(ss("This folder is empty."));
+            }
+            self.sync_fantasy_empty_kind(ui);
         }
         self.apply_filter();
         self.update_models(ui);
@@ -18584,7 +18747,7 @@ impl NativeController {
             }
             "open" => self.open_selected(ui),
             "rename" => self.prompt_rename(ui),
-            "delete" if self.active_path_is_recycle_bin() => self.purge_from_recycle_bin(ui),
+            "delete" if self.active_path_is_recycle_bin() => self.prompt_purge_recycle_bin(ui),
             "delete" => self.prompt_delete(ui),
             "new-folder" => self.prompt_new_folder(ui),
             "new-file" => self.prompt_new_file(ui),
@@ -19002,14 +19165,15 @@ impl NativeController {
                 ui.set_toolbar_search_focus_nonce(n.wrapping_add(1));
             }
             "restore" => self.restore_from_recycle_bin(ui),
+            "restore-all" => self.restore_all_from_recycle_bin(ui),
             "purge" => {
                 if self.active_path_is_recycle_bin() {
-                    self.purge_from_recycle_bin(ui);
+                    self.prompt_purge_recycle_bin(ui);
                 } else {
                     self.prompt_permanent_delete(ui);
                 }
             }
-            "empty-trash" => self.empty_recycle_bin(ui),
+            "empty-trash" => self.prompt_empty_recycle_bin(ui),
             _ => self.show_toast(ui, format!("Unknown command: {command}")),
         }
     }
@@ -19291,7 +19455,7 @@ impl NativeController {
 
     fn prompt_permanent_delete(&mut self, ui: &MainWindow) {
         if self.active_path_is_recycle_bin() {
-            self.purge_from_recycle_bin(ui);
+            self.prompt_purge_recycle_bin(ui);
             return;
         }
         let paths = self.selected_paths();
@@ -19635,6 +19799,7 @@ impl NativeController {
             Some(PendingPrompt::Archive)
             | Some(PendingPrompt::StorageCleanup(_))
             | Some(PendingPrompt::PermanentDelete(_))
+            | Some(PendingPrompt::EmptyRecycleBin)
             | None => {}
         }
     }
@@ -19644,7 +19809,16 @@ impl NativeController {
             Some(PendingPrompt::StorageCleanup(paths)) => Some(paths),
             Some(PendingPrompt::PermanentDelete(paths)) => {
                 ui.set_confirm_visible(false);
-                self.execute_permanent_delete(ui, paths);
+                if paths.iter().any(|p| p.starts_with("recycle://")) {
+                    self.purge_recycle_paths(ui, paths);
+                } else {
+                    self.execute_permanent_delete(ui, paths);
+                }
+                return;
+            }
+            Some(PendingPrompt::EmptyRecycleBin) => {
+                ui.set_confirm_visible(false);
+                self.empty_recycle_bin(ui);
                 return;
             }
             other => {
@@ -23119,6 +23293,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             } else {
                 let mut ctrl = c.borrow_mut();
                 ctrl.active_pane = ActivePane::Primary;
+                ctrl.sync_active_pane(&ui);
                 if index >= 0 {
                     ctrl.selected_index = index;
                     if !ctrl.selected_set.contains(&(index as usize)) {
@@ -23702,6 +23877,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             } else {
                 let mut ctrl = c.borrow_mut();
                 ctrl.active_pane = ActivePane::Secondary;
+                ctrl.sync_active_pane(&ui);
+                ctrl.sync_selection_count_to_ui(&ui);
                 if index >= 0 {
                     ctrl.secondary_selected_index = index;
                     if !ctrl.secondary_selected_set.contains(&(index as usize)) {
@@ -24886,10 +25063,19 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                 if result.refresh_both_panes {
                                     ctrl.invalidate_and_refresh_both_panes(&ui);
                                 } else if !result.optimistic_remove_paths.is_empty() {
-                                    ctrl.optimistic_remove_paths(
-                                        &ui,
-                                        &result.optimistic_remove_paths,
-                                    );
+                                    let recycle_ops = result
+                                        .optimistic_remove_paths
+                                        .iter()
+                                        .any(|p| p.starts_with("recycle://"));
+                                    if recycle_ops && !ctrl.active_path_is_recycle_bin() {
+                                        // User left the Recycle Bin before the op finished —
+                                        // don't mutate the current folder's selection/listing.
+                                    } else {
+                                        ctrl.optimistic_remove_paths(
+                                            &ui,
+                                            &result.optimistic_remove_paths,
+                                        );
+                                    }
                                 } else if result.refresh {
                                     ctrl.refresh(&ui);
                                 }
