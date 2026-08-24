@@ -13255,8 +13255,8 @@ fn command_items_filtered_with_recent(
                     .cloned()
                     .unwrap_or_else(|| (*hint).to_string());
                 items.push(CommandItem {
-                    group: ss("Recent"),
-                    label: ss(*label),
+                    group: ss(&i18n::t("Recent")),
+                    label: ss(&i18n::t(label)),
                     hint: ss(hint_s),
                     command: ss(*command),
                 });
@@ -13269,8 +13269,8 @@ fn command_items_filtered_with_recent(
             .cloned()
             .unwrap_or_else(|| (*hint).to_string());
         CommandItem {
-            group: ss(*group),
-            label: ss(*label),
+            group: ss(&i18n::t(group)),
+            label: ss(&i18n::t(label)),
             hint: ss(hint_s),
             command: ss(*command),
         }

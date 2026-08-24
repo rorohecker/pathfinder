@@ -514,7 +514,7 @@ component TabButton inherits Rectangle {
         button_width: 24px;
         button_height: 24px;
         icon_data: "M18 6L6 18 M6 6l12 12";
-        tooltip: "Close tab";
+        tooltip: @tr("Close tab");
         visible: touch.has-hover || root.tab.active;
         clicked => { root.closed(root.index); }
     }
@@ -2424,7 +2424,7 @@ component StorageListHeader inherits Rectangle {
     if root.show_bucket_label && root.col_category_w > 0px: Text {
         x: root.category_x; y: 0;
         width: root.col_category_w; height: parent.height;
-        text: "Category";
+        text: @tr("Category");
         color: ThemePalette.text_faint;
         font-size: 10px;
         font-weight: 700;
@@ -2434,7 +2434,7 @@ component StorageListHeader inherits Rectangle {
     if root.col_share_w > 0px: Text {
         x: root.share_x; y: 0;
         width: root.col_share_w; height: parent.height;
-        text: "Usage";
+        text: @tr("Usage");
         color: ThemePalette.text_faint;
         font-size: 10px;
         font-weight: 700;
@@ -2485,7 +2485,7 @@ component StorageTipsFooter inherits Rectangle {
             height: parent.height;
             text: root.tips.length > 0
                 ? ("Suggestions · " + root.tips.length + (root.expanded ? "  ▴" : "  ▾"))
-                : "Suggestions";
+                : @tr("Suggestions");
             color: ThemePalette.text_faint;
             font-size: 10px;
             font-weight: 700;
@@ -2606,7 +2606,7 @@ component StorageLargestPanel inherits Rectangle {
             ? ("Largest items · " + root.list_shown + " of " + root.list_total)
             : (root.top_items.length > 0
                 ? ("Largest items · " + root.top_items.length)
-                : "Largest items");
+                : @tr("Largest items"));
         color: ThemePalette.text;
         font-size: 11px;
         font-weight: 700;
@@ -2629,8 +2629,8 @@ component StorageLargestPanel inherits Rectangle {
             x: 12px; y: 14px;
             width: parent.width - 24px;
             text: root.scanning
-                ? "Largest items will appear once the scan completes."
-                : "Nothing to list yet. Click Rescan to start.";
+                ? @tr("Largest items will appear once the scan completes.")
+                : @tr("Nothing to list yet. Click Rescan to start.");
             color: ThemePalette.text_faint;
             font-size: 12px;
             wrap: word-wrap;
@@ -2762,7 +2762,7 @@ component StorageOverview inherits Rectangle {
                 background: full_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
                 Text {
                     width: parent.width; height: parent.height;
-                    text: "Full list";
+                    text: @tr("Full list");
                     color: ThemePalette.text;
                     font-size: 12px;
                     font-weight: 600;
@@ -2783,7 +2783,7 @@ component StorageOverview inherits Rectangle {
                 background: rescan_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
                 Text {
                     width: parent.width; height: parent.height;
-                    text: root.scanning ? "Scanning..." : "Rescan";
+                    text: root.scanning ? @tr("Scanning...") : "Rescan";
                     color: ThemePalette.text;
                     font-size: 12px;
                     font-weight: 600;
@@ -2905,7 +2905,7 @@ component StorageOverview inherits Rectangle {
                 Text {
                     x: 14px; y: 8px;
                     width: parent.width - 28px; height: 14px;
-                    text: "Categories";
+                    text: @tr("Categories");
                     color: ThemePalette.text_faint;
                     font-size: 10px;
                     font-weight: 700;
@@ -2946,7 +2946,7 @@ component StorageOverview inherits Rectangle {
                     Text {
                         x: 14px; y: 8px;
                         width: parent.width - 28px; height: 14px;
-                        text: "Categories";
+                        text: @tr("Categories");
                         color: ThemePalette.text_faint;
                         font-size: 10px;
                         font-weight: 700;
@@ -3076,7 +3076,7 @@ component StorageDrillIn inherits Rectangle {
             width: parent.width - 90px; height: 18px;
             text: root.selected_bucket != ""
                 ? root.selected_bucket_name
-                : "All items by size";
+                : @tr("All items by size");
             color: ThemePalette.text;
             font-size: 14px;
             font-weight: 700;
@@ -3092,8 +3092,8 @@ component StorageDrillIn inherits Rectangle {
                         ? " in this category"
                         : " ranked by size"))
                 : (root.selected_bucket != ""
-                    ? "Largest folders and files in this category"
-                    : "Everything on the drive, ranked by size");
+                    ? @tr("Largest folders and files in this category")
+                    : @tr("Everything on the drive, ranked by size"));
             color: ThemePalette.text_faint;
             font-size: 11px;
             vertical-alignment: center;
@@ -3160,7 +3160,7 @@ component StorageDrillIn inherits Rectangle {
             if root.search_text == "": Text {
                 x: 32px; y: 0;
                 width: parent.width - 64px; height: parent.height;
-                text: "Search by name or path...";
+                text: @tr("Search by name or path...");
                 color: ThemePalette.text_faint;
                 font-size: 12px;
                 vertical-alignment: center;
@@ -3236,7 +3236,7 @@ component StorageDrillIn inherits Rectangle {
             border-color: root.sort_mode == "recent" ? ThemePalette.accent : ThemePalette.border;
             Text {
                 width: parent.width; height: parent.height;
-                text: "Recent";
+                text: @tr("Recent");
                 font-size: 11px; font-weight: 600;
                 color: root.sort_mode == "recent" ? ThemePalette.accent_strong : ThemePalette.text_muted;
                 horizontal-alignment: center; vertical-alignment: center;
@@ -3342,12 +3342,12 @@ component StorageDrillIn inherits Rectangle {
             x: 24px; y: 24px;
             width: parent.width - 48px;
             text: root.scanning
-                ? "Still scanning - results will appear shortly."
+                ? @tr("Still scanning - results will appear shortly.")
                 : (root.search_text != ""
                     ? ("No matches for \"" + root.search_text + "\" in this category.")
                     : (root.selected_bucket != ""
                         ? ("No large items found in " + root.selected_bucket_name + ".")
-                        : "No items to show. Click Rescan to start."));
+                        : @tr("No items to show. Click Rescan to start.")));
             color: ThemePalette.text_muted;
             font-size: 12px;
         }
@@ -3393,7 +3393,7 @@ export component MainWindow inherits Window {
     in-out property <string> address_text: "";
     in-out property <string> search_text: "";
     in-out property <bool> search_scope_all: false;
-    in-out property <string> search_scope_label: "Folder";
+    in-out property <string> search_scope_label: @tr("Folder");
     // When true, ranked by on-device embedding similarity (requires Local AI models).
     in-out property <bool> search_semantic_mode: false;
     in-out property <bool> semantic_search_available: false;
@@ -3531,12 +3531,12 @@ export component MainWindow inherits Window {
     in-out property <bool> ai_install_explainer_visible: false;
     in-out property <int> ai_install_size_mb: 180;
     in-out property <string> ai_profile: "balanced";
-    in-out property <string> ai_profile_label: "Balanced (recommended)";
+    in-out property <string> ai_profile_label: @tr("Balanced (recommended)");
     in-out property <bool> ai_auto_update: true;
     in-out property <string> ai_update_status: "";
-    in-out property <string> ai_feature_semantic: "Install Local AI to enable";
-    in-out property <string> ai_feature_classify: "Install Local AI to enable";
-    in-out property <string> ai_feature_dupes: "Ready - near-duplicate detection uses a lightweight image hash";
+    in-out property <string> ai_feature_semantic: @tr("Install Local AI to enable");
+    in-out property <string> ai_feature_classify: @tr("Install Local AI to enable");
+    in-out property <string> ai_feature_dupes: @tr("Ready - near-duplicate detection uses a lightweight image hash");
     in-out property <string> ai_disk_usage: "";
     in-out property <string> ai_model_versions: "";
     callback ai_install_request();
@@ -3564,7 +3564,7 @@ export component MainWindow inherits Window {
     in-out property <string> preview_title: "";
     in-out property <string> preview_body: "";
     in-out property <string> preview_meta: "";
-    in-out property <string> image_tools_title: "Image Tools";
+    in-out property <string> image_tools_title: @tr("Image Tools");
     in-out property <string> image_tools_subtitle: "";
     in-out property <bool> preview_is_image: false;
     in-out property <image> preview_image;
@@ -3642,11 +3642,11 @@ export component MainWindow inherits Window {
     callback queue_pill_clicked();
     callback welcome_next_step();
     callback welcome_set_mode(string);
-    in-out property <string> status_left: "Ready";
+    in-out property <string> status_left: @tr("Ready");
     in-out property <string> status_right: "";
     in-out property <string> toast_text: "";
-    in-out property <string> ai_label: "CPU Fallback";
-    in-out property <string> ai_device: "Detecting";
+    in-out property <string> ai_label: @tr("CPU Fallback");
+    in-out property <string> ai_device: @tr("Detecting");
     in-out property <string> ai_gpu_status: "";
     in-out property <string> prompt_title: "";
     in-out property <string> prompt_value: "";
@@ -3760,7 +3760,7 @@ export component MainWindow inherits Window {
     callback thumb_size_changed(float);
     callback file_diff_selected();
     in-out property <bool> welcome_visible: false;
-    in-out property <string> welcome_default_status: "Click Set as default below to register Pathfinder for folder shortcuts in Explorer.";
+    in-out property <string> welcome_default_status: @tr("Click Set as default below to register Pathfinder for folder shortcuts in Explorer.");
     in-out property <bool> welcome_default_handler_set: false;
     callback minimize();
     callback maximize();
@@ -4197,7 +4197,7 @@ export component MainWindow inherits Window {
                 visible: parent.sel_label_w > 8px;
                 width: max(0px, parent.sel_label_w - 8px);
                 height: parent.height;
-                text: root.selected_count == 1 ? "1 item in Recycle Bin" : (root.selected_count + " items in Recycle Bin");
+                text: root.selected_count == 1 ? @tr("1 item in Recycle Bin") : (root.selected_count + " items in Recycle Bin");
                 color: ThemePalette.accent_strong;
                 font-size: 13px;
                 font-weight: 600;
@@ -4210,8 +4210,8 @@ export component MainWindow inherits Window {
                 button_width: parent.sel_btn_w; button_height: root.is_simple ? 56px : 31px;
                 tooltip_above: parent.sel_tooltip_above;
                 icon_data: "M3 12a9 9 0 1 0 9-9 M3 4v5h5 M3 9l6-6";
-                text_label: "Restore"; show_caption: root.is_simple;
-                tooltip: "Restore selected to original location";
+                text_label: @tr("Restore"); show_caption: root.is_simple;
+                tooltip: @tr("Restore selected to original location");
                 clicked => { root.command("restore"); }
             }
             ToolButton {
@@ -4220,8 +4220,8 @@ export component MainWindow inherits Window {
                 button_width: parent.sel_btn_w; button_height: root.is_simple ? 56px : 31px;
                 tooltip_above: parent.sel_tooltip_above;
                 icon_data: "M3 12a9 9 0 1 0 9-9 M3 4v5h5 M3 9l6-6 M16 12h5 M18.5 9.5v5";
-                text_label: "All"; show_caption: root.is_simple;
-                tooltip: "Restore all items in Recycle Bin";
+                text_label: @tr("All"); show_caption: root.is_simple;
+                tooltip: @tr("Restore all items in Recycle Bin");
                 clicked => { root.command("restore-all"); }
             }
             ToolButton {
@@ -4231,7 +4231,7 @@ export component MainWindow inherits Window {
                 tooltip_above: parent.sel_tooltip_above; danger: true;
                 icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2";
                 text_label: @tr("Delete"); show_caption: root.is_simple;
-                tooltip: "Delete selected permanently";
+                tooltip: @tr("Delete selected permanently");
                 clicked => { root.command("purge"); }
             }
             ToolButton {
@@ -4241,8 +4241,8 @@ export component MainWindow inherits Window {
                 button_width: parent.sel_btn_w; button_height: root.is_simple ? 56px : 31px;
                 tooltip_above: parent.sel_tooltip_above;
                 icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11";
-                text_label: "Select all"; show_caption: root.is_simple;
-                tooltip: "Select all (Ctrl+A)";
+                text_label: @tr("Select all"); show_caption: root.is_simple;
+                tooltip: @tr("Select all (Ctrl+A)");
                 clicked => { root.command("select-all"); }
             }
             ToolButton {
@@ -4252,8 +4252,8 @@ export component MainWindow inherits Window {
                 button_width: parent.sel_btn_w; button_height: root.is_simple ? 56px : 31px;
                 tooltip_above: parent.sel_tooltip_above; danger: true;
                 icon_data: "M3 6h18 M8 6V4h8v2 M19 6l-1 14H6L5 6 M10 11v6 M14 11v6";
-                text_label: "Empty"; show_caption: root.is_simple;
-                tooltip: "Empty Recycle Bin";
+                text_label: @tr("Empty"); show_caption: root.is_simple;
+                tooltip: @tr("Empty Recycle Bin");
                 clicked => { root.command("empty-trash"); }
             }
             ToolButton {
@@ -4262,8 +4262,8 @@ export component MainWindow inherits Window {
                 button_width: parent.sel_clear_w; button_height: root.is_simple ? 56px : 31px;
                 tooltip_above: parent.sel_tooltip_above;
                 icon_data: "M18 6L6 18 M6 6l12 12";
-                text_label: "Clear"; show_caption: root.is_simple;
-                tooltip: "Clear selection (Esc)";
+                text_label: @tr("Clear"); show_caption: root.is_simple;
+                tooltip: @tr("Clear selection (Esc)");
                 clicked => { root.clear_selection(); }
             }
         }
@@ -4340,34 +4340,34 @@ export component MainWindow inherits Window {
                 visible: parent.sel_label_w > 8px;
                 width: max(0px, parent.sel_label_w - 8px);
                 height: parent.height;
-                text: root.selected_count == 1 ? "1 item selected" : (root.selected_count + " items selected");
+                text: root.selected_count == 1 ? @tr("1 item selected") : (root.selected_count + " items selected");
                 color: ThemePalette.accent_strong;
                 font-size: 13px;
                 font-weight: 600;
                 vertical-alignment: center;
                 overflow: elide;
             }
-            ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left : parent.sel_r - (8 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: "Copy"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Copy (Ctrl+C)"; clicked => { root.command("copy"); } }
-            ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left + parent.sel_step : parent.sel_r - (7 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
-            ToolButton { visible: parent.sel_show_paste; x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.sel_r - (6 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
-            ToolButton { visible: parent.sel_show_rename; x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.sel_r - (5 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_r - (4 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: @tr("Delete"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Delete (Del)"; clicked => { root.command("delete"); } }
+            ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left : parent.sel_r - (8 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6 M9 12l2 2 4-4"; text_label: @tr("Copy"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Copy (Ctrl+C)"); clicked => { root.command("copy"); } }
+            ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left + parent.sel_step : parent.sel_r - (7 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: @tr("Cut"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Cut (Ctrl+X)"); clicked => { root.command("cut"); } }
+            ToolButton { visible: parent.sel_show_paste; x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.sel_r - (6 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: @tr("Paste"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Paste (Ctrl+V)"); clicked => { root.command("paste"); } }
+            ToolButton { visible: parent.sel_show_rename; x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.sel_r - (5 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: @tr("Rename"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Rename (F2)"); clicked => { root.command("rename"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_r - (4 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: @tr("Delete"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Delete (Del)"); clicked => { root.command("delete"); } }
             if root.selection_has_archive: ToolButton {
                 x: root.is_simple ? parent.sel_left + 5 * parent.sel_step : parent.sel_r - (4 - parent.sel_left_trim) * parent.sel_norm_step;
                 y: root.is_simple ? 16px : 6px;
                 button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above;
                 icon_data: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3";
-                text_label: "Extract";
+                text_label: @tr("Extract");
                 show_caption: root.is_simple;
                 button_height: root.is_simple ? 56px : 31px;
-                tooltip: "Extract Here";
+                tooltip: @tr("Extract Here");
                 clicked => { root.command("extract-here"); }
             }
-            ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_r - (3 - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: @tr("Open"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
-            ToolButton { visible: root.selected_count == 1 && parent.sel_show_open_with; x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_r - (2 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M4 7h16 M9 20h6 M12 4v16"; text_label: "Open with"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
-            ToolButton { visible: parent.sel_show_info; x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_r - (1 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
-            ToolButton { visible: parent.sel_show_select_all; x: root.is_simple ? parent.sel_left + (8 + parent.sel_shift) * parent.sel_step : parent.sel_r - (0 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
-            ToolButton { x: parent.sel_right - parent.sel_clear_w; y: root.is_simple ? 16px : 6px; button_width: parent.sel_clear_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: "Clear"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Clear selection (Esc)"; clicked => { root.clear_selection(); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_r - (3 - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: @tr("Open"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Open (Enter)"); clicked => { root.command("open"); } }
+            ToolButton { visible: root.selected_count == 1 && parent.sel_show_open_with; x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_r - (2 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M4 7h16 M9 20h6 M12 4v16"; text_label: @tr("Open with"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Open With"); clicked => { root.command("open-with"); } }
+            ToolButton { visible: parent.sel_show_info; x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_r - (1 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: @tr("Info"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Properties"); clicked => { root.command("properties"); } }
+            ToolButton { visible: parent.sel_show_select_all; x: root.is_simple ? parent.sel_left + (8 + parent.sel_shift) * parent.sel_step : parent.sel_r - (0 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: @tr("Select all"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Select All (Ctrl+A)"); clicked => { root.command("select-all"); } }
+            ToolButton { x: parent.sel_right - parent.sel_clear_w; y: root.is_simple ? 16px : 6px; button_width: parent.sel_clear_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: @tr("Clear"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Clear selection (Esc)"); clicked => { root.clear_selection(); } }
         }
 
         // Toolbar - hidden while the selection bar is visible. Spans the full
@@ -4429,44 +4429,44 @@ export component MainWindow inherits Window {
                 x: 10px;
                 y: root.is_simple ? root.simple_row1_y : 6px;
                 icon_data: "M15 18l-6-6 6-6";
-                text_label: "Back";
+                text_label: @tr("Back");
                 show_caption: root.is_simple;
                 button_width: root.is_simple ? toolbar.simple_row1_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
-                tooltip: "Back";
+                tooltip: @tr("Back");
                 clicked => { root.go_back(); }
             }
             ToolButton {
                 x: root.is_simple ? 10px + toolbar.simple_row1_step : 45px;
                 y: root.is_simple ? root.simple_row1_y : 6px;
                 icon_data: "M9 18l6-6-6-6";
-                text_label: "Forward";
+                text_label: @tr("Forward");
                 show_caption: root.is_simple;
                 button_width: root.is_simple ? toolbar.simple_row1_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
-                tooltip: "Forward";
+                tooltip: @tr("Forward");
                 clicked => { root.go_forward(); }
             }
             ToolButton {
                 x: root.is_simple ? 10px + 2 * toolbar.simple_row1_step : 80px;
                 y: root.is_simple ? root.simple_row1_y : 6px;
                 icon_data: "M12 19V5 M5 12l7-7 7 7";
-                text_label: "Up";
+                text_label: @tr("Up");
                 show_caption: root.is_simple;
                 button_width: root.is_simple ? toolbar.simple_row1_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
-                tooltip: "Up one level";
+                tooltip: @tr("Up one level");
                 clicked => { root.go_up(); }
             }
             ToolButton {
                 x: root.is_simple ? 10px + 3 * toolbar.simple_row1_step : 115px;
                 y: root.is_simple ? root.simple_row1_y : 6px;
                 icon_data: "M3 12a9 9 0 0 1 15-6.7L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15 6.7L3 16 M3 21v-5h5";
-                text_label: "Refresh";
+                text_label: @tr("Refresh");
                 show_caption: root.is_simple;
                 button_width: root.is_simple ? toolbar.simple_row1_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
-                tooltip: "Refresh";
+                tooltip: @tr("Refresh");
                 clicked => { root.refresh(); }
             }
 
@@ -4736,7 +4736,7 @@ export component MainWindow inherits Window {
                     button_width: 22px;
                     button_height: 22px;
                     icon_data: "M18 6L6 18 M6 6l12 12";
-                    tooltip: "Clear search";
+                    tooltip: @tr("Clear search");
                     clicked => {
                         root.search_text = "";
                         root.search_requested("");
@@ -4778,7 +4778,7 @@ export component MainWindow inherits Window {
                 if scope_touch.has-hover: HoverTip {
                     x: 0px;
                     y: parent.height + 6px;
-                    tip_text: root.search_scope_all ? "Searching entire drive - click to search this folder only" : "Click to search the entire drive";
+                    tip_text: root.search_scope_all ? @tr("Searching entire drive - click to search this folder only") : "Click to search the entire drive";
                 }
                 Text {
                     visible: search_box.semantic_available;
@@ -4802,7 +4802,7 @@ export component MainWindow inherits Window {
                 if search_box.semantic_available && sem_touch.has-hover: HoverTip {
                     x: 0px;
                     y: parent.height + 6px;
-                    tip_text: root.search_semantic_mode ? "Semantic ranking on (filename embeddings, not OCR)" : "Semantic ranking off - click to rank by name embeddings";
+                    tip_text: root.search_semantic_mode ? @tr("Semantic ranking on (filename embeddings, not OCR)") : "Semantic ranking off - click to rank by name embeddings";
                 }
                 search_input := TextInput {
                     x: search_box.semantic_available ? 56px : 30px;
@@ -4836,8 +4836,8 @@ export component MainWindow inherits Window {
                     width: parent.width - (search_box.semantic_available ? 84px : 58px);
                     height: parent.height;
                     text: root.search_scope_all
-                        ? "Path or name — e.g. %localappdata%\\App\\"
-                        : "Path or name in this folder";
+                        ? @tr("Path or name — e.g. %localappdata%\\App\\")
+                        : @tr("Path or name in this folder");
                     color: ThemePalette.text_faint;
                     font-size: 12.5px;
                     vertical-alignment: center;
@@ -4849,7 +4849,7 @@ export component MainWindow inherits Window {
                     button_width: 22px;
                     button_height: 22px;
                     icon_data: "M18 6L6 18 M6 6l12 12";
-                    tooltip: "Clear search";
+                    tooltip: @tr("Clear search");
                     clicked => {
                         root.search_text = "";
                         root.search_requested("");
@@ -4866,7 +4866,7 @@ export component MainWindow inherits Window {
                 button_height: 31px;
                 active: root.search_help_visible;
                 text_label: "?";
-                tooltip: "Search operators";
+                tooltip: @tr("Search operators");
                 clicked => { root.search_help_toggle(); }
             }
             ToolButton {
@@ -4876,7 +4876,7 @@ export component MainWindow inherits Window {
                 button_width: 28px;
                 button_height: 31px;
                 icon_data: "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z";
-                tooltip: "Save search";
+                tooltip: @tr("Save search");
                 clicked => { root.search_save_requested(); }
             }
             if toolbar.show_toolbar_search && root.search_help_visible: Rectangle {
@@ -5088,11 +5088,11 @@ export component MainWindow inherits Window {
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z";
-                text_label: "Icons";
+                text_label: @tr("Icons");
                 show_caption: root.is_simple;
                 button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
-                tooltip: "Icon view";
+                tooltip: @tr("Icon view");
                 active: root.view_mode == "grid";
                 clicked => { root.set_view("grid"); }
             }
@@ -5105,7 +5105,7 @@ export component MainWindow inherits Window {
                 show_caption: root.is_simple;
                 button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
-                tooltip: "Compact view";
+                tooltip: @tr("Compact view");
                 active: root.view_mode == "compact";
                 clicked => { root.set_view("compact"); }
             }
@@ -5114,11 +5114,11 @@ export component MainWindow inherits Window {
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01";
-                text_label: "Details";
+                text_label: @tr("Details");
                 show_caption: root.is_simple;
                 button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
-                tooltip: "Details view";
+                tooltip: @tr("Details view");
                 active: root.view_mode == "list";
                 clicked => { root.set_view("list"); }
             }
@@ -5141,11 +5141,11 @@ export component MainWindow inherits Window {
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01";
-                text_label: "Gallery";
+                text_label: @tr("Gallery");
                 show_caption: root.is_simple;
                 button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
-                tooltip: "Gallery view";
+                tooltip: @tr("Gallery view");
                 active: root.view_mode == "gallery";
                 clicked => { root.set_view("gallery"); }
             }
@@ -5154,15 +5154,15 @@ export component MainWindow inherits Window {
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 4h18v16H3z M14 4v16";
-                text_label: "Preview";
+                text_label: @tr("Preview");
                 show_caption: root.is_simple;
                 button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
-                tooltip: "Preview pane";
+                tooltip: @tr("Preview pane");
                 active: root.preview_visible;
                 clicked => { root.toggle_preview(); }
             }
-            ToolButton { visible: !root.is_simple; x: parent.width - 148px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: "Dual pane"; active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
+            ToolButton { visible: !root.is_simple; x: parent.width - 148px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: @tr("Dual pane"); active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
             // Clear-sort button - appears in the gap between Dual Pane and Command Palette
             // when any non-default sort is active. Resets to Name ^ (natural order).
             ToolButton {
@@ -5172,7 +5172,7 @@ export component MainWindow inherits Window {
                 button_width: 28px;
                 button_height: 31px;
                 icon_data: "M18 6L6 18 M6 6l12 12";
-                tooltip: "Clear sort (reset to Name ^)";
+                tooltip: @tr("Clear sort (reset to Name ^)");
                 clicked => { root.sort_column("reset"); }
             }
             ToolButton {
@@ -5180,11 +5180,11 @@ export component MainWindow inherits Window {
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z";
-                text_label: "Actions";
+                text_label: @tr("Actions");
                 show_caption: root.is_simple;
                 button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
-                tooltip: "Command palette";
+                tooltip: @tr("Command palette");
                 clicked => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; }
             }
 
@@ -5849,8 +5849,8 @@ export component MainWindow inherits Window {
                             text: root.empty_state != "" ? root.empty_state :
                                   root.search_text != "" ? "No results for \"" + root.search_text + "\"" :
                                   root.filter_text != "" ? "No files match \"" + root.filter_text + "\"" :
-                                  root.is_home_view ? "Your Home is quiet" :
-                                  root.in_recycle_bin ? "Recycle Bin is empty" :
+                                  root.is_home_view ? @tr("Your Home is quiet") :
+                                  root.in_recycle_bin ? @tr("Recycle Bin is empty") :
                                   "This folder is empty";
                             color: ThemePalette.text;
                             font-size: 15px;
@@ -5861,11 +5861,11 @@ export component MainWindow inherits Window {
                             visible: root.search_text != "" || root.is_home_view || root.in_recycle_bin || root.empty_state == "Loading folder..." || root.empty_state == "Loading Recycle Bin..." || root.empty_state == "Searching..." || root.empty_state == "Searching drive...";
                             width: min(360px, parent.width - 48px);
                             x: (parent.width - self.width) / 2;
-                            text: root.search_text != "" ? (root.search_scope_all ? "Try a different query or switch back to this folder" : "Try a different query or search the whole drive") :
-                                  root.is_home_view ? "Pin folders from the sidebar or open a drive — shortcuts collect here." :
-                                  root.in_recycle_bin ? "Deleted files appear here until you empty the bin." :
-                                  root.empty_state == "Loading Recycle Bin..." ? "Reading the OS Recycle Bin…" :
-                                  root.empty_state == "Loading folder..." ? "Reading folder contents…" :
+                            text: root.search_text != "" ? (root.search_scope_all ? @tr("Try a different query or switch back to this folder") : "Try a different query or search the whole drive") :
+                                  root.is_home_view ? @tr("Pin folders from the sidebar or open a drive — shortcuts collect here.") :
+                                  root.in_recycle_bin ? @tr("Deleted files appear here until you empty the bin.") :
+                                  root.empty_state == "Loading Recycle Bin..." ? @tr("Reading the OS Recycle Bin…") :
+                                  root.empty_state == "Loading folder..." ? @tr("Reading folder contents…") :
                                   "Hang tight…";
                             color: ThemePalette.text_faint;
                             font-size: 12px;
@@ -5875,7 +5875,7 @@ export component MainWindow inherits Window {
                         }
                         if root.in_recycle_bin && root.empty_state == "Recycle Bin is empty.": DialogButton {
                             x: (parent.width - self.preferred-width) / 2;
-                            label: "Refresh";
+                            label: @tr("Refresh");
                             clicked => { root.command("refresh"); }
                         }
                     }
@@ -6072,21 +6072,21 @@ export component MainWindow inherits Window {
                         x: 4px; y: 4px;
                         button_width: 28px; button_height: 28px;
                         icon_data: "M15 18l-6-6 6-6";
-                        tooltip: "Back";
+                        tooltip: @tr("Back");
                         clicked => { root.secondary_go_back(); }
                     }
                     ToolButton {
                         x: 34px; y: 4px;
                         button_width: 28px; button_height: 28px;
                         icon_data: "M12 19V5 M5 12l7-7 7 7";
-                        tooltip: "Up";
+                        tooltip: @tr("Up");
                         clicked => { root.secondary_go_up(); }
                     }
                     ToolButton {
                         x: 64px; y: 4px;
                         button_width: 28px; button_height: 28px;
                         icon_data: "M3 12h14 M10 5l7 7-7 7";
-                        tooltip: "Open left folder here";
+                        tooltip: @tr("Open left folder here");
                         clicked => { root.secondary_navigate(root.current_path); }
                     }
 
@@ -6311,7 +6311,7 @@ export component MainWindow inherits Window {
                         }
                         Text {
                             width: parent.width;
-                            text: root.secondary_path == "" ? "Enable dual pane to browse a second location" : "Empty folder";
+                            text: root.secondary_path == "" ? @tr("Enable dual pane to browse a second location") : "Empty folder";
                             color: ThemePalette.text_faint;
                             font-size: 12px;
                             horizontal-alignment: center;
@@ -6400,7 +6400,7 @@ export component MainWindow inherits Window {
                                 : (root.preview_is_html ? 125px : 92px)
                         );
                         height: parent.height;
-                        text: root.preview_title == "" ? "Preview" : root.preview_title;
+                        text: root.preview_title == "" ? @tr("Preview") : root.preview_title;
                         color: ThemePalette.text;
                         font-size: 13px;
                         font-weight: 700;
@@ -6475,7 +6475,7 @@ export component MainWindow inherits Window {
                         button_width: 30px;
                         button_height: 30px;
                         icon_data: "M10 14L21 3 M21 3v7 M21 3h-7 M5 5h6 M5 19h14a2 2 0 0 0 2-2v-7";
-                        tooltip: "Open rendered output in browser";
+                        tooltip: @tr("Open rendered output in browser");
                         tooltip_above: true;
                         clicked => { root.open_preview_in_browser(); }
                     }
@@ -6483,7 +6483,7 @@ export component MainWindow inherits Window {
                         x: parent.width - 37px;
                         y: 7px;
                         icon_data: "M18 6L6 18 M6 6l12 12";
-                        tooltip: "Close preview";
+                        tooltip: @tr("Close preview");
                         tooltip_above: true;
                         clicked => { root.toggle_preview(); }
                     }
@@ -6609,7 +6609,7 @@ export component MainWindow inherits Window {
                             height: 48px;
                             DialogButton {
                                 x: 16px; y: 8px;
-                                label: "Play in default app";
+                                label: @tr("Play in default app");
                                 primary: true;
                                 clicked => { root.quick_look_play(); }
                             }
@@ -6622,9 +6622,9 @@ export component MainWindow inherits Window {
                             Text {
                                 width: parent.width; height: parent.height;
                                 text: root.preview_has_pdf_page
-                                    ? "PDF · first page rendered above. Open the file for the full document."
+                                    ? @tr("PDF · first page rendered above. Open the file for the full document.")
                                     : (root.preview_body == ""
-                                        ? "Rendering PDF page… if nothing appears it may be protected or image-only — open it to view the full document."
+                                        ? @tr("Rendering PDF page… if nothing appears it may be protected or image-only — open it to view the full document.")
                                         : "PDF · first-page text extract shown below. Open the file for the full document.");
                                 color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap; vertical-alignment: center;
                             }
@@ -6637,8 +6637,8 @@ export component MainWindow inherits Window {
                             Text {
                                 x: 16px; width: parent.width - 32px; height: parent.height;
                                 text: root.preview_show_rendered
-                                    ? "Rendered view (built-in). Switch to Code for raw source, or open in your browser."
-                                    : "Source view. Switch to View for a built-in rendered version, or open in your browser.";
+                                    ? @tr("Rendered view (built-in). Switch to Code for raw source, or open in your browser.")
+                                    : @tr("Source view. Switch to View for a built-in rendered version, or open in your browser.");
                                 color: ThemePalette.text_faint; font-size: 11px; vertical-alignment: center; overflow: elide;
                             }
                         }
@@ -6809,7 +6809,7 @@ export component MainWindow inherits Window {
                     queue_pill_label := Text {
                         width: parent.width;
                         height: parent.height;
-                        text: root.queue_busy_text != "" ? root.queue_busy_text : "Queue busy";
+                        text: root.queue_busy_text != "" ? root.queue_busy_text : @tr("Queue busy");
                         color: white;
                         font-size: 10px;
                         font-weight: 600;
@@ -6885,7 +6885,7 @@ export component MainWindow inherits Window {
                             : rgba(0, 0, 0, 0.25);
                         Text {
                             width: parent.width; height: parent.height;
-                            text: root.update_installing ? "…" : "Install";
+                            text: root.update_installing ? "…" : @tr("Install");
                             color: white;
                             font-size: 10px;
                             font-weight: 700;
@@ -7042,24 +7042,24 @@ export component MainWindow inherits Window {
             // -- Recycle-bin-only actions ------------------------------
             // Surfaced only when browsing `recycle://`; replace the standard
             // open/copy/cut chain because those don't apply to trash items.
-            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Restore"; command_name: "restore"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Restore All"; command_name: "restore-all"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Delete Permanently"; command_name: "purge"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Restore"); command_name: "restore"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Restore All"); command_name: "restore-all"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Delete Permanently"); command_name: "purge"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
-            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Empty Recycle Bin"; command_name: "empty-trash"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Empty Recycle Bin"); command_name: "empty-trash"; picked(c) => { root.context_visible = false; root.command(c); } }
 
             // -- Core actions (regular folders) ------------------------
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Open"); command_name: "open"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Rename"; command_name: "rename"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Copy"; command_name: "copy"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Cut"; command_name: "cut"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Paste"; command_name: "paste"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Rename"); command_name: "rename"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Copy"); command_name: "copy"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Cut"); command_name: "cut"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Paste"); command_name: "paste"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.context_is_archive && !root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
-            if root.context_is_archive && !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Archive Browser"; command_name: "archive-browser"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_is_archive && !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Extract Here"; command_name: "extract-here"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_is_archive && !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Archive Browser"); command_name: "archive-browser"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_is_archive && !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Extract Here"); command_name: "extract-here"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: "Batch Rename"; command_name: "batch-rename"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Add Note"; command_name: "note"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: @tr("Batch Rename"); command_name: "batch-rename"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: @tr("Add Note"); command_name: "note"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
             Rectangle {
                 width: parent.width;
@@ -7111,18 +7111,18 @@ export component MainWindow inherits Window {
             if root.context_tags_expanded: TagMenuRow { width: parent.width; label: root.tag_names[3]; dot_color: #4caf6a; command_name: "tag-green"; picked(c) => { root.context_visible = false; root.context_tags_expanded = false; root.command(c); } }
             if root.context_tags_expanded: TagMenuRow { width: parent.width; label: root.tag_names[4]; dot_color: #4a90d9; command_name: "tag-blue"; picked(c) => { root.context_visible = false; root.context_tags_expanded = false; root.command(c); } }
             if root.context_tags_expanded: TagMenuRow { width: parent.width; label: root.tag_names[5]; dot_color: #8b5cf6; command_name: "tag-violet"; picked(c) => { root.context_visible = false; root.context_tags_expanded = false; root.command(c); } }
-            if root.context_tags_expanded: ChoiceMenuRow { width: parent.width; label: "Clear Tag"; command_name: "tag-clear"; picked(c) => { root.context_visible = false; root.context_tags_expanded = false; root.command(c); } }
+            if root.context_tags_expanded: ChoiceMenuRow { width: parent.width; label: @tr("Clear Tag"); command_name: "tag-clear"; picked(c) => { root.context_visible = false; root.context_tags_expanded = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { width: parent.width; label: "Copy as Path"; command_name: "copy-as-path"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Open in Terminal"; command_name: "open-terminal"; picked(c) => { root.context_visible = false; root.command(c); } }
-            ChoiceMenuRow { width: parent.width; label: "Open With"; command_name: "open-with"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: @tr("Copy as Path"); command_name: "copy-as-path"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: @tr("Open in Terminal"); command_name: "open-terminal"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: @tr("Open With"); command_name: "open-with"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { visible: !root.is_simple; height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: "Image Tools"; command_name: "image-tools"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: @tr("Image Tools"); command_name: "image-tools"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { width: parent.width; label: "Properties"; command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: @tr("Properties"); command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
 
             Rectangle { visible: !root.is_simple; height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: "Create ZIP"; command_name: "create-zip"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: @tr("Create ZIP"); command_name: "create-zip"; picked(c) => { root.context_visible = false; root.command(c); } }
 
             // -- Advanced toggle (ZIP lives above; this expands power / Windows tools) --------------
             Rectangle {
@@ -7139,7 +7139,7 @@ export component MainWindow inherits Window {
                     width: parent.width - 18px;
                     x: 9px;
                     height: parent.height;
-                    text: root.context_advanced ? "^ Hide advanced" : "v Advanced & Windows tools";
+                    text: root.context_advanced ? @tr("^ Hide advanced") : "v Advanced & Windows tools";
                     color: ThemePalette.text_faint;
                     font-size: 11px;
                     vertical-alignment: center;
@@ -7148,16 +7148,16 @@ export component MainWindow inherits Window {
 
             // -- Advanced items (hidden by default, never shown in simple mode) --------------------
             if root.context_advanced && !root.is_simple: Rectangle { height: 1px; background: ThemePalette.border; }
-            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Checksum"; command_name: "checksum"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Copy as PowerShell Path"; command_name: "copy-as-powershell"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Locked File Inspector"; command_name: "locked-file"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Defender Scan"; command_name: "defender-scan"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Cloud State"; command_name: "cloud-state"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Show More Options"; command_name: "show-more-options"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: @tr("Checksum"); command_name: "checksum"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: @tr("Copy as PowerShell Path"); command_name: "copy-as-powershell"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: @tr("Locked File Inspector"); command_name: "locked-file"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: @tr("Defender Scan"); command_name: "defender-scan"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: @tr("Cloud State"); command_name: "cloud-state"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: @tr("Show More Options"); command_name: "show-more-options"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.context_advanced && !root.is_simple: Rectangle { height: 1px; background: ThemePalette.border; }
-            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Run as Administrator"; command_name: "run-as-admin"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Take Ownership"; command_name: "take-ownership"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Previous Versions"; command_name: "previous-versions"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: @tr("Run as Administrator"); command_name: "run-as-admin"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: @tr("Take Ownership"); command_name: "take-ownership"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: @tr("Previous Versions"); command_name: "previous-versions"; picked(c) => { root.context_visible = false; root.command(c); } }
 
             Rectangle { height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { width: parent.width; label: @tr("Delete"); command_name: "delete"; danger: true; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -7186,22 +7186,22 @@ export component MainWindow inherits Window {
             y: 5px;
             spacing: 2px;
             // Recycle-bin empty-area shortcut.
-            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Restore All"; command_name: "restore-all"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Empty Recycle Bin"; command_name: "empty-trash"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Select All"; command_name: "select-all"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Restore All"); command_name: "restore-all"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Empty Recycle Bin"); command_name: "empty-trash"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Select All"); command_name: "select-all"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
-            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Refresh"; command_name: "refresh"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Refresh"); command_name: "refresh"; picked(c) => { root.context_visible = false; root.command(c); } }
 
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "New Folder"; command_name: "new-folder"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "New File"; command_name: "new-file"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("New Folder"); command_name: "new-folder"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("New File"); command_name: "new-file"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Paste"; command_name: "paste"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Select All"; command_name: "select-all"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Paste"); command_name: "paste"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Select All"); command_name: "select-all"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Refresh"; command_name: "refresh"; picked(c) => { root.context_visible = false; root.command(c); } }
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Open in Terminal"; command_name: "open-terminal"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Refresh"); command_name: "refresh"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Open in Terminal"); command_name: "open-terminal"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Properties"; command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Properties"); command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
         }
     }
 
@@ -7259,11 +7259,11 @@ export component MainWindow inherits Window {
 
             Rectangle { x: 18px; y: 96px; width: parent.width - 36px; height: 1px; background: ThemePalette.border; }
 
-            Text { x: 18px; y: 112px; width: 225px; height: 18px; text: "Adjust"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
-            ChoiceMenuRow { x: 18px; y: 136px; width: 225px; label: "Rotate Left"; command_name: "image-rotate-left"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
-            ChoiceMenuRow { x: 18px; y: 170px; width: 225px; label: "Rotate Right"; command_name: "image-rotate-right"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
-            ChoiceMenuRow { x: 18px; y: 204px; width: 225px; label: "Resize to 50%"; command_name: "image-resize-half"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
-            ChoiceMenuRow { x: 18px; y: 238px; width: 225px; label: "Resize to 25%"; command_name: "image-resize-quarter"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            Text { x: 18px; y: 112px; width: 225px; height: 18px; text: @tr("Adjust"); color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+            ChoiceMenuRow { x: 18px; y: 136px; width: 225px; label: @tr("Rotate Left"); command_name: "image-rotate-left"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 18px; y: 170px; width: 225px; label: @tr("Rotate Right"); command_name: "image-rotate-right"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 18px; y: 204px; width: 225px; label: @tr("Resize to 50%"); command_name: "image-resize-half"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 18px; y: 238px; width: 225px; label: @tr("Resize to 25%"); command_name: "image-resize-quarter"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
 
             // Custom resize row
             Rectangle {
@@ -7277,7 +7277,7 @@ export component MainWindow inherits Window {
                 Text {
                     x: 9px; y: 0;
                     width: 70px; height: parent.height;
-                    text: "Scale %:";
+                    text: @tr("Scale %:");
                     color: ThemePalette.text_muted;
                     font-size: 12px;
                     vertical-alignment: center;
@@ -7310,7 +7310,7 @@ export component MainWindow inherits Window {
                     background: apply_touch.has-hover ? ThemePalette.accent : ThemePalette.accent_soft;
                     Text {
                         width: parent.width; height: parent.height;
-                        text: "Apply";
+                        text: @tr("Apply");
                         color: apply_touch.has-hover ? white : ThemePalette.accent_strong;
                         font-size: 11.5px;
                         horizontal-alignment: center;
@@ -7328,21 +7328,21 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Text { x: 277px; y: 112px; width: 225px; height: 18px; text: "Export"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
-            ChoiceMenuRow { x: 277px; y: 136px; width: 225px; label: "Convert to JPEG"; command_name: "image-convert-jpeg"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
-            ChoiceMenuRow { x: 277px; y: 170px; width: 225px; label: "Convert to PNG"; command_name: "image-convert-png"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
-            ChoiceMenuRow { x: 277px; y: 204px; width: 225px; label: "Convert to WebP"; command_name: "image-convert-webp"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
-            ChoiceMenuRow { x: 277px; y: 238px; width: 225px; label: "Compress JPEG Copy"; command_name: "image-compress-jpeg"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            Text { x: 277px; y: 112px; width: 225px; height: 18px; text: @tr("Export"); color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+            ChoiceMenuRow { x: 277px; y: 136px; width: 225px; label: @tr("Convert to JPEG"); command_name: "image-convert-jpeg"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 277px; y: 170px; width: 225px; label: @tr("Convert to PNG"); command_name: "image-convert-png"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 277px; y: 204px; width: 225px; label: @tr("Convert to WebP"); command_name: "image-convert-webp"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            ChoiceMenuRow { x: 277px; y: 238px; width: 225px; label: @tr("Compress JPEG Copy"); command_name: "image-compress-jpeg"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
 
-            Text { x: 18px; y: 334px; width: parent.width - 36px; height: 18px; text: "Privacy"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
-            ChoiceMenuRow { x: 18px; y: 356px; width: parent.width - 36px; label: "Strip Metadata Copy"; command_name: "image-strip-metadata"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
+            Text { x: 18px; y: 334px; width: parent.width - 36px; height: 18px; text: @tr("Privacy"); color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+            ChoiceMenuRow { x: 18px; y: 356px; width: parent.width - 36px; label: @tr("Strip Metadata Copy"); command_name: "image-strip-metadata"; picked(c) => { root.image_tools_visible = false; root.command(c); } }
 
             Text {
                 x: 18px;
                 y: 410px;
                 width: parent.width - 36px;
                 height: 34px;
-                text: "Actions create new files next to the original and keep the source unchanged.";
+                text: @tr("Actions create new files next to the original and keep the source unchanged.");
                 color: ThemePalette.text_faint;
                 font-size: 11.5px;
                 wrap: word-wrap;
@@ -7401,7 +7401,7 @@ export component MainWindow inherits Window {
                     button_width: 26px;
                     button_height: 26px;
                     text_label: "X";
-                    tooltip: "Clear or close";
+                    tooltip: @tr("Clear or close");
                     clicked => {
                         if (root.command_filter != "") {
                             root.command_filter = "";
@@ -7851,7 +7851,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     Text {
-                        text: root.ui_mode == "simple" ? "Essential features only - hides dual pane, power tools, advanced menu, and AI settings." : "Full access to every feature including dual pane, power tools, and AI.";
+                        text: root.ui_mode == "simple" ? @tr("Essential features only - hides dual pane, power tools, advanced menu, and AI settings.") : "Full access to every feature including dual pane, power tools, and AI.";
                         color: ThemePalette.text_faint;
                         font-size: 11.5px;
                         wrap: word-wrap;
@@ -7958,7 +7958,7 @@ export component MainWindow inherits Window {
                                 x: 12px;
                                 width: 170px;
                                 height: parent.height;
-                                text: root.ce_name == "" ? "Custom Theme" : root.ce_name;
+                                text: root.ce_name == "" ? @tr("Custom Theme") : root.ce_name;
                                 color: root.ce_token_colors.length > 5 ? root.ce_token_colors[5] : ThemePalette.text;
                                 font-family: root.ce_preview_ui_font;
                                 font-size: 12px;
@@ -8174,7 +8174,7 @@ export component MainWindow inherits Window {
                             width: parent.width - 162px;
                             height: parent.height - 12px;
                             spacing: 4px;
-                            for speed_label[si] in ["Off", "Fast", "Normal", "Slow"]: Rectangle {
+                            for speed_label[si] in [@tr("Off"), @tr("Fast"), @tr("Normal"), @tr("Slow")]: Rectangle {
                                 property <float> sv: si == 0 ? 0.0 : (si == 1 ? 0.5 : (si == 2 ? 1.0 : 2.0));
                                 border-radius: 4px;
                                 border-width: 1px;
@@ -8292,7 +8292,7 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         height: 38px;
                         spacing: 6px;
-                        for finish_label[fi] in ["Mica Dark", "Mica Light", "Flat", "Solid"]: Rectangle {
+                        for finish_label[fi] in [@tr("Mica Dark"), @tr("Mica Light"), @tr("Flat"), @tr("Solid")]: Rectangle {
                             property <string> fid: fi == 0 ? "mica-dark" : (fi == 1 ? "mica-light" : (fi == 2 ? "flat" : "solid"));
                             border-radius: AppMetrics.radius_small;
                             border-width: 1px;
@@ -8397,7 +8397,7 @@ export component MainWindow inherits Window {
                             width: parent.width - 128px;
                             height: parent.height - 12px;
                             spacing: 4px;
-                            for size_label[sz] in ["Small", "Normal", "Large"]: Rectangle {
+                            for size_label[sz] in [@tr("Small"), @tr("Normal"), @tr("Large")]: Rectangle {
                                 property <int> sdv: sz - 1;
                                 border-radius: 4px;
                                 border-width: 1px;
@@ -8652,12 +8652,12 @@ export component MainWindow inherits Window {
                         height: 36px;
                         alignment: start;
                         DialogButton {
-                            label: "Set as default folder handler";
+                            label: @tr("Set as default folder handler");
                             primary: true;
                             clicked => { root.windows_set_default_folder_handler(); }
                         }
                         DialogButton {
-                            label: "Restore Explorer defaults";
+                            label: @tr("Restore Explorer defaults");
                             clicked => { root.windows_restore_folder_handler(); }
                         }
                     }
@@ -8724,7 +8724,7 @@ export component MainWindow inherits Window {
                         background: ThemePalette.panel;
                         Text { x: 14px; y: 12px; width: parent.width - 112px; height: 20px; text: @tr("Automatic thumbnail cleanup"); color: ThemePalette.text; font-size: 13px; font-weight: 700; }
                         Text { x: 14px; y: 36px; width: parent.width - 112px; height: 22px; text: root.thumbnail_status; color: ThemePalette.text_muted; font-size: 12px; overflow: elide; }
-                        DialogButton { x: parent.width - 92px; y: 22px; label: "Clear"; clicked => { root.clear_thumbnail_cache(); } }
+                        DialogButton { x: parent.width - 92px; y: 22px; label: @tr("Clear"); clicked => { root.clear_thumbnail_cache(); } }
                     }
 
                     Rectangle {
@@ -8750,8 +8750,8 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         height: 34px;
                         spacing: 8px;
-                        DialogButton { label: "Rebuild"; primary: true; clicked => { root.rebuild_index(); } }
-                        DialogButton { label: "Debug"; clicked => { root.command("performance-debug"); } }
+                        DialogButton { label: @tr("Rebuild"); primary: true; clicked => { root.rebuild_index(); } }
+                        DialogButton { label: @tr("Debug"); clicked => { root.command("performance-debug"); } }
                     }
                 }
             }
@@ -8873,10 +8873,10 @@ export component MainWindow inherits Window {
                         Text {
                             width: parent.width - 28px;
                             text: root.ai_install_state == "installed"
-                                ? "Local AI is installed"
+                                ? @tr("Local AI is installed")
                                 : (root.ai_install_state == "downloading" || root.ai_install_state == "updating"
-                                    ? "Downloading models …"
-                                    : (root.ai_install_state == "error" ? "Local AI needs attention" : "Local AI is not installed"));
+                                    ? @tr("Downloading models …")
+                                    : (root.ai_install_state == "error" ? @tr("Local AI needs attention") : "Local AI is not installed"));
                             color: ThemePalette.text;
                             font-size: 13px;
                             font-weight: 700;
@@ -8996,7 +8996,7 @@ export component MainWindow inherits Window {
                                 background: install_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.accent;
                                 Text {
                                     width: parent.width; height: parent.height;
-                                    text: root.ai_install_state == "error" ? "Retry" : "Install AI";
+                                    text: root.ai_install_state == "error" ? @tr("Retry") : "Install AI";
                                     color: ThemePalette.on_accent; font-size: 12.5px; font-weight: 700;
                                     horizontal-alignment: center; vertical-alignment: center;
                                 }
@@ -9036,23 +9036,23 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                Text { text: "FEATURES"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Text { text: @tr("FEATURES"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Rectangle {
                     width: parent.width; height: 58px;
                     border-width: 1px; border-color: ThemePalette.border; border-radius: AppMetrics.radius; background: ThemePalette.panel;
-                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Semantic content search"; color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: @tr("Semantic content search"); color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
                     Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_feature_semantic; color: ThemePalette.text_muted; font-size: 11.5px; overflow: elide; }
                 }
                 Rectangle {
                     width: parent.width; height: 58px;
                     border-width: 1px; border-color: ThemePalette.border; border-radius: AppMetrics.radius; background: ThemePalette.panel;
-                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Image classification"; color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: @tr("Image classification"); color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
                     Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_feature_classify; color: ThemePalette.text_muted; font-size: 11.5px; overflow: elide; }
                 }
                 Rectangle {
                     width: parent.width; height: 58px;
                     border-width: 1px; border-color: ThemePalette.border; border-radius: AppMetrics.radius; background: ThemePalette.panel;
-                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: "Perceptual duplicate detection"; color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
+                    Text { x: 14px; y: 10px; width: parent.width - 28px; height: 18px; text: @tr("Perceptual duplicate detection"); color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide; }
                     Text { x: 14px; y: 32px; width: parent.width - 28px; height: 16px; text: root.ai_feature_dupes; color: ThemePalette.text_muted; font-size: 11.5px; overflow: elide; }
                 }
                 }
@@ -9077,7 +9077,7 @@ export component MainWindow inherits Window {
                     drop-shadow-color: rgba(0, 0, 0, 0.45);
                     TouchArea {}
 
-                    Text { x: 22px; y: 22px; width: parent.width - 44px; height: 28px; text: "Install Pathfinder Local AI"; color: ThemePalette.text; font-size: 17px; font-weight: 700; }
+                    Text { x: 22px; y: 22px; width: parent.width - 44px; height: 28px; text: @tr("Install Pathfinder Local AI"); color: ThemePalette.text; font-size: 17px; font-weight: 700; }
                     Text {
                         x: 22px; y: 58px;
                         width: parent.width - 44px;
@@ -9099,13 +9099,13 @@ export component MainWindow inherits Window {
                     DialogButton {
                         x: parent.width - 240px;
                         y: parent.height - 50px;
-                        label: "Cancel";
+                        label: @tr("Cancel");
                         clicked => { root.ai_install_explainer_visible = false; }
                     }
                     DialogButton {
                         x: parent.width - 130px;
                         y: parent.height - 50px;
-                        label: "Install (~" + root.ai_install_size_mb + " MB)";
+                        label: @tr("Install (~") + root.ai_install_size_mb + " MB)";
                         primary: true;
                         clicked => {
                             root.ai_install_explainer_visible = false;
@@ -9137,7 +9137,7 @@ export component MainWindow inherits Window {
             border-radius: AppMetrics.radius;
             background: ThemePalette.panel_solid;
             clip: true;
-            Text { x: 18px; y: 16px; width: parent.width - 36px; text: "Confirm delete"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            Text { x: 18px; y: 16px; width: parent.width - 36px; text: @tr("Confirm delete"); color: ThemePalette.text; font-size: 18px; font-weight: 700; }
             confirm_body := CopyableMessageText {
                 x: 18px;
                 y: 50px;
@@ -9147,7 +9147,7 @@ export component MainWindow inherits Window {
                 text-color: ThemePalette.text_muted;
                 cap-height: 220px;
             }
-            DialogButton { x: parent.width - 180px; y: parent.height - 48px; label: "Cancel"; clicked => { root.confirm_visible = false; } }
+            DialogButton { x: parent.width - 180px; y: parent.height - 48px; label: @tr("Cancel"); clicked => { root.confirm_visible = false; } }
             DialogButton { x: parent.width - 90px; y: parent.height - 48px; label: @tr("Delete"); primary: true; danger: true; clicked => { root.confirm_visible = false; root.confirm_delete(); } }
         }
     }
@@ -9178,13 +9178,13 @@ export component MainWindow inherits Window {
                 x: 18px;
                 y: 50px;
                 content-width: parent.width - 36px;
-                text: "A file with the same name already exists.\n\nKeep both: save with a new name like \"file (1).txt\".\nReplace: overwrite the existing file.\nSkip: don't copy this file.";
+                text: @tr("A file with the same name already exists.\n\nKeep both: save with a new name like \"file (1).txt\".\nReplace: overwrite the existing file.\nSkip: don't copy this file.");
                 font-size: 12.5px;
                 cap-height: 88px;
             }
-            DialogButton { x: 18px; y: parent.height - 48px; label: "Skip"; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("skip"); } }
-            DialogButton { x: parent.width - 240px; y: parent.height - 48px; label: "Replace"; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("replace"); } }
-            DialogButton { x: parent.width - 120px; y: parent.height - 48px; label: "Keep both"; primary: true; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("keep"); } }
+            DialogButton { x: 18px; y: parent.height - 48px; label: @tr("Skip"); clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("skip"); } }
+            DialogButton { x: parent.width - 240px; y: parent.height - 48px; label: @tr("Replace"); clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("replace"); } }
+            DialogButton { x: parent.width - 120px; y: parent.height - 48px; label: @tr("Keep both"); primary: true; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("keep"); } }
         }
 
         if root.prompt_kind == "rename-conflict": Rectangle {
@@ -9199,12 +9199,12 @@ export component MainWindow inherits Window {
             Text { x: 18px; y: 16px; width: parent.width - 36px; height: 26px; text: root.prompt_title; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
             CopyableMessageText {
                 x: 18px; y: 50px; content-width: parent.width - 36px;
-                text: "A file with that name already exists.\n\nKeep both saves with a numbered suffix.\nReplace overwrites the existing file.\nSkip cancels the rename.";
+                text: @tr("A file with that name already exists.\n\nKeep both saves with a numbered suffix.\nReplace overwrites the existing file.\nSkip cancels the rename.");
                 font-size: 12.5px; cap-height: 88px;
             }
-            DialogButton { x: 18px; y: parent.height - 48px; label: "Skip"; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("skip"); } }
-            DialogButton { x: parent.width - 240px; y: parent.height - 48px; label: "Replace"; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("replace"); } }
-            DialogButton { x: parent.width - 120px; y: parent.height - 48px; label: "Keep both"; primary: true; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("keep"); } }
+            DialogButton { x: 18px; y: parent.height - 48px; label: @tr("Skip"); clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("skip"); } }
+            DialogButton { x: parent.width - 240px; y: parent.height - 48px; label: @tr("Replace"); clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("replace"); } }
+            DialogButton { x: parent.width - 120px; y: parent.height - 48px; label: @tr("Keep both"); primary: true; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("keep"); } }
         }
 
         if root.prompt_kind == "batch-rename": Rectangle {
@@ -9217,28 +9217,28 @@ export component MainWindow inherits Window {
             border-radius: AppMetrics.radius;
             background: ThemePalette.panel_solid;
             clip: true;
-            Text { x: 18px; y: 14px; width: parent.width - 36px; height: 24px; text: "Batch rename"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
-            Text { x: 18px; y: 44px; width: 80px; height: 20px; text: "Find (regex)"; color: ThemePalette.text_faint; font-size: 11px; }
+            Text { x: 18px; y: 14px; width: parent.width - 36px; height: 24px; text: @tr("Batch rename"); color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            Text { x: 18px; y: 44px; width: 80px; height: 20px; text: @tr("Find (regex)"); color: ThemePalette.text_faint; font-size: 11px; }
             br_find := LineEdit { x: 18px; y: 64px; width: parent.width - 36px; height: 30px; text <=> root.batch_rename_find; edited => { root.batch_rename_preview_refresh(); } }
-            Text { x: 18px; y: 100px; width: 80px; height: 20px; text: "Replace"; color: ThemePalette.text_faint; font-size: 11px; }
+            Text { x: 18px; y: 100px; width: 80px; height: 20px; text: @tr("Replace"); color: ThemePalette.text_faint; font-size: 11px; }
             br_repl := LineEdit { x: 18px; y: 120px; width: parent.width - 36px; height: 30px; text <=> root.batch_rename_replace; edited => { root.batch_rename_preview_refresh(); } }
-            Text { x: 18px; y: 156px; width: 60px; height: 20px; text: "Prefix"; color: ThemePalette.text_faint; font-size: 11px; }
+            Text { x: 18px; y: 156px; width: 60px; height: 20px; text: @tr("Prefix"); color: ThemePalette.text_faint; font-size: 11px; }
             br_pre := LineEdit { x: 18px; y: 176px; width: (parent.width - 48px) / 2; height: 30px; text <=> root.batch_rename_prefix; edited => { root.batch_rename_preview_refresh(); } }
-            Text { x: parent.width / 2 + 6px; y: 156px; width: 60px; height: 20px; text: "Suffix"; color: ThemePalette.text_faint; font-size: 11px; }
+            Text { x: parent.width / 2 + 6px; y: 156px; width: 60px; height: 20px; text: @tr("Suffix"); color: ThemePalette.text_faint; font-size: 11px; }
             br_suf := LineEdit { x: parent.width / 2 + 6px; y: 176px; width: (parent.width - 48px) / 2; height: 30px; text <=> root.batch_rename_suffix; edited => { root.batch_rename_preview_refresh(); } }
-            Text { x: 18px; y: 212px; width: 120px; height: 20px; text: "Template"; color: ThemePalette.text_faint; font-size: 11px; }
+            Text { x: 18px; y: 212px; width: 120px; height: 20px; text: @tr("Template"); color: ThemePalette.text_faint; font-size: 11px; }
             br_tmpl := LineEdit { x: 18px; y: 232px; width: parent.width - 36px; height: 30px; text <=> root.batch_rename_template; edited => { root.batch_rename_preview_refresh(); } }
-            Text { x: 18px; y: 270px; width: parent.width - 36px; height: 16px; text: "Preview"; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
+            Text { x: 18px; y: 270px; width: parent.width - 36px; height: 16px; text: @tr("Preview"); color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; }
             CopyableMessageText {
                 x: 18px; y: 288px; content-width: parent.width - 36px;
                 text: root.batch_rename_preview;
                 font-size: 11px; mono: true; cap-height: max(72px, parent.height - 360px);
             }
             Text { x: 18px; y: parent.height - 72px; width: parent.width - 36px; height: 28px;
-                text: "Tokens: {n} {n:04} {name} {ext}  ·  Find uses regex";
+                text: @tr("Tokens: {{n}} {{n:04}} {{name}} {{ext}}  ·  Find uses regex");
                 color: ThemePalette.text_faint; font-size: 10px; wrap: word-wrap; }
-            DialogButton { x: parent.width - 180px; y: parent.height - 44px; label: "Cancel"; clicked => { root.prompt_cancel(); } }
-            DialogButton { x: parent.width - 90px; y: parent.height - 44px; label: "Rename"; primary: true; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("apply"); } }
+            DialogButton { x: parent.width - 180px; y: parent.height - 44px; label: @tr("Cancel"); clicked => { root.prompt_cancel(); } }
+            DialogButton { x: parent.width - 90px; y: parent.height - 44px; label: @tr("Rename"); primary: true; clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("apply"); } }
         }
 
         // Standard text-input prompt (rename / new folder / etc.)
@@ -9284,11 +9284,11 @@ export component MainWindow inherits Window {
                     spacing: 8px;
                     alignment: end;
                     DialogButton {
-                        label: "Cancel";
+                        label: @tr("Cancel");
                         clicked => { root.prompt_cancel(); }
                     }
                     DialogButton {
-                        label: "OK";
+                        label: @tr("OK");
                         primary: true;
                         clicked => {
                             root.prompt_visible = false;
@@ -9315,8 +9315,8 @@ export component MainWindow inherits Window {
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
             background: ThemePalette.panel_solid;
-            Text { x: 18px; y: 14px; width: parent.width - 36px; height: 24px; text: "Rename presets"; color: ThemePalette.text; font-size: 17px; font-weight: 700; }
-            Text { x: 18px; y: 40px; width: parent.width - 36px; height: 18px; text: "Click a preset to apply to the selection"; color: ThemePalette.text_faint; font-size: 11px; }
+            Text { x: 18px; y: 14px; width: parent.width - 36px; height: 24px; text: @tr("Rename presets"); color: ThemePalette.text; font-size: 17px; font-weight: 700; }
+            Text { x: 18px; y: 40px; width: parent.width - 36px; height: 18px; text: @tr("Click a preset to apply to the selection"); color: ThemePalette.text_faint; font-size: 11px; }
             ScrollView {
                 x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 76px;
                 for preset[i] in root.rename_preset_names: Rectangle {
@@ -9377,7 +9377,7 @@ export component MainWindow inherits Window {
                     LineEdit {
                         x: 12px; y: 26px; width: parent.width - 24px; height: 24px;
                         text: sc.hint;
-                        placeholder-text: "Shortcut hint";
+                        placeholder-text: @tr("Shortcut hint");
                         font-size: 12px;
                         font-family: AppMetrics.mono_font;
                         edited(val) => { root.shortcut_hint_changed(sc.command, val); }
@@ -9412,7 +9412,7 @@ export component MainWindow inherits Window {
                         background: item.enabled ? ThemePalette.success : ThemePalette.border_strong;
                         Text {
                             width: parent.width; height: parent.height;
-                            text: item.enabled ? "On" : "Off";
+                            text: item.enabled ? @tr("On") : "Off";
                             color: white; font-size: 10px; font-weight: 700;
                             horizontal-alignment: center; vertical-alignment: center;
                         }
@@ -9432,7 +9432,7 @@ export component MainWindow inherits Window {
                         button_width: 28px; button_height: 28px;
                         visible: item.meta == "";
                         text_label: "···";
-                        tooltip: "More";
+                        tooltip: @tr("More");
                         clicked => { root.tool_overlay_secondary(item.id); }
                     }
                     tool_row_ta := TouchArea {
@@ -9446,14 +9446,14 @@ export component MainWindow inherits Window {
             }
             DialogButton {
                 x: 18px; y: parent.height - 48px;
-                label: "Close";
+                label: @tr("Close");
                 clicked => { root.tool_overlay_close(); }
             }
             if root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "shortcuts" || root.tool_overlay_kind == "workspaces" || root.tool_overlay_kind == "smart-folders": DialogButton {
                 x: parent.width - self.preferred-width - 18px; y: parent.height - 48px;
-                label: root.tool_overlay_kind == "rules" ? "Run enabled"
-                    : (root.tool_overlay_kind == "shortcuts" ? "Save"
-                    : (root.tool_overlay_kind == "workspaces" ? "Open" : "Close"));
+                label: root.tool_overlay_kind == "rules" ? @tr("Run enabled")
+                    : (root.tool_overlay_kind == "shortcuts" ? @tr("Save")
+                    : (root.tool_overlay_kind == "workspaces" ? @tr("Open") : "Close"));
                 primary: true;
                 clicked => {
                     if (root.tool_overlay_kind == "smart-folders") {
@@ -9486,7 +9486,7 @@ export component MainWindow inherits Window {
             TouchArea {}
             Text {
                 x: 18px; y: 14px; width: parent.width - 36px; height: 24px;
-                text: root.compare_overlay_title != "" ? root.compare_overlay_title : "Compare folders";
+                text: root.compare_overlay_title != "" ? root.compare_overlay_title : @tr("Compare folders");
                 color: ThemePalette.text; font-size: 17px; font-weight: 700; overflow: elide;
             }
             Text {
@@ -9502,7 +9502,7 @@ export component MainWindow inherits Window {
                 background: root.compare_overlay_hide_same ? ThemePalette.accent_soft : ThemePalette.panel_alt;
                 Text {
                     x: 10px; width: parent.width - 20px; height: parent.height;
-                    text: root.compare_overlay_hide_same ? "Hide same: On" : "Hide same: Off";
+                    text: root.compare_overlay_hide_same ? @tr("Hide same: On") : "Hide same: Off";
                     color: root.compare_overlay_hide_same ? ThemePalette.accent_strong : ThemePalette.text_muted;
                     font-size: 11.5px; vertical-alignment: center;
                 }
@@ -9542,7 +9542,7 @@ export component MainWindow inherits Window {
             }
             DialogButton {
                 x: parent.width - self.preferred-width - 18px; y: parent.height - 48px;
-                label: "Close";
+                label: @tr("Close");
                 primary: true;
                 clicked => { root.compare_overlay_close(); }
             }
@@ -9569,7 +9569,7 @@ export component MainWindow inherits Window {
             TouchArea {}
             Text {
                 x: 18px; y: 14px; width: parent.width - 36px; height: 24px;
-                text: root.dupe_overlay_title != "" ? root.dupe_overlay_title : "Duplicate files";
+                text: root.dupe_overlay_title != "" ? root.dupe_overlay_title : @tr("Duplicate files");
                 color: ThemePalette.text; font-size: 17px; font-weight: 700; overflow: elide;
             }
             Text {
@@ -9579,8 +9579,8 @@ export component MainWindow inherits Window {
             }
             HorizontalLayout {
                 x: 18px; y: 58px; spacing: 8px; height: 28px;
-                DialogButton { label: "Keep newest"; clicked => { root.dupe_keep_strategy("newest"); } }
-                DialogButton { label: "Keep largest"; clicked => { root.dupe_keep_strategy("largest"); } }
+                DialogButton { label: @tr("Keep newest"); clicked => { root.dupe_keep_strategy("newest"); } }
+                DialogButton { label: @tr("Keep largest"); clicked => { root.dupe_keep_strategy("largest"); } }
             }
             ScrollView {
                 x: 12px; y: 90px; width: parent.width - 24px; height: parent.height - 146px;
@@ -9618,12 +9618,12 @@ export component MainWindow inherits Window {
                     }
                     DialogButton {
                         x: 12px; y: parent.height - 38px;
-                        label: "Keep first";
+                        label: @tr("Keep first");
                         clicked => { root.dupe_group_keep(grp.id); }
                     }
                     DialogButton {
                         x: 118px; y: parent.height - 38px;
-                        label: "Delete others";
+                        label: @tr("Delete others");
                         danger: true;
                         clicked => { root.dupe_group_delete_others(grp.id); }
                     }
@@ -9631,7 +9631,7 @@ export component MainWindow inherits Window {
             }
             DialogButton {
                 x: parent.width - self.preferred-width - 18px; y: parent.height - 48px;
-                label: "Close";
+                label: @tr("Close");
                 primary: true;
                 clicked => { root.dupe_overlay_close(); }
             }
@@ -9667,12 +9667,12 @@ export component MainWindow inherits Window {
                 background: ThemePalette.panel_alt;
                 Text {
                     x: 16px; width: parent.width - 32px; height: parent.height;
-                    text: root.preview_is_pdf ? "PDF document — first page text preview below" : "Media file — press Play to open in your default app";
+                    text: root.preview_is_pdf ? @tr("PDF document — first page text preview below") : "Media file — press Play to open in your default app";
                     color: ThemePalette.text_muted; font-size: 12.5px; vertical-alignment: center;
                 }
             }
             if root.preview_is_media: DialogButton {
-                x: 20px; y: 120px; label: "Play";
+                x: 20px; y: 120px; label: @tr("Play");
                 clicked => { root.quick_look_play(); }
             }
             CopyableMessageText {
@@ -9758,7 +9758,7 @@ export component MainWindow inherits Window {
             button_width: 26px;
             button_height: 26px;
             icon_data: "M18 6L6 18 M6 6l12 12";
-            tooltip: "Dismiss";
+            tooltip: @tr("Dismiss");
             clicked => { root.op_drawer_visible = false; }
         }
     }
@@ -9804,7 +9804,7 @@ export component MainWindow inherits Window {
                     spacing: 12px;
                     alignment: start;
                     Text {
-                        text: "Welcome to Pathfinder";
+                        text: @tr("Welcome to Pathfinder");
                         color: ThemePalette.text;
                         font-size: 20px;
                         font-weight: 700;
@@ -9831,10 +9831,10 @@ export component MainWindow inherits Window {
                 }
                 Text {
                     text: root.welcome_step == 0
-                        ? "Three quick steps to make Pathfinder feel like your everyday file manager. You can finish them all here, or come back later from Settings."
+                        ? @tr("Three quick steps to make Pathfinder feel like your everyday file manager. You can finish them all here, or come back later from Settings.")
                         : (root.welcome_step == 1
-                            ? "Pick how much of Pathfinder you want up front. You can change this any time in Settings → Appearance."
-                            : "A couple of shortcuts that pay off immediately.");
+                            ? @tr("Pick how much of Pathfinder you want up front. You can change this any time in Settings → Appearance.")
+                            : @tr("A couple of shortcuts that pay off immediately."));
                     color: ThemePalette.text_muted;
                     font-size: 12.5px;
                     wrap: word-wrap;
@@ -9849,7 +9849,7 @@ export component MainWindow inherits Window {
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     background: ThemePalette.panel;
-                    w1_title := Text { x: 14px; y: 12px; width: parent.width - 28px; text: "1. Set Pathfinder as your default folder handler"; color: ThemePalette.text; font-size: 13px; font-weight: 700; wrap: word-wrap; height: self.preferred-height; }
+                    w1_title := Text { x: 14px; y: 12px; width: parent.width - 28px; text: @tr("1. Set Pathfinder as your default folder handler"); color: ThemePalette.text; font-size: 13px; font-weight: 700; wrap: word-wrap; height: self.preferred-height; }
                     w1_body := CopyableMessageText {
                         x: 14px;
                         y: w1_title.y + w1_title.preferred-height + 4px;
@@ -9862,7 +9862,7 @@ export component MainWindow inherits Window {
                     DialogButton {
                         x: parent.width - self.preferred-width - 18px;
                         y: parent.height - 42px;
-                        label: root.welcome_default_handler_set ? "Done" : "Set as default";
+                        label: root.welcome_default_handler_set ? @tr("Done") : @tr("Set as default");
                         primary: !root.welcome_default_handler_set;
                         clicked => { root.welcome_set_default_handler(); }
                     }
@@ -9873,12 +9873,12 @@ export component MainWindow inherits Window {
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     background: ThemePalette.panel;
-                    w2_title := Text { x: 14px; y: 12px; width: parent.width - 28px; text: "2. Pin Pathfinder to your taskbar"; color: ThemePalette.text; font-size: 13px; font-weight: 700; wrap: word-wrap; height: self.preferred-height; }
+                    w2_title := Text { x: 14px; y: 12px; width: parent.width - 28px; text: @tr("2. Pin Pathfinder to your taskbar"); color: ThemePalette.text; font-size: 13px; font-weight: 700; wrap: word-wrap; height: self.preferred-height; }
                     w2_body := Text {
                         x: 14px;
                         y: w2_title.y + w2_title.preferred-height + 4px;
                         width: parent.width - 28px;
-                        text: "Windows 11 doesn't let apps pin themselves. Open the Start menu, find Pathfinder, right click it, then choose Pin to taskbar.";
+                        text: @tr("Windows 11 doesn't let apps pin themselves. Open the Start menu, find Pathfinder, right click it, then choose Pin to taskbar.");
                         color: ThemePalette.text_muted;
                         font-size: 11.5px;
                         wrap: word-wrap;
@@ -9891,12 +9891,12 @@ export component MainWindow inherits Window {
                     border-width: 1px;
                     border-color: ThemePalette.border;
                     background: ThemePalette.panel;
-                    w3_title := Text { x: 14px; y: 12px; width: parent.width - 28px; text: "3. Unpin File Explorer (optional)"; color: ThemePalette.text; font-size: 13px; font-weight: 700; wrap: word-wrap; height: self.preferred-height; }
+                    w3_title := Text { x: 14px; y: 12px; width: parent.width - 28px; text: @tr("3. Unpin File Explorer (optional)"); color: ThemePalette.text; font-size: 13px; font-weight: 700; wrap: word-wrap; height: self.preferred-height; }
                     w3_body := Text {
                         x: 14px;
                         y: w3_title.y + w3_title.preferred-height + 4px;
                         width: parent.width - 28px;
-                        text: "Right click File Explorer on the taskbar and pick Unpin from taskbar so Pathfinder is the one you open by reflex.";
+                        text: @tr("Right click File Explorer on the taskbar and pick Unpin from taskbar so Pathfinder is the one you open by reflex.");
                         color: ThemePalette.text_muted;
                         font-size: 11.5px;
                         wrap: word-wrap;
@@ -9913,7 +9913,7 @@ export component MainWindow inherits Window {
                     background: ThemePalette.panel;
                     Text {
                         x: 14px; y: 12px; width: parent.width - 28px; height: 20px;
-                        text: "Choose your starting mode";
+                        text: @tr("Choose your starting mode");
                         color: ThemePalette.text; font-size: 13px; font-weight: 700;
                     }
                     HorizontalLayout {
@@ -9942,8 +9942,8 @@ export component MainWindow inherits Window {
                     Text {
                         x: 14px; y: 96px; width: parent.width - 28px;
                         text: root.ui_mode == "simple"
-                            ? "Essential features only — dual pane, power tools, and AI stay tucked away."
-                            : "Full access including dual pane, power tools, command palette, and AI.";
+                            ? @tr("Essential features only — dual pane, power tools, and AI stay tucked away.")
+                            : @tr("Full access including dual pane, power tools, command palette, and AI.");
                         color: ThemePalette.text_faint; font-size: 11.5px; wrap: word-wrap;
                         height: self.preferred-height;
                     }
@@ -9958,13 +9958,13 @@ export component MainWindow inherits Window {
                     background: ThemePalette.panel;
                     tip1 := Text {
                         x: 14px; y: 14px; width: parent.width - 28px;
-                        text: "Press Ctrl+P to open the command palette — search any action, theme, or folder jump without leaving the keyboard.";
+                        text: @tr("Press Ctrl+P to open the command palette — search any action, theme, or folder jump without leaving the keyboard.");
                         color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap;
                         height: self.preferred-height;
                     }
                     tip2 := Text {
                         x: 14px; y: tip1.y + tip1.preferred-height + 12px; width: parent.width - 28px;
-                        text: "Optional AI features (semantic search & helpers) live under Settings → AI. Install only if you want them — Pathfinder works fully without.";
+                        text: @tr("Optional AI features (semantic search & helpers) live under Settings → AI. Install only if you want them — Pathfinder works fully without.");
                         color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap;
                         height: self.preferred-height;
                     }
@@ -9975,21 +9975,21 @@ export component MainWindow inherits Window {
                     spacing: 10px;
                     alignment: end;
                     if root.welcome_step == 0: DialogButton {
-                        label: "Open Taskbar settings";
+                        label: @tr("Open Taskbar settings");
                         clicked => { root.welcome_open_taskbar_settings(); }
                     }
                     if root.welcome_step < 2: DialogButton {
-                        label: "Next";
+                        label: @tr("Next");
                         primary: true;
                         clicked => { root.welcome_next_step(); }
                     }
                     if root.welcome_step >= 2: DialogButton {
-                        label: "Got it";
+                        label: @tr("Got it");
                         primary: true;
                         clicked => { root.welcome_dismiss(); }
                     }
                     if root.welcome_step < 2: DialogButton {
-                        label: "Skip";
+                        label: @tr("Skip");
                         clicked => { root.welcome_dismiss(); }
                     }
                 }
@@ -10069,11 +10069,11 @@ export component MainWindow inherits Window {
                 height: 32px;
                 spacing: 8px;
                 DialogButton {
-                    label: "Copy";
+                    label: @tr("Copy");
                     clicked => { root.toast_copy(); }
                 }
                 DialogButton {
-                    label: "Dismiss";
+                    label: @tr("Dismiss");
                     clicked => { root.toast_dismiss(); }
                 }
             }
@@ -10157,14 +10157,14 @@ export component MainWindow inherits Window {
             Text {
                 x: 24px; y: 22px;
                 width: parent.width - 48px; height: 28px;
-                text: "Choose your experience";
+                text: @tr("Choose your experience");
                 color: ThemePalette.text;
                 font-size: 18px; font-weight: 700;
             }
             Text {
                 x: 24px; y: 62px;
                 width: parent.width - 48px; height: 44px;
-                text: "Pick how much of Pathfinder you want to see. You can change this anytime in Settings -> Appearance.";
+                text: @tr("Pick how much of Pathfinder you want to see. You can change this anytime in Settings -> Appearance.");
                 color: ThemePalette.text_muted;
                 font-size: 12.5px;
                 wrap: word-wrap;
@@ -10186,7 +10186,7 @@ export component MainWindow inherits Window {
                 }
                 Text {
                     x: 16px; y: 44px; width: parent.width - 32px;
-                    text: "Essential features only.\nClean, focused experience.\nNo dual pane or power tools.";
+                    text: @tr("Essential features only.\nClean, focused experience.\nNo dual pane or power tools.");
                     color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap;
                     height: self.preferred-height;
                 }
@@ -10216,7 +10216,7 @@ export component MainWindow inherits Window {
                 }
                 Text {
                     x: 16px; y: 44px; width: parent.width - 32px;
-                    text: "Full access to every feature:\ndual pane, power tools,\narchive tools, and AI.";
+                    text: @tr("Full access to every feature:\ndual pane, power tools,\narchive tools, and AI.");
                     color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap;
                     height: self.preferred-height;
                 }

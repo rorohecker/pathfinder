@@ -1,8 +1,8 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: pathfinder 0.9.60\n"
-"POT-Creation-Date: 2026-08-24 19:07+0000\n"
-"PO-Revision-Date: 2026-08-24 19:07+0000\n"
+"POT-Creation-Date: 2026-08-24 19:16+0000\n"
+"PO-Revision-Date: 2026-08-24 19:16+0000\n"
 "Last-Translator: Pathfinder contributors\n"
 "Language-Team: es\n"
 "MIME-Version: 1.0\n"
@@ -10,6 +10,9 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Language: es\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Close tab"
+msgstr "Cerrar pestaña"
 
 msgid "Name"
 msgstr "Nombre"
@@ -23,6 +26,81 @@ msgstr "Modificado"
 msgid "Type"
 msgstr "Tipo"
 
+msgid "Category"
+msgstr "Categoría"
+
+msgid "Usage"
+msgstr "Uso"
+
+msgid "Suggestions"
+msgstr "Sugerencias"
+
+msgid "Largest items"
+msgstr "Elementos más grandes"
+
+msgid "Largest items will appear once the scan completes."
+msgstr "Los elementos más grandes aparecerán cuando termine el escaneo."
+
+msgid "Nothing to list yet. Click Rescan to start."
+msgstr "Nada que listar. Haz clic en Volver a escanear para empezar."
+
+msgid "Full list"
+msgstr "Lista completa"
+
+msgid "Scanning..."
+msgstr "Escaneando..."
+
+msgid "Categories"
+msgstr "Categorías"
+
+msgid "All items by size"
+msgstr "Todos los elementos por tamaño"
+
+msgid "Largest folders and files in this category"
+msgstr "Carpetas y archivos más grandes de esta categoría"
+
+msgid "Everything on the drive, ranked by size"
+msgstr "Todo en la unidad, ordenado por tamaño"
+
+msgid "Search by name or path..."
+msgstr "Buscar por nombre o ruta..."
+
+msgid "Recent"
+msgstr "Recientes"
+
+msgid "Still scanning - results will appear shortly."
+msgstr "Escaneando - los resultados aparecerán en breve."
+
+msgid "No items to show. Click Rescan to start."
+msgstr "No hay elementos. Haz clic en Volver a escanear para empezar."
+
+msgid "Folder"
+msgstr "Carpeta"
+
+msgid "Balanced (recommended)"
+msgstr "Equilibrado (recomendado)"
+
+msgid "Install Local AI to enable"
+msgstr "Instala la IA local para activarlo"
+
+msgid "Ready - near-duplicate detection uses a lightweight image hash"
+msgstr "Listo - los casi duplicados usan un hash de imagen ligero"
+
+msgid "Image Tools"
+msgstr "Herramientas de imagen"
+
+msgid "Ready"
+msgstr "Listo"
+
+msgid "CPU Fallback"
+msgstr "Reserva de CPU"
+
+msgid "Detecting"
+msgstr "Detectando"
+
+msgid "Click Set as default below to register Pathfinder for folder shortcuts in Explorer."
+msgstr "Haz clic en Establecer como predeterminado abajo para registrar Pathfinder para carpetas en el Explorador."
+
 msgid "Settings"
 msgstr "Configuración"
 
@@ -35,14 +113,140 @@ msgstr "Maximizar"
 msgid "Close"
 msgstr "Cerrar"
 
+msgid "1 item in Recycle Bin"
+msgstr "1 elemento en la Papelera"
+
+msgid "Restore"
+msgstr "Restaurar"
+
+msgid "Restore selected to original location"
+msgstr "Restaurar seleccionados a la ubicación original"
+
+msgid "All"
+msgstr "Todos"
+
+msgid "Restore all items in Recycle Bin"
+msgstr "Restaurar todos los elementos de la Papelera"
+
 msgid "Delete"
 msgstr "Eliminar"
+
+msgid "Delete selected permanently"
+msgstr "Eliminar seleccionados permanentemente"
+
+msgid "Select all"
+msgstr "Seleccionar todo"
+
+msgid "Select all (Ctrl+A)"
+msgstr "Seleccionar todo (Ctrl+A)"
+
+msgid "Empty"
+msgstr "Vaciar"
+
+msgid "Empty Recycle Bin"
+msgstr "Vaciar Papelera"
+
+msgid "Clear"
+msgstr "Deseleccionar"
+
+msgid "Clear selection (Esc)"
+msgstr "Quitar selección (Esc)"
+
+msgid "1 item selected"
+msgstr "1 elemento seleccionado"
+
+msgid "Copy"
+msgstr "Copiar"
+
+msgid "Copy (Ctrl+C)"
+msgstr "Copiar (Ctrl+C)"
+
+msgid "Cut"
+msgstr "Cortar"
+
+msgid "Cut (Ctrl+X)"
+msgstr "Cortar (Ctrl+X)"
+
+msgid "Paste"
+msgstr "Pegar"
+
+msgid "Paste (Ctrl+V)"
+msgstr "Pegar (Ctrl+V)"
+
+msgid "Rename"
+msgstr "Cambiar nombre"
+
+msgid "Rename (F2)"
+msgstr "Cambiar nombre (F2)"
+
+msgid "Delete (Del)"
+msgstr "Eliminar (Supr)"
+
+msgid "Extract"
+msgstr "Extraer"
+
+msgid "Extract Here"
+msgstr "Extraer aquí"
 
 msgid "Open"
 msgstr "Abrir"
 
+msgid "Open (Enter)"
+msgstr "Abrir (Intro)"
+
+msgid "Open with"
+msgstr "Abrir con"
+
+msgid "Open With"
+msgstr "Abrir con"
+
+msgid "Info"
+msgstr "Info"
+
+msgid "Properties"
+msgstr "Propiedades"
+
+msgid "Select All (Ctrl+A)"
+msgstr "Seleccionar todo (Ctrl+A)"
+
+msgid "Back"
+msgstr "Atrás"
+
+msgid "Forward"
+msgstr "Adelante"
+
+msgid "Up"
+msgstr "Subir"
+
+msgid "Up one level"
+msgstr "Subir un nivel"
+
+msgid "Refresh"
+msgstr "Actualizar"
+
 msgid "Search folder"
 msgstr "Buscar en la carpeta"
+
+msgid "Clear search"
+msgstr "Borrar búsqueda"
+
+msgid "Searching entire drive - click to search this folder only"
+msgstr "Buscando en toda la unidad - haz clic para buscar solo en esta carpeta"
+
+msgid "Semantic ranking on (filename embeddings, not OCR)"
+msgstr "Ranking semántico activo (embeddings de nombres, no OCR)"
+
+msgid "Path or name — e.g. %localappdata%\\App\\"
+msgstr "Ruta o nombre — p. ej. %localappdata%\\App\\"
+
+msgid "Path or name in this folder"
+msgstr "Ruta o nombre en esta carpeta"
+
+msgid "Search operators"
+msgstr "Operadores de búsqueda"
+
+msgid "Save search"
+msgstr "Guardar búsqueda"
 
 msgid "Date"
 msgstr "Fecha"
@@ -50,11 +254,77 @@ msgstr "Fecha"
 msgid "Sort by name, size, date, or type. Click active column to toggle ^/v direction."
 msgstr "Ordena por nombre, tamaño, fecha o tipo. Haz clic en la columna activa para invertir ^/v."
 
+msgid "Icons"
+msgstr "Iconos"
+
+msgid "Icon view"
+msgstr "Vista de iconos"
+
 msgid "Compact"
 msgstr "Compacto"
 
+msgid "Compact view"
+msgstr "Vista compacta"
+
+msgid "Details"
+msgstr "Detalles"
+
+msgid "Details view"
+msgstr "Vista de detalles"
+
+msgid "Gallery"
+msgstr "Galería"
+
+msgid "Gallery view"
+msgstr "Vista de galería"
+
+msgid "Preview"
+msgstr "Vista previa"
+
+msgid "Preview pane"
+msgstr "Panel de vista previa"
+
+msgid "Dual pane"
+msgstr "Panel dual"
+
+msgid "Clear sort (reset to Name ^)"
+msgstr "Quitar orden (restablecer Nombre ^)"
+
+msgid "Actions"
+msgstr "Acciones"
+
+msgid "Command palette"
+msgstr "Paleta de comandos"
+
 msgid "Folder changed on disk — click to refresh"
 msgstr "La carpeta cambió en disco — haz clic para actualizar"
+
+msgid "Your Home is quiet"
+msgstr "Tu Inicio está vacío"
+
+msgid "Recycle Bin is empty"
+msgstr "La Papelera está vacía"
+
+msgid "Try a different query or switch back to this folder"
+msgstr "Prueba otra consulta o vuelve a esta carpeta"
+
+msgid "Pin folders from the sidebar or open a drive — shortcuts collect here."
+msgstr "Fija carpetas desde la barra lateral o abre una unidad — los accesos llegan aquí."
+
+msgid "Deleted files appear here until you empty the bin."
+msgstr "Los archivos eliminados aparecen aquí hasta que vacíes la papelera."
+
+msgid "Reading the OS Recycle Bin…"
+msgstr "Leyendo la Papelera del sistema…"
+
+msgid "Reading folder contents…"
+msgstr "Leyendo el contenido de la carpeta…"
+
+msgid "Open left folder here"
+msgstr "Abrir la carpeta izquierda aquí"
+
+msgid "Enable dual pane to browse a second location"
+msgstr "Activa el panel dual para explorar una segunda ubicación"
 
 msgid "Code"
 msgstr "Código"
@@ -62,6 +332,12 @@ msgstr "Código"
 msgctxt "preview-mode"
 msgid "View"
 msgstr "Ver"
+
+msgid "Open rendered output in browser"
+msgstr "Abrir salida renderizada en el navegador"
+
+msgid "Close preview"
+msgstr "Cerrar vista previa"
 
 msgid "Copy path"
 msgstr "Copiar ruta"
@@ -72,17 +348,152 @@ msgstr "Mostrar"
 msgid "Tag"
 msgstr "Etiqueta"
 
+msgid "Play in default app"
+msgstr "Reproducir con la app predeterminada"
+
+msgid "PDF · first page rendered above. Open the file for the full document."
+msgstr "PDF · primera página arriba. Abre el archivo para el documento completo."
+
+msgid "Rendering PDF page… if nothing appears it may be protected or image-only — open it to view the full document."
+msgstr "Renderizando página PDF… si no aparece puede estar protegido o ser solo imágenes — ábrelo para el documento completo."
+
+msgid "Rendered view (built-in). Switch to Code for raw source, or open in your browser."
+msgstr "Vista renderizada (integrada). Cambia a Código para el origen, o ábrelo en el navegador."
+
+msgid "Source view. Switch to View for a built-in rendered version, or open in your browser."
+msgstr "Vista de origen. Cambia a Ver para la versión renderizada, o ábrelo en el navegador."
+
 msgid "Source below — use the browser button to open rendered output."
 msgstr "Fuente abajo — usa el botón del navegador para abrir la salida renderizada."
 
 msgid "Select a file to preview details."
 msgstr "Selecciona un archivo para ver los detalles."
 
+msgid "Queue busy"
+msgstr "Cola ocupada"
+
+msgid "Install"
+msgstr "Instalar"
+
+msgid "Restore All"
+msgstr "Restaurar todo"
+
+msgid "Delete Permanently"
+msgstr "Eliminar permanentemente"
+
+msgid "Archive Browser"
+msgstr "Explorador de archivos"
+
+msgid "Batch Rename"
+msgstr "Cambio de nombre por lotes"
+
+msgid "Add Note"
+msgstr "Añadir nota"
+
 msgid "Tags"
 msgstr "Etiquetas"
 
+msgid "Clear Tag"
+msgstr "Quitar etiqueta"
+
+msgid "Copy as Path"
+msgstr "Copiar como ruta"
+
+msgid "Open in Terminal"
+msgstr "Abrir en terminal"
+
+msgid "Create ZIP"
+msgstr "Crear ZIP"
+
+msgid "^ Hide advanced"
+msgstr "^ Ocultar avanzado"
+
+msgid "Checksum"
+msgstr "Checksum"
+
+msgid "Copy as PowerShell Path"
+msgstr "Copiar como ruta de PowerShell"
+
+msgid "Locked File Inspector"
+msgstr "Inspector de archivos bloqueados"
+
+msgid "Defender Scan"
+msgstr "Examen de Defender"
+
+msgid "Cloud State"
+msgstr "Estado en la nube"
+
+msgid "Show More Options"
+msgstr "Mostrar más opciones"
+
+msgid "Run as Administrator"
+msgstr "Ejecutar como administrador"
+
+msgid "Take Ownership"
+msgstr "Tomar posesión"
+
+msgid "Previous Versions"
+msgstr "Versiones anteriores"
+
+msgid "Select All"
+msgstr "Seleccionar todo"
+
+msgid "New Folder"
+msgstr "Nueva carpeta"
+
+msgid "New File"
+msgstr "Nuevo archivo"
+
+msgid "Adjust"
+msgstr "Ajustar"
+
+msgid "Rotate Left"
+msgstr "Girar a la izquierda"
+
+msgid "Rotate Right"
+msgstr "Girar a la derecha"
+
+msgid "Resize to 50%"
+msgstr "Redimensionar al 50%"
+
+msgid "Resize to 25%"
+msgstr "Redimensionar al 25%"
+
+msgid "Scale %:"
+msgstr "Escala %:"
+
+msgid "Apply"
+msgstr "Aplicar"
+
+msgid "Export"
+msgstr "Exportar"
+
+msgid "Convert to JPEG"
+msgstr "Convertir a JPEG"
+
+msgid "Convert to PNG"
+msgstr "Convertir a PNG"
+
+msgid "Convert to WebP"
+msgstr "Convertir a WebP"
+
+msgid "Compress JPEG Copy"
+msgstr "Comprimir copia JPEG"
+
+msgid "Privacy"
+msgstr "Privacidad"
+
+msgid "Strip Metadata Copy"
+msgstr "Copia sin metadatos"
+
+msgid "Actions create new files next to the original and keep the source unchanged."
+msgstr "Las acciones crean archivos nuevos junto al original y mantienen la fuente sin cambios."
+
 msgid "Type a command..."
 msgstr "Escribe un comando..."
+
+msgid "Clear or close"
+msgstr "Borrar o cerrar"
 
 msgid "Close settings"
 msgstr "Cerrar configuración"
@@ -169,6 +580,9 @@ msgstr "Simple"
 msgid "Normal"
 msgstr "Normal"
 
+msgid "Essential features only - hides dual pane, power tools, advanced menu, and AI settings."
+msgstr "Solo funciones esenciales: oculta panel dual, herramientas avanzadas, menú avanzado e IA."
+
 msgid "CUSTOM THEME"
 msgstr "TEMA PERSONALIZADO"
 
@@ -189,6 +603,9 @@ msgstr "Mi tema"
 
 msgid "LIVE PREVIEW"
 msgstr "VISTA PREVIA EN VIVO"
+
+msgid "Custom Theme"
+msgstr "Tema personalizado"
 
 msgid "COLORS"
 msgstr "COLORES"
@@ -211,6 +628,15 @@ msgstr "Radio de esquina"
 msgid "Animations"
 msgstr "Animaciones"
 
+msgid "Off"
+msgstr "Off"
+
+msgid "Fast"
+msgstr "Rápido"
+
+msgid "Slow"
+msgstr "Lento"
+
 msgid "BACKGROUND STYLE"
 msgstr "ESTILO DE FONDO"
 
@@ -229,6 +655,15 @@ msgstr "Mezcla el acento en el degradado de fondo (brillo inferior)."
 msgid "FINISH"
 msgstr "ACABADO"
 
+msgid "Mica Dark"
+msgstr "Mica oscuro"
+
+msgid "Mica Light"
+msgstr "Mica claro"
+
+msgid "Flat"
+msgstr "Plano"
+
 msgid "Typography"
 msgstr "Tipografía"
 
@@ -240,6 +675,12 @@ msgstr "FUENTE UI"
 
 msgid "MONO FONT"
 msgstr "FUENTE MONO"
+
+msgid "Small"
+msgstr "Pequeño"
+
+msgid "Large"
+msgstr "Grande"
 
 msgid "ICONS"
 msgstr "ICONOS"
@@ -268,9 +709,6 @@ msgstr "Cuadrícula"
 msgid "List"
 msgstr "Lista"
 
-msgid "Gallery"
-msgstr "Galería"
-
 msgid "OPTIONS"
 msgstr "OPCIONES"
 
@@ -292,6 +730,12 @@ msgstr "INTEGRACIÓN CON WINDOWS"
 msgid "Registers Pathfinder for your user account only (HKCU). Double-clicking a folder in Explorer opens it in Pathfinder. This does not replace every Explorer surface on Windows 11."
 msgstr "Registra Pathfinder solo para tu cuenta (HKCU). Doble clic en una carpeta de Explorer la abre en Pathfinder. No sustituye todas las superficies de Explorer en Windows 11."
 
+msgid "Set as default folder handler"
+msgstr "Establecer como controlador de carpetas predeterminado"
+
+msgid "Restore Explorer defaults"
+msgstr "Restaurar valores predeterminados del Explorador"
+
 msgid "Alternative: import extras/set-pathfinder-default-folder-handler.reg and replace CHANGEME_EXE with your pathfinder.exe path."
 msgstr "Alternativa: importa extras/set-pathfinder-default-folder-handler.reg y sustituye CHANGEME_EXE por la ruta de pathfinder.exe."
 
@@ -309,6 +753,12 @@ msgstr "Limpieza automática de miniaturas"
 
 msgid "Storage and memory footprint"
 msgstr "Huella de almacenamiento y memoria"
+
+msgid "Rebuild"
+msgstr "Reconstruir"
+
+msgid "Debug"
+msgstr "Depurar"
 
 msgid "AI CAPABILITIES"
 msgstr "CAPACIDADES DE IA"
@@ -331,6 +781,15 @@ msgstr "Etiquetas de imagen / búsqueda CLIP (no disponible en esta build)"
 msgid "PATHFINDER LOCAL AI"
 msgstr "IA LOCAL DE PATHFINDER"
 
+msgid "Local AI is installed"
+msgstr "IA local instalada"
+
+msgid "Downloading models …"
+msgstr "Descargando modelos …"
+
+msgid "Local AI needs attention"
+msgstr "La IA local necesita atención"
+
 msgid "Balanced"
 msgstr "Equilibrado"
 
@@ -340,6 +799,9 @@ msgstr "Calidad"
 msgid "Keep models up to date"
 msgstr "Mantener los modelos actualizados"
 
+msgid "Retry"
+msgstr "Reintentar"
+
 msgid "Verify & repair"
 msgstr "Verificar y reparar"
 
@@ -348,4 +810,184 @@ msgstr "Actualizar modelos"
 
 msgid "Remove"
 msgstr "Quitar"
+
+msgid "FEATURES"
+msgstr "FUNCIONES"
+
+msgid "Semantic content search"
+msgstr "Búsqueda semántica de contenido"
+
+msgid "Image classification"
+msgstr "Clasificación de imágenes"
+
+msgid "Perceptual duplicate detection"
+msgstr "Detección de duplicados perceptivos"
+
+msgid "Install Pathfinder Local AI"
+msgstr "Instalar Pathfinder Local AI"
+
+msgid "Cancel"
+msgstr "Cancelar"
+
+msgid "Install (~"
+msgstr "Instalar (~"
+
+msgid "Confirm delete"
+msgstr "Confirmar eliminación"
+
+msgid "A file with the same name already exists.\n\nKeep both: save with a new name like \"file (1).txt\".\nReplace: overwrite the existing file.\nSkip: don't copy this file."
+msgstr "Ya existe un archivo con el mismo nombre.\n\nConservar ambos: guarda con un nombre nuevo como \"file (1).txt\".\nReemplazar: sobrescribe el archivo existente.\nOmitir: no copies este archivo."
+
+msgid "Skip"
+msgstr "Omitir"
+
+msgid "Replace"
+msgstr "Reemplazar"
+
+msgid "Keep both"
+msgstr "Conservar ambos"
+
+msgid "A file with that name already exists.\n\nKeep both saves with a numbered suffix.\nReplace overwrites the existing file.\nSkip cancels the rename."
+msgstr "Ya existe un archivo con ese nombre.\n\nConservar ambos guarda con un sufijo numerado.\nReemplazar sobrescribe el archivo existente.\nOmitir cancela el cambio de nombre."
+
+msgid "Batch rename"
+msgstr "Cambio de nombre por lotes"
+
+msgid "Find (regex)"
+msgstr "Buscar (regex)"
+
+msgid "Prefix"
+msgstr "Prefijo"
+
+msgid "Suffix"
+msgstr "Sufijo"
+
+msgid "Template"
+msgstr "Plantilla"
+
+msgid "Tokens: {{n}} {{n:04}} {{name}} {{ext}}  ·  Find uses regex"
+msgstr "Tokens: {{n}} {{n:04}} {{name}} {{ext}}  ·  Buscar usa regex"
+
+msgid "OK"
+msgstr "Aceptar"
+
+msgid "Rename presets"
+msgstr "Preajustes de nombre"
+
+msgid "Click a preset to apply to the selection"
+msgstr "Haz clic en un preajuste para aplicarlo a la selección"
+
+msgid "Shortcut hint"
+msgstr "Atajo"
+
+msgid "On"
+msgstr "On"
+
+msgid "More"
+msgstr "Más"
+
+msgid "Run enabled"
+msgstr "Ejecutar habilitados"
+
+msgid "Save"
+msgstr "Guardar"
+
+msgid "Compare folders"
+msgstr "Comparar carpetas"
+
+msgid "Hide same: On"
+msgstr "Ocultar iguales: Sí"
+
+msgid "Duplicate files"
+msgstr "Archivos duplicados"
+
+msgid "Keep newest"
+msgstr "Conservar más recientes"
+
+msgid "Keep largest"
+msgstr "Conservar más grandes"
+
+msgid "Keep first"
+msgstr "Conservar el primero"
+
+msgid "Delete others"
+msgstr "Eliminar los demás"
+
+msgid "PDF document — first page text preview below"
+msgstr "Documento PDF — vista previa del texto de la primera página abajo"
+
+msgid "Play"
+msgstr "Reproducir"
+
+msgid "Dismiss"
+msgstr "Cerrar"
+
+msgid "Welcome to Pathfinder"
+msgstr "Bienvenido a Pathfinder"
+
+msgid "Three quick steps to make Pathfinder feel like your everyday file manager. You can finish them all here, or come back later from Settings."
+msgstr "Tres pasos rápidos para que Pathfinder sea tu administrador de archivos diario. Puedes terminar aquí o volver después desde Configuración."
+
+msgid "Pick how much of Pathfinder you want up front. You can change this any time in Settings → Appearance."
+msgstr "Elige cuánto Pathfinder quieres de entrada. Puedes cambiarlo en Configuración → Apariencia."
+
+msgid "A couple of shortcuts that pay off immediately."
+msgstr "Un par de atajos que ayudan de inmediato."
+
+msgid "1. Set Pathfinder as your default folder handler"
+msgstr "1. Establece Pathfinder como controlador de carpetas predeterminado"
+
+msgid "Done"
+msgstr "Hecho"
+
+msgid "Set as default"
+msgstr "Establecer como predeterminado"
+
+msgid "2. Pin Pathfinder to your taskbar"
+msgstr "2. Fija Pathfinder en la barra de tareas"
+
+msgid "Windows 11 doesn't let apps pin themselves. Open the Start menu, find Pathfinder, right click it, then choose Pin to taskbar."
+msgstr "Windows 11 no deja que las apps se fijen solas. Abre Inicio, encuentra Pathfinder, clic derecho y elige Fijar a la barra de tareas."
+
+msgid "3. Unpin File Explorer (optional)"
+msgstr "3. Desanclar el Explorador de archivos (opcional)"
+
+msgid "Right click File Explorer on the taskbar and pick Unpin from taskbar so Pathfinder is the one you open by reflex."
+msgstr "Clic derecho en el Explorador de archivos en la barra y elige Desanclar de la barra de tareas para que Pathfinder sea el reflejo."
+
+msgid "Choose your starting mode"
+msgstr "Elige tu modo inicial"
+
+msgid "Essential features only — dual pane, power tools, and AI stay tucked away."
+msgstr "Solo funciones esenciales — panel dual, herramientas avanzadas e IA quedan ocultos."
+
+msgid "Full access including dual pane, power tools, command palette, and AI."
+msgstr "Acceso completo: panel dual, herramientas avanzadas, paleta de comandos e IA."
+
+msgid "Press Ctrl+P to open the command palette — search any action, theme, or folder jump without leaving the keyboard."
+msgstr "Pulsa Ctrl+P para la paleta de comandos — busca acciones, temas o saltos de carpeta sin dejar el teclado."
+
+msgid "Optional AI features (semantic search & helpers) live under Settings → AI. Install only if you want them — Pathfinder works fully without."
+msgstr "Las funciones de IA opcionales (búsqueda semántica y ayudas) están en Configuración → IA. Instálalas solo si las quieres — Pathfinder funciona completo sin ellas."
+
+msgid "Open Taskbar settings"
+msgstr "Abrir configuración de la barra de tareas"
+
+msgid "Next"
+msgstr "Siguiente"
+
+msgid "Got it"
+msgstr "Entendido"
+
+msgid "Choose your experience"
+msgstr "Elige tu experiencia"
+
+msgid "Pick how much of Pathfinder you want to see. You can change this anytime in Settings -> Appearance."
+msgstr "Elige cuánto Pathfinder quieres ver. Puedes cambiarlo en Configuración -> Apariencia."
+
+msgid "Essential features only.\nClean, focused experience.\nNo dual pane or power tools."
+msgstr "Solo funciones esenciales.\nExperiencia limpia y enfocada.\nSin panel dual ni herramientas avanzadas."
+
+msgid "Full access to every feature:\ndual pane, power tools,\narchive tools, and AI."
+msgstr "Acceso completo a todas las funciones:\npanel dual, herramientas avanzadas,\narchivos e IA."
 

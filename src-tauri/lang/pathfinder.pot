@@ -1,8 +1,8 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: pathfinder 0.9.60\n"
-"POT-Creation-Date: 2026-08-24 19:07+0000\n"
-"PO-Revision-Date: 2026-08-24 19:07+0000\n"
+"POT-Creation-Date: 2026-08-24 19:16+0000\n"
+"PO-Revision-Date: 2026-08-24 19:16+0000\n"
 "Last-Translator: Pathfinder contributors\n"
 "Language-Team: \n"
 "MIME-Version: 1.0\n"
@@ -10,6 +10,9 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Language: \n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Close tab"
+msgstr ""
 
 msgid "Name"
 msgstr ""
@@ -21,6 +24,81 @@ msgid "Modified"
 msgstr ""
 
 msgid "Type"
+msgstr ""
+
+msgid "Category"
+msgstr ""
+
+msgid "Usage"
+msgstr ""
+
+msgid "Suggestions"
+msgstr ""
+
+msgid "Largest items"
+msgstr ""
+
+msgid "Largest items will appear once the scan completes."
+msgstr ""
+
+msgid "Nothing to list yet. Click Rescan to start."
+msgstr ""
+
+msgid "Full list"
+msgstr ""
+
+msgid "Scanning..."
+msgstr ""
+
+msgid "Categories"
+msgstr ""
+
+msgid "All items by size"
+msgstr ""
+
+msgid "Largest folders and files in this category"
+msgstr ""
+
+msgid "Everything on the drive, ranked by size"
+msgstr ""
+
+msgid "Search by name or path..."
+msgstr ""
+
+msgid "Recent"
+msgstr ""
+
+msgid "Still scanning - results will appear shortly."
+msgstr ""
+
+msgid "No items to show. Click Rescan to start."
+msgstr ""
+
+msgid "Folder"
+msgstr ""
+
+msgid "Balanced (recommended)"
+msgstr ""
+
+msgid "Install Local AI to enable"
+msgstr ""
+
+msgid "Ready - near-duplicate detection uses a lightweight image hash"
+msgstr ""
+
+msgid "Image Tools"
+msgstr ""
+
+msgid "Ready"
+msgstr ""
+
+msgid "CPU Fallback"
+msgstr ""
+
+msgid "Detecting"
+msgstr ""
+
+msgid "Click Set as default below to register Pathfinder for folder shortcuts in Explorer."
 msgstr ""
 
 msgid "Settings"
@@ -35,13 +113,139 @@ msgstr ""
 msgid "Close"
 msgstr ""
 
+msgid "1 item in Recycle Bin"
+msgstr ""
+
+msgid "Restore"
+msgstr ""
+
+msgid "Restore selected to original location"
+msgstr ""
+
+msgid "All"
+msgstr ""
+
+msgid "Restore all items in Recycle Bin"
+msgstr ""
+
 msgid "Delete"
+msgstr ""
+
+msgid "Delete selected permanently"
+msgstr ""
+
+msgid "Select all"
+msgstr ""
+
+msgid "Select all (Ctrl+A)"
+msgstr ""
+
+msgid "Empty"
+msgstr ""
+
+msgid "Empty Recycle Bin"
+msgstr ""
+
+msgid "Clear"
+msgstr ""
+
+msgid "Clear selection (Esc)"
+msgstr ""
+
+msgid "1 item selected"
+msgstr ""
+
+msgid "Copy"
+msgstr ""
+
+msgid "Copy (Ctrl+C)"
+msgstr ""
+
+msgid "Cut"
+msgstr ""
+
+msgid "Cut (Ctrl+X)"
+msgstr ""
+
+msgid "Paste"
+msgstr ""
+
+msgid "Paste (Ctrl+V)"
+msgstr ""
+
+msgid "Rename"
+msgstr ""
+
+msgid "Rename (F2)"
+msgstr ""
+
+msgid "Delete (Del)"
+msgstr ""
+
+msgid "Extract"
+msgstr ""
+
+msgid "Extract Here"
 msgstr ""
 
 msgid "Open"
 msgstr ""
 
+msgid "Open (Enter)"
+msgstr ""
+
+msgid "Open with"
+msgstr ""
+
+msgid "Open With"
+msgstr ""
+
+msgid "Info"
+msgstr ""
+
+msgid "Properties"
+msgstr ""
+
+msgid "Select All (Ctrl+A)"
+msgstr ""
+
+msgid "Back"
+msgstr ""
+
+msgid "Forward"
+msgstr ""
+
+msgid "Up"
+msgstr ""
+
+msgid "Up one level"
+msgstr ""
+
+msgid "Refresh"
+msgstr ""
+
 msgid "Search folder"
+msgstr ""
+
+msgid "Clear search"
+msgstr ""
+
+msgid "Searching entire drive - click to search this folder only"
+msgstr ""
+
+msgid "Semantic ranking on (filename embeddings, not OCR)"
+msgstr ""
+
+msgid "Path or name — e.g. %localappdata%\\App\\"
+msgstr ""
+
+msgid "Path or name in this folder"
+msgstr ""
+
+msgid "Search operators"
+msgstr ""
+
+msgid "Save search"
 msgstr ""
 
 msgid "Date"
@@ -50,10 +254,76 @@ msgstr ""
 msgid "Sort by name, size, date, or type. Click active column to toggle ^/v direction."
 msgstr ""
 
+msgid "Icons"
+msgstr ""
+
+msgid "Icon view"
+msgstr ""
+
 msgid "Compact"
 msgstr ""
 
+msgid "Compact view"
+msgstr ""
+
+msgid "Details"
+msgstr ""
+
+msgid "Details view"
+msgstr ""
+
+msgid "Gallery"
+msgstr ""
+
+msgid "Gallery view"
+msgstr ""
+
+msgid "Preview"
+msgstr ""
+
+msgid "Preview pane"
+msgstr ""
+
+msgid "Dual pane"
+msgstr ""
+
+msgid "Clear sort (reset to Name ^)"
+msgstr ""
+
+msgid "Actions"
+msgstr ""
+
+msgid "Command palette"
+msgstr ""
+
 msgid "Folder changed on disk — click to refresh"
+msgstr ""
+
+msgid "Your Home is quiet"
+msgstr ""
+
+msgid "Recycle Bin is empty"
+msgstr ""
+
+msgid "Try a different query or switch back to this folder"
+msgstr ""
+
+msgid "Pin folders from the sidebar or open a drive — shortcuts collect here."
+msgstr ""
+
+msgid "Deleted files appear here until you empty the bin."
+msgstr ""
+
+msgid "Reading the OS Recycle Bin…"
+msgstr ""
+
+msgid "Reading folder contents…"
+msgstr ""
+
+msgid "Open left folder here"
+msgstr ""
+
+msgid "Enable dual pane to browse a second location"
 msgstr ""
 
 msgid "Code"
@@ -61,6 +331,12 @@ msgstr ""
 
 msgctxt "preview-mode"
 msgid "View"
+msgstr ""
+
+msgid "Open rendered output in browser"
+msgstr ""
+
+msgid "Close preview"
 msgstr ""
 
 msgid "Copy path"
@@ -72,16 +348,151 @@ msgstr ""
 msgid "Tag"
 msgstr ""
 
+msgid "Play in default app"
+msgstr ""
+
+msgid "PDF · first page rendered above. Open the file for the full document."
+msgstr ""
+
+msgid "Rendering PDF page… if nothing appears it may be protected or image-only — open it to view the full document."
+msgstr ""
+
+msgid "Rendered view (built-in). Switch to Code for raw source, or open in your browser."
+msgstr ""
+
+msgid "Source view. Switch to View for a built-in rendered version, or open in your browser."
+msgstr ""
+
 msgid "Source below — use the browser button to open rendered output."
 msgstr ""
 
 msgid "Select a file to preview details."
 msgstr ""
 
+msgid "Queue busy"
+msgstr ""
+
+msgid "Install"
+msgstr ""
+
+msgid "Restore All"
+msgstr ""
+
+msgid "Delete Permanently"
+msgstr ""
+
+msgid "Archive Browser"
+msgstr ""
+
+msgid "Batch Rename"
+msgstr ""
+
+msgid "Add Note"
+msgstr ""
+
 msgid "Tags"
 msgstr ""
 
+msgid "Clear Tag"
+msgstr ""
+
+msgid "Copy as Path"
+msgstr ""
+
+msgid "Open in Terminal"
+msgstr ""
+
+msgid "Create ZIP"
+msgstr ""
+
+msgid "^ Hide advanced"
+msgstr ""
+
+msgid "Checksum"
+msgstr ""
+
+msgid "Copy as PowerShell Path"
+msgstr ""
+
+msgid "Locked File Inspector"
+msgstr ""
+
+msgid "Defender Scan"
+msgstr ""
+
+msgid "Cloud State"
+msgstr ""
+
+msgid "Show More Options"
+msgstr ""
+
+msgid "Run as Administrator"
+msgstr ""
+
+msgid "Take Ownership"
+msgstr ""
+
+msgid "Previous Versions"
+msgstr ""
+
+msgid "Select All"
+msgstr ""
+
+msgid "New Folder"
+msgstr ""
+
+msgid "New File"
+msgstr ""
+
+msgid "Adjust"
+msgstr ""
+
+msgid "Rotate Left"
+msgstr ""
+
+msgid "Rotate Right"
+msgstr ""
+
+msgid "Resize to 50%"
+msgstr ""
+
+msgid "Resize to 25%"
+msgstr ""
+
+msgid "Scale %:"
+msgstr ""
+
+msgid "Apply"
+msgstr ""
+
+msgid "Export"
+msgstr ""
+
+msgid "Convert to JPEG"
+msgstr ""
+
+msgid "Convert to PNG"
+msgstr ""
+
+msgid "Convert to WebP"
+msgstr ""
+
+msgid "Compress JPEG Copy"
+msgstr ""
+
+msgid "Privacy"
+msgstr ""
+
+msgid "Strip Metadata Copy"
+msgstr ""
+
+msgid "Actions create new files next to the original and keep the source unchanged."
+msgstr ""
+
 msgid "Type a command..."
+msgstr ""
+
+msgid "Clear or close"
 msgstr ""
 
 msgid "Close settings"
@@ -169,6 +580,9 @@ msgstr ""
 msgid "Normal"
 msgstr ""
 
+msgid "Essential features only - hides dual pane, power tools, advanced menu, and AI settings."
+msgstr ""
+
 msgid "CUSTOM THEME"
 msgstr ""
 
@@ -188,6 +602,9 @@ msgid "My Theme"
 msgstr ""
 
 msgid "LIVE PREVIEW"
+msgstr ""
+
+msgid "Custom Theme"
 msgstr ""
 
 msgid "COLORS"
@@ -211,6 +628,15 @@ msgstr ""
 msgid "Animations"
 msgstr ""
 
+msgid "Off"
+msgstr ""
+
+msgid "Fast"
+msgstr ""
+
+msgid "Slow"
+msgstr ""
+
 msgid "BACKGROUND STYLE"
 msgstr ""
 
@@ -229,6 +655,15 @@ msgstr ""
 msgid "FINISH"
 msgstr ""
 
+msgid "Mica Dark"
+msgstr ""
+
+msgid "Mica Light"
+msgstr ""
+
+msgid "Flat"
+msgstr ""
+
 msgid "Typography"
 msgstr ""
 
@@ -239,6 +674,12 @@ msgid "UI FONT"
 msgstr ""
 
 msgid "MONO FONT"
+msgstr ""
+
+msgid "Small"
+msgstr ""
+
+msgid "Large"
 msgstr ""
 
 msgid "ICONS"
@@ -268,9 +709,6 @@ msgstr ""
 msgid "List"
 msgstr ""
 
-msgid "Gallery"
-msgstr ""
-
 msgid "OPTIONS"
 msgstr ""
 
@@ -292,6 +730,12 @@ msgstr ""
 msgid "Registers Pathfinder for your user account only (HKCU). Double-clicking a folder in Explorer opens it in Pathfinder. This does not replace every Explorer surface on Windows 11."
 msgstr ""
 
+msgid "Set as default folder handler"
+msgstr ""
+
+msgid "Restore Explorer defaults"
+msgstr ""
+
 msgid "Alternative: import extras/set-pathfinder-default-folder-handler.reg and replace CHANGEME_EXE with your pathfinder.exe path."
 msgstr ""
 
@@ -308,6 +752,12 @@ msgid "Automatic thumbnail cleanup"
 msgstr ""
 
 msgid "Storage and memory footprint"
+msgstr ""
+
+msgid "Rebuild"
+msgstr ""
+
+msgid "Debug"
 msgstr ""
 
 msgid "AI CAPABILITIES"
@@ -331,6 +781,15 @@ msgstr ""
 msgid "PATHFINDER LOCAL AI"
 msgstr ""
 
+msgid "Local AI is installed"
+msgstr ""
+
+msgid "Downloading models …"
+msgstr ""
+
+msgid "Local AI needs attention"
+msgstr ""
+
 msgid "Balanced"
 msgstr ""
 
@@ -340,6 +799,9 @@ msgstr ""
 msgid "Keep models up to date"
 msgstr ""
 
+msgid "Retry"
+msgstr ""
+
 msgid "Verify & repair"
 msgstr ""
 
@@ -347,5 +809,185 @@ msgid "Update models"
 msgstr ""
 
 msgid "Remove"
+msgstr ""
+
+msgid "FEATURES"
+msgstr ""
+
+msgid "Semantic content search"
+msgstr ""
+
+msgid "Image classification"
+msgstr ""
+
+msgid "Perceptual duplicate detection"
+msgstr ""
+
+msgid "Install Pathfinder Local AI"
+msgstr ""
+
+msgid "Cancel"
+msgstr ""
+
+msgid "Install (~"
+msgstr ""
+
+msgid "Confirm delete"
+msgstr ""
+
+msgid "A file with the same name already exists.\n\nKeep both: save with a new name like \"file (1).txt\".\nReplace: overwrite the existing file.\nSkip: don't copy this file."
+msgstr ""
+
+msgid "Skip"
+msgstr ""
+
+msgid "Replace"
+msgstr ""
+
+msgid "Keep both"
+msgstr ""
+
+msgid "A file with that name already exists.\n\nKeep both saves with a numbered suffix.\nReplace overwrites the existing file.\nSkip cancels the rename."
+msgstr ""
+
+msgid "Batch rename"
+msgstr ""
+
+msgid "Find (regex)"
+msgstr ""
+
+msgid "Prefix"
+msgstr ""
+
+msgid "Suffix"
+msgstr ""
+
+msgid "Template"
+msgstr ""
+
+msgid "Tokens: {{n}} {{n:04}} {{name}} {{ext}}  ·  Find uses regex"
+msgstr ""
+
+msgid "OK"
+msgstr ""
+
+msgid "Rename presets"
+msgstr ""
+
+msgid "Click a preset to apply to the selection"
+msgstr ""
+
+msgid "Shortcut hint"
+msgstr ""
+
+msgid "On"
+msgstr ""
+
+msgid "More"
+msgstr ""
+
+msgid "Run enabled"
+msgstr ""
+
+msgid "Save"
+msgstr ""
+
+msgid "Compare folders"
+msgstr ""
+
+msgid "Hide same: On"
+msgstr ""
+
+msgid "Duplicate files"
+msgstr ""
+
+msgid "Keep newest"
+msgstr ""
+
+msgid "Keep largest"
+msgstr ""
+
+msgid "Keep first"
+msgstr ""
+
+msgid "Delete others"
+msgstr ""
+
+msgid "PDF document — first page text preview below"
+msgstr ""
+
+msgid "Play"
+msgstr ""
+
+msgid "Dismiss"
+msgstr ""
+
+msgid "Welcome to Pathfinder"
+msgstr ""
+
+msgid "Three quick steps to make Pathfinder feel like your everyday file manager. You can finish them all here, or come back later from Settings."
+msgstr ""
+
+msgid "Pick how much of Pathfinder you want up front. You can change this any time in Settings → Appearance."
+msgstr ""
+
+msgid "A couple of shortcuts that pay off immediately."
+msgstr ""
+
+msgid "1. Set Pathfinder as your default folder handler"
+msgstr ""
+
+msgid "Done"
+msgstr ""
+
+msgid "Set as default"
+msgstr ""
+
+msgid "2. Pin Pathfinder to your taskbar"
+msgstr ""
+
+msgid "Windows 11 doesn't let apps pin themselves. Open the Start menu, find Pathfinder, right click it, then choose Pin to taskbar."
+msgstr ""
+
+msgid "3. Unpin File Explorer (optional)"
+msgstr ""
+
+msgid "Right click File Explorer on the taskbar and pick Unpin from taskbar so Pathfinder is the one you open by reflex."
+msgstr ""
+
+msgid "Choose your starting mode"
+msgstr ""
+
+msgid "Essential features only — dual pane, power tools, and AI stay tucked away."
+msgstr ""
+
+msgid "Full access including dual pane, power tools, command palette, and AI."
+msgstr ""
+
+msgid "Press Ctrl+P to open the command palette — search any action, theme, or folder jump without leaving the keyboard."
+msgstr ""
+
+msgid "Optional AI features (semantic search & helpers) live under Settings → AI. Install only if you want them — Pathfinder works fully without."
+msgstr ""
+
+msgid "Open Taskbar settings"
+msgstr ""
+
+msgid "Next"
+msgstr ""
+
+msgid "Got it"
+msgstr ""
+
+msgid "Choose your experience"
+msgstr ""
+
+msgid "Pick how much of Pathfinder you want to see. You can change this anytime in Settings -> Appearance."
+msgstr ""
+
+msgid "Essential features only.\nClean, focused experience.\nNo dual pane or power tools."
+msgstr ""
+
+msgid "Full access to every feature:\ndual pane, power tools,\narchive tools, and AI."
 msgstr ""
 
