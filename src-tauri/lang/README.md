@@ -55,6 +55,15 @@ Same English in different meanings needs an explicit context:
 
 That becomes `msgctxt` in the `.po` file.
 
+## Literal braces
+
+`@tr` treats `{...}` as format placeholders. Escape literal tokens with doubled braces:
+
+```slint
+@tr("Tokens: {{n}} {{name}}")
+```
+
+
 ## Language setting
 
 `settings.json` field: `ui_language`
