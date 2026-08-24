@@ -5123,16 +5123,19 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("list"); }
             }
             if !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid"): HorizontalLayout {
-                x: parent.width - 180px;
+                // Sit left of Gallery so auto-sized DialogButtons cannot cover Preview/Dual.
+                x: parent.width - 318px;
                 y: 8px;
                 height: 26px;
                 spacing: 4px;
                 DialogButton {
-                    label: "-";
+                    label: "−";
+                    width: 28px;
                     clicked => { root.thumb_size_changed(root.thumb_size_scale - 0.15); }
                 }
                 DialogButton {
                     label: "+";
+                    width: 28px;
                     clicked => { root.thumb_size_changed(root.thumb_size_scale + 0.15); }
                 }
             }
@@ -5774,7 +5777,14 @@ export component MainWindow inherits Window {
                         background: ThemePalette.accent_soft;
                         opacity: 0.55;
                     }
+                    // Declared before the message stack so Refresh/buttons stay clickable.
+                    empty_ta := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => { root.clear_selection(); }
+                    }
                     VerticalLayout {
+                        z: 1;
                         alignment: center;
                         spacing: 10px;
                         // Themed: animated pixel ornament (single instance).
@@ -5858,7 +5868,11 @@ export component MainWindow inherits Window {
                             horizontal-alignment: center;
                         }
                         Text {
-                            visible: root.search_text != "" || root.is_home_view || root.in_recycle_bin || root.empty_state == "Loading folder..." || root.empty_state == "Loading Recycle Bin..." || root.empty_state == "Searching..." || root.empty_state == "Searching drive...";
+                            visible: root.search_text != "" || root.is_home_view || root.in_recycle_bin
+                                || root.empty_state == "Loading folder..."
+                                || root.empty_state == "Loading Recycle Bin..."
+                                || root.empty_state == "Searching..."
+                                || root.empty_state == "Searching drive...";
                             width: min(360px, parent.width - 48px);
                             x: (parent.width - self.width) / 2;
                             text: root.search_text != "" ? (root.search_scope_all ? @tr("Try a different query or switch back to this folder") : "Try a different query or search the whole drive") :
@@ -5873,18 +5887,14 @@ export component MainWindow inherits Window {
                             wrap: word-wrap;
                             height: self.preferred-height;
                         }
-                        if root.in_recycle_bin && root.empty_state == "Recycle Bin is empty.": DialogButton {
+                        // Visibility from mode + emptiness — never compare translated empty_state copy.
+                        if root.in_recycle_bin && root.files.length == 0
+                            && root.empty_state != "Loading Recycle Bin..."
+                            && root.search_text == "": DialogButton {
                             x: (parent.width - self.preferred-width) / 2;
                             label: @tr("Refresh");
                             clicked => { root.command("refresh"); }
                         }
-                    }
-                    // Covers the whole pane so clicks reach clear_selection even over the message.
-                    // Also feeds hover into fantasy ornaments (no per-icon TouchArea).
-                    empty_ta := TouchArea {
-                        width: parent.width;
-                        height: parent.height;
-                        clicked => { root.clear_selection(); }
                     }
                 }
 
@@ -7433,6 +7443,7 @@ export component MainWindow inherits Window {
     if root.settings_visible: Rectangle {
         width: parent.width;
         height: parent.height;
+        z: 165;
         background: rgba(0, 0, 0, 0.42);
         TouchArea { clicked => { root.settings_visible = false; } }
 
@@ -7449,11 +7460,23 @@ export component MainWindow inherits Window {
             drop-shadow-color: rgba(0, 0, 0, 0.45);
             TouchArea {}
 
-            Text { x: 20px; y: 18px; width: 100px; height: 28px; text: @tr("Settings"); color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            settings_heading := Text {
+                x: 20px; y: 18px; height: 28px;
+                text: @tr("Settings");
+                color: ThemePalette.text;
+                font-size: 18px;
+                font-weight: 700;
+                vertical-alignment: center;
+                // Grow for longer translations (Impostazioni / Configuración).
+                width: max(100px, self.preferred-width);
+            }
             // Version label tucked next to the heading. Reads the value the
             // controller pushes from env!("CARGO_PKG_VERSION") at startup.
             Text {
-                x: 124px; y: 22px; width: parent.width - 180px; height: 22px;
+                x: settings_heading.x + settings_heading.width + 8px;
+                y: 22px;
+                width: parent.width - (settings_heading.x + settings_heading.width + 8px) - 56px;
+                height: 22px;
                 text: "v" + root.app_version;
                 color: ThemePalette.text_faint;
                 font-size: 12px;
@@ -7481,34 +7504,40 @@ export component MainWindow inherits Window {
                 background: transparent;
                 Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
 
-                for tab_label[ti] in [@tr("Appearance"), @tr("settings-tab" => "View"), @tr("Performance"), @tr("AI")]: Rectangle {
-                    property <string> tid: ti == 0 ? "appearance" : (ti == 1 ? "view" : (ti == 2 ? "performance" : "ai"));
-                    property <bool> is_active: root.settings_tab == self.tid || (self.tid == "appearance" && root.settings_tab == "themes");
-                    visible: !(root.is_simple && self.tid == "ai");
-                    x: 20px + ti * 102px;
-                    y: 0;
-                    width: 98px;
+                HorizontalLayout {
+                    x: 12px;
+                    width: parent.width - 24px;
                     height: parent.height;
-                    background: transparent;
-                    Text {
-                        width: parent.width;
-                        height: parent.height - 2px;
-                        text: tab_label;
-                        color: parent.is_active ? ThemePalette.text : ThemePalette.text_muted;
-                        font-size: 13px;
-                        font-weight: parent.is_active ? 600 : 400;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                        overflow: elide;
+                    spacing: 2px;
+                    alignment: stretch;
+
+                    for tab_label[ti] in [@tr("Appearance"), @tr("settings-tab" => "View"), @tr("Performance"), @tr("AI")]: Rectangle {
+                        property <string> tid: ti == 0 ? "appearance" : (ti == 1 ? "view" : (ti == 2 ? "performance" : "ai"));
+                        property <bool> is_active: root.settings_tab == self.tid || (self.tid == "appearance" && root.settings_tab == "themes");
+                        visible: !(root.is_simple && self.tid == "ai");
+                        horizontal-stretch: 1;
+                        height: parent.height;
+                        background: transparent;
+                        Text {
+                            width: parent.width;
+                            height: parent.height - 2px;
+                            text: tab_label;
+                            color: parent.is_active ? ThemePalette.text : ThemePalette.text_muted;
+                            font-size: 13px;
+                            font-weight: parent.is_active ? 600 : 400;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Rectangle {
+                            y: parent.height - 2px;
+                            width: parent.width;
+                            height: 2px;
+                            background: parent.is_active ? ThemePalette.accent : transparent;
+                            animate background { duration: 40ms; easing: ease-out; }
+                        }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.settings_tab = tid; } }
                     }
-                    Rectangle {
-                        y: parent.height - 2px;
-                        width: parent.width;
-                        height: 2px;
-                        background: parent.is_active ? ThemePalette.accent : transparent;
-                        animate background { duration: 40ms; easing: ease-out; }
-                    }
-                    TouchArea { mouse-cursor: pointer; clicked => { root.settings_tab = tid; } }
                 }
             }
 
@@ -7530,7 +7559,8 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         spacing: 6px;
                         width: parent.width;
-                        for lang_label[li] in [@tr("System"), @tr("English"), @tr("Italian"), @tr("Spanish")]: Rectangle {
+                        // Endonyms stay fixed so the picker stays recognizable in every UI language.
+                        for lang_label[li] in [@tr("System"), "English", "Italiano", "Español"]: Rectangle {
                             width: (parent.width - 18px) / 4;
                             height: AppMetrics.row_h;
                             property <string> lang_id: li == 0 ? "system" : (li == 1 ? "en" : (li == 2 ? "it" : "es"));
@@ -9096,20 +9126,23 @@ export component MainWindow inherits Window {
                         font-size: 12.5px;
                         wrap: word-wrap;
                     }
-                    DialogButton {
-                        x: parent.width - 240px;
+                    HorizontalLayout {
+                        x: 22px;
                         y: parent.height - 50px;
-                        label: @tr("Cancel");
-                        clicked => { root.ai_install_explainer_visible = false; }
-                    }
-                    DialogButton {
-                        x: parent.width - 130px;
-                        y: parent.height - 50px;
-                        label: @tr("Install (~") + root.ai_install_size_mb + " MB)";
-                        primary: true;
-                        clicked => {
-                            root.ai_install_explainer_visible = false;
-                            root.ai_install_confirm();
+                        width: parent.width - 44px;
+                        spacing: 8px;
+                        alignment: end;
+                        DialogButton {
+                            label: @tr("Cancel");
+                            clicked => { root.ai_install_explainer_visible = false; }
+                        }
+                        DialogButton {
+                            label: @tr("Install (~{} MB)", root.ai_install_size_mb);
+                            primary: true;
+                            clicked => {
+                                root.ai_install_explainer_visible = false;
+                                root.ai_install_confirm();
+                            }
                         }
                     }
                 }
@@ -9120,6 +9153,8 @@ export component MainWindow inherits Window {
     if root.confirm_visible: Rectangle {
         width: parent.width;
         height: parent.height;
+        // Above toasts (150) so destructive confirms stay on top.
+        z: 170;
         background: rgba(0, 0, 0, 0.42);
         TouchArea {
             width: parent.width;
@@ -9147,8 +9182,15 @@ export component MainWindow inherits Window {
                 text-color: ThemePalette.text_muted;
                 cap-height: 220px;
             }
-            DialogButton { x: parent.width - 180px; y: parent.height - 48px; label: @tr("Cancel"); clicked => { root.confirm_visible = false; } }
-            DialogButton { x: parent.width - 90px; y: parent.height - 48px; label: @tr("Delete"); primary: true; danger: true; clicked => { root.confirm_visible = false; root.confirm_delete(); } }
+            HorizontalLayout {
+                x: 18px;
+                y: parent.height - 48px;
+                width: parent.width - 36px;
+                spacing: 8px;
+                alignment: end;
+                DialogButton { label: @tr("Cancel"); clicked => { root.confirm_visible = false; } }
+                DialogButton { label: @tr("Delete"); primary: true; danger: true; clicked => { root.confirm_visible = false; root.confirm_delete(); } }
+            }
         }
     }
 
@@ -10256,20 +10298,22 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(Alt+UpArrow); activated => { root.go_up(); } }
         KeyBinding { keys: @keys(F3); activated => { root.toggle_dual_pane(); } }
         KeyBinding { keys: @keys(F5); activated => { root.refresh(); } }
-        KeyBinding { keys: @keys(Delete); activated => { root.command("delete"); } }
-        KeyBinding { keys: @keys(Shift+Delete); activated => { root.command("purge"); } }
-        KeyBinding { keys: @keys(Alt+Return); activated => { root.command("properties"); } }
-        KeyBinding { keys: @keys(F2); activated => { root.command("rename"); } }
-        KeyBinding { keys: @keys(Return); activated => { root.file_opened(root.selected_index); } }
-        KeyBinding { keys: @keys(Space); activated => { root.toggle_quick_look(); } }
+        KeyBinding { keys: @keys(Delete); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible) { root.command("delete"); } } }
+        KeyBinding { keys: @keys(Shift+Delete); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible) { root.command("purge"); } } }
+        KeyBinding { keys: @keys(Alt+Return); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible) { root.command("properties"); } } }
+        KeyBinding { keys: @keys(F2); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible) { root.command("rename"); } } }
+        KeyBinding { keys: @keys(Return); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.command_visible) { root.file_opened(root.selected_index); } } }
+        KeyBinding { keys: @keys(Space); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible) { root.toggle_quick_look(); } } }
         KeyBinding { keys: @keys(Control+D); activated => { root.command("duplicates"); } }
         KeyBinding { keys: @keys(Control+Shift+C); activated => { root.command("checksum"); } }
-        KeyBinding { keys: @keys(UpArrow); activated => { root.file_selected(max(0, root.selected_index - 1), false, false); } }
-        KeyBinding { keys: @keys(DownArrow); activated => { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } }
+        KeyBinding { keys: @keys(UpArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible) { root.file_selected(max(0, root.selected_index - 1), false, false); } } }
+        KeyBinding { keys: @keys(DownArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible) { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } } }
         KeyBinding { keys: @keys(Escape); activated => {
             if (root.command_visible) { root.command_visible = false; }
             else if (root.settings_visible) { root.settings_visible = false; }
             else if (root.confirm_visible) { root.confirm_visible = false; }
+            else if (root.welcome_visible) { root.welcome_dismiss(); }
+            else if (root.ui_mode_prompt_visible) { /* keep until a mode is chosen */ }
             else if (root.tool_overlay_visible) { root.tool_overlay_close(); }
             else if (root.compare_overlay_visible) { root.compare_overlay_close(); }
             else if (root.dupe_overlay_visible) { root.dupe_overlay_close(); }

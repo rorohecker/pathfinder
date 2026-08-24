@@ -1,8 +1,8 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: pathfinder 0.9.60\n"
-"POT-Creation-Date: 2026-08-24 19:16+0000\n"
-"PO-Revision-Date: 2026-08-24 19:16+0000\n"
+"POT-Creation-Date: 2026-08-24 19:25+0000\n"
+"PO-Revision-Date: 2026-08-24 19:25+0000\n"
 "Last-Translator: Pathfinder contributors\n"
 "Language-Team: \n"
 "MIME-Version: 1.0\n"
@@ -529,15 +529,6 @@ msgstr ""
 msgid "System"
 msgstr ""
 
-msgid "English"
-msgstr ""
-
-msgid "Italian"
-msgstr ""
-
-msgid "Spanish"
-msgstr ""
-
 msgid "System follows the OS locale when Italian or Spanish is available; otherwise English."
 msgstr ""
 
@@ -829,7 +820,7 @@ msgstr ""
 msgid "Cancel"
 msgstr ""
 
-msgid "Install (~"
+msgid "Install (~{} MB)"
 msgstr ""
 
 msgid "Confirm delete"

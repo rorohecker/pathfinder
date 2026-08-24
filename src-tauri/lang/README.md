@@ -55,14 +55,11 @@ Same English in different meanings needs an explicit context:
 
 That becomes `msgctxt` in the `.po` file.
 
-## Literal braces
+## Language picker labels
 
-`@tr` treats `{...}` as format placeholders. Escape literal tokens with doubled braces:
-
-```slint
-@tr("Tokens: {{n}} {{name}}")
-```
-
+Keep language names as **endonyms** (`English`, `Italiano`, `Español`) so the
+chooser stays recognizable after switching. Only translate generic labels like
+`System` / `LANGUAGE`.
 
 ## Language setting
 

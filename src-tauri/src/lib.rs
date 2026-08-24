@@ -329,7 +329,7 @@ pub struct FileOp {
     pub to: Option<String>,
     #[serde(default)]
     pub trash_id: Option<String>,
-    /// Populated for `batch_rename` â€” reversed as one undo step.
+    /// Populated for `batch_rename` — reversed as one undo step.
     #[serde(default)]
     pub batch: Option<Vec<RenameOp>>,
 }
@@ -2081,9 +2081,9 @@ fn pdfium_library_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // Bundled next to the executable (Tauri resource) â€¦
+            // Bundled next to the executable (Tauri resource) …
             candidates.push(dir.join("pdfium.dll"));
-            // â€¦ or under a nested resources folder, depending on bundler.
+            // … or under a nested resources folder, depending on bundler.
             candidates.push(dir.join("resources").join("pdfium.dll"));
         }
     }
@@ -5323,7 +5323,7 @@ fn compute_ai_capabilities() -> AiCapabilities {
         )
     } else {
         format!(
-            "Active accelerator: {} ({}). Fallback order NPU â†’ GPU â†’ CPU. [{}]",
+            "Active accelerator: {} ({}). Fallback order NPU → GPU → CPU. [{}]",
             acceleration_kind, device_name, ort
         )
     };
@@ -6951,12 +6951,12 @@ fn storage_path_summary(path: &str) -> String {
         if let Some(idx) = lower.find(marker) {
             let tail = norm[idx + 1..].trim_start_matches('\\');
             if !tail.is_empty() {
-                return format!("â€¦\\{tail}");
+                return format!("…\\{tail}");
             }
         }
     }
     if norm.len() > 72 {
-        format!("â€¦{}", &norm[norm.len().saturating_sub(68)..])
+        format!("…{}", &norm[norm.len().saturating_sub(68)..])
     } else {
         norm
     }
@@ -9399,7 +9399,7 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
         if semantic_ready {
             name_paths.push((entry.path.clone(), entry.name.clone()));
         }
-        // dHash is pure CPU image hashing â€” works without Local AI models.
+        // dHash is pure CPU image hashing — works without Local AI models.
         if matches!(
             extension.as_str(),
             "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
@@ -11586,7 +11586,7 @@ const PREVIEW_READ_BYTES: usize = 64 * 1024;
 
 /// True if a preview for `path` is already sitting in the in-memory cache, so
 /// the caller can render it synchronously without a background thread hop.
-/// Only does a cheap stat (needed for the cache key) â€” never reads the body.
+/// Only does a cheap stat (needed for the cache key) — never reads the body.
 fn preview_is_cached(state: &AppState, path: &str) -> bool {
     let path_buf = PathBuf::from(path);
     let Ok(metadata) = fs::metadata(&path_buf) else {
@@ -11659,7 +11659,7 @@ fn decode_html_entities(input: &str) -> String {
         .replace("&copy;", "\u{00a9}")
         .replace("&reg;", "\u{00ae}")
         .replace("&trade;", "\u{2122}");
-    // Numeric entities like &#8217; â€” resolve the decimal ones we can.
+    // Numeric entities like &#8217; — resolve the decimal ones we can.
     if out.contains("&#") {
         let re = &NUMERIC_ENTITY_RE;
         out = re
@@ -11698,7 +11698,7 @@ fn tidy_rendered_text(input: &str) -> String {
 
 /// Convert an HTML document into readable plain text: script/style content is
 /// dropped, block tags become line breaks, list items get bullets, and entities
-/// are decoded. This is the built-in "rendered" view â€” there is no WebView in
+/// are decoded. This is the built-in "rendered" view — there is no WebView in
 /// the app by design, so this gives a fast, dependency-free approximation.
 fn render_html_to_text(html: &str) -> String {
     let chars: Vec<char> = html.chars().collect();
@@ -11897,7 +11897,7 @@ fn native_delete(state: &AppState, path: &str) -> Result<(), String> {
     native_delete_inner(state, path, true)
 }
 
-/// Recycle-bin delete without walking the tree for queue byte totals â€” keeps
+/// Recycle-bin delete without walking the tree for queue byte totals — keeps
 /// the UI thread responsive when the user confirms deleting huge folders.
 fn native_delete_fast(state: &AppState, path: &str) -> Result<(), String> {
     native_delete_inner(state, path, false)
@@ -12150,7 +12150,7 @@ fn format_size_short(bytes: u64) -> String {
 }
 
 /// Bucket a modified timestamp into Explorer-style labels using local calendar
-/// midnights (Today / Yesterday / this week / â€¦), matching File Explorer.
+/// midnights (Today / Yesterday / this week / …), matching File Explorer.
 fn date_group_label(secs: u64) -> &'static str {
     if secs == 0 {
         return "Unknown date";
@@ -12206,11 +12206,11 @@ fn dupe_group_ui_item(id_title: &str, paths: &[String], detail: &str) -> DupeGro
     let paths_preview = if paths.len() <= 1 {
         String::new()
     } else if paths.len() <= 4 {
-        format!("Also: {}", others.join(" Â· "))
+        format!("Also: {}", others.join(" · "))
     } else {
         format!(
-            "Also: {} Â· +{} more",
-            others.join(" Â· "),
+            "Also: {} · +{} more",
+            others.join(" · "),
             paths.len().saturating_sub(4)
         )
     };
@@ -13369,7 +13369,7 @@ fn resolve_cli_folder_to_string(raw: PathBuf) -> Option<String> {
 /// Path is expected lowercased.
 fn is_always_list_view_folder(lower: &str) -> bool {
     // Drive root: matches "c:", "c:\", "d:\", "x:", "\\server\share",
-    // "/" â€” short paths with no real folder component below the root.
+    // "/" — short paths with no real folder component below the root.
     let trimmed = lower.trim_end_matches('\\').trim_end_matches('/');
     let is_drive_root = trimmed.len() <= 2 && trimmed.ends_with(':');
     if is_drive_root || trimmed.is_empty() || trimmed == "/" {
@@ -13965,7 +13965,7 @@ impl NativeController {
         ui.set_ai_install_size_mb(0);
         ui.set_index_status(ss(&i18n::t("Loading index statistics...")));
         ui.set_performance_footprint(ss(&i18n::t("Measuring disk usage...")));
-        ui.set_performance_intro(ss(concat!(
+        ui.set_performance_intro(ss(&i18n::t(concat!(
             "Pathfinder keeps a small local database of the files in folders you visit so the search bar can return matches instantly without rescanning your disk every time. ",
             "Indexing modes change how aggressively that database is grown in the background:\n",
             "\u{2022} Low - only the folders you actually open get added. Lightest on disk and CPU.\n",
@@ -13973,10 +13973,33 @@ impl NativeController {
             "\u{2022} Fast - indexes roots you choose, with common folders as fallback.\n",
             "\u{2022} Max - all fixed drives. Best search coverage, uses the most disk while it catches up.\n",
             "Thumbnails are stored separately and the cache is automatically pruned when it hits the budget below."
-        )));
-        ui.set_search_scope_label(ss(&i18n::t("Folder")));
+        ))));
+        // Preserve drive-wide vs folder scope; only re-translate the Folder label.
+        self.sync_search_scope(ui);
         ui.set_side_items(model_from_vec(self.side_items()));
         ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
+        // Tab titles + address chrome for virtual roots (Home / Recycle / Storage).
+        let tabs = self.tab_items();
+        #[cfg(target_os = "windows")]
+        sync_titlebar_hit_regions(&tabs);
+        ui.set_tabs(model_from_vec(tabs));
+        match self.current_path.as_str() {
+            "home://" => {
+                ui.set_current_path(ss(&i18n::t("Home")));
+                ui.set_address_text(ss(&i18n::t("Home")));
+            }
+            "recycle://" => {
+                ui.set_current_path(ss(&i18n::t("Recycle Bin")));
+                ui.set_address_text(ss(&i18n::t("Recycle Bin")));
+            }
+            "storage://" => {
+                ui.set_current_path(ss(&i18n::t("Storage")));
+                ui.set_address_text(ss(&i18n::t("Storage")));
+            }
+            _ => {}
+        }
+        ui.set_breadcrumbs(model_from_vec(build_breadcrumbs(&self.current_path)));
+        self.sync_ai_settings_ui(ui);
     }
 
     fn sync_ai_settings_ui(&self, ui: &MainWindow) {
@@ -13987,11 +14010,11 @@ impl NativeController {
         };
         ui.set_ai_profile(ss(&profile));
         let label = match profile.as_str() {
-            "compact" => "Compact â€” smallest (~50 MB)",
-            "quality" => "Quality â€” best accuracy (~99 MB)",
+            "compact" => "Compact — smallest (~50 MB)",
+            "quality" => "Quality — best accuracy (~99 MB)",
             _ => "Balanced (recommended, ~61 MB)",
         };
-        ui.set_ai_profile_label(ss(label));
+        ui.set_ai_profile_label(ss(&i18n::t(label)));
         ui.set_ai_auto_update(self.settings.ai_auto_update_models);
         let mb = local_ai::approx_install_mb_for_profile(&profile) as i32;
         ui.set_ai_install_size_mb(mb);
@@ -14007,7 +14030,7 @@ impl NativeController {
         let m = local_ai::read_manifest();
         if !m.embedding_model_id.is_empty() {
             ui.set_ai_model_versions(ss(format!(
-                "catalog {} Â· {} Â· {}",
+                "catalog {} · {} · {}",
                 if m.catalog_version.is_empty() {
                     "bundled"
                 } else {
@@ -14040,19 +14063,19 @@ impl NativeController {
         }
         let semantic = local_ai_semantic_ready_cached();
         let classify = semantic && crate::inference::image_classifier_available();
-        ui.set_ai_feature_semantic(ss(if semantic {
-            "Ready â€” search by meaning across indexed files"
+        ui.set_ai_feature_semantic(ss(&i18n::t(if semantic {
+            "Ready — search by meaning across indexed files"
         } else {
             "Install Local AI to enable"
-        }));
-        ui.set_ai_feature_classify(ss(if classify {
-            "Ready â€” auto-suggest tags for photos"
+        })));
+        ui.set_ai_feature_classify(ss(&i18n::t(if classify {
+            "Ready — auto-suggest tags for photos"
         } else {
             "Install Local AI to enable"
-        }));
-        ui.set_ai_feature_dupes(ss(
-            "Ready â€” near-duplicate detection uses a lightweight image hash (no model required)",
-        ));
+        })));
+        ui.set_ai_feature_dupes(ss(&i18n::t(
+            "Ready — near-duplicate detection uses a lightweight image hash (no model required)",
+        )));
     }
 
     /// Work deferred until after the first frame is painted so startup feels
@@ -14329,7 +14352,7 @@ impl NativeController {
         ui.set_search_scope_label(ss(if self.search_all_scope {
             compact_drive_label(&self.current_path)
         } else {
-            "Folder".to_string()
+            i18n::t("Folder")
         }));
         ui.set_search_semantic_mode(self.settings.search_semantic_mode);
         ui.set_clip_search_enabled(self.settings.clip_search_enabled);
@@ -15581,7 +15604,7 @@ impl NativeController {
             expandable: false,
             expanded: false,
         });
-        // Home dashboard â€” virtual landing for drives, pins, and saved searches.
+        // Home dashboard — virtual landing for drives, pins, and saved searches.
         items.push(SideItem {
             label: ss(&i18n::t("Home")),
             path: ss("home://"),
@@ -16037,9 +16060,9 @@ impl NativeController {
             .enumerate()
             .map(|(index, tab)| {
                 let title = match tab.path.as_str() {
-                    "recycle://" => "Recycle Bin".to_string(),
-                    "storage://" => "Storage".to_string(),
-                    "home://" => "Home".to_string(),
+                    "recycle://" => i18n::t("Recycle Bin"),
+                    "storage://" => i18n::t("Storage"),
+                    "home://" => i18n::t("Home"),
                     _ => Path::new(&tab.path)
                         .file_name()
                         .map(|name| name.to_string_lossy().to_string())
@@ -17746,7 +17769,7 @@ impl NativeController {
             self.clear_storage_bucket_filter(ui);
             return;
         }
-        // Leave storage view â†’ folder the user had open before Storage.
+        // Leave storage view → folder the user had open before Storage.
         if self.current_path == "storage://" {
             let target = if !self.storage_path_before.is_empty() {
                 self.storage_path_before.clone()
@@ -18873,7 +18896,7 @@ impl NativeController {
                 } else if paths.len() > 1 {
                     self.show_toast(
                         ui,
-                        "Open With applies to one file â€” select a single item.",
+                        "Open With applies to one file — select a single item.",
                     );
                 } else {
                     match open_with_dialog(&paths[0], Some(ui)) {
@@ -20038,7 +20061,7 @@ impl NativeController {
             eprintln!("set_shell_files_clipboard: {error}");
             self.show_toast_kind(
                 ui,
-                "Clipboard sync failed â€” paste may not work in Explorer.".to_string(),
+                "Clipboard sync failed — paste may not work in Explorer.".to_string(),
                 "error",
             );
         }
@@ -20927,7 +20950,7 @@ impl NativeController {
         self.active_archive = None;
         ui.set_view_mode(ss("list"));
         ui.set_empty_state(ss(if self.files.is_empty() {
-            "Pin folders or open a drive â€” your shortcuts will land here."
+            "Pin folders or open a drive — your shortcuts will land here."
         } else {
             ""
         }));
@@ -21561,7 +21584,7 @@ impl NativeController {
                 id: ss(i.to_string()),
                 title: ss(&r.name),
                 subtitle: ss(format!(
-                    "ext:{} tag:{} Â· {}",
+                    "ext:{} tag:{} · {}",
                     r.extension,
                     r.tag,
                     if r.folder.is_empty() {
@@ -22236,7 +22259,7 @@ impl NativeController {
             result.scanned_files
         )));
         ui.set_storage_subtitle(ss(format!(
-            "8 categories Â· scanned {} ago in {:.1}s",
+            "8 categories · scanned {} ago in {:.1}s",
             format_relative_time(result.scanned_at),
             (result.elapsed_ms as f64) / 1000.0
         )));
@@ -22252,7 +22275,7 @@ impl NativeController {
                 0.0
             };
             ui.set_storage_disk_summary(ss(format!(
-                "{} used of {}  Â·  {} free",
+                "{} used of {}  ·  {} free",
                 format_size_short(used),
                 format_size_short(disk_total),
                 format_size_short(free)
@@ -22267,13 +22290,13 @@ impl NativeController {
             ui.set_storage_scan_coverage_pct(coverage as f32);
             let breakdown = if unaccounted > 512 * 1024 * 1024 {
                 format!(
-                    "{} scanned Â· {} system/other (Windows, pagefile, skipped folders)",
+                    "{} scanned · {} system/other (Windows, pagefile, skipped folders)",
                     format_size_short(result.total_bytes),
                     format_size_short(unaccounted)
                 )
             } else if unaccounted > 64 * 1024 * 1024 {
                 format!(
-                    "{} scanned Â· {} unaccounted (system files, skipped paths)",
+                    "{} scanned · {} unaccounted (system files, skipped paths)",
                     format_size_short(result.total_bytes),
                     format_size_short(unaccounted)
                 )
@@ -22811,7 +22834,7 @@ impl NativeController {
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| from.clone());
-                        format!("Undone: rename â†’ {name}")
+                        format!("Undone: rename → {name}")
                     }
                     "move" => {
                         let name = Path::new(&from)
@@ -24258,7 +24281,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_set_ui_language(move |lang| {
         if let Some(ui) = weak.upgrade() {
             let mut ctrl = c.borrow_mut();
-            ctrl.settings.ui_language = lang.to_string();
+            let next = lang.to_string();
+            // Avoid redundant catalog swaps / model rebuilds when re-clicking
+            // the already-selected language chip.
+            if ctrl.settings.ui_language == next {
+                return;
+            }
+            ctrl.settings.ui_language = next;
             ctrl.save_settings();
             apply_ui_language(&ctrl.settings.ui_language);
             ui.set_ui_language(ss(&ctrl.settings.ui_language));
@@ -24335,7 +24364,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 ctrl.save_settings();
                 ctrl.show_toast(
                     &ui,
-                    "Install Local AI before using semantic search. Ranking uses filename embeddings â€” not OCR.",
+                    "Install Local AI before using semantic search. Ranking uses filename embeddings — not OCR.",
                 );
                 return;
             }
@@ -25427,7 +25456,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 ctrl.save_settings();
                 ctrl.show_toast(
                     &ui,
-                    "Tip: type to filter commands. Try â€œduplicatesâ€, â€œrulesâ€, or â€œhomeâ€.",
+                    "Tip: type to filter commands. Try “duplicates”, “rules”, or “home”.",
                 );
             }
         }
