@@ -1,0 +1,351 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: pathfinder 0.9.60\n"
+"POT-Creation-Date: 2026-08-24 19:07+0000\n"
+"PO-Revision-Date: 2026-08-24 19:07+0000\n"
+"Last-Translator: Pathfinder contributors\n"
+"Language-Team: es\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: es\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Name"
+msgstr "Nombre"
+
+msgid "Size"
+msgstr "Tamaño"
+
+msgid "Modified"
+msgstr "Modificado"
+
+msgid "Type"
+msgstr "Tipo"
+
+msgid "Settings"
+msgstr "Configuración"
+
+msgid "Minimize"
+msgstr "Minimizar"
+
+msgid "Maximize"
+msgstr "Maximizar"
+
+msgid "Close"
+msgstr "Cerrar"
+
+msgid "Delete"
+msgstr "Eliminar"
+
+msgid "Open"
+msgstr "Abrir"
+
+msgid "Search folder"
+msgstr "Buscar en la carpeta"
+
+msgid "Date"
+msgstr "Fecha"
+
+msgid "Sort by name, size, date, or type. Click active column to toggle ^/v direction."
+msgstr "Ordena por nombre, tamaño, fecha o tipo. Haz clic en la columna activa para invertir ^/v."
+
+msgid "Compact"
+msgstr "Compacto"
+
+msgid "Folder changed on disk — click to refresh"
+msgstr "La carpeta cambió en disco — haz clic para actualizar"
+
+msgid "Code"
+msgstr "Código"
+
+msgctxt "preview-mode"
+msgid "View"
+msgstr "Ver"
+
+msgid "Copy path"
+msgstr "Copiar ruta"
+
+msgid "Reveal"
+msgstr "Mostrar"
+
+msgid "Tag"
+msgstr "Etiqueta"
+
+msgid "Source below — use the browser button to open rendered output."
+msgstr "Fuente abajo — usa el botón del navegador para abrir la salida renderizada."
+
+msgid "Select a file to preview details."
+msgstr "Selecciona un archivo para ver los detalles."
+
+msgid "Tags"
+msgstr "Etiquetas"
+
+msgid "Type a command..."
+msgstr "Escribe un comando..."
+
+msgid "Close settings"
+msgstr "Cerrar configuración"
+
+msgid "On-device models · no cloud · no OCR"
+msgstr "Modelos en el dispositivo · sin nube · sin OCR"
+
+msgid "Index, cache, and scan budgets"
+msgstr "Índice, caché y presupuestos de escaneo"
+
+msgid "Layout density, panes, and defaults"
+msgstr "Densidad del diseño, paneles y valores predeterminados"
+
+msgid "Theme, accent, fonts, and chrome"
+msgstr "Tema, acento, fuentes y cromo"
+
+msgid "Appearance"
+msgstr "Apariencia"
+
+msgctxt "settings-tab"
+msgid "View"
+msgstr "Vista"
+
+msgid "Performance"
+msgstr "Rendimiento"
+
+msgid "AI"
+msgstr "IA"
+
+msgid "LANGUAGE"
+msgstr "IDIOMA"
+
+msgid "System"
+msgstr "Sistema"
+
+msgid "English"
+msgstr "Inglés"
+
+msgid "Italian"
+msgstr "Italiano"
+
+msgid "Spanish"
+msgstr "Español"
+
+msgid "System follows the OS locale when Italian or Spanish is available; otherwise English."
+msgstr "Sistema sigue el idioma del SO si hay italiano o español; si no, inglés."
+
+msgid "THEME"
+msgstr "TEMA"
+
+msgid "PIXEL RELICS"
+msgstr "RELIQUIAS PIXEL"
+
+msgid "ARCADE ICONS"
+msgstr "ICONOS ARCADE"
+
+msgid "SUNSET ICONS"
+msgstr "ICONOS ATARDECER"
+
+msgid "ACCENT COLOR"
+msgstr "COLOR DE ACENTO"
+
+msgid "Custom hex"
+msgstr "Hex personalizado"
+
+msgid "FOLDER COLOR"
+msgstr "COLOR DE CARPETAS"
+
+msgid "Folder color"
+msgstr "Color de carpetas"
+
+msgid "Presets"
+msgstr "Preajustes"
+
+msgid "DENSITY"
+msgstr "DENSIDAD"
+
+msgid "INTERFACE MODE"
+msgstr "MODO DE INTERFAZ"
+
+msgid "Simple"
+msgstr "Simple"
+
+msgid "Normal"
+msgstr "Normal"
+
+msgid "CUSTOM THEME"
+msgstr "TEMA PERSONALIZADO"
+
+msgid "Build a theme here, then Save. It appears above as Custom. Pick a color token, adjust hex or swatches, and watch the mini window below (it uses only your token colors, not the rest of Settings)."
+msgstr "Crea un tema aquí y luego Guarda. Aparece arriba como Personalizado. Elige un token de color, ajusta hex o muestras y mira la mini ventana (solo usa tus colores, no el resto de Configuración)."
+
+msgid "SAVED THEMES"
+msgstr "TEMAS GUARDADOS"
+
+msgid "No saved themes yet"
+msgstr "Aún no hay temas guardados"
+
+msgid "THEME NAME"
+msgstr "NOMBRE DEL TEMA"
+
+msgid "My Theme"
+msgstr "Mi tema"
+
+msgid "LIVE PREVIEW"
+msgstr "VISTA PREVIA EN VIVO"
+
+msgid "COLORS"
+msgstr "COLORES"
+
+msgid "Jump to a token, then use swatches or hex."
+msgstr "Ve a un token y luego usa muestras o hex."
+
+msgid "Jump:"
+msgstr "Ir a:"
+
+msgid "Quick colors"
+msgstr "Colores rápidos"
+
+msgid "FEEL"
+msgstr "ESTILO"
+
+msgid "Corner radius"
+msgstr "Radio de esquina"
+
+msgid "Animations"
+msgstr "Animaciones"
+
+msgid "BACKGROUND STYLE"
+msgstr "ESTILO DE FONDO"
+
+msgid "Gradient blends Background and Surface from top to bottom for a soft sky look. Solid uses the Background color edge to edge."
+msgstr "El degradado mezcla Fondo y Superficie de arriba abajo. Sólido usa el color de Fondo de borde a borde."
+
+msgid "Solid"
+msgstr "Sólido"
+
+msgid "Gradient"
+msgstr "Degradado"
+
+msgid "Blend accent into the background gradient (bottom glow)."
+msgstr "Mezcla el acento en el degradado de fondo (brillo inferior)."
+
+msgid "FINISH"
+msgstr "ACABADO"
+
+msgid "Typography"
+msgstr "Tipografía"
+
+msgid "Fonts ship inside Pathfinder so the UI always matches your pick (no reliance on Windows font names)."
+msgstr "Las fuentes van incluidas en Pathfinder para que la UI coincida siempre (sin depender de nombres de fuentes de Windows)."
+
+msgid "UI FONT"
+msgstr "FUENTE UI"
+
+msgid "MONO FONT"
+msgstr "FUENTE MONO"
+
+msgid "ICONS"
+msgstr "ICONOS"
+
+msgid "Icon set"
+msgstr "Conjunto de iconos"
+
+msgid "Path to icon set folder..."
+msgstr "Ruta a la carpeta del conjunto de iconos..."
+
+msgid "Reset"
+msgstr "Restablecer"
+
+msgid "Save Theme"
+msgstr "Guardar tema"
+
+msgid "DEFAULT VIEW MODE"
+msgstr "MODO DE VISTA PREDETERMINADO"
+
+msgid "Pathfinder remembers this for every folder you open until you change the view from the toolbar."
+msgstr "Pathfinder lo recuerda para cada carpeta hasta que cambies la vista desde la barra de herramientas."
+
+msgid "Grid"
+msgstr "Cuadrícula"
+
+msgid "List"
+msgstr "Lista"
+
+msgid "Gallery"
+msgstr "Galería"
+
+msgid "OPTIONS"
+msgstr "OPCIONES"
+
+msgid "Show hidden files"
+msgstr "Mostrar archivos ocultos"
+
+msgid "Theme animations"
+msgstr "Animaciones del tema"
+
+msgid "Atmospheres and animated theme icons (Fantasy / Retro / Sunset). Off keeps static icons and pauses motion."
+msgstr "Atmósferas e iconos animados (Fantasy / Retro / Atardecer). Desactivado mantiene iconos estáticos y pausa el movimiento."
+
+msgid "Show preview panel"
+msgstr "Mostrar panel de vista previa"
+
+msgid "WINDOWS INTEGRATION"
+msgstr "INTEGRACIÓN CON WINDOWS"
+
+msgid "Registers Pathfinder for your user account only (HKCU). Double-clicking a folder in Explorer opens it in Pathfinder. This does not replace every Explorer surface on Windows 11."
+msgstr "Registra Pathfinder solo para tu cuenta (HKCU). Doble clic en una carpeta de Explorer la abre en Pathfinder. No sustituye todas las superficies de Explorer en Windows 11."
+
+msgid "Alternative: import extras/set-pathfinder-default-folder-handler.reg and replace CHANGEME_EXE with your pathfinder.exe path."
+msgstr "Alternativa: importa extras/set-pathfinder-default-folder-handler.reg y sustituye CHANGEME_EXE por la ruta de pathfinder.exe."
+
+msgid "SEARCH PERFORMANCE"
+msgstr "RENDIMIENTO DE BÚSQUEDA"
+
+msgid "Index estimate"
+msgstr "Estimación del índice"
+
+msgid "THUMBNAIL CACHE"
+msgstr "CACHÉ DE MINIATURAS"
+
+msgid "Automatic thumbnail cleanup"
+msgstr "Limpieza automática de miniaturas"
+
+msgid "Storage and memory footprint"
+msgstr "Huella de almacenamiento y memoria"
+
+msgid "AI CAPABILITIES"
+msgstr "CAPACIDADES DE IA"
+
+msgid "On-device only. Semantic ranking uses filename embeddings. Image tags are approximate ImageNet labels — there is no OCR for text inside screenshots."
+msgstr "Solo en el dispositivo. El ranking semántico usa embeddings de nombres de archivo. Las etiquetas de imagen son aproximadas de ImageNet — no hay OCR para texto en capturas."
+
+msgid "Thumbnails, content search, and image analysis use the best detected device."
+msgstr "Miniaturas, búsqueda de contenido y análisis de imágenes usan el mejor dispositivo detectado."
+
+msgid "OPTIONAL SEARCH"
+msgstr "BÚSQUEDA OPCIONAL"
+
+msgid "CLIP visual search is reserved but not bundled in this build. The control below is disabled."
+msgstr "La búsqueda visual CLIP está reservada pero no incluida en esta build. El control de abajo está deshabilitado."
+
+msgid "Image tags / CLIP search (unavailable in this build)"
+msgstr "Etiquetas de imagen / búsqueda CLIP (no disponible en esta build)"
+
+msgid "PATHFINDER LOCAL AI"
+msgstr "IA LOCAL DE PATHFINDER"
+
+msgid "Balanced"
+msgstr "Equilibrado"
+
+msgid "Quality"
+msgstr "Calidad"
+
+msgid "Keep models up to date"
+msgstr "Mantener los modelos actualizados"
+
+msgid "Verify & repair"
+msgstr "Verificar y reparar"
+
+msgid "Update models"
+msgstr "Actualizar modelos"
+
+msgid "Remove"
+msgstr "Quitar"
+

@@ -1850,7 +1850,7 @@ component ListHeader inherits Rectangle {
         width: max(60px, parent.width - 44px - root.right_zone - 16px);
         height: parent.height;
         background: nh.has-hover ? rgba(255,255,255,0.04) : transparent;
-        Text { x: 0; width: parent.width - 18px; height: parent.height; text: "Name"; color: root.sort_by == "name" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+        Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Name"); color: root.sort_by == "name" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
         if root.sort_by == "name": SvgIcon {
             x: parent.width - 14px; y: (parent.height - 10px) / 2; icon_size: 10px;
             data: root.sort_dir == "asc" ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6";
@@ -1864,7 +1864,7 @@ component ListHeader inherits Rectangle {
         width: root.col_size_w;
         height: parent.height;
         background: sh.has-hover ? rgba(255,255,255,0.04) : transparent;
-        Text { x: 0; width: parent.width - 18px; height: parent.height; text: "Size"; color: root.sort_by == "size" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; horizontal-alignment: right; vertical-alignment: center; }
+        Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Size"); color: root.sort_by == "size" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; horizontal-alignment: right; vertical-alignment: center; }
         if root.sort_by == "size": SvgIcon {
             x: parent.width - 12px; y: (parent.height - 10px) / 2; icon_size: 10px;
             data: root.sort_dir == "asc" ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6";
@@ -1878,7 +1878,7 @@ component ListHeader inherits Rectangle {
         width: root.col_modified_w;
         height: parent.height;
         background: mh.has-hover ? rgba(255,255,255,0.04) : transparent;
-        Text { x: 0; width: parent.width - 18px; height: parent.height; text: "Modified"; color: root.sort_by == "modified" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+        Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Modified"); color: root.sort_by == "modified" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
         if root.sort_by == "modified": SvgIcon {
             x: parent.width - 12px; y: (parent.height - 10px) / 2; icon_size: 10px;
             data: root.sort_dir == "asc" ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6";
@@ -1892,7 +1892,7 @@ component ListHeader inherits Rectangle {
         width: root.col_type_w;
         height: parent.height;
         background: th.has-hover ? rgba(255,255,255,0.04) : transparent;
-        Text { x: 0; width: parent.width - 18px; height: parent.height; text: "Type"; color: root.sort_by == "type" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
+        Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Type"); color: root.sort_by == "type" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
         if root.sort_by == "type": SvgIcon {
             x: parent.width - 12px; y: (parent.height - 10px) / 2; icon_size: 10px;
             data: root.sort_dir == "asc" ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6";
@@ -2415,7 +2415,7 @@ component StorageListHeader inherits Rectangle {
         x: 50px; y: 0;
         width: root.category_x - root.col_gap - 50px;
         height: parent.height;
-        text: "Name";
+        text: @tr("Name");
         color: ThemePalette.text_faint;
         font-size: 10px;
         font-weight: 700;
@@ -2444,7 +2444,7 @@ component StorageListHeader inherits Rectangle {
     Text {
         x: root.size_x; y: 0;
         width: root.col_size_w; height: parent.height;
-        text: "Size";
+        text: @tr("Size");
         color: ThemePalette.text_faint;
         font-size: 10px;
         font-weight: 700;
@@ -3206,7 +3206,7 @@ component StorageDrillIn inherits Rectangle {
             border-color: root.sort_mode == "size" ? ThemePalette.accent : ThemePalette.border;
             Text {
                 width: parent.width; height: parent.height;
-                text: "Size";
+                text: @tr("Size");
                 font-size: 11px; font-weight: 600;
                 color: root.sort_mode == "size" ? ThemePalette.accent_strong : ThemePalette.text_muted;
                 horizontal-alignment: center; vertical-alignment: center;
@@ -3221,7 +3221,7 @@ component StorageDrillIn inherits Rectangle {
             border-color: root.sort_mode == "name" ? ThemePalette.accent : ThemePalette.border;
             Text {
                 width: parent.width; height: parent.height;
-                text: "Name";
+                text: @tr("Name");
                 font-size: 11px; font-weight: 600;
                 color: root.sort_mode == "name" ? ThemePalette.accent_strong : ThemePalette.text_muted;
                 horizontal-alignment: center; vertical-alignment: center;
@@ -3788,9 +3788,11 @@ export component MainWindow inherits Window {
     callback filter_changed(string);
     callback set_ui_mode(string);
     callback ui_mode_prompt_choice(string);
+    callback set_ui_language(string);
     callback start_file_drag(int, string);
 
     in-out property <string> ui_mode: "normal";
+    in-out property <string> ui_language: "system";
     in-out property <bool> ui_mode_prompt_visible: false;
     in-out property <[SideItem]> side_items_simple: [];
 
@@ -4042,7 +4044,7 @@ export component MainWindow inherits Window {
                 button_width: 46px;
                 button_height: 36px;
                 icon_data: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z";
-                tooltip: "Settings";
+                tooltip: @tr("Settings");
                 tooltip_above: true;
                 clicked => { root.settings_visible = true; }
             }
@@ -4053,7 +4055,7 @@ export component MainWindow inherits Window {
                 button_width: 46px;
                 button_height: 36px;
                 icon_data: "M5 12h14";
-                tooltip: "Minimize";
+                tooltip: @tr("Minimize");
                 tooltip_above: true;
                 clicked => { root.minimize(); }
             }
@@ -4064,7 +4066,7 @@ export component MainWindow inherits Window {
                 button_width: 46px;
                 button_height: 36px;
                 icon_data: "M7 7h10v10H7z";
-                tooltip: "Maximize";
+                tooltip: @tr("Maximize");
                 tooltip_above: true;
                 clicked => { root.maximize(); }
             }
@@ -4076,7 +4078,7 @@ export component MainWindow inherits Window {
                 button_height: 36px;
                 icon_data: "M18 6L6 18 M6 6l12 12";
                 danger: true;
-                tooltip: "Close";
+                tooltip: @tr("Close");
                 tooltip_above: true;
                 clicked => { root.close(); }
             }
@@ -4228,7 +4230,7 @@ export component MainWindow inherits Window {
                 button_width: parent.sel_btn_w; button_height: root.is_simple ? 56px : 31px;
                 tooltip_above: parent.sel_tooltip_above; danger: true;
                 icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2";
-                text_label: "Delete"; show_caption: root.is_simple;
+                text_label: @tr("Delete"); show_caption: root.is_simple;
                 tooltip: "Delete selected permanently";
                 clicked => { root.command("purge"); }
             }
@@ -4349,7 +4351,7 @@ export component MainWindow inherits Window {
             ToolButton { visible: parent.sel_show_cut; x: root.is_simple ? parent.sel_left + parent.sel_step : parent.sel_r - (7 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z M17 21v-8H7v8 M7 3v5h8"; text_label: "Cut"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Cut (Ctrl+X)"; clicked => { root.command("cut"); } }
             ToolButton { visible: parent.sel_show_paste; x: root.is_simple ? parent.sel_left + 2 * parent.sel_step : parent.sel_r - (6 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2 M12 2v4 M9 2h6"; text_label: "Paste"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Paste (Ctrl+V)"; clicked => { root.command("paste"); } }
             ToolButton { visible: parent.sel_show_rename; x: root.is_simple ? parent.sel_left + 3 * parent.sel_step : parent.sel_r - (5 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M12 20h9 M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"; text_label: "Rename"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Rename (F2)"; clicked => { root.command("rename"); } }
-            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_r - (4 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: "Delete"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Delete (Del)"; clicked => { root.command("delete"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + 4 * parent.sel_step : parent.sel_r - (4 + parent.sel_shift - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"; text_label: @tr("Delete"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Delete (Del)"; clicked => { root.command("delete"); } }
             if root.selection_has_archive: ToolButton {
                 x: root.is_simple ? parent.sel_left + 5 * parent.sel_step : parent.sel_r - (4 - parent.sel_left_trim) * parent.sel_norm_step;
                 y: root.is_simple ? 16px : 6px;
@@ -4361,7 +4363,7 @@ export component MainWindow inherits Window {
                 tooltip: "Extract Here";
                 clicked => { root.command("extract-here"); }
             }
-            ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_r - (3 - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: "Open"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
+            ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_r - (3 - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: @tr("Open"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open (Enter)"; clicked => { root.command("open"); } }
             ToolButton { visible: root.selected_count == 1 && parent.sel_show_open_with; x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_r - (2 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M4 7h16 M9 20h6 M12 4v16"; text_label: "Open with"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Open With"; clicked => { root.command("open-with"); } }
             ToolButton { visible: parent.sel_show_info; x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_r - (1 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: "Info"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Properties"; clicked => { root.command("properties"); } }
             ToolButton { visible: parent.sel_show_select_all; x: root.is_simple ? parent.sel_left + (8 + parent.sel_shift) * parent.sel_step : parent.sel_r - (0 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: "Select all"; show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: "Select All (Ctrl+A)"; clicked => { root.command("select-all"); } }
@@ -4723,7 +4725,7 @@ export component MainWindow inherits Window {
                     y: 0;
                     width: parent.width - 58px;
                     height: parent.height;
-                    text: "Search folder";
+                    text: @tr("Search folder");
                     color: ThemePalette.text_faint;
                     font-size: 12px;
                     vertical-alignment: center;
@@ -5001,7 +5003,7 @@ export component MainWindow inherits Window {
                     background: sort_name_touch.has-hover || root.sort_by == "name" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
                     Text {
                         x: 2px; width: parent.width - (root.sort_by == "name" ? 14px : 4px); height: parent.height;
-                        text: "Name";
+                        text: @tr("Name");
                         color: root.sort_by == "name" ? ThemePalette.accent_strong : ThemePalette.text_muted;
                         font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide;
                     }
@@ -5020,7 +5022,7 @@ export component MainWindow inherits Window {
                     background: sort_size_touch.has-hover || root.sort_by == "size" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
                     Text {
                         x: 2px; width: parent.width - (root.sort_by == "size" ? 14px : 4px); height: parent.height;
-                        text: "Size";
+                        text: @tr("Size");
                         color: root.sort_by == "size" ? ThemePalette.accent_strong : ThemePalette.text_muted;
                         font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide;
                     }
@@ -5039,7 +5041,7 @@ export component MainWindow inherits Window {
                     background: sort_date_touch.has-hover || root.sort_by == "modified" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
                     Text {
                         x: 2px; width: parent.width - (root.sort_by == "modified" ? 14px : 4px); height: parent.height;
-                        text: "Date";
+                        text: @tr("Date");
                         color: root.sort_by == "modified" ? ThemePalette.accent_strong : ThemePalette.text_muted;
                         font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide;
                     }
@@ -5058,7 +5060,7 @@ export component MainWindow inherits Window {
                     background: sort_type_touch.has-hover || root.sort_by == "type" ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
                     Text {
                         x: 2px; width: parent.width - (root.sort_by == "type" ? 14px : 4px); height: parent.height;
-                        text: "Type";
+                        text: @tr("Type");
                         color: root.sort_by == "type" ? ThemePalette.accent_strong : ThemePalette.text_muted;
                         font-size: 10.5px; horizontal-alignment: center; vertical-alignment: center; overflow: elide;
                     }
@@ -5074,7 +5076,7 @@ export component MainWindow inherits Window {
                     x: 2px;
                     y: parent.height + 6px;
                     tip_max_width: 280px;
-                    tip_text: "Sort by name, size, date, or type. Click active column to toggle ^/v direction.";
+                    tip_text: @tr("Sort by name, size, date, or type. Click active column to toggle ^/v direction.");
                 }
             }
 
@@ -5099,7 +5101,7 @@ export component MainWindow inherits Window {
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12";
-                text_label: "Compact";
+                text_label: @tr("Compact");
                 show_caption: root.is_simple;
                 button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
@@ -5273,7 +5275,7 @@ export component MainWindow inherits Window {
                 background: ThemePalette.warning;
                 Text {
                     x: 12px; width: parent.width - 100px; height: parent.height;
-                    text: "Folder changed on disk — click to refresh";
+                    text: @tr("Folder changed on disk — click to refresh");
                     color: white; font-size: 11.5px; font-weight: 600; vertical-alignment: center; overflow: elide;
                 }
                 TouchArea {
@@ -6439,7 +6441,7 @@ export component MainWindow inherits Window {
                         }
                         Text {
                             x: 0; y: 0; width: parent.width / 2; height: parent.height;
-                            text: "Code";
+                            text: @tr("Code");
                             font-size: 11px;
                             font-weight: root.preview_show_rendered ? 400 : 700;
                             color: root.preview_show_rendered ? ThemePalette.text_muted : ThemePalette.accent_strong;
@@ -6447,7 +6449,7 @@ export component MainWindow inherits Window {
                         }
                         Text {
                             x: parent.width / 2; y: 0; width: parent.width / 2; height: parent.height;
-                            text: "View";
+                            text: @tr("preview-mode" => "View");
                             font-size: 11px;
                             font-weight: root.preview_show_rendered ? 700 : 400;
                             color: root.preview_show_rendered ? ThemePalette.accent_strong : ThemePalette.text_muted;
@@ -6506,7 +6508,7 @@ export component MainWindow inherits Window {
                             background: pa_open_ta.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
                             pa_open := Text {
                                 width: parent.width; height: parent.height;
-                                text: "Open"; color: ThemePalette.text_muted; font-size: 11px;
+                                text: @tr("Open"); color: ThemePalette.text_muted; font-size: 11px;
                                 horizontal-alignment: center; vertical-alignment: center;
                             }
                             pa_open_ta := TouchArea { mouse-cursor: pointer; clicked => { root.preview_action("open"); } }
@@ -6518,7 +6520,7 @@ export component MainWindow inherits Window {
                             background: pa_copy_ta.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
                             pa_copy := Text {
                                 width: parent.width; height: parent.height;
-                                text: "Copy path"; color: ThemePalette.text_muted; font-size: 11px;
+                                text: @tr("Copy path"); color: ThemePalette.text_muted; font-size: 11px;
                                 horizontal-alignment: center; vertical-alignment: center;
                             }
                             pa_copy_ta := TouchArea { mouse-cursor: pointer; clicked => { root.preview_action("copy-path"); } }
@@ -6530,7 +6532,7 @@ export component MainWindow inherits Window {
                             background: pa_reveal_ta.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
                             pa_reveal := Text {
                                 width: parent.width; height: parent.height;
-                                text: "Reveal"; color: ThemePalette.text_muted; font-size: 11px;
+                                text: @tr("Reveal"); color: ThemePalette.text_muted; font-size: 11px;
                                 horizontal-alignment: center; vertical-alignment: center;
                             }
                             pa_reveal_ta := TouchArea { mouse-cursor: pointer; clicked => { root.preview_action("reveal"); } }
@@ -6542,7 +6544,7 @@ export component MainWindow inherits Window {
                             background: pa_tag_ta.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
                             pa_tag := Text {
                                 width: parent.width; height: parent.height;
-                                text: "Tag"; color: ThemePalette.text_muted; font-size: 11px;
+                                text: @tr("Tag"); color: ThemePalette.text_muted; font-size: 11px;
                                 horizontal-alignment: center; vertical-alignment: center;
                             }
                             pa_tag_ta := TouchArea { mouse-cursor: pointer; clicked => { root.preview_action("tag"); } }
@@ -6647,7 +6649,7 @@ export component MainWindow inherits Window {
                             height: 28px;
                             Text {
                                 x: 16px; width: parent.width - 32px; height: parent.height;
-                                text: "Source below — use the browser button to open rendered output.";
+                                text: @tr("Source below — use the browser button to open rendered output.");
                                 color: ThemePalette.text_faint; font-size: 11px; vertical-alignment: center; overflow: elide;
                             }
                         }
@@ -6746,7 +6748,7 @@ export component MainWindow inherits Window {
                             }
                             Text {
                                 width: parent.width;
-                                text: "Select a file to preview details.";
+                                text: @tr("Select a file to preview details.");
                                 color: ThemePalette.text_faint;
                                 font-size: 12.5px;
                                 font-family: AppMetrics.ui_font;
@@ -7047,7 +7049,7 @@ export component MainWindow inherits Window {
             if root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Empty Recycle Bin"; command_name: "empty-trash"; picked(c) => { root.context_visible = false; root.command(c); } }
 
             // -- Core actions (regular folders) ------------------------
-            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Open"; command_name: "open"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Open"); command_name: "open"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Rename"; command_name: "rename"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Copy"; command_name: "copy"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: "Cut"; command_name: "cut"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -7077,7 +7079,7 @@ export component MainWindow inherits Window {
                     x: 30px;
                     width: parent.width - 104px;
                     height: parent.height;
-                    text: "Tags";
+                    text: @tr("Tags");
                     color: tag_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted;
                     font-size: 12.5px;
                     vertical-alignment: center;
@@ -7158,7 +7160,7 @@ export component MainWindow inherits Window {
             if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: "Previous Versions"; command_name: "previous-versions"; picked(c) => { root.context_visible = false; root.command(c); } }
 
             Rectangle { height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { width: parent.width; label: "Delete"; command_name: "delete"; danger: true; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: @tr("Delete"); command_name: "delete"; danger: true; picked(c) => { root.context_visible = false; root.command(c); } }
         }
         }
     }
@@ -7240,7 +7242,7 @@ export component MainWindow inherits Window {
                 x: parent.width - 43px;
                 y: 12px;
                 icon_data: "M18 6L6 18 M6 6l12 12";
-                tooltip: "Close";
+                tooltip: @tr("Close");
                 clicked => { root.image_tools_visible = false; }
             }
 
@@ -7382,7 +7384,7 @@ export component MainWindow inherits Window {
                     width: parent.width - 64px;
                     height: parent.height;
                     text: root.command_filter;
-                    placeholder-text: "Type a command...";
+                    placeholder-text: @tr("Type a command...");
                     font-size: 14px;
                     edited(value) => { root.command_filter = value; root.filter_commands(value); }
                     accepted(value) => { root.command_run_first(value); }
@@ -7447,7 +7449,7 @@ export component MainWindow inherits Window {
             drop-shadow-color: rgba(0, 0, 0, 0.45);
             TouchArea {}
 
-            Text { x: 20px; y: 18px; width: 100px; height: 28px; text: "Settings"; color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            Text { x: 20px; y: 18px; width: 100px; height: 28px; text: @tr("Settings"); color: ThemePalette.text; font-size: 18px; font-weight: 700; }
             // Version label tucked next to the heading. Reads the value the
             // controller pushes from env!("CARGO_PKG_VERSION") at startup.
             Text {
@@ -7459,14 +7461,14 @@ export component MainWindow inherits Window {
                 vertical-alignment: center;
                 overflow: elide;
             }
-            ToolButton { x: parent.width - 46px; y: 14px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: "Close settings"; clicked => { root.settings_visible = false; } }
+            ToolButton { x: parent.width - 46px; y: 14px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: @tr("Close settings"); clicked => { root.settings_visible = false; } }
 
             Text {
                 x: 20px; y: 48px; width: parent.width - 40px; height: 16px;
-                text: root.settings_tab == "ai" ? "On-device models · no cloud · no OCR"
-                    : (root.settings_tab == "performance" ? "Index, cache, and scan budgets"
-                    : (root.settings_tab == "view" ? "Layout density, panes, and defaults"
-                    : "Theme, accent, fonts, and chrome"));
+                text: root.settings_tab == "ai" ? @tr("On-device models · no cloud · no OCR")
+                    : (root.settings_tab == "performance" ? @tr("Index, cache, and scan budgets")
+                    : (root.settings_tab == "view" ? @tr("Layout density, panes, and defaults")
+                    : @tr("Theme, accent, fonts, and chrome")));
                 color: ThemePalette.text_faint;
                 font-size: 11px;
                 overflow: elide;
@@ -7479,10 +7481,10 @@ export component MainWindow inherits Window {
                 background: transparent;
                 Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
 
-                for tab_label[ti] in ["Appearance", "View", "Performance", "AI"]: Rectangle {
+                for tab_label[ti] in [@tr("Appearance"), @tr("settings-tab" => "View"), @tr("Performance"), @tr("AI")]: Rectangle {
                     property <string> tid: ti == 0 ? "appearance" : (ti == 1 ? "view" : (ti == 2 ? "performance" : "ai"));
                     property <bool> is_active: root.settings_tab == self.tid || (self.tid == "appearance" && root.settings_tab == "themes");
-                    visible: !(root.is_simple && tab_label == "AI");
+                    visible: !(root.is_simple && self.tid == "ai");
                     x: 20px + ti * 102px;
                     y: 0;
                     width: 98px;
@@ -7524,7 +7526,46 @@ export component MainWindow inherits Window {
                     spacing: 18px;
                     padding-bottom: 16px;
 
-                    Text { text: "THEME"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("LANGUAGE"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        width: parent.width;
+                        for lang_label[li] in [@tr("System"), @tr("English"), @tr("Italian"), @tr("Spanish")]: Rectangle {
+                            width: (parent.width - 18px) / 4;
+                            height: AppMetrics.row_h;
+                            property <string> lang_id: li == 0 ? "system" : (li == 1 ? "en" : (li == 2 ? "it" : "es"));
+                            border-width: 1px;
+                            border-color: root.ui_language == self.lang_id ? ThemePalette.accent : ThemePalette.border;
+                            border-radius: AppMetrics.radius;
+                            background: root.ui_language == self.lang_id ? ThemePalette.accent_soft : ThemePalette.panel;
+                            Text {
+                                width: parent.width;
+                                height: parent.height;
+                                text: lang_label;
+                                color: root.ui_language == parent.lang_id ? ThemePalette.accent_strong : ThemePalette.text_muted;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.ui_language = lang_id;
+                                    root.set_ui_language(lang_id);
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        text: @tr("System follows the OS locale when Italian or Spanish is available; otherwise English.");
+                        color: ThemePalette.text_faint;
+                        font-size: 11.5px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+
+                    Text { text: @tr("THEME"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
                         width: parent.width;
                         height: Math.ceil(root.theme_choices.length / 2) * AppMetrics.choice_chip_row_stride;
@@ -7549,7 +7590,7 @@ export component MainWindow inherits Window {
                         background: ThemePalette.panel;
                         Text {
                             x: 12px; y: 8px; width: parent.width - 24px; height: 14px;
-                            text: "PIXEL RELICS";
+                            text: @tr("PIXEL RELICS");
                             color: ThemePalette.text_faint;
                             font-size: 10px;
                             font-weight: 700;
@@ -7580,7 +7621,7 @@ export component MainWindow inherits Window {
                         background: ThemePalette.panel;
                         Text {
                             x: 12px; y: 8px; width: parent.width - 24px; height: 14px;
-                            text: "ARCADE ICONS";
+                            text: @tr("ARCADE ICONS");
                             color: ThemePalette.text_faint;
                             font-size: 10px;
                             font-weight: 700;
@@ -7611,7 +7652,7 @@ export component MainWindow inherits Window {
                         background: ThemePalette.panel;
                         Text {
                             x: 12px; y: 8px; width: parent.width - 24px; height: 14px;
-                            text: "SUNSET ICONS";
+                            text: @tr("SUNSET ICONS");
                             color: ThemePalette.text_faint;
                             font-size: 10px;
                             font-weight: 700;
@@ -7635,7 +7676,7 @@ export component MainWindow inherits Window {
                     }
 
                     Text {
-                        text: "ACCENT COLOR";
+                        text: @tr("ACCENT COLOR");
                         color: ThemePalette.text_faint;
                         font-size: 10px;
                         font-weight: 700;
@@ -7693,7 +7734,7 @@ export component MainWindow inherits Window {
                             y: 0;
                             width: 132px;
                             height: parent.height;
-                            text: "Custom hex";
+                            text: @tr("Custom hex");
                             color: ThemePalette.text;
                             font-size: 13px;
                             vertical-alignment: center;
@@ -7721,7 +7762,7 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    Text { text: "FOLDER COLOR"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("FOLDER COLOR"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
                         width: parent.width;
                         height: 76px;
@@ -7729,7 +7770,7 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: ThemePalette.panel;
-                        Text { x: 14px; y: 10px; width: 130px; height: 30px; text: "Folder color"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        Text { x: 14px; y: 10px; width: 130px; height: 30px; text: @tr("Folder color"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
                         LineEdit {
                             x: 150px;
                             y: 10px;
@@ -7751,7 +7792,7 @@ export component MainWindow inherits Window {
                             border-width: 1px;
                             border-color: ThemePalette.border_strong;
                         }
-                        Text { x: 14px; y: 44px; width: 90px; height: 22px; text: "Presets"; color: ThemePalette.text_faint; font-size: 11px; vertical-alignment: center; }
+                        Text { x: 14px; y: 44px; width: 90px; height: 22px; text: @tr("Presets"); color: ThemePalette.text_faint; font-size: 11px; vertical-alignment: center; }
                         Rectangle { x: 104px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #e2a934; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#e2a934"); } } }
                         Rectangle { x: 134px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #4f9cff; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#4f9cff"); } } }
                         Rectangle { x: 164px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #2aa96b; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#2aa96b"); } } }
@@ -7762,7 +7803,7 @@ export component MainWindow inherits Window {
                         Rectangle { x: 314px; y: 46px; width: 22px; height: 22px; border-radius: 11px; background: #cfd5dc; border-width: 1px; border-color: ThemePalette.border_strong; TouchArea { mouse-cursor: pointer; clicked => { root.folder_color_changed("#cfd5dc"); } } }
                     }
 
-                    Text { text: "DENSITY"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("DENSITY"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     // Stacked vertical layout instead of a 3-up grid. Cozy /
                     // Comfortable / Compact descriptions ran into each other
                     // at narrow widths because each tile was only ~196 px
@@ -7781,11 +7822,11 @@ export component MainWindow inherits Window {
                         }
                     }
 
-                    Text { text: "INTERFACE MODE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("INTERFACE MODE"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     HorizontalLayout {
                         spacing: 6px;
                         width: parent.width;
-                        for mode_label[mi] in ["Simple", "Normal"]: Rectangle {
+                        for mode_label[mi] in [@tr("Simple"), @tr("Normal")]: Rectangle {
                             width: (parent.width - 6px) / 2;
                             height: AppMetrics.row_h;
                             property <string> mode_id: mi == 0 ? "simple" : "normal";
@@ -7817,11 +7858,11 @@ export component MainWindow inherits Window {
                         height: self.preferred-height;
                     }
 
-                    Text { text: "CUSTOM THEME"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("CUSTOM THEME"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
 
                     // Build a custom theme below; Save adds it to the theme picker as Custom.
                     Text {
-                        text: "Build a theme here, then Save. It appears above as Custom. Pick a color token, adjust hex or swatches, and watch the mini window below (it uses only your token colors, not the rest of Settings).";
+                        text: @tr("Build a theme here, then Save. It appears above as Custom. Pick a color token, adjust hex or swatches, and watch the mini window below (it uses only your token colors, not the rest of Settings).");
                         color: ThemePalette.text_faint;
                         font-size: 11.5px;
                         wrap: word-wrap;
@@ -7829,7 +7870,7 @@ export component MainWindow inherits Window {
                     }
 
                     // Saved themes
-                    Text { text: "SAVED THEMES"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("SAVED THEMES"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
                         height: 38px;
                         border-radius: AppMetrics.radius_small;
@@ -7841,7 +7882,7 @@ export component MainWindow inherits Window {
                             x: 14px;
                             width: parent.width - 28px;
                             height: parent.height;
-                            text: "No saved themes yet";
+                            text: @tr("No saved themes yet");
                             color: ThemePalette.text_faint;
                             font-size: 12px;
                             vertical-alignment: center;
@@ -7873,17 +7914,17 @@ export component MainWindow inherits Window {
                     }
 
                     // Name
-                    Text { text: "THEME NAME"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("THEME NAME"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     LineEdit {
                         height: 34px;
                         text: root.ce_name;
-                        placeholder-text: "My Theme";
+                        placeholder-text: @tr("My Theme");
                         font-size: 13px;
                         edited(val) => { root.ce_name = val; root.ce_apply_preview(); }
                     }
 
                     // Live preview
-                    Text { text: "LIVE PREVIEW"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("LIVE PREVIEW"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
                         height: 142px;
                         border-radius: Math.max(2px, root.ce_radius * 1px);
@@ -7962,16 +8003,16 @@ export component MainWindow inherits Window {
                     }
 
                     // Colors
-                    Text { text: "COLORS"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("COLORS"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Text {
-                        text: "Jump to a token, then use swatches or hex.";
+                        text: @tr("Jump to a token, then use swatches or hex.");
                         color: ThemePalette.text_faint;
                         font-size: 11px;
                     }
                     HorizontalLayout {
                         spacing: 6px;
                         height: 30px;
-                        Text { text: "Jump:"; color: ThemePalette.text_muted; font-size: 11px; vertical-alignment: center; }
+                        Text { text: @tr("Jump:"); color: ThemePalette.text_muted; font-size: 11px; vertical-alignment: center; }
                         Rectangle {
                             width: 44px;
                             height: 26px;
@@ -8037,7 +8078,7 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: ThemePalette.panel;
-                        Text { x: 12px; width: 96px; height: parent.height; text: "Quick colors"; color: ThemePalette.text_muted; font-size: 12px; vertical-alignment: center; }
+                        Text { x: 12px; width: 96px; height: parent.height; text: @tr("Quick colors"); color: ThemePalette.text_muted; font-size: 12px; vertical-alignment: center; }
                         Rectangle { x: 112px; y: 7px; width: 20px; height: 20px; border-radius: 10px; background: #101318; TouchArea { mouse-cursor: pointer; clicked => { root.ce_color_changed(root.ce_selected_token, "#101318"); } } }
                         Rectangle { x: 140px; y: 7px; width: 20px; height: 20px; border-radius: 10px; background: #f6f8fb; TouchArea { mouse-cursor: pointer; clicked => { root.ce_color_changed(root.ce_selected_token, "#f6f8fb"); } } }
                         Rectangle { x: 168px; y: 7px; width: 20px; height: 20px; border-radius: 10px; background: #4f9cff; TouchArea { mouse-cursor: pointer; clicked => { root.ce_color_changed(root.ce_selected_token, "#4f9cff"); } } }
@@ -8091,14 +8132,14 @@ export component MainWindow inherits Window {
                     }
 
                     // Feel
-                    Text { text: "FEEL"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("FEEL"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
                         height: 38px;
                         border-radius: AppMetrics.radius_small;
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: ThemePalette.panel;
-                        Text { x: 14px; width: 140px; height: parent.height; text: "Corner radius"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        Text { x: 14px; width: 140px; height: parent.height; text: @tr("Corner radius"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
                         Slider {
                             x: 158px;
                             y: 9px;
@@ -8126,7 +8167,7 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: ThemePalette.panel;
-                        Text { x: 14px; width: 130px; height: parent.height; text: "Animations"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        Text { x: 14px; width: 130px; height: parent.height; text: @tr("Animations"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
                         HorizontalLayout {
                             x: 148px;
                             y: 6px;
@@ -8152,9 +8193,9 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
-                    Text { text: "BACKGROUND STYLE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("BACKGROUND STYLE"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Text {
-                        text: "Gradient blends Background and Surface from top to bottom for a soft sky look. Solid uses the Background color edge to edge.";
+                        text: @tr("Gradient blends Background and Surface from top to bottom for a soft sky look. Solid uses the Background color edge to edge.");
                         color: ThemePalette.text_muted;
                         font-size: 11.5px;
                         wrap: word-wrap;
@@ -8181,7 +8222,7 @@ export component MainWindow inherits Window {
                                 Text {
                                     width: parent.width;
                                     height: parent.height;
-                                    text: "Solid";
+                                    text: @tr("Solid");
                                     color: !root.ce_gradient_background ? ThemePalette.accent_strong : ThemePalette.text_muted;
                                     font-size: 12.5px;
                                     font-weight: 600;
@@ -8199,7 +8240,7 @@ export component MainWindow inherits Window {
                                 Text {
                                     width: parent.width;
                                     height: parent.height;
-                                    text: "Gradient";
+                                    text: @tr("Gradient");
                                     color: root.ce_gradient_background ? ThemePalette.accent_strong : ThemePalette.text_muted;
                                     font-size: 12.5px;
                                     font-weight: 600;
@@ -8221,7 +8262,7 @@ export component MainWindow inherits Window {
                             y: 0;
                             width: parent.width - 28px;
                             height: parent.height;
-                            text: "Blend accent into the background gradient (bottom glow).";
+                            text: @tr("Blend accent into the background gradient (bottom glow).");
                             color: ThemePalette.text_muted;
                             font-size: 11.5px;
                             vertical-alignment: center;
@@ -8247,7 +8288,7 @@ export component MainWindow inherits Window {
                     }
 
                     // Finish
-                    Text { text: "FINISH"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("FINISH"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     HorizontalLayout {
                         height: 38px;
                         spacing: 6px;
@@ -8271,15 +8312,15 @@ export component MainWindow inherits Window {
                     }
 
                     // Typography (bundled fonts only)
-                    Text { text: "Typography"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("Typography"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Text {
-                        text: "Fonts ship inside Pathfinder so the UI always matches your pick (no reliance on Windows font names).";
+                        text: @tr("Fonts ship inside Pathfinder so the UI always matches your pick (no reliance on Windows font names).");
                         color: ThemePalette.text_muted;
                         font-size: 11.5px;
                         wrap: word-wrap;
                         height: self.preferred-height;
                     }
-                    Text { text: "UI FONT"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("UI FONT"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     HorizontalLayout {
                         spacing: 6px;
                         height: 34px;
@@ -8311,7 +8352,7 @@ export component MainWindow inherits Window {
                             TouchArea { mouse-cursor: pointer; clicked => { root.ce_font_preset("ui", "lora"); } }
                         }
                     }
-                    Text { text: "MONO FONT"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("MONO FONT"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     HorizontalLayout {
                         spacing: 6px;
                         height: 34px;
@@ -8349,7 +8390,7 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: ThemePalette.panel;
-                        Text { x: 14px; width: 100px; height: parent.height; text: "Size"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        Text { x: 14px; width: 100px; height: parent.height; text: @tr("Size"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
                         HorizontalLayout {
                             x: 114px;
                             y: 6px;
@@ -8377,14 +8418,14 @@ export component MainWindow inherits Window {
                     }
 
                     // Icons
-                    Text { text: "ICONS"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("ICONS"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
                         height: 72px;
                         border-radius: AppMetrics.radius_small;
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: ThemePalette.panel;
-                        Text { x: 14px; y: 0; width: 120px; height: 38px; text: "Folder color"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        Text { x: 14px; y: 0; width: 120px; height: 38px; text: @tr("Folder color"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
                         LineEdit {
                             x: 134px;
                             y: 6px;
@@ -8406,7 +8447,7 @@ export component MainWindow inherits Window {
                             border-width: 1px;
                             border-color: ThemePalette.border_strong;
                         }
-                        Text { x: 14px; y: 41px; width: 90px; height: 20px; text: "Presets"; color: ThemePalette.text_faint; font-size: 11px; vertical-alignment: center; }
+                        Text { x: 14px; y: 41px; width: 90px; height: 20px; text: @tr("Presets"); color: ThemePalette.text_faint; font-size: 11px; vertical-alignment: center; }
                         Rectangle { x: 104px; y: 42px; width: 20px; height: 20px; border-radius: 10px; background: #e2a934; TouchArea { mouse-cursor: pointer; clicked => { root.ce_icon_tint_changed("#e2a934"); } } }
                         Rectangle { x: 132px; y: 42px; width: 20px; height: 20px; border-radius: 10px; background: #4f9cff; TouchArea { mouse-cursor: pointer; clicked => { root.ce_icon_tint_changed("#4f9cff"); } } }
                         Rectangle { x: 160px; y: 42px; width: 20px; height: 20px; border-radius: 10px; background: #2aa96b; TouchArea { mouse-cursor: pointer; clicked => { root.ce_icon_tint_changed("#2aa96b"); } } }
@@ -8420,14 +8461,14 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: ThemePalette.panel;
-                        Text { x: 14px; width: 100px; height: parent.height; text: "Icon set"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        Text { x: 14px; width: 100px; height: parent.height; text: @tr("Icon set"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
                         LineEdit {
                             x: 114px;
                             y: 6px;
                             width: parent.width - 128px;
                             height: 26px;
                             text: root.ce_icon_set;
-                            placeholder-text: "Path to icon set folder...";
+                            placeholder-text: @tr("Path to icon set folder...");
                             font-size: 11.5px;
                             edited(val) => { root.ce_icon_set = val; }
                         }
@@ -8439,17 +8480,17 @@ export component MainWindow inherits Window {
                         spacing: 8px;
                         alignment: end;
                         DialogButton {
-                            label: "Reset";
+                            label: @tr("Reset");
                             clicked => { root.ce_reset_to_active(); }
                         }
                         DialogButton {
-                            label: "Delete";
+                            label: @tr("Delete");
                             danger: true;
                             visible: root.ce_saved_themes.length > 0;
                             clicked => { root.ce_delete(root.ce_name); }
                         }
                         DialogButton {
-                            label: "Save Theme";
+                            label: @tr("Save Theme");
                             primary: true;
                             clicked => { root.ce_save(root.ce_name); }
                         }
@@ -8468,9 +8509,9 @@ export component MainWindow inherits Window {
                 spacing: 12px;
                 padding-bottom: 16px;
 
-                Text { text: "DEFAULT VIEW MODE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Text { text: @tr("DEFAULT VIEW MODE"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Text {
-                    text: "Pathfinder remembers this for every folder you open until you change the view from the toolbar.";
+                    text: @tr("Pathfinder remembers this for every folder you open until you change the view from the toolbar.");
                     color: ThemePalette.text_muted;
                     font-size: 11.5px;
                     wrap: word-wrap;
@@ -8479,7 +8520,7 @@ export component MainWindow inherits Window {
                 HorizontalLayout {
                     spacing: 8px;
                     width: parent.width;
-                    for vm_label[vi] in ["Grid", "Compact", "List", "Gallery"]: Rectangle {
+                    for vm_label[vi] in [@tr("Grid"), @tr("Compact"), @tr("List"), @tr("Gallery")]: Rectangle {
                         width: (parent.width - 24px) / 4;
                         height: AppMetrics.row_h;
                         property <string> vm_id: vi == 0 ? "grid" : (vi == 1 ? "compact" : (vi == 2 ? "list" : "gallery"));
@@ -8502,14 +8543,14 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                Text { text: "OPTIONS"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Text { text: @tr("OPTIONS"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Rectangle {
                     height: AppMetrics.row_h;
                     border-radius: AppMetrics.radius;
                     background: ThemePalette.panel;
                     border-width: 1px;
                     border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Show hidden files"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Show hidden files"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
                     Rectangle {
                         x: parent.width - 52px;
                         y: (parent.height - 22px) / 2;
@@ -8536,7 +8577,7 @@ export component MainWindow inherits Window {
                     background: ThemePalette.panel;
                     border-width: 1px;
                     border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 160px; height: parent.height; text: "Theme animations"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Text { x: 14px; width: parent.width - 160px; height: parent.height; text: @tr("Theme animations"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
                     Text {
                         x: 14px; y: parent.height - 16px; width: parent.width - 70px; height: 0px;
                         // hint reserved via sibling below when row is taller — keep compact row
@@ -8562,7 +8603,7 @@ export component MainWindow inherits Window {
                     }
                 }
                 Text {
-                    text: "Atmospheres and animated theme icons (Fantasy / Retro / Sunset). Off keeps static icons and pauses motion.";
+                    text: @tr("Atmospheres and animated theme icons (Fantasy / Retro / Sunset). Off keeps static icons and pauses motion.");
                     color: ThemePalette.text_faint;
                     font-size: 11px;
                     wrap: word-wrap;
@@ -8574,7 +8615,7 @@ export component MainWindow inherits Window {
                     background: ThemePalette.panel;
                     border-width: 1px;
                     border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Show preview panel"; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Show preview panel"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
                     Rectangle {
                         x: parent.width - 52px;
                         y: (parent.height - 22px) / 2;
@@ -8598,9 +8639,9 @@ export component MainWindow inherits Window {
 
                 if root.show_windows_integration: VerticalLayout {
                     spacing: 10px;
-                    Text { text: "WINDOWS INTEGRATION"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("WINDOWS INTEGRATION"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Text {
-                        text: "Registers Pathfinder for your user account only (HKCU). Double-clicking a folder in Explorer opens it in Pathfinder. This does not replace every Explorer surface on Windows 11.";
+                        text: @tr("Registers Pathfinder for your user account only (HKCU). Double-clicking a folder in Explorer opens it in Pathfinder. This does not replace every Explorer surface on Windows 11.");
                         color: ThemePalette.text_muted;
                         font-size: 11.5px;
                         wrap: word-wrap;
@@ -8621,7 +8662,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     Text {
-                        text: "Alternative: import extras/set-pathfinder-default-folder-handler.reg and replace CHANGEME_EXE with your pathfinder.exe path.";
+                        text: @tr("Alternative: import extras/set-pathfinder-default-folder-handler.reg and replace CHANGEME_EXE with your pathfinder.exe path.");
                         color: ThemePalette.text_faint;
                         font-size: 11px;
                         wrap: word-wrap;
@@ -8642,7 +8683,7 @@ export component MainWindow inherits Window {
                     spacing: 14px;
                     padding-bottom: 16px;
 
-                    Text { text: "SEARCH PERFORMANCE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("SEARCH PERFORMANCE"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Text {
                         text: root.performance_intro;
                         color: ThemePalette.text_muted;
@@ -8670,18 +8711,18 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: ThemePalette.panel;
-                        Text { x: 14px; y: 12px; width: parent.width - 28px; height: 20px; text: "Index estimate"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
+                        Text { x: 14px; y: 12px; width: parent.width - 28px; height: 20px; text: @tr("Index estimate"); color: ThemePalette.text; font-size: 13px; font-weight: 700; }
                         Text { x: 14px; y: 36px; width: parent.width - 28px; height: 44px; text: root.index_status; color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap; }
                     }
 
-                    Text { text: "THUMBNAIL CACHE"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text { text: @tr("THUMBNAIL CACHE"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Rectangle {
                         height: 76px;
                         border-radius: AppMetrics.radius;
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: ThemePalette.panel;
-                        Text { x: 14px; y: 12px; width: parent.width - 112px; height: 20px; text: "Automatic thumbnail cleanup"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
+                        Text { x: 14px; y: 12px; width: parent.width - 112px; height: 20px; text: @tr("Automatic thumbnail cleanup"); color: ThemePalette.text; font-size: 13px; font-weight: 700; }
                         Text { x: 14px; y: 36px; width: parent.width - 112px; height: 22px; text: root.thumbnail_status; color: ThemePalette.text_muted; font-size: 12px; overflow: elide; }
                         DialogButton { x: parent.width - 92px; y: 22px; label: "Clear"; clicked => { root.clear_thumbnail_cache(); } }
                     }
@@ -8692,7 +8733,7 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: ThemePalette.panel;
-                        footprint_label := Text { x: 14px; y: 12px; width: parent.width - 28px; height: 20px; text: "Storage and memory footprint"; color: ThemePalette.text; font-size: 13px; font-weight: 700; }
+                        footprint_label := Text { x: 14px; y: 12px; width: parent.width - 28px; height: 20px; text: @tr("Storage and memory footprint"); color: ThemePalette.text; font-size: 13px; font-weight: 700; }
                         footprint_text := Text {
                             x: 14px;
                             y: 36px;
@@ -8726,10 +8767,10 @@ export component MainWindow inherits Window {
                     spacing: 14px;
                     padding-bottom: 16px;
 
-                Text { text: "AI CAPABILITIES"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Text { text: @tr("AI CAPABILITIES"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Text {
                     width: parent.width;
-                    text: "On-device only. Semantic ranking uses filename embeddings. Image tags are approximate ImageNet labels — there is no OCR for text inside screenshots.";
+                    text: @tr("On-device only. Semantic ranking uses filename embeddings. Image tags are approximate ImageNet labels — there is no OCR for text inside screenshots.");
                     color: ThemePalette.text_muted;
                     font-size: 11.5px;
                     wrap: word-wrap;
@@ -8772,7 +8813,7 @@ export component MainWindow inherits Window {
                         }
                         Text {
                             width: parent.width - 28px;
-                            text: "Thumbnails, content search, and image analysis use the best detected device.";
+                            text: @tr("Thumbnails, content search, and image analysis use the best detected device.");
                             color: ThemePalette.text_muted;
                             font-size: 11px;
                             wrap: word-wrap;
@@ -8780,10 +8821,10 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                Text { text: "OPTIONAL SEARCH"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Text { text: @tr("OPTIONAL SEARCH"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Text {
                     width: parent.width;
-                    text: "CLIP visual search is reserved but not bundled in this build. The control below is disabled.";
+                    text: @tr("CLIP visual search is reserved but not bundled in this build. The control below is disabled.");
                     color: ThemePalette.text_muted;
                     font-size: 11.5px;
                     wrap: word-wrap;
@@ -8795,7 +8836,7 @@ export component MainWindow inherits Window {
                     background: ThemePalette.panel;
                     border-width: 1px;
                     border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Image tags / CLIP search (unavailable in this build)"; color: ThemePalette.text_muted; font-size: 13px; vertical-alignment: center; overflow: elide; }
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Image tags / CLIP search (unavailable in this build)"); color: ThemePalette.text_muted; font-size: 13px; vertical-alignment: center; overflow: elide; }
                     Rectangle {
                         x: parent.width - 52px;
                         y: (parent.height - 22px) / 2;
@@ -8816,7 +8857,7 @@ export component MainWindow inherits Window {
                 }
 
                 // Pathfinder Local AI install / uninstall area.
-                Text { text: "PATHFINDER LOCAL AI"; color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Text { text: @tr("PATHFINDER LOCAL AI"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                 Rectangle {
                     width: parent.width;
                     border-width: 1px;
@@ -8908,21 +8949,21 @@ export component MainWindow inherits Window {
                                 width: 88px; height: 30px; border-radius: AppMetrics.radius_small;
                                 background: root.ai_profile == "compact" ? ThemePalette.accent : ThemePalette.panel_alt;
                                 border-width: 1px; border-color: ThemePalette.border;
-                                Text { width: parent.width; height: parent.height; text: "Compact"; color: root.ai_profile == "compact" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: parent.width; height: parent.height; text: @tr("Compact"); color: root.ai_profile == "compact" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("compact"); } }
                             }
                             Rectangle {
                                 width: 96px; height: 30px; border-radius: AppMetrics.radius_small;
                                 background: root.ai_profile == "balanced" ? ThemePalette.accent : ThemePalette.panel_alt;
                                 border-width: 1px; border-color: ThemePalette.border;
-                                Text { width: parent.width; height: parent.height; text: "Balanced"; color: root.ai_profile == "balanced" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: parent.width; height: parent.height; text: @tr("Balanced"); color: root.ai_profile == "balanced" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("balanced"); } }
                             }
                             Rectangle {
                                 width: 88px; height: 30px; border-radius: AppMetrics.radius_small;
                                 background: root.ai_profile == "quality" ? ThemePalette.accent : ThemePalette.panel_alt;
                                 border-width: 1px; border-color: ThemePalette.border;
-                                Text { width: parent.width; height: parent.height; text: "Quality"; color: root.ai_profile == "quality" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: parent.width; height: parent.height; text: @tr("Quality"); color: root.ai_profile == "quality" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("quality"); } }
                             }
                         }
@@ -8932,7 +8973,7 @@ export component MainWindow inherits Window {
                             height: AppMetrics.row_h;
                             border-radius: AppMetrics.radius;
                             background: ThemePalette.panel_alt;
-                            Text { x: 14px; width: parent.width - 60px; height: parent.height; text: "Keep models up to date"; color: ThemePalette.text; font-size: 12.5px; vertical-alignment: center; overflow: elide; }
+                            Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Keep models up to date"); color: ThemePalette.text; font-size: 12.5px; vertical-alignment: center; overflow: elide; }
                             Rectangle {
                                 x: parent.width - 52px;
                                 y: (parent.height - 22px) / 2;
@@ -8974,21 +9015,21 @@ export component MainWindow inherits Window {
                                 width: 118px; height: 36px; border-radius: AppMetrics.radius_small;
                                 border-width: 1px; border-color: ThemePalette.border_strong;
                                 background: repair_touch.has-hover ? ThemePalette.panel_alt : transparent;
-                                Text { width: parent.width; height: parent.height; text: "Verify & repair"; color: ThemePalette.text; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: parent.width; height: parent.height; text: @tr("Verify & repair"); color: ThemePalette.text; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 repair_touch := TouchArea { mouse-cursor: pointer; clicked => { root.ai_repair(); } }
                             }
                             if root.ai_install_state == "installed": Rectangle {
                                 width: 118px; height: 36px; border-radius: AppMetrics.radius_small;
                                 border-width: 1px; border-color: ThemePalette.border_strong;
                                 background: upd_touch.has-hover ? ThemePalette.panel_alt : transparent;
-                                Text { width: parent.width; height: parent.height; text: "Update models"; color: ThemePalette.text; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: parent.width; height: parent.height; text: @tr("Update models"); color: ThemePalette.text; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 upd_touch := TouchArea { mouse-cursor: pointer; clicked => { root.ai_update_models(); } }
                             }
                             if root.ai_install_state == "installed": Rectangle {
                                 width: 100px; height: 36px; border-radius: AppMetrics.radius_small;
                                 border-width: 1px; border-color: ThemePalette.border_strong;
                                 background: uninstall_touch.has-hover ? ThemePalette.panel_alt : transparent;
-                                Text { width: parent.width; height: parent.height; text: "Remove"; color: ThemePalette.text; font-size: 12.5px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
+                                Text { width: parent.width; height: parent.height; text: @tr("Remove"); color: ThemePalette.text; font-size: 12.5px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 uninstall_touch := TouchArea { mouse-cursor: pointer; clicked => { root.ai_uninstall(); } }
                             }
                         }
@@ -9107,7 +9148,7 @@ export component MainWindow inherits Window {
                 cap-height: 220px;
             }
             DialogButton { x: parent.width - 180px; y: parent.height - 48px; label: "Cancel"; clicked => { root.confirm_visible = false; } }
-            DialogButton { x: parent.width - 90px; y: parent.height - 48px; label: "Delete"; primary: true; danger: true; clicked => { root.confirm_visible = false; root.confirm_delete(); } }
+            DialogButton { x: parent.width - 90px; y: parent.height - 48px; label: @tr("Delete"); primary: true; danger: true; clicked => { root.confirm_visible = false; root.confirm_delete(); } }
         }
     }
 
@@ -9613,7 +9654,7 @@ export component MainWindow inherits Window {
             border-radius: AppMetrics.radius;
             background: ThemePalette.panel_solid;
             Text { x: 20px; y: 16px; width: parent.width - 80px; height: 28px; text: root.preview_title; color: ThemePalette.text; font-size: 20px; font-weight: 700; overflow: elide; }
-            ToolButton { x: parent.width - 44px; y: 10px; button_width: 32px; button_height: 32px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: "Close"; clicked => { root.quick_look_close(); } }
+            ToolButton { x: parent.width - 44px; y: 10px; button_width: 32px; button_height: 32px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: @tr("Close"); clicked => { root.quick_look_close(); } }
             if root.preview_is_image: Image {
                 x: (parent.width - 420px) / 2; y: 56px;
                 width: 420px; height: 320px;
@@ -9878,7 +9919,7 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         x: 14px; y: 44px; width: parent.width - 28px; height: AppMetrics.row_h;
                         spacing: 8px;
-                        for mode_label[mi] in ["Simple", "Normal"]: Rectangle {
+                        for mode_label[mi] in [@tr("Simple"), @tr("Normal")]: Rectangle {
                             width: (parent.width - 8px) / 2;
                             height: AppMetrics.row_h;
                             property <string> mode_id: mi == 0 ? "simple" : "normal";
@@ -10139,7 +10180,7 @@ export component MainWindow inherits Window {
                 animate background { duration: 40ms; easing: ease-out; }
                 Text {
                     x: 16px; y: 16px; width: parent.width - 32px; height: 22px;
-                    text: "Simple";
+                    text: @tr("Simple");
                     color: simple_card_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text;
                     font-size: 14px; font-weight: 700;
                 }
@@ -10169,7 +10210,7 @@ export component MainWindow inherits Window {
                 animate background { duration: 40ms; easing: ease-out; }
                 Text {
                     x: 16px; y: 16px; width: parent.width - 32px; height: 22px;
-                    text: "Normal";
+                    text: @tr("Normal");
                     color: normal_card_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text;
                     font-size: 14px; font-weight: 700;
                 }

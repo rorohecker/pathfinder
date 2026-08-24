@@ -1,0 +1,351 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: pathfinder 0.9.60\n"
+"POT-Creation-Date: 2026-08-24 19:07+0000\n"
+"PO-Revision-Date: 2026-08-24 19:07+0000\n"
+"Last-Translator: Pathfinder contributors\n"
+"Language-Team: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: \n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Name"
+msgstr ""
+
+msgid "Size"
+msgstr ""
+
+msgid "Modified"
+msgstr ""
+
+msgid "Type"
+msgstr ""
+
+msgid "Settings"
+msgstr ""
+
+msgid "Minimize"
+msgstr ""
+
+msgid "Maximize"
+msgstr ""
+
+msgid "Close"
+msgstr ""
+
+msgid "Delete"
+msgstr ""
+
+msgid "Open"
+msgstr ""
+
+msgid "Search folder"
+msgstr ""
+
+msgid "Date"
+msgstr ""
+
+msgid "Sort by name, size, date, or type. Click active column to toggle ^/v direction."
+msgstr ""
+
+msgid "Compact"
+msgstr ""
+
+msgid "Folder changed on disk — click to refresh"
+msgstr ""
+
+msgid "Code"
+msgstr ""
+
+msgctxt "preview-mode"
+msgid "View"
+msgstr ""
+
+msgid "Copy path"
+msgstr ""
+
+msgid "Reveal"
+msgstr ""
+
+msgid "Tag"
+msgstr ""
+
+msgid "Source below — use the browser button to open rendered output."
+msgstr ""
+
+msgid "Select a file to preview details."
+msgstr ""
+
+msgid "Tags"
+msgstr ""
+
+msgid "Type a command..."
+msgstr ""
+
+msgid "Close settings"
+msgstr ""
+
+msgid "On-device models · no cloud · no OCR"
+msgstr ""
+
+msgid "Index, cache, and scan budgets"
+msgstr ""
+
+msgid "Layout density, panes, and defaults"
+msgstr ""
+
+msgid "Theme, accent, fonts, and chrome"
+msgstr ""
+
+msgid "Appearance"
+msgstr ""
+
+msgctxt "settings-tab"
+msgid "View"
+msgstr ""
+
+msgid "Performance"
+msgstr ""
+
+msgid "AI"
+msgstr ""
+
+msgid "LANGUAGE"
+msgstr ""
+
+msgid "System"
+msgstr ""
+
+msgid "English"
+msgstr ""
+
+msgid "Italian"
+msgstr ""
+
+msgid "Spanish"
+msgstr ""
+
+msgid "System follows the OS locale when Italian or Spanish is available; otherwise English."
+msgstr ""
+
+msgid "THEME"
+msgstr ""
+
+msgid "PIXEL RELICS"
+msgstr ""
+
+msgid "ARCADE ICONS"
+msgstr ""
+
+msgid "SUNSET ICONS"
+msgstr ""
+
+msgid "ACCENT COLOR"
+msgstr ""
+
+msgid "Custom hex"
+msgstr ""
+
+msgid "FOLDER COLOR"
+msgstr ""
+
+msgid "Folder color"
+msgstr ""
+
+msgid "Presets"
+msgstr ""
+
+msgid "DENSITY"
+msgstr ""
+
+msgid "INTERFACE MODE"
+msgstr ""
+
+msgid "Simple"
+msgstr ""
+
+msgid "Normal"
+msgstr ""
+
+msgid "CUSTOM THEME"
+msgstr ""
+
+msgid "Build a theme here, then Save. It appears above as Custom. Pick a color token, adjust hex or swatches, and watch the mini window below (it uses only your token colors, not the rest of Settings)."
+msgstr ""
+
+msgid "SAVED THEMES"
+msgstr ""
+
+msgid "No saved themes yet"
+msgstr ""
+
+msgid "THEME NAME"
+msgstr ""
+
+msgid "My Theme"
+msgstr ""
+
+msgid "LIVE PREVIEW"
+msgstr ""
+
+msgid "COLORS"
+msgstr ""
+
+msgid "Jump to a token, then use swatches or hex."
+msgstr ""
+
+msgid "Jump:"
+msgstr ""
+
+msgid "Quick colors"
+msgstr ""
+
+msgid "FEEL"
+msgstr ""
+
+msgid "Corner radius"
+msgstr ""
+
+msgid "Animations"
+msgstr ""
+
+msgid "BACKGROUND STYLE"
+msgstr ""
+
+msgid "Gradient blends Background and Surface from top to bottom for a soft sky look. Solid uses the Background color edge to edge."
+msgstr ""
+
+msgid "Solid"
+msgstr ""
+
+msgid "Gradient"
+msgstr ""
+
+msgid "Blend accent into the background gradient (bottom glow)."
+msgstr ""
+
+msgid "FINISH"
+msgstr ""
+
+msgid "Typography"
+msgstr ""
+
+msgid "Fonts ship inside Pathfinder so the UI always matches your pick (no reliance on Windows font names)."
+msgstr ""
+
+msgid "UI FONT"
+msgstr ""
+
+msgid "MONO FONT"
+msgstr ""
+
+msgid "ICONS"
+msgstr ""
+
+msgid "Icon set"
+msgstr ""
+
+msgid "Path to icon set folder..."
+msgstr ""
+
+msgid "Reset"
+msgstr ""
+
+msgid "Save Theme"
+msgstr ""
+
+msgid "DEFAULT VIEW MODE"
+msgstr ""
+
+msgid "Pathfinder remembers this for every folder you open until you change the view from the toolbar."
+msgstr ""
+
+msgid "Grid"
+msgstr ""
+
+msgid "List"
+msgstr ""
+
+msgid "Gallery"
+msgstr ""
+
+msgid "OPTIONS"
+msgstr ""
+
+msgid "Show hidden files"
+msgstr ""
+
+msgid "Theme animations"
+msgstr ""
+
+msgid "Atmospheres and animated theme icons (Fantasy / Retro / Sunset). Off keeps static icons and pauses motion."
+msgstr ""
+
+msgid "Show preview panel"
+msgstr ""
+
+msgid "WINDOWS INTEGRATION"
+msgstr ""
+
+msgid "Registers Pathfinder for your user account only (HKCU). Double-clicking a folder in Explorer opens it in Pathfinder. This does not replace every Explorer surface on Windows 11."
+msgstr ""
+
+msgid "Alternative: import extras/set-pathfinder-default-folder-handler.reg and replace CHANGEME_EXE with your pathfinder.exe path."
+msgstr ""
+
+msgid "SEARCH PERFORMANCE"
+msgstr ""
+
+msgid "Index estimate"
+msgstr ""
+
+msgid "THUMBNAIL CACHE"
+msgstr ""
+
+msgid "Automatic thumbnail cleanup"
+msgstr ""
+
+msgid "Storage and memory footprint"
+msgstr ""
+
+msgid "AI CAPABILITIES"
+msgstr ""
+
+msgid "On-device only. Semantic ranking uses filename embeddings. Image tags are approximate ImageNet labels — there is no OCR for text inside screenshots."
+msgstr ""
+
+msgid "Thumbnails, content search, and image analysis use the best detected device."
+msgstr ""
+
+msgid "OPTIONAL SEARCH"
+msgstr ""
+
+msgid "CLIP visual search is reserved but not bundled in this build. The control below is disabled."
+msgstr ""
+
+msgid "Image tags / CLIP search (unavailable in this build)"
+msgstr ""
+
+msgid "PATHFINDER LOCAL AI"
+msgstr ""
+
+msgid "Balanced"
+msgstr ""
+
+msgid "Quality"
+msgstr ""
+
+msgid "Keep models up to date"
+msgstr ""
+
+msgid "Verify & repair"
+msgstr ""
+
+msgid "Update models"
+msgstr ""
+
+msgid "Remove"
+msgstr ""
+

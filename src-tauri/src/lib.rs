@@ -37,6 +37,7 @@ mod file_icons;
 #[cfg(target_os = "windows")]
 mod folder_shell_registry;
 mod gpu_detect;
+mod i18n;
 
 // Detection probe helpers used by /examples/probe_npu.rs to verify NPU and
 // GPU detection on new hardware without launching the full UI. Kept as
@@ -8318,6 +8319,10 @@ struct NativeSettings {
     /// Default on; when false, themed icons stay static and FX timers pause.
     #[serde(default = "default_true")]
     theme_animations: bool,
+    /// UI language: `system` | `en` | `it` | `es`. Applied via Slint bundled
+    /// translations (`@tr`) and [`i18n`] for Rust-fed model strings.
+    #[serde(default = "default_ui_language")]
+    ui_language: String,
 }
 
 fn default_ai_profile() -> String {
@@ -8326,6 +8331,10 @@ fn default_ai_profile() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_ui_language() -> String {
+    "system".into()
 }
 
 impl Default for NativeSettings {
@@ -8363,6 +8372,7 @@ impl Default for NativeSettings {
             folder_color: None,
             custom_accent_hex: None,
             theme_animations: true,
+            ui_language: default_ui_language(),
         }
     }
 }
@@ -11296,7 +11306,7 @@ fn build_breadcrumbs(path: &str) -> Vec<ChoiceItem> {
     if path == "recycle://" {
         return vec![ChoiceItem {
             id: ss("recycle://"),
-            label: ss("Recycle Bin"),
+            label: ss(&i18n::t("Recycle Bin")),
             description: ss(""),
             color: slint::Color::from_argb_u8(0, 0, 0, 0),
         }];
@@ -11304,7 +11314,7 @@ fn build_breadcrumbs(path: &str) -> Vec<ChoiceItem> {
     if path == "home://" {
         return vec![ChoiceItem {
             id: ss("home://"),
-            label: ss("Home"),
+            label: ss(&i18n::t("Home")),
             description: ss(""),
             color: slint::Color::from_argb_u8(0, 0, 0, 0),
         }];
@@ -11312,7 +11322,7 @@ fn build_breadcrumbs(path: &str) -> Vec<ChoiceItem> {
     if path == "storage://" {
         return vec![ChoiceItem {
             id: ss("storage://"),
-            label: ss("Storage"),
+            label: ss(&i18n::t("Storage")),
             description: ss(""),
             color: slint::Color::from_argb_u8(0, 0, 0, 0),
         }];
@@ -13042,12 +13052,23 @@ fn choice_items(items: &[(&str, &str, &str, &str)]) -> ModelRc<ChoiceItem> {
             .iter()
             .map(|(id, label, description, color_value)| ChoiceItem {
                 id: ss(*id),
-                label: ss(*label),
-                description: ss(*description),
+                label: ss(&i18n::t(label)),
+                description: ss(&i18n::t(description)),
                 color: color(color_value),
             })
             .collect(),
     )
+}
+
+/// Apply Slint bundled translations + Rust [`i18n`] table from a settings value.
+fn apply_ui_language(setting: &str) {
+    let lang = i18n::resolve_setting(setting);
+    i18n::set_language(lang);
+    // Empty / "en" selects the source (English) catalog in Slint.
+    let slint_lang = if lang == "en" { "" } else { lang };
+    if let Err(err) = slint::select_bundled_translation(slint_lang) {
+        eprintln!("pathfinder: select_bundled_translation({slint_lang:?}): {err}");
+    }
 }
 
 const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
@@ -13784,6 +13805,50 @@ impl NativeController {
         // Surface the compiled-in package version so the Settings header can
         // display it. Single source of truth: Cargo.toml -> CARGO_PKG_VERSION.
         ui.set_app_version(SharedString::from(env!("CARGO_PKG_VERSION")));
+        ui.set_ui_language(ss(&self.settings.ui_language));
+        self.push_localized_choice_models(ui);
+        apply_theme(ui, &self.settings);
+        ui.set_ai_device(ss(&self.ai.reason));
+        ui.set_ai_gpu_status(ss(&self.ai.gpu_summary));
+        ui.set_ai_label(ss(ai_status_label(&self.ai)));
+
+        if self.settings.ui_mode.is_empty() {
+            ui.set_ui_mode_prompt_visible(true);
+        } else {
+            ui.set_ui_mode(ss(&self.settings.ui_mode));
+        }
+        ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
+
+        #[cfg(target_os = "windows")]
+        ui.set_show_windows_integration(true);
+        #[cfg(not(target_os = "windows"))]
+        ui.set_show_windows_integration(false);
+        let ai_install_state = self
+            .ai_progress
+            .state
+            .lock()
+            .map(|s| *s)
+            .unwrap_or(local_ai::InstallState::NotInstalled);
+        ui.set_ai_install_state(SharedString::from(ai_install_state.as_slint_str()));
+        self.sync_ai_settings_ui(ui);
+        let semantic_ready = local_ai_semantic_ready_cached();
+        let image_ready = local_ai_image_search_ready_cached();
+        if !semantic_ready {
+            self.settings.search_semantic_mode = false;
+        }
+        if !image_ready {
+            self.settings.clip_search_enabled = false;
+        }
+        ui.set_semantic_search_available(semantic_ready);
+        ui.set_search_semantic_mode(self.settings.search_semantic_mode);
+        ui.set_clip_search_enabled(self.settings.clip_search_enabled);
+        ui.set_search_source_pref(ss(&self.search_source_pref));
+        ui.set_thumb_size_scale(self.thumb_size_scale);
+        self.sync_tag_chips(ui);
+    }
+
+    /// Refresh labels that come from Rust models after a language change.
+    fn push_localized_choice_models(&mut self, ui: &MainWindow) {
         ui.set_theme_choices(choice_items(&[
             (
                 "mica-dark",
@@ -13898,8 +13963,8 @@ impl NativeController {
         ]));
         ui.set_command_items(command_items());
         ui.set_ai_install_size_mb(0);
-        ui.set_index_status(ss("Loading index statistics..."));
-        ui.set_performance_footprint(ss("Measuring disk usage..."));
+        ui.set_index_status(ss(&i18n::t("Loading index statistics...")));
+        ui.set_performance_footprint(ss(&i18n::t("Measuring disk usage...")));
         ui.set_performance_intro(ss(concat!(
             "Pathfinder keeps a small local database of the files in folders you visit so the search bar can return matches instantly without rescanning your disk every time. ",
             "Indexing modes change how aggressively that database is grown in the background:\n",
@@ -13909,44 +13974,9 @@ impl NativeController {
             "\u{2022} Max - all fixed drives. Best search coverage, uses the most disk while it catches up.\n",
             "Thumbnails are stored separately and the cache is automatically pruned when it hits the budget below."
         )));
-        apply_theme(ui, &self.settings);
-        ui.set_ai_device(ss(&self.ai.reason));
-        ui.set_ai_gpu_status(ss(&self.ai.gpu_summary));
-        ui.set_ai_label(ss(ai_status_label(&self.ai)));
-
-        if self.settings.ui_mode.is_empty() {
-            ui.set_ui_mode_prompt_visible(true);
-        } else {
-            ui.set_ui_mode(ss(&self.settings.ui_mode));
-        }
+        ui.set_search_scope_label(ss(&i18n::t("Folder")));
+        ui.set_side_items(model_from_vec(self.side_items()));
         ui.set_side_items_simple(model_from_vec(self.side_items_simple()));
-
-        #[cfg(target_os = "windows")]
-        ui.set_show_windows_integration(true);
-        #[cfg(not(target_os = "windows"))]
-        ui.set_show_windows_integration(false);
-        let ai_install_state = self
-            .ai_progress
-            .state
-            .lock()
-            .map(|s| *s)
-            .unwrap_or(local_ai::InstallState::NotInstalled);
-        ui.set_ai_install_state(SharedString::from(ai_install_state.as_slint_str()));
-        self.sync_ai_settings_ui(ui);
-        let semantic_ready = local_ai_semantic_ready_cached();
-        let image_ready = local_ai_image_search_ready_cached();
-        if !semantic_ready {
-            self.settings.search_semantic_mode = false;
-        }
-        if !image_ready {
-            self.settings.clip_search_enabled = false;
-        }
-        ui.set_semantic_search_available(semantic_ready);
-        ui.set_search_semantic_mode(self.settings.search_semantic_mode);
-        ui.set_clip_search_enabled(self.settings.clip_search_enabled);
-        ui.set_search_source_pref(ss(&self.search_source_pref));
-        ui.set_thumb_size_scale(self.thumb_size_scale);
-        self.sync_tag_chips(ui);
     }
 
     fn sync_ai_settings_ui(&self, ui: &MainWindow) {
@@ -15539,7 +15569,7 @@ impl NativeController {
     fn side_items(&self) -> Vec<SideItem> {
         let mut items = Vec::new();
         items.push(SideItem {
-            label: ss("QUICK ACCESS"),
+            label: ss(&i18n::t("QUICK ACCESS")),
             path: ss(""),
             icon: ss(""),
             count: ss(""),
@@ -15553,7 +15583,7 @@ impl NativeController {
         });
         // Home dashboard â€” virtual landing for drives, pins, and saved searches.
         items.push(SideItem {
-            label: ss("Home"),
+            label: ss(&i18n::t("Home")),
             path: ss("home://"),
             icon: ss("home"),
             count: ss(""),
@@ -15600,7 +15630,7 @@ impl NativeController {
         // Recycle Bin entry - virtual `recycle://` path. Click to browse,
         // right-click items inside to restore or delete permanently.
         items.push(SideItem {
-            label: ss("Recycle Bin"),
+            label: ss(&i18n::t("Recycle Bin")),
             path: ss("recycle://"),
             icon: ss("trash"),
             count: ss(""),
@@ -15617,7 +15647,7 @@ impl NativeController {
         // pane to the categorized storage view (Apps, Documents, Pictures,
         // etc.) plus a ranked-by-size list of biggest items.
         items.push(SideItem {
-            label: ss("Storage"),
+            label: ss(&i18n::t("Storage")),
             path: ss("storage://"),
             icon: ss("storage"),
             count: ss(""),
@@ -15632,7 +15662,7 @@ impl NativeController {
 
         if !self.user_pins.is_empty() {
             items.push(SideItem {
-                label: ss("PINNED"),
+                label: ss(&i18n::t("PINNED")),
                 path: ss(""),
                 icon: ss(""),
                 count: ss(""),
@@ -15666,7 +15696,7 @@ impl NativeController {
         }
 
         items.push(SideItem {
-            label: ss("DRIVES"),
+            label: ss(&i18n::t("DRIVES")),
             path: ss(""),
             icon: ss(""),
             count: ss(""),
@@ -15852,7 +15882,7 @@ impl NativeController {
     fn side_items_simple(&self) -> Vec<SideItem> {
         let mut items = Vec::new();
         items.push(SideItem {
-            label: ss("QUICK ACCESS"),
+            label: ss(&i18n::t("QUICK ACCESS")),
             path: ss(""),
             icon: ss(""),
             count: ss(""),
@@ -15865,7 +15895,7 @@ impl NativeController {
             expanded: false,
         });
         items.push(SideItem {
-            label: ss("Home"),
+            label: ss(&i18n::t("Home")),
             path: ss("home://"),
             icon: ss("home"),
             count: ss(""),
@@ -15908,7 +15938,7 @@ impl NativeController {
         }
         if !self.user_pins.is_empty() {
             items.push(SideItem {
-                label: ss("PINNED"),
+                label: ss(&i18n::t("PINNED")),
                 path: ss(""),
                 icon: ss(""),
                 count: ss(""),
@@ -15941,7 +15971,7 @@ impl NativeController {
             }
         }
         items.push(SideItem {
-            label: ss("DRIVES"),
+            label: ss(&i18n::t("DRIVES")),
             path: ss(""),
             icon: ss(""),
             count: ss(""),
@@ -15973,7 +16003,7 @@ impl NativeController {
             });
         }
         items.push(SideItem {
-            label: ss("Recycle Bin"),
+            label: ss(&i18n::t("Recycle Bin")),
             path: ss("recycle://"),
             icon: ss("trash"),
             count: ss(""),
@@ -15986,7 +16016,7 @@ impl NativeController {
             expanded: false,
         });
         items.push(SideItem {
-            label: ss("Storage"),
+            label: ss(&i18n::t("Storage")),
             path: ss("storage://"),
             icon: ss("storage"),
             count: ss(""),
@@ -20905,8 +20935,8 @@ impl NativeController {
         self.visible_files = self.files.clone();
         self.update_models(ui);
         ui.set_side_items(model_from_vec(self.side_items()));
-        ui.set_current_path(ss("Home"));
-        ui.set_address_text(ss("Home"));
+        ui.set_current_path(ss(&i18n::t("Home")));
+        ui.set_address_text(ss(&i18n::t("Home")));
         ui.set_status_left(ss(format!("{} shortcuts", self.files.len())));
     }
 
@@ -24225,6 +24255,19 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
 
     let weak = ui.as_weak();
     let c = controller.clone();
+    ui.on_set_ui_language(move |lang| {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.settings.ui_language = lang.to_string();
+            ctrl.save_settings();
+            apply_ui_language(&ctrl.settings.ui_language);
+            ui.set_ui_language(ss(&ctrl.settings.ui_language));
+            ctrl.push_localized_choice_models(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_ui_mode_prompt_choice(move |mode| {
         if let Some(ui) = weak.upgrade() {
             let mut ctrl = c.borrow_mut();
@@ -27152,6 +27195,9 @@ pub fn run() {
     let initial_settings: NativeSettings =
         read_native_json("settings.json", NativeSettings::default());
     let ui = MainWindow::new().expect("failed to create Pathfinder window");
+    // Bundled translations must be selected after the first component exists.
+    apply_ui_language(&initial_settings.ui_language);
+    ui.set_ui_language(ss(&initial_settings.ui_language));
     fantasy_icons::load_fantasy_icon_bank(&ui);
     retro_icons::load_retro_icon_bank(&ui);
     sunset_icons::load_sunset_icon_bank(&ui);
