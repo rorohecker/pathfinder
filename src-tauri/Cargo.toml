@@ -100,12 +100,13 @@ windows = { version = "0.62", features = [
 
 # Non-Windows dev/CI: keep compile-time ORT fetch (no separate runtime zip yet).
 [target.'cfg(not(windows))'.dependencies]
-ort = { version = "2.0.0-rc.12", default-features = false, features = [
+ort = { version = "=2.0.0-rc.12", default-features = false, features = [
     "std",
     "ndarray",
     "download-binaries",
     "copy-dylibs",
     "api-24",
+    "tls-rustls",
 ] }
 
 [profile.release]

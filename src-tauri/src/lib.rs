@@ -32,6 +32,11 @@ mod windows_integration;
 
 #[cfg(target_os = "windows")]
 mod file_drag;
+/// No-op logging stub so shared drop/paste helpers compile off Windows.
+#[cfg(not(target_os = "windows"))]
+mod file_drag {
+    pub(crate) fn log(_msg: &str) {}
+}
 #[cfg(target_os = "windows")]
 mod file_icons;
 #[cfg(target_os = "windows")]
@@ -9514,8 +9519,8 @@ fn embedding_blob_to_vec(blob: &[u8]) -> Option<Vec<f32>> {
         return None;
     }
     let mut v = Vec::with_capacity(blob.len() / 4);
-    for chunk in blob.chunks_exact(4) {
-        v.push(f32::from_le_bytes(chunk.try_into().ok()?));
+    for chunk in blob.as_chunks::<4>().0 {
+        v.push(f32::from_le_bytes(*chunk));
     }
     Some(v)
 }
@@ -10718,9 +10723,12 @@ del \"%~f0\"\r\n"
         #[cfg(not(windows))]
         {
             let _ = installer;
-            return Err("In-app update install is only supported on Windows.".into());
+            Err("In-app update install is only supported on Windows.".into())
         }
-        Ok(())
+        #[cfg(windows)]
+        {
+            Ok(())
+        }
     })();
     UPDATE_INSTALL_IN_PROGRESS.store(false, Ordering::SeqCst);
     result
@@ -11404,6 +11412,8 @@ fn compact_drive_label(path: &str) -> String {
             return text.trim_end_matches('\\').to_string();
         }
     }
+    #[cfg(not(target_os = "windows"))]
+    let _ = path;
     "All".to_string()
 }
 
@@ -12084,10 +12094,10 @@ fn native_move(state: &AppState, from: &str, to: &str) -> Result<(), String> {
 /// Return (free_bytes, total_bytes) for the volume that contains `path`.
 /// Returns None on non-Windows builds or if the OS call fails.
 fn drive_space_cache_key(path: &str) -> String {
-    let p = Path::new(path);
-    let mut components = p.components();
     #[cfg(target_os = "windows")]
     {
+        let p = Path::new(path);
+        let mut components = p.components();
         use std::path::Component;
         if let Some(Component::Prefix(prefix)) = components.next()
             && matches!(components.next(), Some(Component::RootDir))
@@ -18965,7 +18975,10 @@ impl NativeController {
                         Err(e) => self.show_toast(ui, e),
                     }
                     #[cfg(not(target_os = "windows"))]
-                    self.show_toast(ui, "Take Ownership is only available on Windows.");
+                    {
+                        let _ = entry;
+                        self.show_toast(ui, "Take Ownership is only available on Windows.");
+                    }
                 } else {
                     self.show_toast(ui, "Select a file first.");
                 }
@@ -18995,7 +19008,10 @@ impl NativeController {
                         Err(e) => self.show_toast(ui, e),
                     }
                     #[cfg(not(target_os = "windows"))]
-                    self.show_toast(ui, "Pin to Taskbar is only available on Windows.");
+                    {
+                        let _ = entry;
+                        self.show_toast(ui, "Pin to Taskbar is only available on Windows.");
+                    }
                 } else {
                     self.show_toast(ui, "Select a file first.");
                 }
@@ -19008,7 +19024,10 @@ impl NativeController {
                         Err(e) => self.show_toast(ui, e),
                     }
                     #[cfg(not(target_os = "windows"))]
-                    self.show_toast(ui, "Pin to Start is only available on Windows.");
+                    {
+                        let _ = entry;
+                        self.show_toast(ui, "Pin to Start is only available on Windows.");
+                    }
                 } else {
                     self.show_toast(ui, "Select a file first.");
                 }
@@ -24442,6 +24461,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
+    #[cfg(target_os = "windows")]
     let c = controller.clone();
     ui.on_welcome_set_default_handler(move || {
         if let Some(ui) = weak.upgrade() {
@@ -26296,6 +26316,7 @@ fn startup_warning_toast(weak_ui: slint::Weak<MainWindow>, message: String) {
     });
 }
 
+#[cfg(target_os = "windows")]
 fn install_mouse_nav(ui: &MainWindow) {
     // Defer the WindowProc subclass via a Slint Timer for the same reason the
     // IDropTarget registration is deferred: calling `with_winit_window` synchronously

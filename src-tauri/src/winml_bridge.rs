@@ -155,6 +155,15 @@ pub fn discover_winml_ep_libraries() -> Vec<(String, PathBuf)> {
 
 /// Build an ordered list of provider candidates: NPU → GPU → CPU.
 pub fn provider_candidates() -> Vec<ProviderCandidate> {
+    #[cfg(not(windows))]
+    {
+        vec![ProviderCandidate {
+            label: "CPU".into(),
+            kind: AcceleratorKind::Cpu,
+            tag: "cpu".into(),
+        }]
+    }
+    #[cfg(windows)]
     let mut out = Vec::new();
     #[cfg(windows)]
     {
@@ -218,11 +227,11 @@ pub fn provider_candidates() -> Vec<ProviderCandidate> {
             kind: AcceleratorKind::Gpu,
             tag: "dml:default".into(),
         });
+        out.push(ProviderCandidate {
+            label: "CPU".into(),
+            kind: AcceleratorKind::Cpu,
+            tag: "cpu".into(),
+        });
+        out
     }
-    out.push(ProviderCandidate {
-        label: "CPU".into(),
-        kind: AcceleratorKind::Cpu,
-        tag: "cpu".into(),
-    });
-    out
 }

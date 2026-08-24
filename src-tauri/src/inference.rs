@@ -3,7 +3,9 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+#[cfg(windows)]
+use std::sync::OnceLock;
 
 use image::imageops::FilterType;
 use image::DynamicImage;

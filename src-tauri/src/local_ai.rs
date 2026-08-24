@@ -23,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(windows)]
 use zip::ZipArchive;
 
 const BUNDLED_CATALOG_JSON: &str = include_str!("../ai-catalog.json");

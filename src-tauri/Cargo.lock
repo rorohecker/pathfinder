@@ -5072,6 +5072,7 @@ dependencies = [
  "ort-sys",
  "smallvec",
  "tracing",
+ "ureq 3.3.0",
 ]
 
 [[package]]
@@ -8099,9 +8100,12 @@ dependencies = [
  "base64 0.22.1",
  "log",
  "percent-encoding",
+ "rustls",
+ "rustls-pki-types",
  "socks",
  "ureq-proto",
  "utf8-zero",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]

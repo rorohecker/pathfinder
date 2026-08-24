@@ -168,9 +168,9 @@ unsafe fn hicon_to_image(hicon: HICON) -> Option<Image> {
 
         // Some icon bitmaps come back with alpha=0 across the board. When that
         // happens, assume opaque pixels (255) so the icon is visible at all.
-        let any_alpha = bgra.chunks_exact(4).any(|p| p[3] != 0);
+        let any_alpha = bgra.as_chunks::<4>().0.iter().any(|p| p[3] != 0);
         let mut rgba: Vec<u8> = Vec::with_capacity(bgra.len());
-        for chunk in bgra.chunks_exact(4) {
+        for chunk in bgra.as_chunks::<4>().0 {
             let b = chunk[0];
             let g = chunk[1];
             let r = chunk[2];
