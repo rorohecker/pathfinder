@@ -3854,42 +3854,6 @@ fn run_as_admin(path: &str) -> Result<(), String> {
     }
 }
 
-/// List VSS shadow copies for the drive that contains `path`.
-/// Returns human-readable lines; empty vec means none found or vssadmin not available.
-fn list_previous_versions(path: &str) -> Vec<String> {
-    let drive = Path::new(path)
-        .components()
-        .next()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .unwrap_or_default();
-    if drive.is_empty() {
-        return Vec::new();
-    }
-    let out = ProcessCommand::new("vssadmin")
-        .args(["list", "shadows", &format!("/for={}", drive)])
-        .no_window()
-        .output()
-        .ok();
-    let stdout = match out {
-        Some(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
-        None => return Vec::new(),
-    };
-    let mut versions = Vec::new();
-    let mut current_time = String::new();
-    for line in stdout.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("Creation Time:") {
-            current_time = rest.trim().to_string();
-        } else if let Some(rest) = line.strip_prefix("Shadow Copy Volume:") {
-            if !current_time.is_empty() {
-                versions.push(format!("{} - {}", current_time, rest.trim()));
-                current_time.clear();
-            }
-        }
-    }
-    versions
-}
-
 /// Open Explorer with the file selected so the user can access the full shell context menu.
 fn open_more_options(path: &str, _ui: &MainWindow) -> Result<(), String> {
     reveal_in_folder(path.to_string())
@@ -13920,6 +13884,8 @@ impl NativeController {
         ui.set_semantic_search_available(semantic_ready);
         ui.set_search_semantic_mode(self.settings.search_semantic_mode);
         ui.set_clip_search_enabled(self.settings.clip_search_enabled);
+        ui.set_active_index_mode(ss(&self.settings.index_mode));
+        ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         ui.set_search_source_pref(ss(&self.search_source_pref));
         ui.set_thumb_size_scale(self.thumb_size_scale);
         self.sync_tag_chips(ui);
@@ -14190,9 +14156,9 @@ impl NativeController {
                 }
             });
         });
-        // Silent Local AI model self-update when enabled.
+        // Silent Local AI model self-update when enabled and downloads are allowed.
         let progress = self.ai_progress.clone();
-        let auto = self.settings.ai_auto_update_models;
+        let auto = self.settings.ai_auto_update_models && self.settings.network_downloads_enabled;
         local_ai::maybe_auto_update_models(progress, auto);
     }
 
@@ -14232,6 +14198,10 @@ impl NativeController {
     }
 
     fn spawn_performance_status(&self, ui: &MainWindow) {
+        // Push live toggles on this thread so a stale worker snapshot cannot
+        // revert a download/index choice the user just made.
+        ui.set_active_index_mode(ss(&self.settings.index_mode));
+        ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         let settings = self.settings.clone();
         let drives = self.drives.clone();
         let weak = ui.as_weak();
@@ -14272,10 +14242,8 @@ impl NativeController {
                 "Thumbnail cache is capped at {} and old thumbnails are removed automatically.",
                 format_size_short(status.thumbnail_limit)
             );
-            let mode = settings.index_mode.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    ui.set_active_index_mode(ss(&mode));
                     ui.set_index_status(ss(index_line));
                     ui.set_thumbnail_status(ss(thumb_line));
                     ui.set_performance_footprint(ss(footprint));
@@ -16312,6 +16280,9 @@ impl NativeController {
         ui.set_primary_grid_scroll_y(0.0);
         ui.set_grid_window_start(0);
         ui.set_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
+        ui.set_list_window_files(model_from_vec(Vec::<FileItem>::new()));
+        ui.set_list_window_start(0);
+        ui.set_list_window_y(0.0);
         ui.set_files(model_from_vec(Vec::<FileItem>::new()));
         self.sync_nav_chrome(ui);
         self.sync_sidebar_models(ui);
@@ -16450,9 +16421,9 @@ impl NativeController {
 
         let restore_y = self.path_scroll.get(&path).copied().unwrap_or(0.0);
         ui.set_primary_list_scroll_y(restore_y);
-        // Grid keeps its own scroll; clamp window after restore so we never
-        // land past the end of a shorter folder.
-        if ui.get_view_mode().as_str() != "list" {
+        if ui.get_view_mode().as_str() == "list" {
+            self.sync_list_window(ui, false);
+        } else {
             self.sync_grid_window(ui, false);
         }
 
@@ -17013,11 +16984,11 @@ impl NativeController {
                 .map(|e| e.name.clone())
                 .unwrap_or_else(|| "item".to_string());
             ui.set_confirm_text(ss(format!(
-                "Permanently delete '{name}' from the Recycle Bin? This cannot be undone."
+                "Permanently delete '{name}'? This cannot be undone."
             )));
         } else {
             ui.set_confirm_text(ss(format!(
-                "Permanently delete {n} items from the Recycle Bin? This cannot be undone."
+                "Permanently delete {n} items? This cannot be undone."
             )));
         }
         ui.set_confirm_title(ss(&i18n::t("Delete forever")));
@@ -17377,7 +17348,7 @@ impl NativeController {
                 mx2,
                 my2,
                 list_top,
-                ui.get_primary_list_scroll_y(),
+                ui.get_primary_list_scroll_y().abs(),
                 row_h,
             )
         } else {
@@ -17400,7 +17371,7 @@ impl NativeController {
                 mx2,
                 my2,
                 pad,
-                ui.get_primary_grid_scroll_y(),
+                ui.get_primary_grid_scroll_y().abs(),
                 grid_cell_w,
                 grid_item_h,
                 grid_gap,
@@ -17711,7 +17682,12 @@ impl NativeController {
         ui.set_preview_rendered(ss(""));
 
         if let Some(archive) = &self.active_archive {
+            self.preview_generation.fetch_add(1, Ordering::SeqCst);
             ui.set_preview_is_image(false);
+            ui.set_preview_is_media(false);
+            ui.set_preview_is_pdf(false);
+            ui.set_preview_has_pdf_page(false);
+            ui.set_preview_can_render(false);
             ui.set_preview_body(ss(if entry.kind == FileKind::Directory {
                 "Archive folder".to_string()
             } else {
@@ -17767,6 +17743,7 @@ impl NativeController {
 
         // Media + folders: metadata-only, no disk body read.
         if is_media_ext(&ext) {
+            self.preview_generation.fetch_add(1, Ordering::SeqCst);
             #[cfg(target_os = "windows")]
             if let Some(img) = file_icons::shell_thumbnail(&entry.path, 256) {
                 ui.set_preview_image(img);
@@ -17781,6 +17758,10 @@ impl NativeController {
             return;
         }
         if entry.kind == FileKind::Directory {
+            self.preview_generation.fetch_add(1, Ordering::SeqCst);
+            ui.set_preview_is_media(false);
+            ui.set_preview_is_pdf(false);
+            ui.set_preview_has_pdf_page(false);
             ui.set_preview_body(ss(""));
             ui.set_preview_meta(ss(base_meta));
             return;
@@ -17970,6 +17951,10 @@ impl NativeController {
         } else {
             ui.set_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
             ui.set_secondary_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
+            self.sync_list_window(ui, false);
+            if ui.get_dual_pane() {
+                self.sync_list_window(ui, true);
+            }
         }
     }
 
@@ -18591,6 +18576,8 @@ impl NativeController {
         self.sync_selection_count_to_ui(ui);
         if ui.get_view_mode().as_str() != "list" {
             self.sync_grid_window(ui, true);
+        } else {
+            self.sync_list_window(ui, true);
         }
     }
 
@@ -18637,6 +18624,9 @@ impl NativeController {
         ui.set_secondary_files(model_from_vec(Vec::<FileItem>::new()));
         ui.set_secondary_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
         ui.set_secondary_grid_window_start(0);
+        ui.set_secondary_list_window_files(model_from_vec(Vec::<FileItem>::new()));
+        ui.set_secondary_list_window_start(0);
+        ui.set_secondary_list_window_y(0.0);
         ui.set_secondary_list_scroll_y(0.0);
         ui.set_secondary_path(ss(&path));
         self.sync_selection_count_to_ui(ui);
@@ -18904,7 +18894,9 @@ impl NativeController {
                 ui.get_settings_visible(),
                 ui.get_welcome_visible(),
                 ui.get_ui_mode_prompt_visible(),
-                ui.get_command_visible(),
+                ui.get_command_visible()
+                    || ui.get_context_visible()
+                    || ui.get_rename_presets_visible(),
                 ui.get_tool_overlay_visible(),
                 ui.get_compare_overlay_visible(),
                 ui.get_image_tools_visible(),
@@ -19394,6 +19386,7 @@ impl NativeController {
         alt: bool,
         key: String,
     ) {
+        let key = shortcuts::canonical_key(&key);
         ui.set_shortcut_consumed(false);
         let capturing = ui.get_shortcut_capture_active()
             || (ui.get_tool_overlay_visible()
@@ -19410,9 +19403,7 @@ impl NativeController {
             if target.is_empty() {
                 return;
             }
-            let reset = !ctrl
-                && !alt
-                && (key.eq_ignore_ascii_case("backspace") || key.eq_ignore_ascii_case("delete"));
+            let reset = !ctrl && !alt && key.eq_ignore_ascii_case("backspace");
             if reset {
                 self.shortcut_draft.remove(&target);
             } else {
@@ -19428,9 +19419,9 @@ impl NativeController {
                 .iter()
                 .map(|(group, label, hint, command)| ShortcutEditItem {
                     command: ss(*command),
-                    label: ss(*label),
+                    label: ss(&i18n::t(label)),
                     hint: ss(shortcuts::hint_for(command, &self.shortcut_draft, hint)),
-                    group: ss(*group),
+                    group: ss(&i18n::t(group)),
                 })
                 .collect();
             ui.set_shortcut_edit_items(model_from_vec(items));
@@ -19443,7 +19434,9 @@ impl NativeController {
             ui.get_settings_visible(),
             ui.get_welcome_visible(),
             ui.get_ui_mode_prompt_visible(),
-            ui.get_command_visible(),
+            ui.get_command_visible()
+                || ui.get_context_visible()
+                || ui.get_rename_presets_visible(),
             ui.get_tool_overlay_visible(),
             ui.get_compare_overlay_visible(),
             ui.get_image_tools_visible(),
@@ -19653,6 +19646,12 @@ impl NativeController {
         ui.set_rename_presets_visible(false);
     }
 
+    fn cancel_confirm(&mut self, ui: &MainWindow) {
+        self.pending_prompt = None;
+        ui.set_confirm_visible(false);
+        ui.set_confirm_is_permanent(false);
+    }
+
     fn prompt_rename_conflict(&mut self, ui: &MainWindow, path: String, new_name: String) {
         self.pending_prompt = Some(PendingPrompt::RenameConflict {
             path,
@@ -19753,6 +19752,7 @@ impl NativeController {
             self.show_toast(ui, "Select a file first.");
             return;
         }
+        self.pending_prompt = None;
         ui.set_confirm_title(ss(&i18n::t("Move to Recycle Bin")));
         ui.set_confirm_action(ss(&i18n::t("Move to Bin")));
         ui.set_confirm_is_permanent(false);
@@ -21259,7 +21259,7 @@ impl NativeController {
             })
             .collect();
         ui.set_tool_overlay_kind(ss("smart-folders"));
-        ui.set_tool_overlay_title(ss("Smart Folders"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Smart Folders")));
         ui.set_tool_overlay_subtitle(ss(
             "Click a smart folder to filter. Labels can be renamed from More.",
         ));
@@ -21345,7 +21345,7 @@ impl NativeController {
             })
             .collect();
         ui.set_tool_overlay_kind(ss("templates"));
-        ui.set_tool_overlay_title(ss("New From Template"));
+        ui.set_tool_overlay_title(ss(&i18n::t("New From Template")));
         ui.set_tool_overlay_subtitle(ss("Pick a template, then name the new file."));
         ui.set_tool_overlay_items(model_from_vec(items));
         ui.set_tool_overlay_visible(true);
@@ -21886,7 +21886,7 @@ impl NativeController {
             })
             .collect();
         ui.set_tool_overlay_kind(ss("rules"));
-        ui.set_tool_overlay_title(ss("Rules and Automation"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Rules and Automation")));
         ui.set_tool_overlay_subtitle(ss(
             "Toggle rules on, then Run enabled. Moves stay opt-in and only run when you ask.",
         ));
@@ -21900,9 +21900,9 @@ impl NativeController {
             .iter()
             .map(|(group, label, hint, command)| ShortcutEditItem {
                 command: ss(*command),
-                label: ss(*label),
+                label: ss(&i18n::t(label)),
                 hint: ss(shortcuts::hint_for(command, &self.shortcut_draft, hint)),
-                group: ss(*group),
+                group: ss(&i18n::t(group)),
             })
             .collect();
         ui.set_tool_overlay_kind(ss("shortcuts"));
@@ -21935,7 +21935,7 @@ impl NativeController {
             })
             .collect();
         ui.set_tool_overlay_kind(ss("workspaces"));
-        ui.set_tool_overlay_title(ss("Open Workspace"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Open Workspace")));
         ui.set_tool_overlay_subtitle(ss(if items.is_empty() {
             "No saved workspaces yet. Use Save Workspace first."
         } else {
@@ -22349,6 +22349,9 @@ impl NativeController {
             preview,
             if n > 8 { "\n..." } else { "" }
         )));
+        ui.set_confirm_title(ss(&i18n::t("Move to Recycle Bin")));
+        ui.set_confirm_action(ss(&i18n::t("Move to Bin")));
+        ui.set_confirm_is_permanent(false);
         ui.set_confirm_visible(true);
     }
 
@@ -22752,23 +22755,21 @@ impl NativeController {
             }
         }
         if items.is_empty() {
-            for line in list_previous_versions(&path) {
-                items.push(ToolListItem {
-                    id: ss(format!("{path}\t{line}")),
-                    title: ss(&line),
-                    subtitle: ss(&path),
-                    meta: ss(""),
-                    enabled: true,
-                    accent: color("#d98a24"),
-                });
-            }
+            ui.set_tool_overlay_kind(ss("versions"));
+            ui.set_tool_overlay_title(ss(&i18n::t("Previous Versions")));
+            ui.set_tool_overlay_subtitle(ss(&i18n::t(
+                "No shadow copies found. Enable File History or VSS snapshots.",
+            )));
+            ui.set_tool_overlay_items(model_from_vec(items));
+            ui.set_tool_overlay_visible(true);
+            return;
         }
         ui.set_tool_overlay_kind(ss("versions"));
         ui.set_tool_overlay_title(ss(&i18n::t("Previous Versions")));
         ui.set_tool_overlay_subtitle(ss(if items.is_empty() {
             i18n::t("No shadow copies found. Enable File History or VSS snapshots.")
         } else {
-            i18n::t("Click a version, then Restore")
+            i18n::t("Click a version to restore it.")
         }));
         ui.set_tool_overlay_items(model_from_vec(items));
         ui.set_tool_overlay_visible(true);
@@ -25563,8 +25564,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                         {
                                             " · first 25,000 matches"
                                         } else if !result.partial
-                                            && (count >= SEARCH_INDEX_LIMIT
-                                                || count >= SEARCH_LIVE_SCAN_LIMIT)
+                                            && count >= SEARCH_LIVE_SCAN_LIMIT
                                         {
                                             " · results truncated"
                                         } else {
@@ -25873,6 +25873,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_confirm_delete(move || {
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut().confirm_delete(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_confirm_cancel(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().cancel_confirm(&ui);
         }
     });
 

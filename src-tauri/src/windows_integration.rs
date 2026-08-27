@@ -163,17 +163,39 @@ fn skip_shell_verb_label(label: &str) -> bool {
     matches!(
         n.as_str(),
         "open"
+            | "apri"
+            | "abrir"
             | "open with"
             | "cut"
+            | "taglia"
+            | "cortar"
             | "copy"
+            | "copia"
+            | "copiar"
             | "paste"
+            | "incolla"
+            | "pegar"
             | "delete"
+            | "elimina"
+            | "eliminar"
+            | "borrar"
             | "rename"
+            | "rinomina"
+            | "renombrar"
             | "properties"
+            | "proprietà"
+            | "propiedades"
             | "copy as path"
             | "copy path"
+            | "copia come percorso"
+            | "copiar como ruta"
             | "share"
+            | "condividi"
+            | "compartir"
     ) || n.starts_with("open with")
+        || n.starts_with("apri con")
+        || n.starts_with("abrir con")
+        || n.starts_with("cambiar nombre")
 }
 
 fn with_shell_context_menu<T>(
@@ -326,8 +348,7 @@ pub fn share_path(path: &str) -> Result<(), String> {
         Err(_) => {
             // Fallback: select the file in Explorer so Share is one click away.
             Command::new("explorer")
-                .arg("/select,")
-                .arg(path)
+                .arg(format!("/select,{path}"))
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn()
                 .map(|_| ())
@@ -346,6 +367,13 @@ pub fn get_previous_versions(path: &str) -> Result<Vec<PreviousVersion>, String>
 $path = $args[0]
 $versions = @()
 
+function Shadow-ItemPath($device, $orig) {
+    $rel = $orig
+    if ($rel.Length -ge 2 -and $rel[1] -eq [char]':') { $rel = $rel.Substring(2) }
+    $rel = $rel.TrimStart('\', '/')
+    return ($device.TrimEnd('\') + '\' + $rel)
+}
+
 # Try to use WMI to query VSS
 try {
     $vssReaderPath = Get-WmiObject -Query "SELECT * FROM Win32_ShadowCopy" -ErrorAction Stop
@@ -353,19 +381,20 @@ try {
     foreach ($shadow in $vssReaderPath) {
         $device = $shadow.DeviceObject
         $id = $shadow.ID
-        $timestamp = $shadow.InstallDate
+        $unix = 0
+        try {
+            $dt = [System.Management.ManagementDateTimeConverter]::ToDateTime($shadow.InstallDate)
+            $unix = [int64]([DateTimeOffset]::new($dt).ToUnixTimeSeconds())
+        } catch {}
+        $versionPath = Shadow-ItemPath $device $path
         
-        # Mount the shadow copy
-        $mount = (New-Item -ItemType Directory -Force -Path "C:\VSS_Temp_$([guid]::NewGuid())" -ErrorAction SilentlyContinue).FullName
-        cmd /c mklink /d "$mount" "$device\$path" 2>$null
-        
-        if (Test-Path "$mount") {
-            $file = Get-Item -LiteralPath "$mount" -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $versionPath) {
+            $file = Get-Item -LiteralPath $versionPath -ErrorAction SilentlyContinue
             if ($file) {
                 $versions += @{
-                    path = "$mount"
-                    timestamp = [int64]($timestamp.ToFileTime())
-                    size = $file.Length
+                    path = $versionPath
+                    timestamp = $unix
+                    size = $(if ($file.PSIsContainer) { 0 } else { $file.Length })
                     version_id = $id
                 }
             }
@@ -406,8 +435,12 @@ ConvertTo-Json -InputObject $versions -Compress
         .map_err(|e| e.to_string())?;
 
     if output.status.success() {
-        let versions: Vec<PreviousVersion> =
-            serde_json::from_slice(&output.stdout).unwrap_or_default();
+        let versions = match serde_json::from_slice::<Vec<PreviousVersion>>(&output.stdout) {
+            Ok(v) => v,
+            Err(_) => serde_json::from_slice::<PreviousVersion>(&output.stdout)
+                .map(|v| vec![v])
+                .unwrap_or_default(),
+        };
         Ok(versions)
     } else {
         Ok(Vec::new())
@@ -426,9 +459,12 @@ $shadow = Get-WmiObject -Query "SELECT * FROM Win32_ShadowCopy WHERE ID='$versio
 
 if ($shadow) {{
     $device = $shadow.DeviceObject
-    $versionPath = "$device\$path"
+    $rel = $path
+    if ($rel.Length -ge 2 -and $rel[1] -eq [char]':') {{ $rel = $rel.Substring(2) }}
+    $rel = $rel.TrimStart('\', '/')
+    $versionPath = $device.TrimEnd('\') + '\' + $rel
 
-    if (Test-Path $versionPath) {{
+    if (Test-Path -LiteralPath $versionPath) {{
         Copy-Item -LiteralPath $versionPath -Destination $path -Force -Recurse
         Write-Host "Successfully restored from version $versionId"
     }} else {{

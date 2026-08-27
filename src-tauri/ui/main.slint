@@ -2011,6 +2011,7 @@ component ChoiceMenuRow inherits Rectangle {
         color: touch.has-hover ? (root.danger ? white : ThemePalette.accent_strong) : ThemePalette.text_muted;
         font-size: 12.5px;
         vertical-alignment: center;
+        overflow: elide;
     }
     touch := TouchArea { mouse-cursor: pointer; clicked => { root.picked(root.command_name); } }
 }
@@ -3790,6 +3791,7 @@ export component MainWindow inherits Window {
     callback close();
     callback drag_window();
     callback confirm_delete();
+    callback confirm_cancel();
     callback prompt_accept(string);
     callback prompt_cancel();
     callback sort_column(string);
@@ -6199,9 +6201,9 @@ export component MainWindow inherits Window {
                 // so the controller knows it's an empty-space context (paste, new folder, etc.).
                 Rectangle {
                     x: 0;
-                    y: 38px;
+                    y: root.view_mode == "list" ? 70px : 38px;
                     width: parent.width;
-                    height: parent.height - 38px;
+                    height: parent.height - (root.view_mode == "list" ? 70px : 38px);
                     background: transparent;
                     sec_empty_touch := TouchArea {
                         width: parent.width;
@@ -6627,7 +6629,7 @@ export component MainWindow inherits Window {
                         spacing: 0;
 
                         // Image preview area
-                        if root.preview_is_image: Rectangle {
+                        if root.preview_is_image && !root.preview_is_media: Rectangle {
                             width: parent.width;
                             height: 220px;
                             background: ThemePalette.bg;
@@ -7600,7 +7602,12 @@ export component MainWindow inherits Window {
                             background: parent.is_active ? ThemePalette.accent : transparent;
                             animate background { duration: 40ms; easing: ease-out; }
                         }
-                        TouchArea { mouse-cursor: pointer; clicked => { root.settings_tab = tid; } }
+                        TouchArea { mouse-cursor: pointer; clicked => {
+                            root.settings_tab = tid;
+                            if (tid == "performance") {
+                                root.command("performance-settings");
+                            }
+                        } }
                     }
                 }
             }
@@ -7657,6 +7664,16 @@ export component MainWindow inherits Window {
                         font-size: 11.5px;
                         wrap: word-wrap;
                         height: self.preferred-height;
+                    }
+                    Rectangle {
+                        height: 72px;
+                        border-radius: AppMetrics.radius;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text { x: 14px; y: 12px; width: parent.width - 140px; height: 20px; text: @tr("Keyboard shortcuts"); color: ThemePalette.text; font-size: 13px; font-weight: 700; }
+                        Text { x: 14px; y: 36px; width: parent.width - 140px; height: 22px; text: @tr("Click a row, press a chord, then Save."); color: ThemePalette.text_muted; font-size: 12px; overflow: elide; }
+                        DialogButton { x: parent.width - 92px; y: 20px; label: @tr("Edit"); clicked => { root.settings_visible = false; root.command("shortcut-editor"); } }
                     }
 
                     Text { text: @tr("THEME"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
@@ -9291,7 +9308,7 @@ export component MainWindow inherits Window {
                 width: parent.width - 36px;
                 spacing: 8px;
                 alignment: end;
-                DialogButton { label: @tr("Cancel"); clicked => { root.confirm_visible = false; } }
+                DialogButton { label: @tr("Cancel"); clicked => { root.confirm_visible = false; root.confirm_cancel(); } }
                 DialogButton {
                     label: root.confirm_action != "" ? root.confirm_action : @tr("Delete");
                     primary: true;
@@ -9533,6 +9550,13 @@ export component MainWindow inherits Window {
                         font-size: 12px;
                         font-family: AppMetrics.mono_font;
                         key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                if (root.shortcut_capture_active && root.shortcut_capture_command == sc.command) {
+                                    root.shortcut_key(event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.text);
+                                    return accept;
+                                }
+                                return reject;
+                            }
                             root.shortcut_capture_command = sc.command;
                             root.shortcut_capture_active = true;
                             root.shortcut_key(event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.text);
@@ -9587,7 +9611,7 @@ export component MainWindow inherits Window {
                     ToolButton {
                         x: parent.width - 36px; y: 10px;
                         button_width: 28px; button_height: 28px;
-                        visible: item.meta == "";
+                        visible: item.meta == "" && root.tool_overlay_kind == "smart-folders";
                         text_label: "···";
                         tooltip: @tr("More");
                         clicked => { root.tool_overlay_secondary(item.id); }
@@ -9606,21 +9630,13 @@ export component MainWindow inherits Window {
                 label: @tr("Close");
                 clicked => { root.tool_overlay_close(); }
             }
-            if root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "shortcuts" || root.tool_overlay_kind == "workspaces" || root.tool_overlay_kind == "smart-folders" || root.tool_overlay_kind == "versions" || root.tool_overlay_kind == "privacy": DialogButton {
+            if root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "shortcuts" || root.tool_overlay_kind == "privacy": DialogButton {
                 x: parent.width - self.preferred-width - 18px; y: parent.height - 48px;
                 label: root.tool_overlay_kind == "rules" ? @tr("Run enabled")
                     : (root.tool_overlay_kind == "shortcuts" ? @tr("Save")
-                    : (root.tool_overlay_kind == "versions" ? @tr("Restore")
-                    : (root.tool_overlay_kind == "privacy" ? @tr("Clear caches")
-                    : (root.tool_overlay_kind == "workspaces" ? @tr("Open") : @tr("Close")))));
+                    : @tr("Clear caches"));
                 primary: true;
-                clicked => {
-                    if (root.tool_overlay_kind == "smart-folders") {
-                        root.tool_overlay_close();
-                    } else {
-                        root.tool_overlay_primary_action();
-                    }
-                }
+                clicked => { root.tool_overlay_primary_action(); }
             }
         }
     }
@@ -9814,7 +9830,7 @@ export component MainWindow inherits Window {
             background: ThemePalette.panel_solid;
             Text { x: 20px; y: 16px; width: parent.width - 80px; height: 28px; text: root.preview_title; color: ThemePalette.text; font-size: 20px; font-weight: 700; overflow: elide; }
             ToolButton { x: parent.width - 44px; y: 10px; button_width: 32px; button_height: 32px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: @tr("Close"); clicked => { root.quick_look_close(); } }
-            if root.preview_is_image: Image {
+            if root.preview_is_image && !root.preview_is_media: Image {
                 x: (parent.width - 420px) / 2; y: 56px;
                 width: 420px; height: 320px;
                 source: root.preview_image;
@@ -9826,7 +9842,7 @@ export component MainWindow inherits Window {
                 background: ThemePalette.panel_alt;
                 Text {
                     x: 16px; width: parent.width - 32px; height: parent.height;
-                    text: root.preview_is_pdf ? @tr("PDF document — first page text preview below") : "Media file — press Play to open in your default app";
+                    text: root.preview_is_pdf ? @tr("PDF document — first page text preview below") : @tr("Media file — press Play to open in your default app");
                     color: ThemePalette.text_muted; font-size: 12.5px; vertical-alignment: center;
                 }
             }
@@ -10393,10 +10409,10 @@ export component MainWindow inherits Window {
 
     keys := FocusScope {
         key-pressed(event) => {
-            if (root.address_editing || root.rename_index >= 0) {
+            if (root.address_editing || root.secondary_addr_editing || root.rename_index >= 0) {
                 return reject;
             }
-            if (event.text == Key.Escape || event.text == Key.Return || event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.Tab) {
+            if (!event.modifiers.alt && (event.text == Key.Escape || event.text == Key.Return || event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.Tab)) {
                 return reject;
             }
             root.shortcut_consumed = false;
@@ -10410,8 +10426,10 @@ export component MainWindow inherits Window {
                     : (event.text == Key.F5 ? "F5"
                     : (event.text == Key.LeftArrow ? "Left"
                     : (event.text == Key.RightArrow ? "Right"
+                    : (event.text == Key.UpArrow ? "Up"
+                    : (event.text == Key.Return ? "Return"
                     : (event.text == Key.Backspace ? "Backspace"
-                    : event.text)))))));
+                    : event.text)))))))));
             if (root.shortcut_consumed) {
                 return accept;
             }
@@ -10419,14 +10437,14 @@ export component MainWindow inherits Window {
         }
         // Overlay-sensitive keys stay in Slint so Escape / arrows / Return
         // still follow dialog state. Rebindable chords are dispatched from Rust.
-        KeyBinding { keys: @keys(Return); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.command_visible && !root.tool_overlay_visible) { root.file_opened(root.selected_index); } } }
-        KeyBinding { keys: @keys(Space); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.tool_overlay_visible && !root.command_visible) { root.toggle_quick_look(); } } }
-        KeyBinding { keys: @keys(UpArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible) { root.file_selected(max(0, root.selected_index - 1), false, false); } } }
-        KeyBinding { keys: @keys(DownArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible) { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } } }
+        KeyBinding { keys: @keys(Return); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_opened(root.selected_index); } } }
+        KeyBinding { keys: @keys(Space); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.tool_overlay_visible && !root.command_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.toggle_quick_look(); } } }
+        KeyBinding { keys: @keys(UpArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_selected(max(0, root.selected_index - 1), false, false); } } }
+        KeyBinding { keys: @keys(DownArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } } }
         KeyBinding { keys: @keys(Escape); activated => {
             if (root.command_visible) { root.command_visible = false; }
             else if (root.settings_visible) { root.settings_visible = false; }
-            else if (root.confirm_visible) { root.confirm_visible = false; }
+            else if (root.confirm_visible) { root.confirm_visible = false; root.confirm_cancel(); }
             else if (root.welcome_visible) { root.welcome_dismiss(); }
             else if (root.ui_mode_prompt_visible) { /* keep until a mode is chosen */ }
             else if (root.tool_overlay_visible) { root.tool_overlay_close(); }

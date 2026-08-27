@@ -125,8 +125,38 @@ fn shift_implied(key: &str) -> bool {
     matches!(key, "," | "." | ";" | "/" | "\\" | "'" | "[" | "]")
 }
 
+/// Map Slint `event.text` (control chars / PUA) and typed names onto one key id.
+pub fn canonical_key(raw: &str) -> String {
+    normalize_key_name(raw)
+}
+
 fn normalize_key_name(raw: &str) -> String {
     let t = raw.trim();
+    if let Some(c) = t.chars().next() {
+        if t.chars().count() == 1 {
+            match c {
+                '\u{0008}' => return "Backspace".into(),
+                '\u{0009}' => return "Tab".into(),
+                '\u{000a}' | '\u{000d}' => return "Return".into(),
+                '\u{001b}' => return "Escape".into(),
+                '\u{007f}' => return "Delete".into(),
+                '\u{0010}' | '\u{0015}' => return "Shift".into(),
+                '\u{0011}' | '\u{0016}' => return "Control".into(),
+                '\u{0012}' | '\u{0013}' => return "Alt".into(),
+                '\u{0017}' | '\u{0018}' => return "Meta".into(),
+                '\u{0020}' => return "Space".into(),
+                '\u{F700}' => return "Up".into(),
+                '\u{F701}' => return "Down".into(),
+                '\u{F702}' => return "Left".into(),
+                '\u{F703}' => return "Right".into(),
+                c if ('\u{F704}'..='\u{F717}').contains(&c) => {
+                    let n = (c as u32) - 0xF703;
+                    return format!("F{n}");
+                }
+                _ => {}
+            }
+        }
+    }
     match t.to_ascii_lowercase().as_str() {
         "esc" | "escape" => "Escape".into(),
         "enter" | "return" => "Return".into(),
@@ -192,14 +222,16 @@ pub fn resolve(
         return None;
     }
 
+    let mut entries: Vec<(&String, &String)> = overrides.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
     let mut overridden_commands: Vec<&str> = Vec::new();
-    for (command, raw) in overrides {
+    for (command, raw) in entries {
         let Some(chord) = Chord::parse(raw) else {
             continue;
         };
         overridden_commands.push(command.as_str());
         if chord.matches(ctrl, shift, alt, &key) {
-            return Some(command.clone());
+            return Some((*command).clone());
         }
     }
 
@@ -303,6 +335,31 @@ mod tests {
         assert!(Chord::from_parts(true, false, false, "c").is_some());
         assert!(Chord::from_parts(true, false, false, "Control").is_none());
         assert!(Chord::from_parts(false, false, false, "").is_none());
+    }
+
+    #[test]
+    fn canonical_key_maps_slint_control_chars() {
+        assert_eq!(canonical_key("\u{001b}"), "Escape");
+        assert_eq!(canonical_key("\u{0008}"), "Backspace");
+        assert_eq!(canonical_key("\u{007f}"), "Delete");
+        assert_eq!(canonical_key("\u{0011}"), "Control");
+        assert_eq!(canonical_key("\u{F705}"), "F2");
+        assert_eq!(canonical_key("\u{F702}"), "Left");
+        assert_eq!(canonical_key("\u{F700}"), "Up");
+        assert_eq!(canonical_key("\n"), "Return");
+    }
+
+    #[test]
+    fn resolve_alt_chords_from_slint_pua() {
+        let map = HashMap::new();
+        assert_eq!(
+            resolve(false, false, true, "\u{F700}", &map).as_deref(),
+            Some("go-up")
+        );
+        assert_eq!(
+            resolve(false, false, true, "\n", &map).as_deref(),
+            Some("properties")
+        );
     }
 
     #[test]

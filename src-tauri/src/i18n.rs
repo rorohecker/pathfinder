@@ -224,6 +224,7 @@ fn it(en: &str) -> Option<String> {
             "Delete" => "Elimina",
             "Details View" => "Vista dettagli",
             "Empty Recycle Bin" => "Svuota Cestino",
+            "Empty" => "Svuota",
             "Extract Here" => "Estrai qui",
             "File Note" => "Nota file",
             "Files" => "File",
@@ -311,6 +312,11 @@ fn it(en: &str) -> Option<String> {
             "Does not delete your files" => "Non elimina i tuoi file",
             "Click a row and press a key combination. Save to apply." => {
                 "Clicca una riga e premi una combinazione. Salva per applicare."
+            }
+            "Click a version to restore it." => "Clicca una versione per ripristinarla.",
+            "Keyboard shortcuts" => "Scorciatoie da tastiera",
+            "Click a row, press a chord, then Save." => {
+                "Clicca una riga, premi un accordo, poi Salva."
             }
             "Documents" => "Documenti",
             "Pictures" => "Immagini",
@@ -459,6 +465,7 @@ fn es(en: &str) -> Option<String> {
             "Delete" => "Eliminar",
             "Details View" => "Vista de detalles",
             "Empty Recycle Bin" => "Vaciar Papelera",
+            "Empty" => "Vaciar",
             "Extract Here" => "Extraer aquí",
             "File Note" => "Nota de archivo",
             "Files" => "Archivos",
@@ -546,6 +553,11 @@ fn es(en: &str) -> Option<String> {
             "Does not delete your files" => "No elimina tus archivos",
             "Click a row and press a key combination. Save to apply." => {
                 "Haz clic en una fila y pulsa una combinación. Guarda para aplicar."
+            }
+            "Click a version to restore it." => "Haz clic en una versión para restaurarla.",
+            "Keyboard shortcuts" => "Atajos de teclado",
+            "Click a row, press a chord, then Save." => {
+                "Haz clic en una fila, pulsa un acorde y guarda."
             }
             "Documents" => "Documentos",
             "Pictures" => "Imágenes",
