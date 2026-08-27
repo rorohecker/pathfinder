@@ -131,9 +131,8 @@ pub fn canonical_key(raw: &str) -> String {
 }
 
 fn normalize_key_name(raw: &str) -> String {
-    let t = raw.trim();
-    if let Some(c) = t.chars().next() {
-        if t.chars().count() == 1 {
+    if let Some(c) = raw.chars().next() {
+        if raw.chars().count() == 1 {
             match c {
                 '\u{0008}' => return "Backspace".into(),
                 '\u{0009}' => return "Tab".into(),
@@ -157,6 +156,7 @@ fn normalize_key_name(raw: &str) -> String {
             }
         }
     }
+    let t = raw.trim();
     match t.to_ascii_lowercase().as_str() {
         "esc" | "escape" => "Escape".into(),
         "enter" | "return" => "Return".into(),

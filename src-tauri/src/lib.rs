@@ -22736,24 +22736,32 @@ impl NativeController {
             return;
         };
         let path = entry.path.clone();
-        let mut items: Vec<ToolListItem> = Vec::new();
-        #[cfg(target_os = "windows")]
-        if let Ok(versions) = windows_integration::get_previous_versions(&path) {
-            for v in versions {
-                items.push(ToolListItem {
-                    id: ss(format!("{path}\t{}", v.version_id)),
-                    title: ss(if v.timestamp == 0 {
-                        v.version_id.clone()
-                    } else {
-                        format_modified(v.timestamp)
-                    }),
-                    subtitle: ss(format!("{} · {}", format_size_short(v.size), v.path)),
-                    meta: ss(""),
-                    enabled: true,
-                    accent: color("#d98a24"),
-                });
+        let items: Vec<ToolListItem> = {
+            #[cfg(target_os = "windows")]
+            {
+                windows_integration::get_previous_versions(&path)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|v| ToolListItem {
+                        id: ss(format!("{path}\t{}", v.version_id)),
+                        title: ss(if v.timestamp == 0 {
+                            v.version_id.clone()
+                        } else {
+                            format_modified(v.timestamp)
+                        }),
+                        subtitle: ss(format!("{} · {}", format_size_short(v.size), v.path)),
+                        meta: ss(""),
+                        enabled: true,
+                        accent: color("#d98a24"),
+                    })
+                    .collect()
             }
-        }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = &path;
+                Vec::new()
+            }
+        };
         if items.is_empty() {
             ui.set_tool_overlay_kind(ss("versions"));
             ui.set_tool_overlay_title(ss(&i18n::t("Previous Versions")));
@@ -22766,11 +22774,7 @@ impl NativeController {
         }
         ui.set_tool_overlay_kind(ss("versions"));
         ui.set_tool_overlay_title(ss(&i18n::t("Previous Versions")));
-        ui.set_tool_overlay_subtitle(ss(if items.is_empty() {
-            i18n::t("No shadow copies found. Enable File History or VSS snapshots.")
-        } else {
-            i18n::t("Click a version to restore it.")
-        }));
+        ui.set_tool_overlay_subtitle(ss(&i18n::t("Click a version to restore it.")));
         ui.set_tool_overlay_items(model_from_vec(items));
         ui.set_tool_overlay_visible(true);
     }
