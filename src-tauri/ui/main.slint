@@ -303,20 +303,30 @@ component HoverTip inherits Rectangle {
     }
 }
 
-// Fade-in host for overlays created with `if visible`. A 16ms timer flips
-// `shown` so opacity actually interpolates instead of appearing at 1.
+// Spawn host for overlays created with `if visible`. Starts transparent and
+// slightly offset; a 16ms timer eases `shown` and `rise` so the panel
+// interpolates in instead of popping at full opacity.
 component FadeHost inherits Rectangle {
-    in property <duration> motion: 160ms;
+    in property <duration> motion: 180ms;
+    in property <length> spawn_from: 14px;
     property <float> shown: 0;
+    out property <length> rise: spawn_from;
     opacity: root.shown;
     animate shown {
+        duration: root.motion;
+        easing: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    animate rise {
         duration: root.motion;
         easing: cubic-bezier(0.16, 1, 0.3, 1);
     }
     Timer {
         interval: 16ms;
         running: root.shown < 1.0;
-        triggered => { root.shown = 1.0; }
+        triggered => {
+            root.shown = 1.0;
+            root.rise = 0px;
+        }
     }
 }
 
@@ -4239,7 +4249,9 @@ export component MainWindow inherits Window {
         // Selection action bar - replaces the toolbar when files are selected.
         // Recycle Bin gets a restore-focused bar; normal folders keep the usual actions.
         // No clip so hover tooltips can draw above the strip.
-        if root.selected_count > 0 && !root.is_storage_view && root.in_recycle_bin: Rectangle {
+        if root.selected_count > 0 && !root.is_storage_view && root.in_recycle_bin: FadeHost {
+            spawn_from: 0px;
+            motion: 140ms;
             property <length> sel_gap: 4px;
             property <length> sel_clear_w: root.is_simple ? 54px : 44px;
             property <length> sel_norm_step: 34px;
@@ -4351,7 +4363,9 @@ export component MainWindow inherits Window {
             }
         }
 
-        if root.selected_count > 0 && !root.is_storage_view && !root.in_recycle_bin: Rectangle {
+        if root.selected_count > 0 && !root.is_storage_view && !root.in_recycle_bin: FadeHost {
+            spawn_from: 0px;
+            motion: 140ms;
             property <int> sel_shift: root.selection_has_archive ? 1 : 0;
             property <int> sel_btn_count: 10 + sel_shift;
             property <length> sel_gap: 4px;
@@ -5352,9 +5366,11 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.folder_changed_banner: Rectangle {
+            if root.folder_changed_banner: FadeHost {
+                spawn_from: -10px;
+                motion: 160ms;
                 x: 0;
-                y: -2px;
+                y: -2px + self.rise;
                 width: root.primary_pane_w;
                 height: 28px;
                 z: 8;
@@ -5835,8 +5851,10 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                empty_pane := Rectangle {
-                    visible: root.files.length == 0;
+                if root.files.length == 0: empty_pane := FadeHost {
+                    spawn_from: 10px;
+                    motion: 180ms;
+                    y: self.rise;
                     width: parent.width;
                     height: parent.height;
                     property <bool> fantasy_on: ThemePalette.active_theme == "fantasy";
@@ -6375,9 +6393,11 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if root.secondary_files.length == 0: Rectangle {
+                if root.secondary_files.length == 0: FadeHost {
+                    spawn_from: 10px;
+                    motion: 180ms;
                     x: 0;
-                    y: 38px + (root.view_mode == "list" ? 32px : 0px);
+                    y: 38px + (root.view_mode == "list" ? 32px : 0px) + self.rise;
                     width: parent.width;
                     height: parent.height - 38px - (root.view_mode == "list" ? 32px : 0px);
                     property <bool> fantasy_on: ThemePalette.active_theme == "fantasy";
@@ -7149,10 +7169,11 @@ export component MainWindow inherits Window {
 
     // Context menu - file
     if root.context_visible && root.context_on_file: FadeHost {
-        motion: 80ms;
+        motion: 90ms;
+        spawn_from: 6px;
         z: 100;
         x: root.context_x;
-        y: root.context_y.clamp(0px, root.height - (root.is_simple ? 410px : 580px));
+        y: root.context_y.clamp(0px, root.height - (root.is_simple ? 410px : 580px)) + self.rise;
         width: 226px;
         height: root.is_simple ? 390px : 560px;
         border-width: 1px;
@@ -7312,10 +7333,11 @@ export component MainWindow inherits Window {
 
     // Context menu - empty area
     if root.context_visible && !root.context_on_file: FadeHost {
-        motion: 80ms;
+        motion: 90ms;
+        spawn_from: 6px;
         z: 100;
         x: root.context_x;
-        y: root.context_y.clamp(0px, root.height - 278px);
+        y: root.context_y.clamp(0px, root.height - 278px) + self.rise;
         width: 226px;
         height: 266px;
         border-width: 1px;
@@ -7362,7 +7384,7 @@ export component MainWindow inherits Window {
 
         Rectangle {
             x: (parent.width - 520px) / 2;
-            y: 96px;
+            y: 96px + parent.rise;
             width: 520px;
             height: 470px;
             border-width: 1px;
@@ -7498,6 +7520,7 @@ export component MainWindow inherits Window {
     }
 
     if root.command_visible: FadeHost {
+        spawn_from: -12px;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
@@ -7505,7 +7528,7 @@ export component MainWindow inherits Window {
 
         Rectangle {
             x: max(16px, (parent.width - min(620px, parent.width - 32px)) / 2);
-            y: max(16px, min(82px, (parent.height - min(512px, parent.height - 32px)) / 2));
+            y: max(16px, min(82px, (parent.height - min(512px, parent.height - 32px)) / 2)) + parent.rise;
             width: min(620px, parent.width - 32px);
             height: min(512px, parent.height - 32px);
             border-width: 1px;
@@ -7587,7 +7610,7 @@ export component MainWindow inherits Window {
 
         Rectangle {
             x: (parent.width - min(780px, parent.width - 32px)) / 2;
-            y: (parent.height - min(680px, parent.height - 32px)) / 2;
+            y: (parent.height - min(680px, parent.height - 32px)) / 2 + parent.rise;
             width: min(780px, parent.width - 32px);
             height: min(680px, parent.height - 32px);
             border-width: 1px;
@@ -9359,7 +9382,7 @@ export component MainWindow inherits Window {
         }
         confirm_panel := Rectangle {
             x: (parent.width - 460px) / 2;
-            y: (parent.height - self.height) / 2;
+            y: (parent.height - self.height) / 2 + parent.rise;
             width: 460px;
             height: confirm_body.preferred-height + 120px;
             border-width: 1px;
@@ -9408,7 +9431,7 @@ export component MainWindow inherits Window {
 
         if root.prompt_kind == "conflict": Rectangle {
             x: (parent.width - min(460px, parent.width - 32px)) / 2;
-            y: (parent.height - min(220px, parent.height - 32px)) / 2;
+            y: (parent.height - min(220px, parent.height - 32px)) / 2 + parent.rise;
             width: min(460px, parent.width - 32px);
             height: min(220px, parent.height - 32px);
             border-width: 1px;
@@ -9431,7 +9454,7 @@ export component MainWindow inherits Window {
 
         if root.prompt_kind == "rename-conflict": Rectangle {
             x: (parent.width - min(460px, parent.width - 32px)) / 2;
-            y: (parent.height - min(220px, parent.height - 32px)) / 2;
+            y: (parent.height - min(220px, parent.height - 32px)) / 2 + parent.rise;
             width: min(460px, parent.width - 32px);
             height: min(220px, parent.height - 32px);
             border-width: 1px;
@@ -9451,7 +9474,7 @@ export component MainWindow inherits Window {
 
         if root.prompt_kind == "batch-rename": Rectangle {
             x: (parent.width - min(560px, parent.width - 24px)) / 2;
-            y: (parent.height - min(520px, parent.height - 24px)) / 2;
+            y: (parent.height - min(520px, parent.height - 24px)) / 2 + parent.rise;
             width: min(560px, parent.width - 24px);
             height: min(520px, parent.height - 24px);
             border-width: 1px;
@@ -9486,7 +9509,7 @@ export component MainWindow inherits Window {
         // Standard text-input prompt (rename / new folder / etc.)
         if root.prompt_kind != "conflict" && root.prompt_kind != "rename-conflict" && root.prompt_kind != "batch-rename": Rectangle {
             x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
+            y: (parent.height - self.height) / 2 + parent.rise;
             width: min(440px, parent.width - 40px);
             height: 188px;
             border-width: 1px;
@@ -9542,7 +9565,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.rename_presets_visible: Rectangle {
+    if root.rename_presets_visible: FadeHost {
         z: 110;
         width: parent.width;
         height: parent.height;
@@ -9550,7 +9573,7 @@ export component MainWindow inherits Window {
         TouchArea { clicked => { root.prompt_cancel(); } }
         Rectangle {
             x: (parent.width - min(380px, parent.width - 32px)) / 2;
-            y: (parent.height - min(320px, parent.height - 32px)) / 2;
+            y: (parent.height - min(320px, parent.height - 32px)) / 2 + parent.rise;
             width: min(380px, parent.width - 32px);
             height: min(320px, parent.height - 32px);
             border-width: 1px;
@@ -9584,7 +9607,7 @@ export component MainWindow inherits Window {
         TouchArea { clicked => { root.tool_overlay_close(); } }
         Rectangle {
             x: (parent.width - min(520px, parent.width - 32px)) / 2;
-            y: (parent.height - min(420px, parent.height - 32px)) / 2;
+            y: (parent.height - min(420px, parent.height - 32px)) / 2 + parent.rise;
             width: min(520px, parent.width - 32px);
             height: min(420px, parent.height - 32px);
             border-width: 1px;
@@ -9724,7 +9747,7 @@ export component MainWindow inherits Window {
         TouchArea { clicked => { root.compare_overlay_close(); } }
         Rectangle {
             x: (parent.width - min(560px, parent.width - 32px)) / 2;
-            y: (parent.height - min(440px, parent.height - 32px)) / 2;
+            y: (parent.height - min(440px, parent.height - 32px)) / 2 + parent.rise;
             width: min(560px, parent.width - 32px);
             height: min(440px, parent.height - 32px);
             border-width: 1px;
@@ -9807,7 +9830,7 @@ export component MainWindow inherits Window {
         TouchArea { clicked => { root.dupe_overlay_close(); } }
         Rectangle {
             x: (parent.width - min(640px, parent.width - 32px)) / 2;
-            y: (parent.height - min(520px, parent.height - 32px)) / 2;
+            y: (parent.height - min(520px, parent.height - 32px)) / 2 + parent.rise;
             width: min(640px, parent.width - 32px);
             height: min(520px, parent.height - 32px);
             border-width: 1px;
@@ -9896,7 +9919,7 @@ export component MainWindow inherits Window {
         TouchArea { clicked => { root.quick_look_close(); } }
         Rectangle {
             x: (parent.width - min(640px, parent.width - 48px)) / 2;
-            y: (parent.height - min(480px, parent.height - 48px)) / 2;
+            y: (parent.height - min(480px, parent.height - 48px)) / 2 + parent.rise;
             width: min(640px, parent.width - 48px);
             height: min(480px, parent.height - 48px);
             border-width: 1px;
@@ -9938,9 +9961,11 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.op_drawer_visible: Rectangle {
+    if root.op_drawer_visible: FadeHost {
+        spawn_from: 14px;
+        motion: 200ms;
         x: (parent.width - min(420px, parent.width - 32px)) / 2;
-        y: parent.height - root.status_h - 76px;
+        y: parent.height - root.status_h - 76px + self.rise;
         width: min(420px, parent.width - 32px);
         height: 60px;
         border-width: 1px;
@@ -10034,7 +10059,7 @@ export component MainWindow inherits Window {
 
         Rectangle {
             x: (parent.width - min(600px, parent.width - 32px)) / 2;
-            y: (parent.height - min(580px, parent.height - 32px)) / 2;
+            y: (parent.height - min(580px, parent.height - 32px)) / 2 + parent.rise;
             width: min(600px, parent.width - 32px);
             height: min(580px, parent.height - 32px);
             border-radius: AppMetrics.radius;
@@ -10254,18 +10279,10 @@ export component MainWindow inherits Window {
         height: parent.height;
 
         toast_box := FadeHost {
+            spawn_from: 16px;
+            motion: 220ms;
             x: (parent.width - self.width) / 2;
             y: parent.height - self.height - 18px + self.rise;
-            property <length> rise: 18px;
-            animate rise {
-                duration: 220ms;
-                easing: cubic-bezier(0.16, 1, 0.3, 1);
-            }
-            Timer {
-                interval: 16ms;
-                running: rise > 0px;
-                triggered => { rise = 0px; }
-            }
             width: min(560px, parent.width - 28px);
             height: toast_body.preferred-height + ((root.toast_kind == "error" || root.toast_kind == "warning" || root.toast_action != "") ? 52px : 36px)
                 + (root.update_installing ? 14px : 0px);
@@ -10405,7 +10422,7 @@ export component MainWindow inherits Window {
 
         Rectangle {
             x: (parent.width - min(500px, parent.width - 32px)) / 2;
-            y: (parent.height - min(310px, parent.height - 32px)) / 2;
+            y: (parent.height - min(310px, parent.height - 32px)) / 2 + parent.rise;
             width: min(500px, parent.width - 32px);
             height: min(310px, parent.height - 32px);
             border-width: 1px;
