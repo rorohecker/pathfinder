@@ -303,6 +303,23 @@ component HoverTip inherits Rectangle {
     }
 }
 
+// Fade-in host for overlays created with `if visible`. A 16ms timer flips
+// `shown` so opacity actually interpolates instead of appearing at 1.
+component FadeHost inherits Rectangle {
+    in property <duration> motion: 160ms;
+    property <float> shown: 0;
+    opacity: root.shown;
+    animate shown {
+        duration: root.motion;
+        easing: cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    Timer {
+        interval: 16ms;
+        running: root.shown < 1.0;
+        triggered => { root.shown = 1.0; }
+    }
+}
+
 component ToolButton inherits Rectangle {
     in property <string> icon_data;
     in property <string> text_label;
@@ -326,6 +343,7 @@ component ToolButton inherits Rectangle {
         (touch.pressed ? rgba(255, 255, 255, 0.12) :
         (root.active ? ThemePalette.accent_soft :
         (touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0))));
+    animate background { duration: 90ms; easing: ease-out; }
 
     // Prefer explicit tooltip; fall back to the caption so icon-only buttons
     // still name themselves on hover.
@@ -457,8 +475,8 @@ component TabButton inherits Rectangle {
     background: root.is_drop_target
         ? ThemePalette.accent_soft
         : (root.tab.active ? ThemePalette.panel : (touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0)));
-    animate background { duration: 40ms; easing: linear; }
-    animate border-color { duration: 120ms; easing: ease-out; }
+    animate background { duration: 90ms; easing: ease-out; }
+    animate border-color { duration: 90ms; easing: ease-out; }
 
     title_text := Text {
         x: 10px;
@@ -563,8 +581,8 @@ component SideRow inherits Rectangle {
                 : (!root.item.is_header && touch.has-hover
                     ? rgba(255, 255, 255, 0.06)
                     : rgba(0, 0, 0, 0)));
-        animate background { duration: 120ms; easing: ease-out; }
-        animate border-color { duration: 120ms; easing: ease-out; }
+        animate background { duration: 90ms; easing: ease-out; }
+        animate border-color { duration: 90ms; easing: ease-out; }
     }
 
     Text {
@@ -1434,6 +1452,8 @@ component FileRow inherits Rectangle {
     border-width: 0px;
     background: rgba(0, 0, 0, 0);
 
+    // Instant selection/hover. These rows are virtualized: animating opacity
+    // here ghosts the previous file as the window recycles during scroll.
     if root.item.is_selected: Rectangle {
         x: 0;
         y: root.group_header_h;
@@ -1445,8 +1465,6 @@ component FileRow inherits Rectangle {
         background: ThemePalette.accent_soft;
     }
 
-    // Hover glow - instant on, instant off. File Explorer doesn't fade either.
-    // Wrapped in `if` so non-hovered rows skip rendering this entirely.
     if touch.has-hover && !root.item.is_selected: Rectangle {
         x: 0;
         y: root.group_header_h;
@@ -1854,6 +1872,7 @@ component ListHeader inherits Rectangle {
         width: max(60px, parent.width - 44px - root.right_zone - 16px);
         height: parent.height;
         background: nh.has-hover ? rgba(255,255,255,0.04) : transparent;
+        animate background { duration: 90ms; easing: ease-out; }
         Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Name"); color: root.sort_by == "name" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
         if root.sort_by == "name": SvgIcon {
             x: parent.width - 14px; y: (parent.height - 10px) / 2; icon_size: 10px;
@@ -1868,6 +1887,7 @@ component ListHeader inherits Rectangle {
         width: root.col_size_w;
         height: parent.height;
         background: sh.has-hover ? rgba(255,255,255,0.04) : transparent;
+        animate background { duration: 90ms; easing: ease-out; }
         Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Size"); color: root.sort_by == "size" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; horizontal-alignment: right; vertical-alignment: center; }
         if root.sort_by == "size": SvgIcon {
             x: parent.width - 12px; y: (parent.height - 10px) / 2; icon_size: 10px;
@@ -1882,6 +1902,7 @@ component ListHeader inherits Rectangle {
         width: root.col_modified_w;
         height: parent.height;
         background: mh.has-hover ? rgba(255,255,255,0.04) : transparent;
+        animate background { duration: 90ms; easing: ease-out; }
         Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Modified"); color: root.sort_by == "modified" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
         if root.sort_by == "modified": SvgIcon {
             x: parent.width - 12px; y: (parent.height - 10px) / 2; icon_size: 10px;
@@ -1896,6 +1917,7 @@ component ListHeader inherits Rectangle {
         width: root.col_type_w;
         height: parent.height;
         background: th.has-hover ? rgba(255,255,255,0.04) : transparent;
+        animate background { duration: 90ms; easing: ease-out; }
         Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Type"); color: root.sort_by == "type" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
         if root.sort_by == "type": SvgIcon {
             x: parent.width - 12px; y: (parent.height - 10px) / 2; icon_size: 10px;
@@ -1919,6 +1941,8 @@ component ChoiceChip inherits Rectangle {
     border-width: 1px;
     border-color: root.active ? ThemePalette.accent : ThemePalette.border;
     background: root.active ? ThemePalette.accent_soft : (touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel);
+    animate background { duration: 90ms; easing: ease-out; }
+    animate border-color { duration: 90ms; easing: ease-out; }
 
     Rectangle {
         x: 10px;
@@ -1999,6 +2023,7 @@ component ChoiceMenuRow inherits Rectangle {
     height: 30px;
     border-radius: AppMetrics.radius_small;
     background: touch.has-hover ? (root.danger ? ThemePalette.danger : ThemePalette.accent_soft) : rgba(0, 0, 0, 0);
+    animate background { duration: 90ms; easing: ease-out; }
     SvgIcon {
         x: 9px;
         y: (parent.height - 14px) / 2;
@@ -2029,6 +2054,7 @@ component TagMenuRow inherits Rectangle {
     height: 30px;
     border-radius: AppMetrics.radius_small;
     background: touch.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+    animate background { duration: 90ms; easing: ease-out; }
     // Color dot
     Rectangle {
         x: 10px;
@@ -2063,6 +2089,7 @@ component CommandRow inherits Rectangle {
         height: parent.height;
         border-radius: AppMetrics.radius_small;
         background: touch.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+        animate background { duration: 90ms; easing: ease-out; }
     }
     Text { x: 10px; width: 90px; height: parent.height; text: root.item.group; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; overflow: elide; }
     Text { x: 110px; width: parent.width - 220px - AppMetrics.scroll_gutter; height: parent.height; text: root.item.label; color: touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 13px; vertical-alignment: center; overflow: elide; }
@@ -2087,6 +2114,8 @@ component DialogButton inherits Rectangle {
             ? (dlg_btn_touch.has-hover ? ThemePalette.danger : ThemePalette.danger)
             : (dlg_btn_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.accent))
         : (dlg_btn_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt);
+    animate background { duration: 90ms; easing: ease-out; }
+    animate opacity { duration: 90ms; easing: ease-out; }
     opacity: root.primary && root.danger && dlg_btn_touch.has-hover ? 0.92 : 1.0;
     dlg_btn_label := Text {
         x: 14px;
@@ -2182,7 +2211,7 @@ component StorageEntryRow inherits Rectangle {
         height: parent.height - 2px;
         border-radius: AppMetrics.radius_small;
         background: touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0);
-        animate background { duration: 60ms; easing: ease-out; }
+        animate background { duration: 90ms; easing: ease-out; }
     }
     Rectangle {
         x: 10px;
@@ -2354,7 +2383,7 @@ component StorageBucketRow inherits Rectangle {
         background: root.is_active
             ? ThemePalette.accent_soft
             : (touch.has-hover ? ThemePalette.panel_alt : rgba(0, 0, 0, 0));
-        animate background { duration: 60ms; easing: ease-out; }
+        animate background { duration: 90ms; easing: ease-out; }
     }
     Rectangle {
         x: 0; y: parent.height - 1px;
@@ -3886,20 +3915,22 @@ export component MainWindow inherits Window {
     in-out property <float> update_download_progress: 0.0;
     callback install_update();
 
-    // Splitter targets update every frame while dragging; layout reads the
-    // animated properties so panes ease instead of snapping pixel-by-pixel.
+    // Splitter targets update every frame while dragging. Duration is 0ms
+    // during the drag so the pane tracks the pointer; idle/double-click
+    // resets ease to the new size.
+    property <bool> layout_dragging: false;
     property <length> sidebar_w_target: 238px;
     out property <length> sidebar_w: sidebar_w_target;
     animate sidebar_w {
-        duration: 140ms;
-        easing: ease-in-out;
+        duration: root.layout_dragging ? 0ms : 200ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
     }
 
     property <float> split_ratio_target: 0.5;
     property <float> split_ratio: split_ratio_target;
     animate split_ratio {
-        duration: 130ms;
-        easing: ease-in-out;
+        duration: root.layout_dragging ? 0ms : 200ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
     }
     property <length> title_h: 36px;
     // Simple mode uses a true two-row toolbar: navigation cluster + address bar
@@ -3908,22 +3939,30 @@ export component MainWindow inherits Window {
     // captions stay visible at all times so users who don't recognise the glyphs
     // can read what each button does.
     property <length> toolbar_h: root.is_simple ? 88px : 44px;
+    animate toolbar_h {
+        duration: 200ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
     property <length> simple_row1_y: 4px;
     property <length> simple_row2_y: 48px;
     property <length> simple_btn_w: 88px;
     property <length> simple_btn_h: 38px;
     property <length> filter_bar_h: root.filter_bar_visible ? 36px : 0px;
+    animate filter_bar_h {
+        duration: 180ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
     property <length> status_h: 26px;
     // User-set preview pane width (drag handle on its left edge writes here).
     // Clamped to a usable range so the preview never shrinks to nothing or
     // crowds the file area off-screen on narrow windows.
     property <length> preview_w_user_target: 326px;
     in-out property <length> preview_w_user: preview_w_user_target;
-    animate preview_w_user {
-        duration: 140ms;
-        easing: ease-in-out;
-    }
     property <length> preview_w: root.preview_visible ? max(220px, min(640px, root.preview_w_user)) : 0px;
+    animate preview_w {
+        duration: root.layout_dragging ? 0ms : 220ms;
+        easing: cubic-bezier(0.22, 1, 0.36, 1);
+    }
     property <length> main_content_w: root.width - root.sidebar_w - root.preview_w;
     out property <length> pane_splitter_w: root.dual_pane ? 6px : 0px;
     out property <length> primary_pane_w: root.dual_pane ? (root.main_content_w - root.pane_splitter_w) * root.split_ratio : root.main_content_w;
@@ -3989,8 +4028,8 @@ export component MainWindow inherits Window {
                         ? ThemePalette.accent
                         : ThemePalette.border;
                     background: plus_touch.has-hover ? ThemePalette.panel_alt : ThemePalette.panel;
-                    animate background { duration: 60ms; easing: ease-out; }
-                    animate border-color { duration: 60ms; easing: ease-out; }
+                    animate background { duration: 90ms; easing: ease-out; }
+                    animate border-color { duration: 90ms; easing: ease-out; }
                     Rectangle {
                         x: (parent.width - 12px) / 2;
                         y: (parent.height - 2px) / 2;
@@ -4183,7 +4222,11 @@ export component MainWindow inherits Window {
                     property <length> sw_at_press: 238px;
                     pointer-event(e) => {
                         if (e.kind == PointerEventKind.down) {
+                            root.layout_dragging = true;
                             sw_at_press = root.sidebar_w;
+                        }
+                        if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                            root.layout_dragging = false;
                         }
                     }
                     moved => {
@@ -6010,6 +6053,7 @@ export component MainWindow inherits Window {
                 width: root.pane_splitter_w;
                 height: parent.height;
                 background: split_touch.has-hover || split_touch.pressed ? ThemePalette.accent : ThemePalette.panel;
+                animate background { duration: 90ms; easing: ease-out; }
 
                 // Center divider line
                 Rectangle {
@@ -6051,7 +6095,11 @@ export component MainWindow inherits Window {
                     property <float> ratio_at_press: 0.5;
                     pointer-event(e) => {
                         if (e.kind == PointerEventKind.down) {
+                            root.layout_dragging = true;
                             ratio_at_press = root.split_ratio;
+                        }
+                        if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                            root.layout_dragging = false;
                         }
                     }
                     moved => {
@@ -6407,11 +6455,12 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.preview_visible: Rectangle {
+            if root.preview_w > 0.5px: Rectangle {
                 x: parent.width - root.preview_w;
                 y: 0;
                 width: root.preview_w;
                 height: parent.height;
+                clip: true;
                 background: ThemePalette.panel_solid;
                 border-width: 0px;
                 // Left-edge separator removed. The panel background already
@@ -6431,7 +6480,11 @@ export component MainWindow inherits Window {
                         property <length> w_at_press: 326px;
                         pointer-event(e) => {
                             if (e.kind == PointerEventKind.down) {
+                                root.layout_dragging = true;
                                 w_at_press = root.preview_w;
+                            }
+                            if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) {
+                                root.layout_dragging = false;
                             }
                         }
                         moved => {
@@ -7095,7 +7148,8 @@ export component MainWindow inherits Window {
     }
 
     // Context menu - file
-    if root.context_visible && root.context_on_file: Rectangle {
+    if root.context_visible && root.context_on_file: FadeHost {
+        motion: 80ms;
         z: 100;
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - (root.is_simple ? 410px : 580px));
@@ -7257,7 +7311,8 @@ export component MainWindow inherits Window {
     }
 
     // Context menu - empty area
-    if root.context_visible && !root.context_on_file: Rectangle {
+    if root.context_visible && !root.context_on_file: FadeHost {
+        motion: 80ms;
         z: 100;
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - 278px);
@@ -7296,7 +7351,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.image_tools_visible: Rectangle {
+    if root.image_tools_visible: FadeHost {
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
@@ -7442,7 +7497,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.command_visible: Rectangle {
+    if root.command_visible: FadeHost {
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
@@ -7523,7 +7578,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.settings_visible: Rectangle {
+    if root.settings_visible: FadeHost {
         width: parent.width;
         height: parent.height;
         z: 165;
@@ -7617,7 +7672,7 @@ export component MainWindow inherits Window {
                             width: parent.width;
                             height: 2px;
                             background: parent.is_active ? ThemePalette.accent : transparent;
-                            animate background { duration: 40ms; easing: ease-out; }
+                            animate background { duration: 90ms; easing: ease-out; }
                         }
                         TouchArea { mouse-cursor: pointer; clicked => {
                             root.settings_tab = tid;
@@ -8686,7 +8741,7 @@ export component MainWindow inherits Window {
                         height: 22px;
                         border-radius: 11px;
                         background: root.show_hidden ? ThemePalette.accent : ThemePalette.border_strong;
-                        animate background { duration: 60ms; easing: ease-out; }
+                        animate background { duration: 90ms; easing: ease-out; }
                         Rectangle {
                             x: root.show_hidden ? 20px : 2px;
                             y: 2px;
@@ -8694,7 +8749,7 @@ export component MainWindow inherits Window {
                             height: 18px;
                             border-radius: 9px;
                             background: white;
-                            animate x { duration: 60ms; easing: ease-out; }
+                            animate x { duration: 90ms; easing: ease-out; }
                         }
                         TouchArea { mouse-cursor: pointer; clicked => { root.toggle_hidden(); } }
                     }
@@ -8717,7 +8772,7 @@ export component MainWindow inherits Window {
                         height: 22px;
                         border-radius: 11px;
                         background: root.theme_animations ? ThemePalette.accent : ThemePalette.border_strong;
-                        animate background { duration: 60ms; easing: ease-out; }
+                        animate background { duration: 90ms; easing: ease-out; }
                         Rectangle {
                             x: root.theme_animations ? 20px : 2px;
                             y: 2px;
@@ -8725,7 +8780,7 @@ export component MainWindow inherits Window {
                             height: 18px;
                             border-radius: 9px;
                             background: white;
-                            animate x { duration: 60ms; easing: ease-out; }
+                            animate x { duration: 90ms; easing: ease-out; }
                         }
                         TouchArea { mouse-cursor: pointer; clicked => { root.toggle_theme_animations(); } }
                     }
@@ -8751,7 +8806,7 @@ export component MainWindow inherits Window {
                         height: 22px;
                         border-radius: 11px;
                         background: root.preview_visible ? ThemePalette.accent : ThemePalette.border_strong;
-                        animate background { duration: 60ms; easing: ease-out; }
+                        animate background { duration: 90ms; easing: ease-out; }
                         Rectangle {
                             x: root.preview_visible ? 20px : 2px;
                             y: 2px;
@@ -8759,7 +8814,7 @@ export component MainWindow inherits Window {
                             height: 18px;
                             border-radius: 9px;
                             background: white;
-                            animate x { duration: 60ms; easing: ease-out; }
+                            animate x { duration: 90ms; easing: ease-out; }
                         }
                         TouchArea { mouse-cursor: pointer; clicked => { root.toggle_preview(); } }
                     }
@@ -9116,6 +9171,7 @@ export component MainWindow inherits Window {
                                 width: 88px; height: 30px; border-radius: AppMetrics.radius_small;
                                 background: root.ai_profile == "compact" ? ThemePalette.accent : ThemePalette.panel_alt;
                                 border-width: 1px; border-color: ThemePalette.border;
+                                animate background { duration: 90ms; easing: ease-out; }
                                 Text { width: parent.width; height: parent.height; text: @tr("Compact"); color: root.ai_profile == "compact" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("compact"); } }
                             }
@@ -9123,6 +9179,7 @@ export component MainWindow inherits Window {
                                 width: 96px; height: 30px; border-radius: AppMetrics.radius_small;
                                 background: root.ai_profile == "balanced" ? ThemePalette.accent : ThemePalette.panel_alt;
                                 border-width: 1px; border-color: ThemePalette.border;
+                                animate background { duration: 90ms; easing: ease-out; }
                                 Text { width: parent.width; height: parent.height; text: @tr("Balanced"); color: root.ai_profile == "balanced" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("balanced"); } }
                             }
@@ -9130,6 +9187,7 @@ export component MainWindow inherits Window {
                                 width: 88px; height: 30px; border-radius: AppMetrics.radius_small;
                                 background: root.ai_profile == "quality" ? ThemePalette.accent : ThemePalette.panel_alt;
                                 border-width: 1px; border-color: ThemePalette.border;
+                                animate background { duration: 90ms; easing: ease-out; }
                                 Text { width: parent.width; height: parent.height; text: @tr("Quality"); color: root.ai_profile == "quality" ? ThemePalette.on_accent : ThemePalette.text; font-size: 11px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
                                 TouchArea { mouse-cursor: pointer; clicked => { root.ai_set_profile("quality"); } }
                             }
@@ -9287,7 +9345,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.confirm_visible: Rectangle {
+    if root.confirm_visible: FadeHost {
         width: parent.width;
         height: parent.height;
         // Above toasts (150) so destructive confirms stay on top.
@@ -9336,7 +9394,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.prompt_visible: Rectangle {
+    if root.prompt_visible: FadeHost {
         z: 160;
         width: parent.width;
         height: parent.height;
@@ -9518,7 +9576,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.tool_overlay_visible: Rectangle {
+    if root.tool_overlay_visible: FadeHost {
         z: 110;
         width: parent.width;
         height: parent.height;
@@ -9658,7 +9716,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.compare_overlay_visible: Rectangle {
+    if root.compare_overlay_visible: FadeHost {
         z: 110;
         width: parent.width;
         height: parent.height;
@@ -9741,7 +9799,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.dupe_overlay_visible: Rectangle {
+    if root.dupe_overlay_visible: FadeHost {
         z: 110;
         width: parent.width;
         height: parent.height;
@@ -9830,7 +9888,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.quick_look_visible: Rectangle {
+    if root.quick_look_visible: FadeHost {
         z: 120;
         width: parent.width;
         height: parent.height;
@@ -9961,7 +10019,7 @@ export component MainWindow inherits Window {
     // default folder handler in one click, and explains the manual steps for
     // pinning Pathfinder to the taskbar / unpinning File Explorer since
     // Windows 11 does not expose those verbs to third party apps.
-    if root.welcome_visible: Rectangle {
+    if root.welcome_visible: FadeHost {
         x: 0; y: 0;
         width: parent.width; height: parent.height;
         background: rgba(0, 0, 0, 0.55);
@@ -10195,9 +10253,19 @@ export component MainWindow inherits Window {
         width: parent.width;
         height: parent.height;
 
-        toast_box := Rectangle {
+        toast_box := FadeHost {
             x: (parent.width - self.width) / 2;
-            y: parent.height - self.height - 18px;
+            y: parent.height - self.height - 18px + self.rise;
+            property <length> rise: 18px;
+            animate rise {
+                duration: 220ms;
+                easing: cubic-bezier(0.16, 1, 0.3, 1);
+            }
+            Timer {
+                interval: 16ms;
+                running: rise > 0px;
+                triggered => { rise = 0px; }
+            }
             width: min(560px, parent.width - 28px);
             height: toast_body.preferred-height + ((root.toast_kind == "error" || root.toast_kind == "warning" || root.toast_action != "") ? 52px : 36px)
                 + (root.update_installing ? 14px : 0px);
@@ -10328,7 +10396,7 @@ export component MainWindow inherits Window {
     }
 
     // -- UI mode first-run prompt --------------------------------------
-    if root.ui_mode_prompt_visible: Rectangle {
+    if root.ui_mode_prompt_visible: FadeHost {
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.46);
@@ -10371,7 +10439,8 @@ export component MainWindow inherits Window {
                 border-color: simple_card_touch.has-hover ? ThemePalette.accent : ThemePalette.border;
                 border-radius: AppMetrics.radius;
                 background: simple_card_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel;
-                animate background { duration: 40ms; easing: ease-out; }
+                animate background { duration: 90ms; easing: ease-out; }
+                animate border-color { duration: 90ms; easing: ease-out; }
                 Text {
                     x: 16px; y: 16px; width: parent.width - 32px; height: 22px;
                     text: @tr("Simple");
@@ -10401,7 +10470,8 @@ export component MainWindow inherits Window {
                 border-color: normal_card_touch.has-hover ? ThemePalette.accent : ThemePalette.border;
                 border-radius: AppMetrics.radius;
                 background: normal_card_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel;
-                animate background { duration: 40ms; easing: ease-out; }
+                animate background { duration: 90ms; easing: ease-out; }
+                animate border-color { duration: 90ms; easing: ease-out; }
                 Text {
                     x: 16px; y: 16px; width: parent.width - 32px; height: 22px;
                     text: @tr("Normal");
