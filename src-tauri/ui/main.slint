@@ -1844,6 +1844,10 @@ component ListHeader inherits Rectangle {
     background: ThemePalette.panel_solid;
     border-width: 0px;
 
+    // Consume clicks in the icon gutter so they do not fall through to the
+    // pane empty-context layer (which would clear the selection).
+    TouchArea { width: 44px; height: parent.height; }
+
     // NAME
     Rectangle {
         x: 44px;
@@ -2053,11 +2057,17 @@ component CommandRow inherits Rectangle {
 
     height: 34px;
     border-radius: AppMetrics.radius_small;
-    background: touch.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+    background: transparent;
+    Rectangle {
+        width: parent.width - AppMetrics.scroll_gutter;
+        height: parent.height;
+        border-radius: AppMetrics.radius_small;
+        background: touch.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+    }
     Text { x: 10px; width: 90px; height: parent.height; text: root.item.group; color: ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; overflow: elide; }
-    Text { x: 110px; width: parent.width - 220px; height: parent.height; text: root.item.label; color: touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 13px; vertical-alignment: center; overflow: elide; }
-    Text { x: parent.width - 100px; width: 90px; height: parent.height; text: root.item.hint; color: ThemePalette.text_faint; font-family: AppMetrics.mono_font; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
-    touch := TouchArea { mouse-cursor: pointer; clicked => { root.picked(root.item.command); } }
+    Text { x: 110px; width: parent.width - 220px - AppMetrics.scroll_gutter; height: parent.height; text: root.item.label; color: touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted; font-size: 13px; vertical-alignment: center; overflow: elide; }
+    Text { x: parent.width - 100px - AppMetrics.scroll_gutter; width: 90px; height: parent.height; text: root.item.hint; color: ThemePalette.text_faint; font-family: AppMetrics.mono_font; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
+    touch := TouchArea { width: parent.width - AppMetrics.scroll_gutter; mouse-cursor: pointer; clicked => { root.picked(root.item.command); } }
 }
 
 component DialogButton inherits Rectangle {
@@ -2072,19 +2082,24 @@ component DialogButton inherits Rectangle {
     width: self.preferred-width;
     height: 32px;
     border-radius: AppMetrics.radius_small;
-    background: root.primary ? (root.danger ? ThemePalette.danger : ThemePalette.accent) : ThemePalette.panel_alt;
+    background: root.primary
+        ? (root.danger
+            ? (dlg_btn_touch.has-hover ? ThemePalette.danger : ThemePalette.danger)
+            : (dlg_btn_touch.has-hover ? ThemePalette.accent_strong : ThemePalette.accent))
+        : (dlg_btn_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt);
+    opacity: root.primary && root.danger && dlg_btn_touch.has-hover ? 0.92 : 1.0;
     dlg_btn_label := Text {
         x: 14px;
         width: parent.width - 28px;
         height: parent.height;
         text: root.label;
-        color: root.primary ? ThemePalette.on_accent : ThemePalette.text_muted;
+        color: root.primary ? ThemePalette.on_accent : (dlg_btn_touch.has-hover ? ThemePalette.text : ThemePalette.text_muted);
         font-size: 12.5px;
         font-weight: 600;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-    TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    dlg_btn_touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 // Selectable message body - select text and Ctrl+C, or use toast Copy button.
@@ -5572,7 +5587,7 @@ export component MainWindow inherits Window {
                     property <length> est-content-end: AppMetrics.pad + 32px + root.files.length * (AppMetrics.row_h + 26px);
                     x: AppMetrics.pad;
                     y: min(parent.height - AppMetrics.pad, est-content-end);
-                    width: parent.width - AppMetrics.pad * 2;
+                    width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     height: max(0px, parent.height - AppMetrics.pad - self.y);
                     TouchArea {
                         clicked => {
@@ -7301,6 +7316,7 @@ export component MainWindow inherits Window {
             background: ThemePalette.panel_solid;
             drop-shadow-blur: 18px;
             drop-shadow-color: rgba(0, 0, 0, 0.38);
+            TouchArea {}
 
             Text {
                 x: 18px;
@@ -7443,6 +7459,7 @@ export component MainWindow inherits Window {
             background: ThemePalette.panel_solid;
             drop-shadow-blur: 18px;
             drop-shadow-color: rgba(0, 0, 0, 0.38);
+            TouchArea {}
 
             Rectangle {
                 x: 16px;
@@ -9532,7 +9549,7 @@ export component MainWindow inherits Window {
             if root.tool_overlay_kind == "shortcuts": ScrollView {
                 x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 120px;
                 for sc[si] in root.shortcut_edit_items: Rectangle {
-                    width: parent.width - 8px;
+                    width: parent.width - 8px - AppMetrics.scroll_gutter;
                     height: 56px;
                     border-radius: AppMetrics.radius_small;
                     background: Math.mod(si, 2) == 0 ? ThemePalette.panel : rgba(0, 0, 0, 0);
@@ -9568,7 +9585,7 @@ export component MainWindow inherits Window {
             if root.tool_overlay_kind != "shortcuts": ScrollView {
                 x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 120px;
                 for item[ti] in root.tool_overlay_items: Rectangle {
-                    width: parent.width - 8px;
+                    width: parent.width - 8px - AppMetrics.scroll_gutter;
                     height: 52px;
                     border-radius: AppMetrics.radius_small;
                     background: tool_row_ta.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
@@ -9674,19 +9691,19 @@ export component MainWindow inherits Window {
                 border-radius: AppMetrics.radius_small;
                 border-width: 1px;
                 border-color: root.compare_overlay_hide_same ? ThemePalette.accent : ThemePalette.border;
-                background: root.compare_overlay_hide_same ? ThemePalette.accent_soft : ThemePalette.panel_alt;
+                background: root.compare_overlay_hide_same ? ThemePalette.accent_soft : (hide_same_ta.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt);
                 Text {
                     x: 10px; width: parent.width - 20px; height: parent.height;
-                    text: root.compare_overlay_hide_same ? @tr("Hide same: On") : "Hide same: Off";
+                    text: root.compare_overlay_hide_same ? @tr("Hide same: On") : @tr("Hide same: Off");
                     color: root.compare_overlay_hide_same ? ThemePalette.accent_strong : ThemePalette.text_muted;
                     font-size: 11.5px; vertical-alignment: center;
                 }
-                TouchArea { mouse-cursor: pointer; clicked => { root.compare_toggle_hide_same(); } }
+                hide_same_ta := TouchArea { mouse-cursor: pointer; clicked => { root.compare_toggle_hide_same(); } }
             }
             ScrollView {
                 x: 12px; y: 96px; width: parent.width - 24px; height: parent.height - 152px;
                 for row[ri] in root.compare_rows: Rectangle {
-                    width: parent.width - 8px;
+                    width: parent.width - 8px - AppMetrics.scroll_gutter;
                     height: 40px;
                     border-radius: AppMetrics.radius_small;
                     background: cmp_ta.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
@@ -9760,7 +9777,7 @@ export component MainWindow inherits Window {
             ScrollView {
                 x: 12px; y: 90px; width: parent.width - 24px; height: parent.height - 146px;
                 for grp[gi] in root.dupe_groups: Rectangle {
-                    width: parent.width - 8px;
+                    width: parent.width - 8px - AppMetrics.scroll_gutter;
                     height: 118px;
                     border-radius: AppMetrics.radius_small;
                     border-width: 1px;
@@ -9828,6 +9845,7 @@ export component MainWindow inherits Window {
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
             background: ThemePalette.panel_solid;
+            TouchArea {}
             Text { x: 20px; y: 16px; width: parent.width - 80px; height: 28px; text: root.preview_title; color: ThemePalette.text; font-size: 20px; font-weight: 700; overflow: elide; }
             ToolButton { x: parent.width - 44px; y: 10px; button_width: 32px; button_height: 32px; icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: @tr("Close"); clicked => { root.quick_look_close(); } }
             if root.preview_is_image && !root.preview_is_media: Image {
@@ -10315,6 +10333,7 @@ export component MainWindow inherits Window {
         height: parent.height;
         background: rgba(0, 0, 0, 0.46);
         z: 120;
+        TouchArea { clicked => {} }
 
         Rectangle {
             x: (parent.width - min(500px, parent.width - 32px)) / 2;

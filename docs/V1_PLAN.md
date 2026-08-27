@@ -2,9 +2,7 @@
 
 ## Status
 
-Phases A–E are implemented on this branch. Version stays **0.9.61** until Windows CI is green and the 1.0 bar is signed off. Authenticode is not faked.
-
-Local working branch only. Do not push until the user asks.
+Phases A–E shipped in **1.0.0**. Authenticode is not faked.
 
 This plan turns the 1.0 readiness audit into sequenced work. The product contract stays **Windows 11 file manager**. Linux/macOS, CLIP search, and a plugin host stay post-1.0.
 
