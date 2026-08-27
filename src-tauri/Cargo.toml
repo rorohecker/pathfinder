@@ -72,6 +72,7 @@ windows = { version = "0.62", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_Properties",
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_NetworkManagement_WNet",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi",

@@ -46,6 +46,7 @@ pub struct PinningResult {
 // Helper Functions
 // ============================================================================
 
+#[allow(dead_code)]
 fn win32_clipboard_copy(text: &str) -> Result<(), String> {
     use windows::Win32::Foundation::{GlobalFree, HANDLE};
     use windows::Win32::System::DataExchange::{
@@ -150,155 +151,188 @@ fn is_elevated() -> bool {
 // 1. Shell Extensions / IContextMenu COM Interop
 // ============================================================================
 
-/// Get context menu actions available for a file/folder from registered shell extensions
+const SHELL_CMD_FIRST: u32 = 1;
+const SHELL_CMD_LAST: u32 = 0x7FFF;
+const MAX_THEMED_SHELL_VERBS: usize = 12;
+
+fn skip_shell_verb_label(label: &str) -> bool {
+    let n = label.trim().trim_start_matches('&').to_ascii_lowercase();
+    if n.is_empty() {
+        return true;
+    }
+    matches!(
+        n.as_str(),
+        "open"
+            | "open with"
+            | "cut"
+            | "copy"
+            | "paste"
+            | "delete"
+            | "rename"
+            | "properties"
+            | "copy as path"
+            | "copy path"
+            | "share"
+    ) || n.starts_with("open with")
+}
+
+fn with_shell_context_menu<T>(
+    path: &str,
+    f: impl FnOnce(
+        &windows::Win32::UI::Shell::IContextMenu,
+        windows::Win32::UI::WindowsAndMessaging::HMENU,
+    ) -> Result<T, String>,
+) -> Result<T, String> {
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+    use windows::Win32::UI::Shell::{
+        BHID_SFUIObject, CMF_EXPLORE, CMF_NORMAL, IContextMenu, IShellItem,
+        SHCreateItemFromParsingName,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu};
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let path_wide = to_wide(path);
+        let item: IShellItem =
+            SHCreateItemFromParsingName(windows::core::PCWSTR(path_wide.as_ptr()), None)
+                .map_err(|e| e.to_string())?;
+        let menu: IContextMenu = item
+            .BindToHandler(None, &BHID_SFUIObject)
+            .map_err(|e| e.to_string())?;
+        let hmenu = CreatePopupMenu().map_err(|e| e.to_string())?;
+        let result = (|| {
+            menu.QueryContextMenu(
+                hmenu,
+                0,
+                SHELL_CMD_FIRST,
+                SHELL_CMD_LAST,
+                CMF_NORMAL | CMF_EXPLORE,
+            )
+            .ok()
+            .map_err(|e| e.to_string())?;
+            f(&menu, hmenu)
+        })();
+        let _ = DestroyMenu(hmenu);
+        result
+    }
+}
+
+/// Extra IContextMenu verbs that Pathfinder's themed menu does not already cover.
 pub fn get_context_menu_actions(path: &str) -> Result<Vec<ContextMenuAction>, String> {
-    let mut actions = vec![
-        ContextMenuAction {
-            id: 0,
-            name: "Open".to_string(),
-            help_text: Some("Open using the default Windows association".to_string()),
-            icon_url: None,
-        },
-        ContextMenuAction {
-            id: 1,
-            name: "Copy Path".to_string(),
-            help_text: Some("Copy file path to clipboard".to_string()),
-            icon_url: None,
-        },
-        ContextMenuAction {
-            id: 2,
-            name: "Open in Terminal".to_string(),
-            help_text: Some("Open terminal here".to_string()),
-            icon_url: None,
-        },
-        ContextMenuAction {
-            id: 3,
-            name: "Send to".to_string(),
-            help_text: Some("Send file to another location".to_string()),
-            icon_url: None,
-        },
-        ContextMenuAction {
-            id: 4,
-            name: "Open With".to_string(),
-            help_text: Some("Open Windows app picker".to_string()),
-            icon_url: None,
-        },
-        ContextMenuAction {
-            id: 5,
-            name: "Properties".to_string(),
-            help_text: Some("Open native Windows Properties".to_string()),
-            icon_url: None,
-        },
-    ];
-
-    let ext = PathBuf::from(path)
-        .extension()
-        .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    if matches!(ext.as_str(), "exe" | "bat" | "cmd" | "ps1" | "msi") {
-        actions.push(ContextMenuAction {
-            id: 6,
-            name: "Run as administrator".to_string(),
-            help_text: Some("Invoke the Windows runas verb".to_string()),
-            icon_url: None,
-        });
-    }
-
-    Ok(actions)
+    with_shell_context_menu(path, |_menu, hmenu| unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetMenuItemCount, GetMenuStringW, MF_BYPOSITION,
+        };
+        let count = GetMenuItemCount(Some(hmenu));
+        if count <= 0 {
+            return Ok(Vec::new());
+        }
+        let mut actions = Vec::new();
+        let mut buf = [0u16; 256];
+        for i in 0..count as u32 {
+            let n = GetMenuStringW(hmenu, i, Some(&mut buf), MF_BYPOSITION);
+            if n <= 0 {
+                continue;
+            }
+            let label = from_wide(&buf[..n as usize]).replace('&', "");
+            if skip_shell_verb_label(&label) {
+                continue;
+            }
+            // Menu ids are assigned from SHELL_CMD_FIRST by QueryContextMenu.
+            // GetMenuItemID is more accurate than position+1 for skipped items.
+            let id = windows::Win32::UI::WindowsAndMessaging::GetMenuItemID(hmenu, i as i32);
+            if id == u32::MAX || id < SHELL_CMD_FIRST {
+                continue;
+            }
+            actions.push(ContextMenuAction {
+                id,
+                name: label,
+                help_text: None,
+                icon_url: None,
+            });
+            if actions.len() >= MAX_THEMED_SHELL_VERBS {
+                break;
+            }
+        }
+        Ok(actions)
+    })
 }
 
-fn enumerate_shell_extensions(path: &str) -> Result<Vec<ContextMenuAction>, String> {
-    // This would read from HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Shell Extensions
-    // For extensibility, we'll use a PowerShell approach to be cross-compatible
-    let script = r#"
-$path = $args[0]
-$item = Get-Item -LiteralPath $path -ErrorAction Stop
-$shell = New-Object -ComObject Shell.Application
-
-try {
-    if ($item.PSIsContainer) {
-        $folder = $shell.Namespace($item.FullName)
-    } else {
-        $folder = $shell.Namespace($item.DirectoryName)
-    }
-    
-    if ($item.PSIsContainer) {
-        $target = $folder.Self
-    } else {
-        $target = $folder.ParseName($item.Name)
-    }
-    
-    # Get context menu via IContextMenu (this invokes COM)
-    # We'll just return a JSON marker for now
-    ConvertTo-Json -InputObject @(@{
-        id = 10
-        name = "PowerShell Extension Menu"
-        help_text = "Extensions registered in shell"
-    }) -Compress
-} catch {
-    ConvertTo-Json -InputObject @() -Compress
-}
-"#;
-
-    let output = Command::new("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(script)
-        .arg(path)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    if output.status.success() {
-        serde_json::from_slice(&output.stdout)
-            .map_err(|e| format!("Failed to parse context menu actions: {}", e))
-    } else {
-        Ok(Vec::new())
-    }
-}
-
-/// Invoke a context menu action (via the COM interface or registered handler)
+/// Invoke a verb previously listed by [`get_context_menu_actions`].
 pub fn invoke_context_menu_action(path: &str, action_id: u32) -> Result<(), String> {
-    match action_id {
-        0 => shell_execute_verb(path, "open"),
-        1 => {
-            // Copy Path - Win32 clipboard, no PowerShell spawn
-            win32_clipboard_copy(path)
+    with_shell_context_menu(path, |menu, _hmenu| unsafe {
+        use windows::Win32::UI::Shell::CMINVOKECOMMANDINFO;
+        let offset = action_id.saturating_sub(SHELL_CMD_FIRST);
+        let mut info = CMINVOKECOMMANDINFO {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+            fMask: 0,
+            hwnd: windows::Win32::Foundation::HWND(std::ptr::null_mut()),
+            lpVerb: windows::core::PCSTR(offset as usize as *const u8),
+            lpParameters: windows::core::PCSTR::null(),
+            lpDirectory: windows::core::PCSTR::null(),
+            nShow: 1,
+            dwHotKey: 0,
+            hIcon: windows::Win32::Foundation::HANDLE::default(),
+        };
+        menu.InvokeCommand(&mut info).map_err(|e| e.to_string())
+    })
+}
+
+/// Full owner-draw Windows shell menu at the cursor (nested extensions, 7-Zip, etc.).
+pub fn track_shell_context_menu(
+    path: &str,
+    hwnd: windows::Win32::Foundation::HWND,
+) -> Result<(), String> {
+    with_shell_context_menu(path, |menu, hmenu| unsafe {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::Shell::CMINVOKECOMMANDINFO;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetCursorPos, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
+        };
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let cmd = TrackPopupMenuEx(
+            hmenu,
+            TPM_LEFTALIGN.0 | TPM_RIGHTBUTTON.0 | TPM_RETURNCMD.0,
+            pt.x,
+            pt.y,
+            hwnd,
+            None,
+        )
+        .0 as u32;
+        if cmd == 0 {
+            return Ok(());
         }
-        2 => {
-            // Open in Terminal
-            Command::new("wt")
-                .args(&["-d", path])
-                .spawn()
-                .or_else(|_| {
-                    Command::new("cmd")
-                        .arg("/k")
-                        .arg(&format!("cd /d {}", path))
-                        .spawn()
-                })
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        }
-        3 => {
-            // Send To (open Send To folder)
-            let send_to = PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
-                .join("Microsoft\\Windows\\SendTo");
+        let offset = cmd.saturating_sub(SHELL_CMD_FIRST);
+        let mut info = CMINVOKECOMMANDINFO {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+            fMask: 0,
+            hwnd,
+            lpVerb: windows::core::PCSTR(offset as usize as *const u8),
+            lpParameters: windows::core::PCSTR::null(),
+            lpDirectory: windows::core::PCSTR::null(),
+            nShow: 1,
+            dwHotKey: 0,
+            hIcon: windows::Win32::Foundation::HANDLE::default(),
+        };
+        menu.InvokeCommand(&mut info).map_err(|e| e.to_string())
+    })
+}
+
+/// Nearby Share / Windows share sheet when the verb is registered.
+pub fn share_path(path: &str) -> Result<(), String> {
+    match shell_execute_verb(path, "share") {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Fallback: select the file in Explorer so Share is one click away.
             Command::new("explorer")
-                .arg(send_to)
+                .arg("/select,")
+                .arg(path)
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn()
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         }
-        4 => Command::new("rundll32.exe")
-            .args(["shell32.dll,OpenAs_RunDLL", path])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
-        5 => shell_execute_verb(path, "properties"),
-        6 => shell_execute_verb(path, "runas"),
-        _ => Err("Unknown action ID".to_string()),
     }
 }
 

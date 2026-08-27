@@ -15,15 +15,16 @@ use std::os::windows::ffi::OsStrExt;
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    DeleteObject, GetDC, GetDIBits, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, ReleaseDC,
 };
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::{
-    SHGetFileInfoW, SHGetImageList, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SYSICONINDEX,
-    SHGFI_USEFILEATTRIBUTES, SHIL_EXTRALARGE, SHIL_JUMBO,
+    SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
+    SHGetFileInfoW, SHGetImageList, SHIL_EXTRALARGE, SHIL_JUMBO,
 };
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
+use windows::core::Interface;
 
 /// Attempt to extract the shell icon for a path and return RGBA pixels.
 /// Returns None on failure (no icon available, GDI call failed, etc.).
@@ -47,10 +48,7 @@ pub fn extract_icon_rgba(path: &str, use_real_file: bool) -> Option<Image> {
         return Some(img);
     }
     unsafe {
-        let wide: Vec<u16> = OsStr::new(path)
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
+        let wide: Vec<u16> = OsStr::new(path).encode_wide().chain(Some(0)).collect();
         let mut sfi = SHFILEINFOW::default();
         let mut flags = SHGFI_ICON | SHGFI_LARGEICON;
         if !use_real_file {
@@ -76,12 +74,13 @@ pub fn extract_icon_rgba(path: &str, use_real_file: bool) -> Option<Image> {
 /// from the shell's system image list and return it as a slint Image.
 /// Returns None if the system doesn't expose the requested list (very
 /// old Windows) or if any of the COM calls fail.
-fn try_extract_high_res_icon(path: &str, use_real_file: bool, image_list_size: u32) -> Option<Image> {
+fn try_extract_high_res_icon(
+    path: &str,
+    use_real_file: bool,
+    image_list_size: u32,
+) -> Option<Image> {
     unsafe {
-        let wide: Vec<u16> = OsStr::new(path)
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
+        let wide: Vec<u16> = OsStr::new(path).encode_wide().chain(Some(0)).collect();
         let mut sfi = SHFILEINFOW::default();
         let mut flags = SHGFI_SYSICONINDEX;
         if !use_real_file {
@@ -183,6 +182,89 @@ unsafe fn hicon_to_image(hicon: HICON) -> Option<Image> {
 
         let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&rgba, w, h);
         Some(Image::from_rgba8_premultiplied(buffer))
+    }
+}
+
+/// Shell thumbnail (videos, photos, documents) via IShellItemImageFactory.
+pub fn shell_thumbnail(path: &str, px: i32) -> Option<Image> {
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC,
+        GetDIBits, GetObjectW, ReleaseDC,
+    };
+    use windows::Win32::UI::Shell::{
+        IShellItem, IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK,
+        SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY,
+    };
+
+    unsafe {
+        let wide: Vec<u16> = OsStr::new(path).encode_wide().chain(Some(0)).collect();
+        let item: IShellItem =
+            SHCreateItemFromParsingName(windows::core::PCWSTR(wide.as_ptr()), None).ok()?;
+        let factory: IShellItemImageFactory = item.cast().ok()?;
+        let size = SIZE {
+            cx: px.max(64),
+            cy: px.max(64),
+        };
+        let hbmp = factory
+            .GetImage(
+                size,
+                SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK | SIIGBF_THUMBNAILONLY,
+            )
+            .ok()
+            .or_else(|| {
+                factory
+                    .GetImage(size, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK)
+                    .ok()
+            })?;
+        let mut bm = BITMAP::default();
+        let read = GetObjectW(
+            hbmp.into(),
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bm as *mut _ as *mut _),
+        );
+        if read == 0 {
+            let _ = DeleteObject(hbmp.into());
+            return None;
+        }
+        let w = bm.bmWidth as u32;
+        let h = bm.bmHeight as u32;
+        if w == 0 || h == 0 || w > 2048 || h > 2048 {
+            let _ = DeleteObject(hbmp.into());
+            return None;
+        }
+        let mut bgra: Vec<u8> = vec![0; (w * h * 4) as usize];
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = w as i32;
+        bmi.bmiHeader.biHeight = -(h as i32);
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB.0;
+        let hdc = GetDC(Some(HWND::default()));
+        let pulled = GetDIBits(
+            hdc,
+            hbmp,
+            0,
+            h,
+            Some(bgra.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+        let _ = ReleaseDC(Some(HWND::default()), hdc);
+        let _ = DeleteObject(hbmp.into());
+        if pulled == 0 {
+            return None;
+        }
+        let mut rgba: Vec<u8> = Vec::with_capacity(bgra.len());
+        for chunk in bgra.as_chunks::<4>().0 {
+            rgba.push(chunk[2]);
+            rgba.push(chunk[1]);
+            rgba.push(chunk[0]);
+            rgba.push(chunk[3]);
+        }
+        let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&rgba, w, h);
+        Some(Image::from_rgba8(buffer))
     }
 }
 

@@ -1,4 +1,4 @@
-﻿#![allow(dead_code)]
+#![allow(dead_code)]
 #![allow(
     clippy::collapsible_if,
     clippy::needless_borrows_for_generic_args,
@@ -43,6 +43,7 @@ mod file_icons;
 mod folder_shell_registry;
 mod gpu_detect;
 mod i18n;
+mod shortcuts;
 
 // Detection probe helpers used by /examples/probe_npu.rs to verify NPU and
 // GPU detection on new hardware without launching the full UI. Kept as
@@ -75,11 +76,11 @@ pub fn __test_detect_gpus() -> Vec<(String, u32, u64, bool, bool)> {
         .collect()
 }
 mod fantasy_icons;
-mod retro_icons;
-mod sunset_icons;
+mod imagenet_labels;
 mod inference;
 mod local_ai;
-mod imagenet_labels;
+mod retro_icons;
+mod sunset_icons;
 mod winml_bridge;
 
 slint::include_modules!();
@@ -471,6 +472,7 @@ pub struct UpdateCheckResult {
     pub latest_version: String,
     pub release_url: String,
     pub download_url: String,
+    pub download_sha256: String,
     pub notes: String,
     pub message: String,
 }
@@ -1841,11 +1843,7 @@ fn dir_entry_name_cmp(a: &fs::DirEntry, b: &fs::DirEntry) -> std::cmp::Ordering 
     a.file_name()
         .to_string_lossy()
         .to_ascii_lowercase()
-        .cmp(
-            &b.file_name()
-                .to_string_lossy()
-                .to_ascii_lowercase(),
-        )
+        .cmp(&b.file_name().to_string_lossy().to_ascii_lowercase())
 }
 
 fn sort_entries_by(entries: &mut [FileEntry], sort_by: &str, sort_dir: &str) {
@@ -1997,9 +1995,7 @@ fn apply_batch_rename_advanced(
     if !params.find.trim().is_empty() {
         let re = regex::Regex::new(params.find.trim())
             .map_err(|e| format!("Invalid find pattern: {e}"))?;
-        name = re
-            .replace_all(&name, params.replace.as_str())
-            .into_owned();
+        name = re.replace_all(&name, params.replace.as_str()).into_owned();
     }
 
     if !params.prefix.is_empty() {
@@ -2028,7 +2024,11 @@ fn apply_batch_rename_advanced(
     Ok(name.to_string())
 }
 
-fn batch_rename_preview_lines(paths: &[String], params: &BatchRenameParams, limit: usize) -> String {
+fn batch_rename_preview_lines(
+    paths: &[String],
+    params: &BatchRenameParams,
+    limit: usize,
+) -> String {
     let mut lines = Vec::new();
     for (i, path) in paths.iter().take(limit).enumerate() {
         let src = Path::new(path);
@@ -2317,13 +2317,7 @@ impl AppState {
         }
     }
 
-    fn log_op_with_trash(
-        &self,
-        kind: &str,
-        from: &str,
-        to: Option<&str>,
-        trash_id: Option<&str>,
-    ) {
+    fn log_op_with_trash(&self, kind: &str, from: &str, to: Option<&str>, trash_id: Option<&str>) {
         if let Ok(mut log) = self.operation_log.lock() {
             log.push(FileOp {
                 kind: kind.to_string(),
@@ -2456,8 +2450,7 @@ impl AppState {
     }
 
     fn queue_cancel_requested(&self) -> bool {
-        self.queue_cancel
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.queue_cancel.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn request_queue_cancel(&self) {
@@ -2750,18 +2743,14 @@ fn parse_query(query: &str) -> ParsedQuery {
                     if let Some(filter) = parse_size_filter(&value) {
                         parsed.size = Some(filter);
                     } else {
-                        parsed
-                            .ignored_filters
-                            .push(format!("size:{value}"));
+                        parsed.ignored_filters.push(format!("size:{value}"));
                     }
                 }
                 "modified" => {
                     if let Some(after) = parse_modified_filter(&value) {
                         parsed.modified_after = Some(after);
                     } else {
-                        parsed
-                            .ignored_filters
-                            .push(format!("modified:{value}"));
+                        parsed.ignored_filters.push(format!("modified:{value}"));
                     }
                 }
                 // Tags are stored in the frontend because they are local app metadata.
@@ -2780,9 +2769,7 @@ fn query_filter_warnings(query: &str) -> Vec<String> {
     let parsed = parse_query(query);
     let mut warnings = parsed.ignored_filters;
     if parsed.content.is_some() {
-        warnings.push(
-            "content: searches text <=1MB plus PDF/DOCX/PPTX (no OCR)".to_string(),
-        );
+        warnings.push("content: searches text <=1MB plus PDF/DOCX/PPTX (no OCR)".to_string());
     }
     warnings
 }
@@ -2906,9 +2893,7 @@ fn matches_query(path: &Path, metadata: &fs::Metadata, parsed: &ParsedQuery) -> 
     }
 
     let needs_content = parsed.content.is_some()
-        || (!parsed.terms.is_empty()
-            && metadata.is_file()
-            && (is_text_ext(&ext) || ext == "pdf"));
+        || (!parsed.terms.is_empty() && metadata.is_file() && (is_text_ext(&ext) || ext == "pdf"));
     let content = if needs_content {
         read_text_for_search(path, metadata)
     } else {
@@ -3048,11 +3033,7 @@ fn list_directory_from_index(parent: &str) -> Option<Vec<FileEntry>> {
             },
             size: size.max(0) as u64,
             modified: modified.max(0) as u64,
-            extension: if ext.is_empty() {
-                None
-            } else {
-                Some(ext)
-            },
+            extension: if ext.is_empty() { None } else { Some(ext) },
         });
     }
     if entries.is_empty() {
@@ -3064,8 +3045,7 @@ fn list_directory_from_index(parent: &str) -> Option<Vec<FileEntry>> {
 
 static APP_STARTED: LazyLock<Instant> = LazyLock::new(Instant::now);
 
-static LOCAL_AI_SEMANTIC_READY: LazyLock<Mutex<Option<bool>>> =
-    LazyLock::new(|| Mutex::new(None));
+static LOCAL_AI_SEMANTIC_READY: LazyLock<Mutex<Option<bool>>> = LazyLock::new(|| Mutex::new(None));
 
 fn local_ai_semantic_ready_cached() -> bool {
     if let Ok(lock) = LOCAL_AI_SEMANTIC_READY.lock() {
@@ -3946,7 +3926,9 @@ fn open_with_dialog(path: &str, ui: Option<&MainWindow>) -> Result<(), String> {
     {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::UI::Shell::{SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, ShellExecuteExW};
+        use windows::Win32::UI::Shell::{
+            SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, ShellExecuteExW,
+        };
         use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
         use windows::core::PCWSTR;
 
@@ -4984,10 +4966,7 @@ fn read_preview_uncached(
     }
 
     if is_media_ext(&ext) {
-        let kind_label = if matches!(
-            ext.as_str(),
-            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a"
-        ) {
+        let kind_label = if matches!(ext.as_str(), "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a") {
             "Audio"
         } else {
             "Video"
@@ -6288,10 +6267,8 @@ fn storage_bucket_for_ext(ext: &str, path_bytes: &[u8]) -> &'static str {
         | "cr2" | "nef" | "arw" | "svg" | "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv"
         | "flv" | "m4v" | "mpg" | "mpeg" | "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a"
         | "wma" | "opus" => "media",
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "rtf"
-        | "odt" | "epub" | "zip" | "7z" | "rar" | "tar" | "gz" | "bz2" | "xz" | "cab" => {
-            "documents"
-        }
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "rtf" | "odt"
+        | "epub" | "zip" | "7z" | "rar" | "tar" | "gz" | "bz2" | "xz" | "cab" => "documents",
         "exe" | "msi" | "msix" | "appx" if storage_is_app_path(path_bytes) => "apps",
         "exe" | "msi" | "msix" | "appx" => "other",
         "dll"
@@ -7062,9 +7039,11 @@ fn sort_storage_drill_entries(bucket_id: &str, entries: &mut [StorageEntry]) {
         return;
     }
     entries.sort_unstable_by(|a, b| {
-        b.bytes
-            .cmp(&a.bytes)
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+        b.bytes.cmp(&a.bytes).then_with(|| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        })
     });
 }
 
@@ -7131,6 +7110,17 @@ mod path_query_tests {
         assert!(!looks_like_path_query("storage://"));
         assert!(!looks_like_path_query("archive://Zm9v!/%2F"));
     }
+
+    #[test]
+    fn parse_github_asset_digest_accepts_sha256_prefix() {
+        let hex = "a".repeat(64);
+        assert_eq!(
+            parse_github_asset_digest(&format!("sha256:{hex}")).as_deref(),
+            Some(hex.as_str())
+        );
+        assert!(parse_github_asset_digest("md5:abc").is_none());
+        assert!(parse_github_asset_digest("short").is_none());
+    }
 }
 
 #[cfg(test)]
@@ -7156,9 +7146,8 @@ mod storage_tests {
     #[test]
     fn storage_bucket_narrow_cache_not_browser_cache() {
         let ctx = StorageScanCtx::new();
-        let browser = Path::new(
-            r"C:\Users\a\AppData\Local\Google\Chrome\User Data\Default\Cache\f_001",
-        );
+        let browser =
+            Path::new(r"C:\Users\a\AppData\Local\Google\Chrome\User Data\Default\Cache\f_001");
         assert_ne!(storage_bucket_for(browser, &ctx), "cache");
         let temp = Path::new(r"C:\Users\a\AppData\Local\Temp\setup.tmp");
         assert_eq!(storage_bucket_for(temp, &ctx), "cache");
@@ -8354,7 +8343,7 @@ impl Default for NativeSettings {
             // fixed drive, which makes "Search entire drive" find
             // every file on the first try instead of needing a follow-
             // up scan to expand coverage.
-            index_mode: "max".to_string(),
+            index_mode: "balanced".to_string(),
             index_roots: Vec::new(),
             thumbnail_cache_limit_mb: 40,
             // Auto-update check runs once at startup and lights up the green
@@ -8549,7 +8538,10 @@ enum PendingPrompt {
     SaveWorkspace,
     BatchRename(Vec<String>),
     RenamePreset(Vec<String>),
-    RenameConflict { path: String, new_name: String },
+    RenameConflict {
+        path: String,
+        new_name: String,
+    },
     ConflictPaste {
         src: String,
         dest: String,
@@ -9391,8 +9383,7 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
     let mut emb_rows: Vec<(String, Vec<u8>, i64)> = Vec::new();
     let mut dhash_rows: Vec<(String, Vec<u8>, i64)> = Vec::new();
     let semantic_ready = local_ai_semantic_ready_cached();
-    let index_image_desc =
-        semantic_ready && crate::inference::image_classifier_available();
+    let index_image_desc = semantic_ready && crate::inference::image_classifier_available();
     let mut img_desc_label_pairs: Vec<(String, String)> = Vec::new();
     let mut img_desc_clear_paths: Vec<String> = Vec::new();
     let mut name_paths: Vec<(String, String)> = Vec::new();
@@ -10201,6 +10192,7 @@ fn update_disabled_result() -> UpdateCheckResult {
         latest_version: current,
         release_url: GITHUB_RELEASES_URL.to_string(),
         download_url: String::new(),
+        download_sha256: String::new(),
         notes: String::new(),
         message: "Update checks are off. Pathfinder will not contact GitHub until you enable or manually run update checks.".to_string(),
     }
@@ -10271,9 +10263,23 @@ fn updater_log(msg: &str) {
     eprintln!("[updater] {msg}");
 }
 
+fn parse_github_asset_digest(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    let hex = t
+        .strip_prefix("sha256:")
+        .or_else(|| t.strip_prefix("SHA256:"))
+        .unwrap_or(t)
+        .trim();
+    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(hex.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
 /// Prefer a Windows `.exe` NSIS/setup asset, else `.msi`; skip `.zip` / `.7z` so
 /// in-app Install always launches a real installer.
-fn pick_release_installer_url(assets: &[serde_json::Value]) -> String {
+fn pick_release_installer(assets: &[serde_json::Value]) -> (String, String) {
     for ext in [".exe", ".msi"] {
         for a in assets {
             let Some(name) = a.get("name").and_then(|v| v.as_str()) else {
@@ -10289,10 +10295,15 @@ fn pick_release_installer_url(assets: &[serde_json::Value]) -> String {
             else {
                 continue;
             };
-            return url.to_string();
+            let sha = a
+                .get("digest")
+                .and_then(|v| v.as_str())
+                .and_then(parse_github_asset_digest)
+                .unwrap_or_default();
+            return (url.to_string(), sha);
         }
     }
-    String::new()
+    (String::new(), String::new())
 }
 
 fn check_github_release_now() -> Result<UpdateCheckResult, String> {
@@ -10355,10 +10366,10 @@ fn check_github_release_now() -> Result<UpdateCheckResult, String> {
         .chars()
         .take(4_000)
         .collect::<String>();
-    let download_url = value
+    let (download_url, download_sha256) = value
         .get("assets")
         .and_then(|a| a.as_array())
-        .map(|assets| pick_release_installer_url(assets))
+        .map(|assets| pick_release_installer(assets))
         .unwrap_or_default();
     if download_url.is_empty() {
         eprintln!("[updater] no .exe or .msi release asset found for in-app install");
@@ -10376,6 +10387,7 @@ fn check_github_release_now() -> Result<UpdateCheckResult, String> {
         },
         release_url,
         download_url,
+        download_sha256,
         notes,
         message: if available {
             format!("Pathfinder {latest_version} is available.")
@@ -10406,6 +10418,21 @@ fn installer_suffix_from_url(url: &str) -> &'static str {
 static UPDATE_INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static UPDATE_BYTES_COPIED: AtomicU64 = AtomicU64::new(0);
 static UPDATE_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static UPDATE_EXPECTED_SHA256: Mutex<String> = Mutex::new(String::new());
+
+fn sha256_file_hex(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
 
 fn update_download_progress_fraction() -> f32 {
     let copied = UPDATE_BYTES_COPIED.load(Ordering::Relaxed);
@@ -10451,7 +10478,11 @@ fn probe_download_content_length(url: &str) -> Option<u64> {
 /// Prefer Windows curl.exe for large release assets — typically much faster
 /// than ureq on GitHub CDN links. Polls the growing file for UI progress.
 #[cfg(windows)]
-fn download_release_installer_curl(url: &str, dest: &Path, expected: Option<u64>) -> Result<u64, String> {
+fn download_release_installer_curl(
+    url: &str,
+    dest: &Path,
+    expected: Option<u64>,
+) -> Result<u64, String> {
     let _ = fs::remove_file(dest);
     let dest_str = dest.to_string_lossy().to_string();
     updater_log(&format!("curl download start → {dest_str}"));
@@ -10521,7 +10552,11 @@ fn download_release_installer_curl(url: &str, dest: &Path, expected: Option<u64>
     Ok(copied)
 }
 
-fn download_release_installer_ureq(url: &str, dest: &Path, expected_hint: Option<u64>) -> Result<u64, String> {
+fn download_release_installer_ureq(
+    url: &str,
+    dest: &Path,
+    expected_hint: Option<u64>,
+) -> Result<u64, String> {
     let _ = fs::remove_file(dest);
     updater_log(&format!("ureq download start → {}", dest.display()));
     // Slow GitHub CDNs often take 60–120s for a ~12 MB NSIS build. Use a long
@@ -10571,13 +10606,12 @@ fn download_release_installer_ureq(url: &str, dest: &Path, expected_hint: Option
             last_logged_mb = mb;
             updater_log(&format!(
                 "download progress: {copied} bytes{}",
-                expected
-                    .map(|e| format!(" / {e}"))
-                    .unwrap_or_default()
+                expected.map(|e| format!(" / {e}")).unwrap_or_default()
             ));
         }
     }
-    out.flush().map_err(|e| format!("flush installer file: {e}"))?;
+    out.flush()
+        .map_err(|e| format!("flush installer file: {e}"))?;
     drop(out);
 
     if let Some(exp) = expected {
@@ -10633,10 +10667,8 @@ fn download_and_install_update(url: &str) -> Result<(), String> {
     let result = (|| {
         updater_log(&format!("install requested: {url}"));
         let suffix = installer_suffix_from_url(url);
-        let installer = std::env::temp_dir().join(format!(
-            "pathfinder_update_{}{suffix}",
-            std::process::id()
-        ));
+        let installer =
+            std::env::temp_dir().join(format!("pathfinder_update_{}{suffix}", std::process::id()));
 
         let mut last_err = String::new();
         for attempt in 1..=3 {
@@ -10658,6 +10690,21 @@ fn download_and_install_update(url: &str) -> Result<(), String> {
         }
         if !last_err.is_empty() {
             return Err(last_err);
+        }
+        let expected = UPDATE_EXPECTED_SHA256
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        if !expected.is_empty() {
+            let actual = sha256_file_hex(&installer)?;
+            if !actual.eq_ignore_ascii_case(&expected) {
+                let _ = fs::remove_file(&installer);
+                return Err(format!(
+                    "Installer hash mismatch (got {actual}, expected {expected})"
+                ));
+            }
+            updater_log("installer SHA-256 verified");
         }
 
         #[cfg(windows)]
@@ -11074,11 +11121,7 @@ fn save_shortcut_overrides(map: &HashMap<String, String>) -> Result<(), String> 
 }
 
 fn shortcut_hint_for(command: &str, default_hint: &str) -> String {
-    load_shortcut_overrides()
-        .get(command)
-        .cloned()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| default_hint.to_string())
+    shortcuts::hint_for(command, &load_shortcut_overrides(), default_hint)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -11098,14 +11141,7 @@ fn save_workspaces(list: &[WorkspaceSession]) -> Result<(), String> {
 fn native_save_search(name: String, query: String, scope: String) -> Result<(), String> {
     let mut searches: Vec<SavedSearch> = read_native_json("searches.json", Vec::new());
     searches.retain(|s| s.name != name);
-    searches.insert(
-        0,
-        SavedSearch {
-            name,
-            query,
-            scope,
-        },
-    );
+    searches.insert(0, SavedSearch { name, query, scope });
     if searches.len() > 50 {
         searches.truncate(50);
     }
@@ -11627,11 +11663,15 @@ fn build_preview_display(
             let body = match preview.kind.as_str() {
                 // No extractable body — never invent labels like "file file".
                 "image" | "folder" | "binary" | "file" => String::new(),
-                "text" | "svg" | "archive" | "pdf" | "font" | "media"
-                | "image-too-large" | "image-metadata" => preview.text.unwrap_or_default(),
+                "text" | "svg" | "archive" | "pdf" | "font" | "media" | "image-too-large"
+                | "image-metadata" => preview.text.unwrap_or_default(),
                 _ => preview.text.unwrap_or_default(),
             };
-            let truncated_note = if preview.truncated { " | truncated" } else { "" };
+            let truncated_note = if preview.truncated {
+                " | truncated"
+            } else {
+                ""
+            };
             let meta = format!(
                 "Path:     {}\nType:     {}\nSize:     {}\nModified: {}{}",
                 path,
@@ -11800,10 +11840,7 @@ fn render_markdown_to_text(md: &str) -> String {
     }
     // Inline cleanup: links first, then emphasis / code markers.
     let linked = MD_LINK_RE.replace_all(&out, "$1 ($2)").into_owned();
-    let cleaned = linked
-        .replace("**", "")
-        .replace("__", "")
-        .replace('`', "");
+    let cleaned = linked.replace("**", "").replace("__", "").replace('`', "");
     tidy_rendered_text(&cleaned)
 }
 
@@ -12176,9 +12213,7 @@ fn date_group_label(secs: u64) -> &'static str {
     // Local midnight boundaries via offset from UTC. Windows local time is
     // enough for grouping; we approximate with the process timezone offset.
     let local_offset_secs = local_utc_offset_secs();
-    let day_of = |unix: u64| -> i64 {
-        ((unix as i64) + local_offset_secs).div_euclid(86_400)
-    };
+    let day_of = |unix: u64| -> i64 { ((unix as i64) + local_offset_secs).div_euclid(86_400) };
     let today = day_of(now);
     let file_day = day_of(secs);
     let day_diff = today - file_day;
@@ -12256,9 +12291,7 @@ fn local_utc_offset_secs() -> i64 {
         unsafe {
             let local = GetLocalTime();
             let utc = GetSystemTime();
-            let to_mins = |hour: u16, minute: u16| -> i64 {
-                hour as i64 * 60 + minute as i64
-            };
+            let to_mins = |hour: u16, minute: u16| -> i64 { hour as i64 * 60 + minute as i64 };
             // Rough same-day offset; good enough for midnight bucketing.
             let diff_mins = to_mins(local.wHour, local.wMinute) - to_mins(utc.wHour, utc.wMinute);
             // Handle day wrap when local/UTC straddle midnight.
@@ -13084,6 +13117,12 @@ fn apply_ui_language(setting: &str) {
 const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Navigation", "New Tab", "Ctrl+T", "new-tab"),
     ("Navigation", "Close Tab", "Ctrl+W", "close-tab"),
+    ("Navigation", "Back", "Alt+Left", "go-back"),
+    ("Navigation", "Forward", "Alt+Right", "go-forward"),
+    ("Navigation", "Up One Level", "Alt+Up", "go-up"),
+    ("Navigation", "Focus Address Bar", "Ctrl+L", "focus-address"),
+    ("Navigation", "Focus Search", "Ctrl+Shift+F", "focus-search"),
+    ("Navigation", "Command Palette", "Ctrl+P", "command-palette"),
     ("Navigation", "Refresh", "F5", "refresh"),
     ("Files", "New Folder", "Ctrl+Shift+N", "new-folder"),
     ("Files", "New File", "", "new-file"),
@@ -13106,6 +13145,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Cancel Queued Operations", "", "queue-cancel"),
     ("Tools", "Locked File Inspector", "", "locked-file"),
     ("Tools", "Native Properties", "Alt+Enter", "properties"),
+    ("Tools", "Share", "", "share"),
     ("Tools", "Show More Options", "", "show-more-options"),
     ("Tools", "Open in Terminal", "", "open-terminal"),
     ("Tools", "Open With", "", "open-with"),
@@ -13178,6 +13218,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Batch Tag Selection", "", "batch-tag"),
     ("Tools", "Batch Note Selection", "", "batch-note"),
     ("View", "Icon View", "Ctrl+1", "view-grid"),
+    ("View", "Compact View", "Ctrl+Shift+1", "view-compact"),
     ("View", "Details View", "Ctrl+2", "view-list"),
     ("View", "Gallery View", "Ctrl+3", "view-gallery"),
     ("View", "Toggle Preview", "Ctrl+I", "toggle-preview"),
@@ -13237,10 +13278,7 @@ fn command_items_filtered(query: &str) -> ModelRc<CommandItem> {
     command_items_filtered_with_recent(query, &[])
 }
 
-fn command_items_filtered_with_recent(
-    query: &str,
-    recent: &[String],
-) -> ModelRc<CommandItem> {
+fn command_items_filtered_with_recent(query: &str, recent: &[String]) -> ModelRc<CommandItem> {
     let q = query.to_lowercase();
     let overrides = load_shortcut_overrides();
     let mut matches: Vec<(i32, &(&str, &str, &str, &str))> = ALL_COMMANDS
@@ -13260,10 +13298,7 @@ fn command_items_filtered_with_recent(
             if let Some((_group, label, hint, command)) =
                 ALL_COMMANDS.iter().find(|(_, _, _, c)| *c == cmd.as_str())
             {
-                let hint_s = overrides
-                    .get(*command)
-                    .cloned()
-                    .unwrap_or_else(|| (*hint).to_string());
+                let hint_s = shortcuts::hint_for(command, &overrides, hint);
                 items.push(CommandItem {
                     group: ss(&i18n::t("Recent")),
                     label: ss(&i18n::t(label)),
@@ -13273,18 +13308,19 @@ fn command_items_filtered_with_recent(
             }
         }
     }
-    items.extend(matches.into_iter().map(|(_, (group, label, hint, command))| {
-        let hint_s = overrides
-            .get(*command)
-            .cloned()
-            .unwrap_or_else(|| (*hint).to_string());
-        CommandItem {
-            group: ss(&i18n::t(group)),
-            label: ss(&i18n::t(label)),
-            hint: ss(hint_s),
-            command: ss(*command),
-        }
-    }));
+    items.extend(
+        matches
+            .into_iter()
+            .map(|(_, (group, label, hint, command))| {
+                let hint_s = shortcuts::hint_for(command, &overrides, hint);
+                CommandItem {
+                    group: ss(&i18n::t(group)),
+                    label: ss(&i18n::t(label)),
+                    hint: ss(hint_s),
+                    command: ss(*command),
+                }
+            }),
+    );
     model_from_vec(items)
 }
 
@@ -13406,9 +13442,7 @@ fn is_always_list_view_folder(lower: &str) -> bool {
 /// App-internal navigation targets (not filesystem paths). These often contain
 /// `/` and must never go through `resolve_path_query`.
 fn is_virtual_nav_path(path: &str) -> bool {
-    path == "recycle://"
-        || path == "storage://"
-        || path.starts_with(ARCHIVE_SCHEME)
+    path == "recycle://" || path == "storage://" || path.starts_with(ARCHIVE_SCHEME)
 }
 
 fn navigation_display_path(current_path: &str, archive: Option<&ArchiveView>) -> String {
@@ -13537,27 +13571,24 @@ fn index_search_paths(root: &str, pattern: &str, max: usize) -> Result<Vec<FileE
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(
-            params![root_prefix, path_like, sqlite_limit(max)],
-            |row| {
-                let is_dir = row.get::<_, i64>(2)? == 1;
-                let ext = row.get::<_, String>(5)?;
-                let name: String = row.get(1)?;
-                Ok(FileEntry {
-                    path: row.get(0)?,
-                    name_lower: name.to_lowercase(),
-                    name,
-                    kind: if is_dir {
-                        FileKind::Directory
-                    } else {
-                        FileKind::File
-                    },
-                    size: row.get::<_, i64>(3)?.max(0) as u64,
-                    modified: row.get::<_, i64>(4)?.max(0) as u64,
-                    extension: (!ext.is_empty()).then_some(ext),
-                })
-            },
-        )
+        .query_map(params![root_prefix, path_like, sqlite_limit(max)], |row| {
+            let is_dir = row.get::<_, i64>(2)? == 1;
+            let ext = row.get::<_, String>(5)?;
+            let name: String = row.get(1)?;
+            Ok(FileEntry {
+                path: row.get(0)?,
+                name_lower: name.to_lowercase(),
+                name,
+                kind: if is_dir {
+                    FileKind::Directory
+                } else {
+                    FileKind::File
+                },
+                size: row.get::<_, i64>(3)?.max(0) as u64,
+                modified: row.get::<_, i64>(4)?.max(0) as u64,
+                extension: (!ext.is_empty()).then_some(ext),
+            })
+        })
         .map_err(|e| e.to_string())?;
     Ok(rows.filter_map(Result::ok).collect())
 }
@@ -13617,9 +13648,21 @@ impl NativeController {
         // a few KB on disk but the sequential I/O latency adds up over 7 reads.
         // join lets the OS file cache stream them concurrently and cuts the
         // total startup wall-clock by roughly the number of cores serving I/O.
-        let ((tabs_raw, recent_raw), (folder_views_raw, (tags_raw, (tag_labels_raw, (notes_raw, user_pins_raw))))): (
+        let (
+            (tabs_raw, recent_raw),
+            (folder_views_raw, (tags_raw, (tag_labels_raw, (notes_raw, user_pins_raw)))),
+        ): (
             (Vec<SessionTab>, Vec<String>),
-            (HashMap<String, String>, (HashMap<String, String>, (HashMap<String, String>, (HashMap<String, String>, Vec<UserPin>)))),
+            (
+                HashMap<String, String>,
+                (
+                    HashMap<String, String>,
+                    (
+                        HashMap<String, String>,
+                        (HashMap<String, String>, Vec<UserPin>),
+                    ),
+                ),
+            ),
         ) = rayon::join(
             || {
                 rayon::join(
@@ -13629,17 +13672,42 @@ impl NativeController {
             },
             || {
                 rayon::join(
-                    || read_native_json::<HashMap<String, String>>("folder_views.json", HashMap::new()),
+                    || {
+                        read_native_json::<HashMap<String, String>>(
+                            "folder_views.json",
+                            HashMap::new(),
+                        )
+                    },
                     || {
                         rayon::join(
-                            || read_native_json::<HashMap<String, String>>("tags.json", HashMap::new()),
+                            || {
+                                read_native_json::<HashMap<String, String>>(
+                                    "tags.json",
+                                    HashMap::new(),
+                                )
+                            },
                             || {
                                 rayon::join(
-                                    || read_native_json::<HashMap<String, String>>("tag_labels.json", HashMap::new()),
+                                    || {
+                                        read_native_json::<HashMap<String, String>>(
+                                            "tag_labels.json",
+                                            HashMap::new(),
+                                        )
+                                    },
                                     || {
                                         rayon::join(
-                                            || read_native_json::<HashMap<String, String>>("notes.json", HashMap::new()),
-                                            || read_native_json::<Vec<UserPin>>("user_pins.json", Vec::new()),
+                                            || {
+                                                read_native_json::<HashMap<String, String>>(
+                                                    "notes.json",
+                                                    HashMap::new(),
+                                                )
+                                            },
+                                            || {
+                                                read_native_json::<Vec<UserPin>>(
+                                                    "user_pins.json",
+                                                    Vec::new(),
+                                                )
+                                            },
                                         )
                                     },
                                 )
@@ -14030,10 +14098,7 @@ impl NativeController {
         ui.set_ai_install_size_mb(mb);
         let disk = local_ai::actual_disk_usage_bytes();
         if disk > 0 {
-            ui.set_ai_disk_usage(ss(format!(
-                "On disk: {:.0} MB",
-                disk as f64 / 1_000_000.0
-            )));
+            ui.set_ai_disk_usage(ss(format!("On disk: {:.0} MB", disk as f64 / 1_000_000.0)));
         } else {
             ui.set_ai_disk_usage(ss(""));
         }
@@ -14174,7 +14239,9 @@ impl NativeController {
             let status = index_status_for_settings_with_drives(&settings, Some(&drives));
             let ram_line = match process_memory_stats() {
                 Some((ws, private_mb)) => {
-                    format!("Memory in use right now: {ws} MB working set ({private_mb} MB private)")
+                    format!(
+                        "Memory in use right now: {ws} MB working set ({private_mb} MB private)"
+                    )
                 }
                 None => "Memory in use: not available on this platform".to_string(),
             };
@@ -14288,6 +14355,7 @@ impl NativeController {
     fn sync_performance_status(&self, ui: &MainWindow) {
         let status = index_status_for_settings(&self.settings);
         ui.set_active_index_mode(ss(&self.settings.index_mode));
+        ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         ui.set_index_status(ss(format!(
             "{} files indexed | {} on disk | thumbnails {} of {} cap | {}",
             status.indexed_files,
@@ -14488,8 +14556,7 @@ impl NativeController {
     fn active_selected_indices(&self) -> Vec<usize> {
         if self.active_pane == ActivePane::Secondary {
             if !self.secondary_selected_set.is_empty() {
-                let mut sorted: Vec<usize> =
-                    self.secondary_selected_set.iter().copied().collect();
+                let mut sorted: Vec<usize> = self.secondary_selected_set.iter().copied().collect();
                 sorted.sort_unstable();
                 return sorted;
             }
@@ -14623,12 +14690,7 @@ impl NativeController {
                     "recent" => entry.modified >= now.saturating_sub(7 * 24 * 60 * 60),
                     "old-downloads" => {
                         let in_downloads = dirs::download_dir()
-                            .map(|d| {
-                                same_path_string(
-                                    &self.current_path,
-                                    &d.to_string_lossy(),
-                                )
-                            })
+                            .map(|d| same_path_string(&self.current_path, &d.to_string_lossy()))
                             .unwrap_or(false);
                         entry.kind != FileKind::Directory
                             && in_downloads
@@ -14889,8 +14951,7 @@ impl NativeController {
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                let mut item =
-                    self.file_item(entry, self.selected_set.contains(&i), max_file_size);
+                let mut item = self.file_item(entry, self.selected_set.contains(&i), max_file_size);
                 if show_home_groups {
                     let group = home_section_label(entry.modified).to_string();
                     if !group.is_empty() {
@@ -14918,10 +14979,7 @@ impl NativeController {
         self.sync_selection_count_to_ui(ui);
         self.sync_search_scope(ui);
         self.sync_tag_names(ui);
-        let shown_path = navigation_display_path(
-            &self.current_path,
-            self.active_archive.as_ref(),
-        );
+        let shown_path = navigation_display_path(&self.current_path, self.active_archive.as_ref());
         ui.set_current_path(ss(&shown_path));
         ui.set_address_text(ss(&shown_path));
         ui.set_search_text(ss(&self.search_query));
@@ -14933,6 +14991,7 @@ impl NativeController {
         ));
         self.update_status(ui);
         self.sync_grid_window(ui, false);
+        self.sync_list_window(ui, false);
     }
 
     fn sync_nav_chrome(&mut self, ui: &MainWindow) {
@@ -14944,10 +15003,7 @@ impl NativeController {
         self.sync_selection_count_to_ui(ui);
         self.sync_search_scope(ui);
         self.sync_tag_names(ui);
-        let shown_path = navigation_display_path(
-            &self.current_path,
-            self.active_archive.as_ref(),
-        );
+        let shown_path = navigation_display_path(&self.current_path, self.active_archive.as_ref());
         ui.set_current_path(ss(&shown_path));
         ui.set_address_text(ss(&shown_path));
         ui.set_search_text(ss(&self.search_query));
@@ -15074,9 +15130,7 @@ impl NativeController {
         let items: Vec<FileItem> = files[start..end]
             .iter()
             .enumerate()
-            .map(|(i, entry)| {
-                self.file_item(entry, selected.contains(&(start + i)), max_file_size)
-            })
+            .map(|(i, entry)| self.file_item(entry, selected.contains(&(start + i)), max_file_size))
             .collect();
 
         if secondary {
@@ -15113,8 +15167,7 @@ impl NativeController {
                         if img.width() <= 8192 && img.height() <= 8192 {
                             let t = img.thumbnail(160, 160);
                             let mut buf = Vec::new();
-                            if t
-                                .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+                            if t.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
                                 .is_ok()
                             {
                                 let _ = store_thumbnail_on_disk(
@@ -15133,9 +15186,97 @@ impl NativeController {
         }
     }
 
+    fn sync_list_window(&mut self, ui: &MainWindow, secondary: bool) {
+        use slint::Model;
+        if ui.get_view_mode().as_str() != "list" {
+            return;
+        }
+        let row_h = ui.global::<AppMetrics>().get_row_h().max(26.0);
+        let header_h = 26.0;
+        let scroll_y = if secondary {
+            ui.get_secondary_list_scroll_y()
+        } else {
+            ui.get_primary_list_scroll_y()
+        }
+        .abs();
+        let viewport_h = if secondary {
+            ui.get_secondary_list_viewport_h()
+        } else {
+            ui.get_primary_list_viewport_h()
+        }
+        .max(120.0);
+        let model = if secondary {
+            self.secondary_files_model.clone()
+        } else {
+            self.files_model.clone()
+        };
+        let Some(model) = model else {
+            if secondary {
+                ui.set_secondary_list_window_files(model_from_vec(Vec::<FileItem>::new()));
+                ui.set_secondary_list_window_start(0);
+                ui.set_secondary_list_window_y(0.0);
+                ui.set_secondary_list_content_h(viewport_h);
+            } else {
+                ui.set_list_window_files(model_from_vec(Vec::<FileItem>::new()));
+                ui.set_list_window_start(0);
+                ui.set_list_window_y(0.0);
+                ui.set_list_content_h(viewport_h);
+            }
+            return;
+        };
+        let total = model.row_count();
+        let mut offsets = Vec::with_capacity(total + 1);
+        offsets.push(0.0);
+        for i in 0..total {
+            let h = model
+                .row_data(i)
+                .map(|item| {
+                    row_h
+                        + if item.show_date_group_header {
+                            header_h
+                        } else {
+                            0.0
+                        }
+                })
+                .unwrap_or(row_h);
+            offsets.push(offsets[i] + h);
+        }
+        let content_h = *offsets.last().unwrap_or(&viewport_h);
+        let mut start = 0usize;
+        for i in 0..total {
+            if offsets[i + 1] >= scroll_y {
+                start = i.saturating_sub(2);
+                break;
+            }
+            start = i;
+        }
+        let mut end = start;
+        while end < total && offsets[end] < scroll_y + viewport_h + row_h * 3.0 {
+            end += 1;
+        }
+        end = end.min(total);
+        let items: Vec<FileItem> = (start..end).filter_map(|i| model.row_data(i)).collect();
+        let offset_y = offsets.get(start).copied().unwrap_or(0.0);
+        if secondary {
+            ui.set_secondary_list_window_start(start as i32);
+            ui.set_secondary_list_window_y(offset_y);
+            ui.set_secondary_list_content_h(content_h.max(viewport_h));
+            ui.set_secondary_list_window_files(model_from_vec(items));
+        } else {
+            ui.set_list_window_start(start as i32);
+            ui.set_list_window_y(offset_y);
+            ui.set_list_content_h(content_h.max(viewport_h));
+            ui.set_list_window_files(model_from_vec(items));
+        }
+    }
+
     /// Apply a scroll/viewport sync request from Slint (debounced there).
     fn on_sync_grid_windows(&mut self, ui: &MainWindow) {
         if ui.get_view_mode().as_str() == "list" {
+            self.sync_list_window(ui, false);
+            if ui.get_dual_pane() {
+                self.sync_list_window(ui, true);
+            }
             return;
         }
         self.sync_grid_window(ui, false);
@@ -15187,6 +15328,8 @@ impl NativeController {
         self.update_status(ui);
         if ui.get_view_mode().as_str() != "list" {
             self.sync_grid_window(ui, false);
+        } else {
+            self.sync_list_window(ui, false);
         }
     }
 
@@ -15369,9 +15512,7 @@ impl NativeController {
             for src in sources {
                 if let Some(parent) = Path::new(src).parent() {
                     let parent = parent.to_string_lossy().to_string();
-                    if !parent.is_empty()
-                        && !dirs.iter().any(|d| same_path_string(d, &parent))
-                    {
+                    if !parent.is_empty() && !dirs.iter().any(|d| same_path_string(d, &parent)) {
                         dirs.push(parent);
                     }
                 }
@@ -15383,8 +15524,7 @@ impl NativeController {
 
     fn invalidate_paste_directories(&self, dirs: &[String]) {
         for dir in dirs {
-            self.app_state
-                .invalidate_directory_path(Path::new(dir));
+            self.app_state.invalidate_directory_path(Path::new(dir));
         }
     }
 
@@ -15411,12 +15551,7 @@ impl NativeController {
     }
 
     /// Reload the pane(s) that show pasted files after copy or move.
-    fn refresh_after_paste(
-        &mut self,
-        ui: &MainWindow,
-        cut: bool,
-        pasted_sources: &[String],
-    ) {
+    fn refresh_after_paste(&mut self, ui: &MainWindow, cut: bool, pasted_sources: &[String]) {
         let dest_dir = self.active_directory().to_string();
         let invalidate_dirs = Self::paste_invalidate_dirs(&dest_dir, pasted_sources, cut);
         self.invalidate_paste_directories(&invalidate_dirs);
@@ -15508,7 +15643,6 @@ impl NativeController {
             _ => "folder",
         }
     }
-
 
     fn side_row(
         label: impl Into<String>,
@@ -15702,10 +15836,10 @@ impl NativeController {
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: true,
                 active: false,
-            indent: 0,
-            usage: -1.0,
-            expandable: false,
-            expanded: false,
+                indent: 0,
+                usage: -1.0,
+                expandable: false,
+                expanded: false,
             });
             for pin in self.user_pins.iter().take(12) {
                 items.push(SideItem {
@@ -15778,10 +15912,10 @@ impl NativeController {
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: true,
                 active: false,
-            indent: 0,
-            usage: -1.0,
-            expandable: false,
-            expanded: false,
+                indent: 0,
+                usage: -1.0,
+                expandable: false,
+                expanded: false,
             });
             for path in self.recent_locations.iter().take(5) {
                 let label_str = Path::new(path)
@@ -15845,10 +15979,10 @@ impl NativeController {
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: true,
                 active: false,
-            indent: 0,
-            usage: -1.0,
-            expandable: false,
-            expanded: false,
+                indent: 0,
+                usage: -1.0,
+                expandable: false,
+                expanded: false,
             });
             for search in saved.into_iter().take(8) {
                 let encoded = format!("search:{}", search.name);
@@ -15860,10 +15994,10 @@ impl NativeController {
                     color: rgba_u8(0, 0, 0, 0.0),
                     is_header: false,
                     active: self.search_query == search.query,
-            indent: 0,
-            usage: -1.0,
-            expandable: false,
-            expanded: false,
+                    indent: 0,
+                    usage: -1.0,
+                    expandable: false,
+                    expanded: false,
                 });
             }
         }
@@ -15903,10 +16037,10 @@ impl NativeController {
                 color: tag_color(id),
                 is_header: false,
                 active: self.search_query == format!("tag:{id}"),
-            indent: 0,
-            usage: -1.0,
-            expandable: false,
-            expanded: false,
+                indent: 0,
+                usage: -1.0,
+                expandable: false,
+                expanded: false,
             });
         }
         items
@@ -16029,10 +16163,10 @@ impl NativeController {
                 color: rgba_u8(0, 0, 0, 0.0),
                 is_header: false,
                 active: self.current_path.starts_with(&drive.path),
-            indent: 0,
-            usage: -1.0,
-            expandable: false,
-            expanded: false,
+                indent: 0,
+                usage: -1.0,
+                expandable: false,
+                expanded: false,
             });
         }
         items.push(SideItem {
@@ -16152,8 +16286,7 @@ impl NativeController {
         }
         self.current_path = path.to_string();
         self.thumbnail_memory.retain(|k, _| k.starts_with(path));
-        self.recent_locations
-            .retain(|p| !same_path_string(p, path));
+        self.recent_locations.retain(|p| !same_path_string(p, path));
         self.recent_locations.insert(0, path.to_string());
         if self.recent_locations.len() > 12 {
             self.recent_locations.truncate(12);
@@ -16348,8 +16481,7 @@ impl NativeController {
                         if img.width() <= 8192 && img.height() <= 8192 {
                             let t = img.thumbnail(160, 160);
                             let mut buf = Vec::new();
-                            if t
-                                .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+                            if t.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
                                 .is_ok()
                             {
                                 let _ = store_thumbnail_on_disk(
@@ -16498,7 +16630,8 @@ impl NativeController {
         if let Some(name) = path.strip_prefix("search:") {
             let saved = read_native_json::<Vec<SavedSearch>>("searches.json", Vec::new());
             if let Some(search) = saved.into_iter().find(|s| s.name == name) {
-                if !search.scope.is_empty() && !same_path_string(&self.current_path, &search.scope) {
+                if !search.scope.is_empty() && !same_path_string(&self.current_path, &search.scope)
+                {
                     return SidebarActivateAction::NavigateThenSearch {
                         path: search.scope,
                         query: search.query,
@@ -16771,9 +16904,7 @@ impl NativeController {
                         .into_iter()
                         .filter(|item| {
                             let orig = item.original_path().to_string_lossy().into_owned();
-                            target_originals
-                                .iter()
-                                .any(|t| same_path_string(t, &orig))
+                            target_originals.iter().any(|t| same_path_string(t, &orig))
                         })
                         .collect(),
                     None => items,
@@ -16870,10 +17001,7 @@ impl NativeController {
 
     fn prompt_purge_recycle_bin(&mut self, ui: &MainWindow) {
         let paths = self.selected_paths();
-        let n = paths
-            .iter()
-            .filter(|p| p.starts_with("recycle://"))
-            .count();
+        let n = paths.iter().filter(|p| p.starts_with("recycle://")).count();
         if n == 0 {
             self.show_toast(ui, "Select items to delete permanently.");
             return;
@@ -16892,6 +17020,9 @@ impl NativeController {
                 "Permanently delete {n} items from the Recycle Bin? This cannot be undone."
             )));
         }
+        ui.set_confirm_title(ss(&i18n::t("Delete forever")));
+        ui.set_confirm_action(ss(&i18n::t("Delete forever")));
+        ui.set_confirm_is_permanent(true);
         ui.set_confirm_visible(true);
     }
 
@@ -16900,6 +17031,9 @@ impl NativeController {
         ui.set_confirm_text(ss(
             "Empty the Recycle Bin? This permanently deletes all items and cannot be undone.",
         ));
+        ui.set_confirm_title(ss(&i18n::t("Empty Recycle Bin")));
+        ui.set_confirm_action(ss(&i18n::t("Empty")));
+        ui.set_confirm_is_permanent(true);
         ui.set_confirm_visible(true);
     }
 
@@ -16926,9 +17060,7 @@ impl NativeController {
                     .into_iter()
                     .filter(|item| {
                         let orig = item.original_path().to_string_lossy().into_owned();
-                        target_originals
-                            .iter()
-                            .any(|t| same_path_string(t, &orig))
+                        target_originals.iter().any(|t| same_path_string(t, &orig))
                     })
                     .collect();
                 let n = to_purge.len();
@@ -17100,8 +17232,7 @@ impl NativeController {
         self.sync_active_pane(ui);
         if self.active_pane == ActivePane::Secondary {
             let path = self.secondary_path.clone();
-            self.app_state
-                .invalidate_directory_path(Path::new(&path));
+            self.app_state.invalidate_directory_path(Path::new(&path));
             self.secondary_navigate(ui, path);
             return;
         }
@@ -17127,8 +17258,7 @@ impl NativeController {
             return;
         }
         self.bump_nav_generation();
-        self.app_state
-            .invalidate_directory_path(Path::new(&path));
+        self.app_state.invalidate_directory_path(Path::new(&path));
         self.schedule_full_directory_load(path);
     }
 
@@ -17153,10 +17283,7 @@ impl NativeController {
             self.secondary_selected_index = -1;
             self.secondary_select_anchor = -1;
             for (i, entry) in self.secondary_visible_files.iter().enumerate() {
-                if kept_paths
-                    .iter()
-                    .any(|p| same_path_string(p, &entry.path))
-                {
+                if kept_paths.iter().any(|p| same_path_string(p, &entry.path)) {
                     self.secondary_selected_set.insert(i);
                     if self.secondary_selected_index < 0 {
                         self.secondary_selected_index = i as i32;
@@ -17183,10 +17310,7 @@ impl NativeController {
         self.selected_index = -1;
         self.select_anchor = -1;
         for (i, entry) in self.visible_files.iter().enumerate() {
-            if kept_paths
-                .iter()
-                .any(|p| same_path_string(p, &entry.path))
-            {
+            if kept_paths.iter().any(|p| same_path_string(p, &entry.path)) {
                 self.selected_set.insert(i);
                 if self.selected_index < 0 {
                     self.selected_index = i as i32;
@@ -17613,9 +17737,12 @@ impl NativeController {
         // PDF: show a previously-rasterized first page instantly (mutex + image
         // wrap only — never rasterize here). Cold renders stay on the worker.
         if ext == "pdf" {
-            if let Some(rgba) =
-                pdf_page_cached_only(&self.app_state, &entry.path, entry.modified, PDF_PREVIEW_WIDTH)
-            {
+            if let Some(rgba) = pdf_page_cached_only(
+                &self.app_state,
+                &entry.path,
+                entry.modified,
+                PDF_PREVIEW_WIDTH,
+            ) {
                 ui.set_preview_pdf_page(rgba_to_slint_image(&rgba));
                 ui.set_preview_has_pdf_page(true);
             } else {
@@ -17640,6 +17767,11 @@ impl NativeController {
 
         // Media + folders: metadata-only, no disk body read.
         if is_media_ext(&ext) {
+            #[cfg(target_os = "windows")]
+            if let Some(img) = file_icons::shell_thumbnail(&entry.path, 256) {
+                ui.set_preview_image(img);
+                ui.set_preview_is_image(true);
+            }
             ui.set_preview_body(ss(format!(
                 "Media file ({ext})\n\nOpen with the system player, or use the preview action row.\n\nSize: {}\nModified: {}",
                 format_size_short(entry.size),
@@ -17902,11 +18034,7 @@ impl NativeController {
         if navigate_if_dir {
             if let Some(existing) = deepest_existing_directory(&resolved) {
                 if !same_path_string(&existing.to_string_lossy(), &self.current_path) {
-                    self.navigate(
-                        ui,
-                        existing.to_string_lossy().into_owned(),
-                        true,
-                    );
+                    self.navigate(ui, existing.to_string_lossy().into_owned(), true);
                     self.search_query = query.to_string();
                     ui.set_search_text(ss(query));
                 }
@@ -17931,8 +18059,7 @@ impl NativeController {
             .collect();
 
         if matches.is_empty() {
-            if let Ok(indexed) =
-                index_search_paths(&self.search_root(), query, SEARCH_INDEX_LIMIT)
+            if let Ok(indexed) = index_search_paths(&self.search_root(), query, SEARCH_INDEX_LIMIT)
             {
                 matches = indexed;
             }
@@ -18020,10 +18147,7 @@ impl NativeController {
 
         let warnings = query_filter_warnings(&trimmed);
         if !warnings.is_empty() {
-            ui.set_status_right(ss(format!(
-                "{search_root} | {}",
-                warnings.join(" · ")
-            )));
+            ui.set_status_right(ss(format!("{search_root} | {}", warnings.join(" · "))));
         }
 
         // Index / Windows Search / live scan run on a worker thread so typing
@@ -18077,7 +18201,11 @@ impl NativeController {
             }
             let (tx, rx) = std::sync::mpsc::channel::<Part>();
 
-            let index_limit = if prefer_live_first { 400.max(limit / 4) } else { limit };
+            let index_limit = if prefer_live_first {
+                400.max(limit / 4)
+            } else {
+                limit
+            };
             {
                 let tx = tx.clone();
                 let path = path.clone();
@@ -18430,6 +18558,7 @@ impl NativeController {
         ui.set_secondary_path(ss(&self.secondary_path));
         self.secondary_files_model = Some(model);
         self.sync_grid_window(ui, true);
+        self.sync_list_window(ui, true);
     }
 
     fn update_secondary_selection_in_model(&mut self, ui: &MainWindow, changed: &[usize]) {
@@ -18501,10 +18630,7 @@ impl NativeController {
         }
 
         // Async chunked load — mirrors primary so large folders don't freeze.
-        let token = self
-            .secondary_nav_generation
-            .fetch_add(1, Ordering::SeqCst)
-            + 1;
+        let token = self.secondary_nav_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.secondary_files.clear();
         self.secondary_visible_files.clear();
         self.secondary_files_model = None;
@@ -18646,8 +18772,7 @@ impl NativeController {
                     if img.width() <= 8192 && img.height() <= 8192 {
                         let t = img.thumbnail(160, 160);
                         let mut buf = Vec::new();
-                        if t
-                            .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+                        if t.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
                             .is_ok()
                         {
                             let _ = store_thumbnail_on_disk(
@@ -18772,6 +18897,22 @@ impl NativeController {
     }
 
     fn command(&mut self, ui: &MainWindow, command: &str) {
+        if shortcuts::blocked_while_modal(command)
+            && shortcuts::overlay_is_blocking(
+                ui.get_confirm_visible(),
+                ui.get_prompt_visible(),
+                ui.get_settings_visible(),
+                ui.get_welcome_visible(),
+                ui.get_ui_mode_prompt_visible(),
+                ui.get_command_visible(),
+                ui.get_tool_overlay_visible(),
+                ui.get_compare_overlay_visible(),
+                ui.get_image_tools_visible(),
+                ui.get_dupe_overlay_visible(),
+            )
+        {
+            return;
+        }
         if let Some(tag) = command.strip_prefix("tag-") {
             self.set_selected_tag(ui, tag);
             return;
@@ -18879,10 +19020,7 @@ impl NativeController {
                             let msg = if paths.len() == 1 {
                                 "Opening Windows Properties".to_string()
                             } else {
-                                format!(
-                                    "Opening Properties for first of {} items",
-                                    paths.len()
-                                )
+                                format!("Opening Properties for first of {} items", paths.len())
                             };
                             self.show_toast(ui, msg);
                         }
@@ -18904,10 +19042,7 @@ impl NativeController {
                 if paths.is_empty() {
                     self.show_toast(ui, "Select a file first.");
                 } else if paths.len() > 1 {
-                    self.show_toast(
-                        ui,
-                        "Open With applies to one file — select a single item.",
-                    );
+                    self.show_toast(ui, "Open With applies to one file — select a single item.");
                 } else {
                     match open_with_dialog(&paths[0], Some(ui)) {
                         Ok(()) => {}
@@ -18983,23 +19118,7 @@ impl NativeController {
                     self.show_toast(ui, "Select a file first.");
                 }
             }
-            "previous-versions" => {
-                if let Some(entry) = self.selected_entry() {
-                    let versions = list_previous_versions(&entry.path);
-                    if versions.is_empty() {
-                        ui.set_preview_title(ss("Previous Versions"));
-                        ui.set_preview_body(ss("No shadow copies found for this drive.\n\n\
-                             Enable File History, a restore point, or Volume Shadow \
-                             Copy Service (VSS) snapshots to create previous versions."));
-                    } else {
-                        ui.set_preview_title(ss("Previous Versions"));
-                        ui.set_preview_body(ss(versions.join("\n")));
-                    }
-                    ui.set_preview_meta(ss(&entry.path));
-                } else {
-                    self.show_toast(ui, "Select a file first.");
-                }
-            }
+            "previous-versions" => self.show_previous_versions_overlay(ui),
             "pin-to-taskbar" => {
                 if let Some(entry) = self.selected_entry() {
                     #[cfg(target_os = "windows")]
@@ -19032,15 +19151,7 @@ impl NativeController {
                     self.show_toast(ui, "Select a file first.");
                 }
             }
-            "cloud-state" => {
-                if let Some(entry) = self.selected_entry() {
-                    ui.set_preview_title(ss("Cloud State"));
-                    ui.set_preview_body(ss(cloud_state_label(&entry.path)));
-                    ui.set_preview_meta(ss(entry.path));
-                } else {
-                    self.show_toast(ui, "Select a file first.");
-                }
-            }
+            "cloud-state" => self.show_cloud_state_overlay(ui),
             "new-template" => self.show_templates(ui),
             "rename-presets" => self.show_rename_presets(ui),
             "image-tools" => self.show_image_tools(ui),
@@ -19109,10 +19220,7 @@ impl NativeController {
                     let text = paths
                         .iter()
                         .map(|path| {
-                            format!(
-                                "file:///{}",
-                                path.replace('\\', "/").replace(' ', "%20")
-                            )
+                            format!("file:///{}", path.replace('\\', "/").replace(' ', "%20"))
                         })
                         .collect::<Vec<_>>()
                         .join("\r\n");
@@ -19246,8 +19354,135 @@ impl NativeController {
                 }
             }
             "empty-trash" => self.prompt_empty_recycle_bin(ui),
+            "go-back" => self.go_back(ui),
+            "go-forward" => self.go_forward(ui),
+            "go-up" => self.go_up(ui),
+            "focus-address" => {
+                ui.set_address_text(ss(&self.current_path));
+                ui.set_address_editing(true);
+            }
+            "view-compact" => self.set_view(ui, "compact"),
+            "share" => self.share_selected(ui),
             _ => self.show_toast(ui, format!("Unknown command: {command}")),
         }
+    }
+
+    fn share_selected(&mut self, ui: &MainWindow) {
+        let Some(entry) = self.selected_entry() else {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        };
+        #[cfg(target_os = "windows")]
+        {
+            match windows_integration::share_path(&entry.path) {
+                Ok(()) => {}
+                Err(e) => self.show_toast_kind(ui, e, "error"),
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = entry;
+            self.show_toast(ui, "Share is only available on Windows.");
+        }
+    }
+
+    fn handle_shortcut_key(
+        &mut self,
+        ui: &MainWindow,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        key: String,
+    ) {
+        ui.set_shortcut_consumed(false);
+        let capturing = ui.get_shortcut_capture_active()
+            || (ui.get_tool_overlay_visible()
+                && ui.get_tool_overlay_kind().as_str() == "shortcuts"
+                && !ui.get_shortcut_capture_command().is_empty());
+        if capturing {
+            if key.eq_ignore_ascii_case("escape") {
+                ui.set_shortcut_capture_active(false);
+                ui.set_shortcut_capture_command(ss(""));
+                ui.set_shortcut_consumed(true);
+                return;
+            }
+            let target = ui.get_shortcut_capture_command().to_string();
+            if target.is_empty() {
+                return;
+            }
+            let reset = !ctrl
+                && !alt
+                && (key.eq_ignore_ascii_case("backspace") || key.eq_ignore_ascii_case("delete"));
+            if reset {
+                self.shortcut_draft.remove(&target);
+            } else {
+                let Some(built) = shortcuts::Chord::from_parts(ctrl, shift, alt, &key) else {
+                    ui.set_shortcut_consumed(true);
+                    return;
+                };
+                self.shortcut_draft.insert(target, built.display());
+            }
+            ui.set_shortcut_capture_active(false);
+            ui.set_shortcut_capture_command(ss(""));
+            let items: Vec<ShortcutEditItem> = ALL_COMMANDS
+                .iter()
+                .map(|(group, label, hint, command)| ShortcutEditItem {
+                    command: ss(*command),
+                    label: ss(*label),
+                    hint: ss(shortcuts::hint_for(command, &self.shortcut_draft, hint)),
+                    group: ss(*group),
+                })
+                .collect();
+            ui.set_shortcut_edit_items(model_from_vec(items));
+            ui.set_shortcut_consumed(true);
+            return;
+        }
+        if shortcuts::overlay_is_blocking(
+            ui.get_confirm_visible(),
+            ui.get_prompt_visible(),
+            ui.get_settings_visible(),
+            ui.get_welcome_visible(),
+            ui.get_ui_mode_prompt_visible(),
+            ui.get_command_visible(),
+            ui.get_tool_overlay_visible(),
+            ui.get_compare_overlay_visible(),
+            ui.get_image_tools_visible(),
+            ui.get_dupe_overlay_visible(),
+        ) {
+            return;
+        }
+        let overrides = load_shortcut_overrides();
+        if let Some(cmd) = shortcuts::resolve(ctrl, shift, alt, &key, &overrides) {
+            ui.set_shortcut_consumed(true);
+            match cmd.as_str() {
+                "command-palette" => {
+                    ui.set_command_filter(ss(""));
+                    ui.invoke_filter_commands(ss(""));
+                    ui.set_command_visible(true);
+                }
+                other => self.command(ui, other),
+            }
+        }
+    }
+
+    fn populate_shell_menu(&self, ui: &MainWindow, path: Option<&str>) {
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut items: Vec<CommandItem> = Vec::new();
+        #[cfg(target_os = "windows")]
+        if let Some(path) = path {
+            if let Ok(actions) = windows_integration::get_context_menu_actions(path) {
+                for action in actions {
+                    items.push(CommandItem {
+                        group: ss("shell"),
+                        label: ss(&action.name),
+                        hint: ss(""),
+                        command: ss(action.id.to_string()),
+                    });
+                }
+            }
+        }
+        let _ = path;
+        ui.set_shell_menu_items(model_from_vec(items));
     }
 
     fn prompt_rename(&mut self, ui: &MainWindow) {
@@ -19387,11 +19622,8 @@ impl NativeController {
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
-                        let _ = native_rename(
-                            &self.app_state,
-                            &current.to_string_lossy(),
-                            &old_name,
-                        );
+                        let _ =
+                            native_rename(&self.app_state, &current.to_string_lossy(), &old_name);
                     }
                     return Err(error);
                 }
@@ -19422,7 +19654,10 @@ impl NativeController {
     }
 
     fn prompt_rename_conflict(&mut self, ui: &MainWindow, path: String, new_name: String) {
-        self.pending_prompt = Some(PendingPrompt::RenameConflict { path, new_name: new_name.clone() });
+        self.pending_prompt = Some(PendingPrompt::RenameConflict {
+            path,
+            new_name: new_name.clone(),
+        });
         ui.set_prompt_kind(ss("rename-conflict"));
         ui.set_prompt_title(ss("Name already exists"));
         ui.set_prompt_value(ss(new_name));
@@ -19483,11 +19718,7 @@ impl NativeController {
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
         if let Some(path) = active_path {
-            self.active_tab = self
-                .tabs
-                .iter()
-                .position(|t| t.path == path)
-                .unwrap_or(0);
+            self.active_tab = self.tabs.iter().position(|t| t.path == path).unwrap_or(0);
         }
         self.update_models(ui);
         self.save_session();
@@ -19516,13 +19747,16 @@ impl NativeController {
         let n = paths.len();
         if n > 1 {
             ui.set_confirm_text(ss(format!("Send {n} items to the Recycle Bin?")));
-            ui.set_confirm_visible(true);
         } else if let Some(entry) = self.selected_entry() {
             ui.set_confirm_text(ss(format!("Send '{}' to the Recycle Bin?", entry.name)));
-            ui.set_confirm_visible(true);
         } else {
             self.show_toast(ui, "Select a file first.");
+            return;
         }
+        ui.set_confirm_title(ss(&i18n::t("Move to Recycle Bin")));
+        ui.set_confirm_action(ss(&i18n::t("Move to Bin")));
+        ui.set_confirm_is_permanent(false);
+        ui.set_confirm_visible(true);
     }
 
     fn prompt_permanent_delete(&mut self, ui: &MainWindow) {
@@ -19550,6 +19784,9 @@ impl NativeController {
                 "Permanently delete {n} items? This cannot be undone."
             )));
         }
+        ui.set_confirm_title(ss(&i18n::t("Delete forever")));
+        ui.set_confirm_action(ss(&i18n::t("Delete forever")));
+        ui.set_confirm_is_permanent(true);
         ui.set_confirm_visible(true);
     }
 
@@ -19656,7 +19893,8 @@ impl NativeController {
                         self.show_toast_kind(ui, format!("Renamed {count} items"), "success");
                     }
                     Err(error) => {
-                        self.pending_prompt = Some(PendingPrompt::BatchRename(paths_for_retry.clone()));
+                        self.pending_prompt =
+                            Some(PendingPrompt::BatchRename(paths_for_retry.clone()));
                         ui.set_prompt_kind(ss("batch-rename"));
                         self.sync_batch_rename_preview(ui, &paths_for_retry);
                         ui.set_prompt_visible(true);
@@ -19764,7 +20002,9 @@ impl NativeController {
                     list.truncate(30);
                 }
                 match save_workspaces(&list) {
-                    Ok(()) => self.show_toast_kind(ui, format!("Saved workspace '{name}'"), "success"),
+                    Ok(()) => {
+                        self.show_toast_kind(ui, format!("Saved workspace '{name}'"), "success")
+                    }
                     Err(e) => self.show_toast_kind(ui, e, "error"),
                 }
             }
@@ -20019,7 +20259,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 }
             } else {
                 NativeOperationResult {
@@ -20039,7 +20279,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: paths_for_optimistic,
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 }
             };
             if let Ok(mut lock) = pending_result.lock() {
@@ -20523,11 +20763,8 @@ impl NativeController {
             }
 
             let pasted = completed > 0;
-            let moved_sources: Vec<String> = paths_to_paste
-                .iter()
-                .take(completed)
-                .cloned()
-                .collect();
+            let moved_sources: Vec<String> =
+                paths_to_paste.iter().take(completed).cloned().collect();
             let invalidate_dirs = if pasted {
                 NativeController::paste_invalidate_dirs(&dest_dir, &moved_sources, cut)
             } else {
@@ -20547,7 +20784,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs,
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 }
             } else {
                 let verb_done = if cut { "Moved" } else { "Pasted" };
@@ -20567,7 +20804,7 @@ impl NativeController {
                     clear_clipboard: cut,
                     invalidate_dirs: invalidate_dirs_on_success,
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 }
             };
 
@@ -20669,7 +20906,10 @@ impl NativeController {
                 p
             })
             .unwrap_or_else(|| PathBuf::from(&path));
-        self.show_toast(ui, format!("Scanning drive {} for duplicates…", root.display()));
+        self.show_toast(
+            ui,
+            format!("Scanning drive {} for duplicates…", root.display()),
+        );
         match find_duplicates(root.to_string_lossy().to_string(), Some(64 * 1024)) {
             Ok(groups) => {
                 self.dupe_groups_cache = groups
@@ -20923,12 +21163,7 @@ impl NativeController {
             });
         }
         if let Some(downloads) = dirs::download_dir() {
-            push_dir(
-                &mut entries,
-                "Downloads",
-                &downloads.to_string_lossy(),
-                5,
-            );
+            push_dir(&mut entries, "Downloads", &downloads.to_string_lossy(), 5);
         }
         entries.push(FileEntry {
             path: "storage://".to_string(),
@@ -20983,30 +21218,32 @@ impl NativeController {
     }
 
     fn show_libraries(&mut self, ui: &MainWindow) {
-        let mut lines = Vec::new();
-        let libraries = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Microsoft")
-            .join("Windows")
-            .join("Libraries");
-        if let Ok(entries) = fs::read_dir(&libraries) {
-            for entry in entries.flatten() {
-                if entry
-                    .path()
-                    .extension()
-                    .map(|e| e == "library-ms")
-                    .unwrap_or(false)
-                {
-                    lines.push(entry.file_name().to_string_lossy().to_string());
-                }
+        let mut items: Vec<ToolListItem> = Vec::new();
+        let known = [
+            ("Documents", dirs::document_dir()),
+            ("Pictures", dirs::picture_dir()),
+            ("Music", dirs::audio_dir()),
+            ("Videos", dirs::video_dir()),
+            ("Downloads", dirs::download_dir()),
+            ("Desktop", dirs::desktop_dir()),
+        ];
+        for (name, path) in known {
+            if let Some(p) = path {
+                items.push(ToolListItem {
+                    id: ss(p.to_string_lossy().to_string()),
+                    title: ss(&i18n::t(name)),
+                    subtitle: ss(p.to_string_lossy().to_string()),
+                    meta: ss(""),
+                    enabled: true,
+                    accent: color("#4f9cff"),
+                });
             }
         }
-        if lines.is_empty() {
-            lines.push("Windows library definitions were not found. Standard Documents, Pictures, Music, and Videos locations remain available in Quick Access.".to_string());
-        }
-        ui.set_preview_title(ss("Libraries"));
-        ui.set_preview_body(ss(lines.join("\n")));
-        ui.set_preview_meta(ss(libraries.to_string_lossy().to_string()));
+        ui.set_tool_overlay_kind(ss("libraries"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Libraries")));
+        ui.set_tool_overlay_subtitle(ss(&i18n::t("Open a library folder")));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
     }
 
     fn show_smart_folders(&mut self, ui: &MainWindow) {
@@ -21031,20 +21268,37 @@ impl NativeController {
     }
 
     fn show_recent_locations(&mut self, ui: &MainWindow) {
-        ui.set_preview_title(ss("Recent Locations"));
-        ui.set_preview_body(ss(if self.recent_locations.is_empty() {
-            "No recent locations recorded yet.".to_string()
+        let items: Vec<ToolListItem> = self
+            .recent_locations
+            .iter()
+            .map(|p| ToolListItem {
+                id: ss(p),
+                title: ss(Path::new(p)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.clone())),
+                subtitle: ss(p),
+                meta: ss(""),
+                enabled: true,
+                accent: color("#4f9cff"),
+            })
+            .collect();
+        ui.set_tool_overlay_kind(ss("recents"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Recent Locations")));
+        ui.set_tool_overlay_subtitle(ss(if items.is_empty() {
+            i18n::t("No recent locations recorded yet.")
         } else {
-            self.recent_locations.join("\n")
+            i18n::t("Click a folder to open it")
         }));
-        ui.set_preview_meta(ss(""));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
     }
 
     fn show_breadcrumb_siblings(&mut self, ui: &MainWindow) {
         let parent = Path::new(&self.current_path)
             .parent()
             .map(Path::to_path_buf);
-        let body = parent
+        let items: Vec<ToolListItem> = parent
             .as_ref()
             .and_then(|p| fs::read_dir(p).ok())
             .map(|entries| {
@@ -21052,16 +21306,29 @@ impl NativeController {
                     .flatten()
                     .filter(|e| e.path().is_dir())
                     .take(80)
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                    .map(|e| {
+                        let p = e.path();
+                        ToolListItem {
+                            id: ss(p.to_string_lossy().to_string()),
+                            title: ss(e.file_name().to_string_lossy().to_string()),
+                            subtitle: ss(p.to_string_lossy().to_string()),
+                            meta: ss(""),
+                            enabled: true,
+                            accent: color("#8b6cff"),
+                        }
+                    })
+                    .collect()
             })
-            .unwrap_or_else(|| "No sibling folders available.".to_string());
-        ui.set_preview_title(ss("Breadcrumb Siblings"));
-        ui.set_preview_body(ss(body));
-        ui.set_preview_meta(ss(parent
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default()));
+            .unwrap_or_default();
+        ui.set_tool_overlay_kind(ss("siblings"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Breadcrumb Siblings")));
+        ui.set_tool_overlay_subtitle(ss(if items.is_empty() {
+            i18n::t("No sibling folders available.")
+        } else {
+            i18n::t("Open a folder next to the current one")
+        }));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
     }
 
     fn show_templates(&mut self, ui: &MainWindow) {
@@ -21257,7 +21524,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 }
             } else {
                 let count = created.len();
@@ -21279,7 +21546,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 }
             };
 
@@ -21424,7 +21691,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 }
             } else {
                 NativeOperationResult {
@@ -21444,7 +21711,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 }
             };
             if let Ok(mut lock) = pending.lock() {
@@ -21518,10 +21785,7 @@ impl NativeController {
             ui.set_prompt_title(ss(if encrypted_count == 1 {
                 "Archive password".to_string()
             } else {
-                format!(
-                    "Archive password ({} encrypted)",
-                    encrypted_count
-                )
+                format!("Archive password ({} encrypted)", encrypted_count)
             }));
             ui.set_prompt_value(ss(""));
             ui.set_prompt_visible(true);
@@ -21564,7 +21828,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 },
                 Err(error) => NativeOperationResult {
                     message: error,
@@ -21575,7 +21839,7 @@ impl NativeController {
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
-                        toast_action: String::new(),
+                    toast_action: String::new(),
                 },
             };
             if let Ok(mut lock) = pending.lock() {
@@ -21637,15 +21901,15 @@ impl NativeController {
             .map(|(group, label, hint, command)| ShortcutEditItem {
                 command: ss(*command),
                 label: ss(*label),
-                hint: ss(shortcut_hint_for(command, hint)),
+                hint: ss(shortcuts::hint_for(command, &self.shortcut_draft, hint)),
                 group: ss(*group),
             })
             .collect();
         ui.set_tool_overlay_kind(ss("shortcuts"));
-        ui.set_tool_overlay_title(ss("Shortcut Editor"));
-        ui.set_tool_overlay_subtitle(ss(
-            "Edit the displayed chord hints. Defaults remain until you Save.",
-        ));
+        ui.set_tool_overlay_title(ss(&i18n::t("Shortcut Editor")));
+        ui.set_tool_overlay_subtitle(ss(&i18n::t(
+            "Click a row and press a key combination. Save to apply.",
+        )));
         ui.set_shortcut_edit_items(model_from_vec(items));
         ui.set_tool_overlay_visible(true);
     }
@@ -21789,9 +22053,7 @@ impl NativeController {
     }
 
     fn storage_result_clone(&self) -> Option<StorageScanResult> {
-        self.storage_caches
-            .get(&self.storage_current_root)
-            .cloned()
+        self.storage_caches.get(&self.storage_current_root).cloned()
     }
 
     fn open_storage_view(&mut self, ui: &MainWindow, push_history: bool) {
@@ -22132,63 +22394,61 @@ impl NativeController {
     /// (e.g. scan finished but heaps were unlucky) but the global top-N
     /// still has entries for that bucket.
     fn push_storage_top_items(&self, ui: &MainWindow, result: &StorageScanResult) {
-        let entries_src: Vec<StorageEntry> =
-            if self.storage_show_all_state || self.storage_selected_bucket.is_empty() {
-                refine_storage_largest_list(result.top_items.clone())
-            } else {
-                // Drill-in: merge folder roll-ups + individual files so
-                // users see EVERY app/folder/file in the bucket, sorted
-                // by size. Folders go through refine first to drop
-                // nested duplicates; files are then appended unless a
-                // refined folder already contains them. v0.9.11 stopped
-                // gating on "folders.is_empty()" - users complained
-                // that buckets with a handful of refined folders showed
-                // only ~5 rows when there were dozens of standalone
-                // files worth listing alongside them.
-                let folders_raw: Vec<StorageEntry> = result
-                    .bucket_folder_items
-                    .get(&self.storage_selected_bucket)
-                    .cloned()
-                    .unwrap_or_default();
-                let refined_folders =
-                    refine_storage_drill_folders(&self.storage_selected_bucket, folders_raw);
-                let files: Vec<StorageEntry> = result
-                    .bucket_items
-                    .get(&self.storage_selected_bucket)
-                    .cloned()
-                    .unwrap_or_default();
-                let mut merged: Vec<StorageEntry> = refined_folders.clone();
-                for f in files {
-                    if self.storage_selected_bucket == "apps"
-                        && is_storage_apps_drill_noise(&f.path)
-                    {
-                        continue;
-                    }
-                    let contained = refined_folders.iter().any(|fldr| {
-                        path_is_strict_parent(&fldr.path, &f.path) || fldr.path == f.path
-                    });
-                    if !contained {
-                        merged.push(f);
-                    }
+        let entries_src: Vec<StorageEntry> = if self.storage_show_all_state
+            || self.storage_selected_bucket.is_empty()
+        {
+            refine_storage_largest_list(result.top_items.clone())
+        } else {
+            // Drill-in: merge folder roll-ups + individual files so
+            // users see EVERY app/folder/file in the bucket, sorted
+            // by size. Folders go through refine first to drop
+            // nested duplicates; files are then appended unless a
+            // refined folder already contains them. v0.9.11 stopped
+            // gating on "folders.is_empty()" - users complained
+            // that buckets with a handful of refined folders showed
+            // only ~5 rows when there were dozens of standalone
+            // files worth listing alongside them.
+            let folders_raw: Vec<StorageEntry> = result
+                .bucket_folder_items
+                .get(&self.storage_selected_bucket)
+                .cloned()
+                .unwrap_or_default();
+            let refined_folders =
+                refine_storage_drill_folders(&self.storage_selected_bucket, folders_raw);
+            let files: Vec<StorageEntry> = result
+                .bucket_items
+                .get(&self.storage_selected_bucket)
+                .cloned()
+                .unwrap_or_default();
+            let mut merged: Vec<StorageEntry> = refined_folders.clone();
+            for f in files {
+                if self.storage_selected_bucket == "apps" && is_storage_apps_drill_noise(&f.path) {
+                    continue;
                 }
-                // Last-resort fallback: filter top_items if both heaps
-                // produced nothing (rare for tiny buckets).
-                if merged.is_empty() {
-                    merged = refine_storage_largest_list(
-                        result
-                            .top_items
-                            .iter()
-                            .filter(|e| {
-                                storage_canonical_bucket(&e.bucket)
-                                    == self.storage_selected_bucket
-                            })
-                            .cloned()
-                            .collect(),
-                    );
+                let contained = refined_folders
+                    .iter()
+                    .any(|fldr| path_is_strict_parent(&fldr.path, &f.path) || fldr.path == f.path);
+                if !contained {
+                    merged.push(f);
                 }
-                sort_storage_drill_entries(&self.storage_selected_bucket, &mut merged);
-                merged
-            };
+            }
+            // Last-resort fallback: filter top_items if both heaps
+            // produced nothing (rare for tiny buckets).
+            if merged.is_empty() {
+                merged = refine_storage_largest_list(
+                    result
+                        .top_items
+                        .iter()
+                        .filter(|e| {
+                            storage_canonical_bucket(&e.bucket) == self.storage_selected_bucket
+                        })
+                        .cloned()
+                        .collect(),
+                );
+            }
+            sort_storage_drill_entries(&self.storage_selected_bucket, &mut merged);
+            merged
+        };
         // v0.9.14: search filter applied AFTER sorting + bucket
         // selection so the user's "show me everything in this bucket"
         // input narrows what's already there, never widens the scope.
@@ -22252,9 +22512,7 @@ impl NativeController {
         sorted_buckets.sort_by(|a, b| {
             let a_other = a.id == "other";
             let b_other = b.id == "other";
-            a_other
-                .cmp(&b_other)
-                .then_with(|| b.bytes.cmp(&a.bytes))
+            a_other.cmp(&b_other).then_with(|| b.bytes.cmp(&a.bytes))
         });
         let buckets: Vec<StorageBucketUi> = sorted_buckets
             .iter()
@@ -22469,39 +22727,114 @@ impl NativeController {
         }
     }
 
+    fn show_previous_versions_overlay(&mut self, ui: &MainWindow) {
+        let Some(entry) = self.selected_entry() else {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        };
+        let path = entry.path.clone();
+        let mut items: Vec<ToolListItem> = Vec::new();
+        #[cfg(target_os = "windows")]
+        if let Ok(versions) = windows_integration::get_previous_versions(&path) {
+            for v in versions {
+                items.push(ToolListItem {
+                    id: ss(format!("{path}\t{}", v.version_id)),
+                    title: ss(if v.timestamp == 0 {
+                        v.version_id.clone()
+                    } else {
+                        format_modified(v.timestamp)
+                    }),
+                    subtitle: ss(format!("{} · {}", format_size_short(v.size), v.path)),
+                    meta: ss(""),
+                    enabled: true,
+                    accent: color("#d98a24"),
+                });
+            }
+        }
+        if items.is_empty() {
+            for line in list_previous_versions(&path) {
+                items.push(ToolListItem {
+                    id: ss(format!("{path}\t{line}")),
+                    title: ss(&line),
+                    subtitle: ss(&path),
+                    meta: ss(""),
+                    enabled: true,
+                    accent: color("#d98a24"),
+                });
+            }
+        }
+        ui.set_tool_overlay_kind(ss("versions"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Previous Versions")));
+        ui.set_tool_overlay_subtitle(ss(if items.is_empty() {
+            i18n::t("No shadow copies found. Enable File History or VSS snapshots.")
+        } else {
+            i18n::t("Click a version, then Restore")
+        }));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
+    }
+
+    fn show_cloud_state_overlay(&mut self, ui: &MainWindow) {
+        let Some(entry) = self.selected_entry() else {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        };
+        let label = cloud_state_label(&entry.path);
+        let items = vec![ToolListItem {
+            id: ss(&entry.path),
+            title: ss(&entry.name),
+            subtitle: ss(label),
+            meta: ss(""),
+            enabled: true,
+            accent: color("#4a90d9"),
+        }];
+        ui.set_tool_overlay_kind(ss("cloud"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Cloud State")));
+        ui.set_tool_overlay_subtitle(ss(&i18n::t(
+            "OneDrive and cloud placeholders. Open in Explorer for pin controls.",
+        )));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
+    }
+
     fn show_privacy_storage(&mut self, ui: &MainWindow) {
         let info = privacy_storage_info_for_state(&self.app_state, &self.settings);
-        let stored = info
-            .stored_items
-            .iter()
-            .map(|item| {
-                format!(
-                    "{}: {} | {}",
-                    item.label,
-                    format_size_short(item.bytes),
-                    item.description
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        ui.set_preview_title(ss("Privacy and Storage"));
-        ui.set_preview_body(ss(format!(
-            "{}\n\nData folder: {}\nCache folder: {}\nIndex: {}\nThumbnails: {} / {}\nMemory caches: {} folders, {} previews\nWatchers: {}\nUpdate checks: {}\nNetwork downloads: {}\nNetwork uploads: {}\n\nStored local data:\n{}",
-            info.policy,
+        ui.set_tool_overlay_kind(ss("privacy"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Privacy and Storage")));
+        ui.set_tool_overlay_subtitle(ss(format!(
+            "{} · {} thumbnails · {} index",
             info.data_dir,
-            info.cache_dir,
-            format_size_short(info.index_bytes),
             format_size_short(info.thumbnail_cache_bytes),
-            format_size_short(info.thumbnail_cache_limit),
-            info.directory_cache_entries,
-            info.preview_cache_entries,
-            info.watcher_count,
-            if info.update_checks_enabled { "enabled" } else { "off" },
-            if info.network_downloads_enabled { "explicit only" } else { "off" },
-            if info.network_uploads_enabled { "enabled" } else { "off" },
-            if stored.is_empty() { "No local metadata yet.".to_string() } else { stored }
+            format_size_short(info.index_bytes)
         )));
-        ui.set_preview_meta(ss("Use Clear Thumbnail Cache or Clear Local Caches to remove generated cache data without deleting your files."));
+        let items = vec![
+            ToolListItem {
+                id: ss("clear-thumbnail-cache"),
+                title: ss(&i18n::t("Clear Thumbnail Cache")),
+                subtitle: ss(format_size_short(info.thumbnail_cache_bytes)),
+                meta: ss(""),
+                enabled: true,
+                accent: color("#4f9cff"),
+            },
+            ToolListItem {
+                id: ss("clear-local-caches"),
+                title: ss(&i18n::t("Clear Local Caches")),
+                subtitle: ss(&i18n::t("Thumbnails, previews, and folder cache")),
+                meta: ss(""),
+                enabled: true,
+                accent: color("#8b6cff"),
+            },
+            ToolListItem {
+                id: ss("rebuild-index"),
+                title: ss(&i18n::t("Rebuild Search Index")),
+                subtitle: ss(&i18n::t("Does not delete your files")),
+                meta: ss(""),
+                enabled: true,
+                accent: color("#2aa96b"),
+            },
+        ];
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
     }
 
     fn tool_overlay_activate(&mut self, ui: &MainWindow, id: String) {
@@ -22563,6 +22896,38 @@ impl NativeController {
                     }
                 }
             }
+            "libraries" | "recents" | "siblings" => {
+                ui.set_tool_overlay_visible(false);
+                self.navigate(ui, id, true);
+            }
+            "cloud" => {
+                ui.set_tool_overlay_visible(false);
+                let _ = reveal_in_folder(id);
+            }
+            "privacy" => {
+                ui.set_tool_overlay_visible(false);
+                self.command(ui, &id);
+            }
+            "versions" => {
+                if let Some((path, version_id)) = id.split_once('\t') {
+                    #[cfg(target_os = "windows")]
+                    {
+                        match windows_integration::restore_from_previous_version(path, version_id) {
+                            Ok(()) => {
+                                ui.set_tool_overlay_visible(false);
+                                self.refresh(ui);
+                                self.show_toast_kind(ui, "Restored previous version", "success");
+                            }
+                            Err(e) => self.show_toast_kind(ui, e, "error"),
+                        }
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let _ = (path, version_id);
+                        self.show_toast(ui, "Previous versions are only available on Windows.");
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -22618,19 +22983,22 @@ impl NativeController {
                     Err(e) => self.show_toast_kind(ui, e, "error"),
                 }
             }
-            "shortcuts" => {
-                match save_shortcut_overrides(&self.shortcut_draft) {
-                    Ok(()) => {
-                        ui.set_tool_overlay_visible(false);
-                        self.show_toast_kind(ui, "Shortcuts saved", "success");
-                    }
-                    Err(e) => self.show_toast_kind(ui, e, "error"),
+            "shortcuts" => match save_shortcut_overrides(&self.shortcut_draft) {
+                Ok(()) => {
+                    ui.set_tool_overlay_visible(false);
+                    self.show_toast_kind(ui, "Shortcuts saved", "success");
                 }
-            }
+                Err(e) => self.show_toast_kind(ui, e, "error"),
+            },
             "workspaces" => {
                 // Open first selected isn't available; keep overlay for click-to-open.
                 self.show_toast(ui, "Click a workspace to open it.");
             }
+            "privacy" => {
+                ui.set_tool_overlay_visible(false);
+                self.command(ui, "clear-local-caches");
+            }
+            "versions" => self.show_toast(ui, "Click a version to restore it."),
             _ => ui.set_tool_overlay_visible(false),
         }
     }
@@ -22907,13 +23275,10 @@ impl NativeController {
             }
             "copy" => {
                 let dest = to.as_deref().unwrap_or("");
-                fs::copy(&from, dest)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
+                fs::copy(&from, dest).map(|_| ()).map_err(|e| e.to_string())
             }
-            "delete" => native_delete_path(&from).or_else(|_| {
-                trash::delete(&from).map_err(|e| e.to_string())
-            }),
+            "delete" => native_delete_path(&from)
+                .or_else(|_| trash::delete(&from).map_err(|e| e.to_string())),
             "batch_rename" => match &op.batch {
                 None => Err("Missing batch rename metadata".to_string()),
                 Some(ops) => {
@@ -22955,8 +23320,12 @@ impl NativeController {
                 let mb = fs::metadata(b).ok();
                 match strategy {
                     "newest" => {
-                        let ta = ma.and_then(|m| m.modified().ok()).unwrap_or(SystemTime::UNIX_EPOCH);
-                        let tb = mb.and_then(|m| m.modified().ok()).unwrap_or(SystemTime::UNIX_EPOCH);
+                        let ta = ma
+                            .and_then(|m| m.modified().ok())
+                            .unwrap_or(SystemTime::UNIX_EPOCH);
+                        let tb = mb
+                            .and_then(|m| m.modified().ok())
+                            .unwrap_or(SystemTime::UNIX_EPOCH);
                         tb.cmp(&ta)
                     }
                     "largest" => {
@@ -23083,9 +23452,7 @@ impl NativeController {
             "tag" => {
                 self.pending_prompt = Some(PendingPrompt::TagOne(entry.path.clone()));
                 ui.set_prompt_kind(ss("text"));
-                ui.set_prompt_title(ss(
-                    "Tag file (red/orange/yellow/green/blue/violet)",
-                ));
+                ui.set_prompt_title(ss("Tag file (red/orange/yellow/green/blue/violet)"));
                 ui.set_prompt_value(ss(""));
                 ui.set_prompt_visible(true);
             }
@@ -23161,9 +23528,7 @@ impl NativeController {
         }
         self.pending_prompt = Some(PendingPrompt::BatchTag(paths));
         ui.set_prompt_kind(ss("text"));
-        ui.set_prompt_title(ss(
-            "Batch tag (red/orange/yellow/green/blue/violet)",
-        ));
+        ui.set_prompt_title(ss("Batch tag (red/orange/yellow/green/blue/violet)"));
         ui.set_prompt_value(ss("yellow"));
         ui.set_prompt_visible(true);
     }
@@ -23232,7 +23597,11 @@ impl NativeController {
             exif::Tag::PhotographicSensitivity,
         ] {
             if let Some(field) = exif.get_field(tag, exif::In::PRIMARY) {
-                parts.push(format!("{}: {}", tag, field.display_value().with_unit(&exif)));
+                parts.push(format!(
+                    "{}: {}",
+                    tag,
+                    field.display_value().with_unit(&exif)
+                ));
             }
         }
         if parts.is_empty() {
@@ -23256,9 +23625,7 @@ fn undo_delete_from_trash(
     } else if let Some(path) = original_path {
         items
             .into_iter()
-            .find(|i| {
-                same_path_string(&i.original_path().to_string_lossy(), path)
-            })
+            .find(|i| same_path_string(&i.original_path().to_string_lossy(), path))
             .ok_or_else(|| "Item is no longer in the Recycle Bin".to_string())?
     } else {
         return Err("Missing recycle metadata for undo".to_string());
@@ -23291,12 +23658,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             let action = c.borrow_mut().side_activate_action(&ui, index);
             match action {
                 SidebarActivateAction::Navigate(path) => {
-                    c.borrow_mut()
-                        .queue_sidebar_navigate(&ui, path, c.clone());
+                    c.borrow_mut().queue_sidebar_navigate(&ui, path, c.clone());
                 }
                 SidebarActivateAction::NavigateThenSearch { path, query } => {
-                    c.borrow_mut()
-                        .queue_sidebar_navigate(&ui, path, c.clone());
+                    c.borrow_mut().queue_sidebar_navigate(&ui, path, c.clone());
                     // Apply search after navigation commits on the next tick.
                     let weak2 = weak.clone();
                     let c2 = c.clone();
@@ -23389,6 +23754,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 .any(|entry| is_archive_ext(entry.extension.as_deref().unwrap_or("")));
             ui.set_context_on_file(index >= 0);
             ui.set_context_is_archive(is_archive);
+            let path = c.borrow().selected_entry().map(|e| e.path.clone());
+            c.borrow().populate_shell_menu(&ui, path.as_deref());
             ui.set_context_visible(true);
         }
     });
@@ -23548,9 +23915,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let q = query.to_string();
         let weak2 = weak.clone();
         let c2 = c.clone();
-        let drive_wide = c
-            .borrow()
-            .search_all_scope
+        let drive_wide = c.borrow().search_all_scope
             || is_filesystem_root(std::path::Path::new(&c.borrow().search_root()));
         let delay_ms = if drive_wide { 280 } else { 160 };
         sd.start(
@@ -23663,7 +24028,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
-  ui.on_quick_look_close(move || {
+    ui.on_quick_look_close(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_quick_look_visible(false);
         }
@@ -23741,6 +24106,73 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         c.borrow_mut()
             .shortcut_hint_changed(command.to_string(), hint.to_string());
         let _ = weak;
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_shortcut_key(move |ctrl, shift, alt, key| {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut()
+                .handle_shortcut_key(&ui, ctrl, shift, alt, key.to_string());
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_shell_verb(move |id| {
+        if let Some(ui) = weak.upgrade() {
+            let Ok(action_id) = id.parse::<u32>() else {
+                return;
+            };
+            let path = c.borrow().selected_entry().map(|e| e.path.clone());
+            let Some(path) = path else {
+                return;
+            };
+            #[cfg(target_os = "windows")]
+            match windows_integration::invoke_context_menu_action(&path, action_id) {
+                Ok(()) => {}
+                Err(e) => c.borrow_mut().show_toast_kind(&ui, e, "error"),
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = (action_id, path);
+                c.borrow_mut()
+                    .show_toast(&ui, "Shell verbs are only available on Windows.");
+            }
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_windows_shell_menu(move || {
+        if let Some(ui) = weak.upgrade() {
+            let path = c.borrow().selected_entry().map(|e| e.path.clone());
+            let Some(path) = path else {
+                c.borrow_mut().show_toast(&ui, "Select a file first.");
+                return;
+            };
+            #[cfg(target_os = "windows")]
+            {
+                let hwnd = main_window_hwnd(Some(&ui));
+                match windows_integration::track_shell_context_menu(&path, hwnd) {
+                    Ok(()) => {}
+                    Err(e) => c.borrow_mut().show_toast_kind(&ui, e, "error"),
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = path;
+                c.borrow_mut()
+                    .show_toast(&ui, "The Windows menu is only available on Windows.");
+            }
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_toggle_network_downloads(move || {
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c.borrow_mut();
+            ctrl.settings.network_downloads_enabled = !ctrl.settings.network_downloads_enabled;
+            ui.set_network_downloads_enabled(ctrl.settings.network_downloads_enabled);
+            ctrl.save_settings();
+        }
     });
     let weak = ui.as_weak();
     let c = controller.clone();
@@ -23974,6 +24406,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 .any(|entry| is_archive_ext(entry.extension.as_deref().unwrap_or("")));
             ui.set_context_on_file(index >= 0);
             ui.set_context_is_archive(is_archive);
+            let path = c.borrow().selected_entry().map(|e| e.path.clone());
+            c.borrow().populate_shell_menu(&ui, path.as_deref());
             ui.set_context_visible(true);
         }
     });
@@ -24776,7 +25210,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let dir_ready = controller.borrow().directory_ready.clone();
         let pending_dir = controller.borrow().pending_directory_result.clone();
         let sec_dir_ready = controller.borrow().secondary_directory_ready.clone();
-        let pending_sec_dir = controller.borrow().pending_secondary_directory_result.clone();
+        let pending_sec_dir = controller
+            .borrow()
+            .pending_secondary_directory_result
+            .clone();
         let search_ready = controller.borrow().search_ready.clone();
         let pending_search = controller.borrow().pending_search_result.clone();
         let preview_ready = controller.borrow().preview_ready.clone();
@@ -25122,11 +25559,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                         count,
                                         if count == 1 { "match" } else { "matches" },
                                         if !result.partial
-                                            && (count >= SEARCH_INDEX_LIMIT
-                                                || count >= SEARCH_LIVE_SCAN_LIMIT
-                                                || count >= SEARCH_DRIVE_SCAN_LIMIT)
+                                            && count >= SEARCH_DRIVE_SCAN_LIMIT
                                         {
-                                            " · showing first page"
+                                            " · first 25,000 matches"
+                                        } else if !result.partial
+                                            && (count >= SEARCH_INDEX_LIMIT
+                                                || count >= SEARCH_LIVE_SCAN_LIMIT)
+                                        {
+                                            " · results truncated"
                                         } else {
                                             ""
                                         }
@@ -25358,11 +25798,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             let mut ctrl = c.borrow_mut();
             ctrl.search_source_pref = source.to_string();
             ui.set_search_source_pref(ss(&source));
-            ctrl.show_toast_kind(
-                &ui,
-                format!("Search source: {source}"),
-                "info",
-            );
+            ctrl.show_toast_kind(&ui, format!("Search source: {source}"), "info");
         }
     });
 
@@ -25527,9 +25963,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             let result = {
                 let ctrl = c.borrow();
-                ctrl.visible_files
-                    .get(index as usize)
-                    .map(|e| (e.path.clone(), e.name.clone(), e.kind == FileKind::Directory))
+                ctrl.visible_files.get(index as usize).map(|e| {
+                    (
+                        e.path.clone(),
+                        e.name.clone(),
+                        e.kind == FileKind::Directory,
+                    )
+                })
             };
             if let Some((old_path, old_name, is_dir)) = result {
                 c.borrow_mut()
@@ -25544,9 +25984,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             let result = {
                 let ctrl = c.borrow();
-                ctrl.secondary_visible_files
-                    .get(index as usize)
-                    .map(|e| (e.path.clone(), e.name.clone(), e.kind == FileKind::Directory))
+                ctrl.secondary_visible_files.get(index as usize).map(|e| {
+                    (
+                        e.path.clone(),
+                        e.name.clone(),
+                        e.kind == FileKind::Directory,
+                    )
+                })
             };
             if let Some((old_path, old_name, is_dir)) = result {
                 c.borrow_mut()
@@ -26482,7 +26926,8 @@ fn toolbar_simple_addr_x(toolbar_width: f32) -> f32 {
     const SIMPLE_ROW1_SLOTS: f32 = 4.0;
     let simple_row1_budget = (toolbar_width * 0.42).clamp(240.0, 380.0);
     let simple_row1_slot_w = SIMPLE_BTN_W.min(
-        ((simple_row1_budget - 10.0 - (SIMPLE_ROW1_SLOTS - 1.0) * SIMPLE_ROW_GAP) / SIMPLE_ROW1_SLOTS)
+        ((simple_row1_budget - 10.0 - (SIMPLE_ROW1_SLOTS - 1.0) * SIMPLE_ROW_GAP)
+            / SIMPLE_ROW1_SLOTS)
             .max(54.0),
     );
     let simple_row1_step = simple_row1_slot_w + SIMPLE_ROW_GAP;
@@ -26599,12 +27044,8 @@ fn hit_test_list_folder_drop(
         "list" => hit_test_list_rows(files, left, right, lx, ly, list_top, scroll_y, sort_by),
         "compact" | "grid" | "gallery" => {
             let metrics = ui.global::<AppMetrics>();
-            let geom = pane_grid_geometry(
-                pane_w,
-                view_str,
-                metrics.get_grid_w(),
-                metrics.get_grid_h(),
-            );
+            let geom =
+                pane_grid_geometry(pane_w, view_str, metrics.get_grid_w(), metrics.get_grid_h());
             hit_test_grid_folder_drop(files, lx, ly, list_top, scroll_y, left, &geom)
         }
         _ => None,
@@ -26812,8 +27253,7 @@ fn pick_drop_destination(
     // Drops on the preview pane (right strip) land in the active pane's folder,
     // matching Explorer where the details/preview strip is not a subfolder target.
     if ui.get_preview_visible() && lx >= file_area_right && ly >= content_top {
-        let dest = if ctrl.active_pane == ActivePane::Secondary && !ctrl.secondary_path.is_empty()
-        {
+        let dest = if ctrl.active_pane == ActivePane::Secondary && !ctrl.secondary_path.is_empty() {
             ctrl.secondary_path.clone()
         } else {
             ctrl.current_path.clone()
@@ -27008,15 +27448,7 @@ fn pick_drop_destination(
     };
 
     if let Some(sub) = hit_test_list_folder_drop(
-        ui,
-        files,
-        pane_left,
-        pane_w,
-        lx,
-        ly,
-        list_top,
-        scroll_y,
-        &sort_by,
+        ui, files, pane_left, pane_w, lx, ly, list_top, scroll_y, &sort_by,
     ) {
         file_drag::log(&format!(
             "pick_drop_destination: pane={} ROW -> '{}'",
@@ -27515,6 +27947,9 @@ pub fn run() {
                         }
                     ));
                     if result.available {
+                        if let Ok(mut g) = UPDATE_EXPECTED_SHA256.lock() {
+                            *g = result.download_sha256.clone();
+                        }
                         let ver = SharedString::from(result.latest_version.clone());
                         let dl = SharedString::from(result.download_url.clone());
                         let weak_pill = weak_ui_upd.clone();

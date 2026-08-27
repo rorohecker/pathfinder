@@ -2783,7 +2783,7 @@ component StorageOverview inherits Rectangle {
                 background: rescan_touch.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
                 Text {
                     width: parent.width; height: parent.height;
-                    text: root.scanning ? @tr("Scanning...") : "Rescan";
+                    text: root.scanning ? @tr("Scanning...") : @tr("Rescan");
                     color: ThemePalette.text;
                     font-size: 12px;
                     font-weight: 600;
@@ -3381,6 +3381,17 @@ export component MainWindow inherits Window {
     in-out property <[FileItem]> grid_window_files;
     in-out property <int> grid_window_start: 0;
     in-out property <length> primary_grid_viewport_h: 400px;
+    // Viewport window for details/list — same idea as the grid.
+    in-out property <[FileItem]> list_window_files;
+    in-out property <int> list_window_start: 0;
+    in-out property <length> list_window_y: 0;
+    in-out property <length> list_content_h: 400px;
+    in-out property <length> primary_list_viewport_h: 400px;
+    in-out property <[FileItem]> secondary_list_window_files;
+    in-out property <int> secondary_list_window_start: 0;
+    in-out property <length> secondary_list_window_y: 0;
+    in-out property <length> secondary_list_content_h: 400px;
+    in-out property <length> secondary_list_viewport_h: 400px;
     in-out property <[SideItem]> side_items;
     in-out property <[TabItem]> tabs;
     in-out property <[ChoiceItem]> theme_choices;
@@ -3550,6 +3561,14 @@ export component MainWindow inherits Window {
     in-out property <bool> context_visible: false;
     in-out property <bool> image_tools_visible: false;
     in-out property <bool> confirm_visible: false;
+    in-out property <string> confirm_title: @tr("Confirm delete");
+    in-out property <string> confirm_action: @tr("Delete");
+    in-out property <bool> confirm_is_permanent: false;
+    in-out property <[CommandItem]> shell_menu_items;
+    in-out property <bool> shortcut_capture_active: false;
+    in-out property <string> shortcut_capture_command: "";
+    in-out property <bool> shortcut_consumed: false;
+    in-out property <bool> network_downloads_enabled: false;
     in-out property <bool> prompt_visible: false;
     in-out property <bool> address_editing: false;
     in-out property <[string]> addr_suggestions: [];
@@ -3725,6 +3744,10 @@ export component MainWindow inherits Window {
     callback toggle_hidden();
     callback toggle_theme_animations();
     callback command(string);
+    callback shortcut_key(bool, bool, bool, string);
+    callback shell_verb(string);
+    callback windows_shell_menu();
+    callback toggle_network_downloads();
     in-out property <int> toolbar_search_focus_nonce: 0;
     callback theme_selected(string);
     callback accent_selected(string);
@@ -4778,7 +4801,7 @@ export component MainWindow inherits Window {
                 if scope_touch.has-hover: HoverTip {
                     x: 0px;
                     y: parent.height + 6px;
-                    tip_text: root.search_scope_all ? @tr("Searching entire drive - click to search this folder only") : "Click to search the entire drive";
+                    tip_text: root.search_scope_all ? @tr("Searching entire drive - click to search this folder only") : @tr("Click to search the entire drive");
                 }
                 Text {
                     visible: search_box.semantic_available;
@@ -4802,7 +4825,7 @@ export component MainWindow inherits Window {
                 if search_box.semantic_available && sem_touch.has-hover: HoverTip {
                     x: 0px;
                     y: parent.height + 6px;
-                    tip_text: root.search_semantic_mode ? @tr("Semantic ranking on (filename embeddings, not OCR)") : "Semantic ranking off - click to rank by name embeddings";
+                    tip_text: root.search_semantic_mode ? @tr("Semantic ranking on (filename embeddings, not OCR)") : @tr("Semantic ranking off - click to rank by name embeddings");
                 }
                 search_input := TextInput {
                     x: search_box.semantic_available ? 56px : 30px;
@@ -5395,65 +5418,73 @@ export component MainWindow inherits Window {
                     sort_col(col) => { root.sort_column(col); }
                 }
 
-                if root.view_mode == "list": ListView {
+                if root.view_mode == "list": ScrollView {
                     x: AppMetrics.pad;
                     y: AppMetrics.pad + 32px;
-                    // Reserve scroll_gutter on the right for the scroll bar so
-                    // column text and the tag dot never sit under it.
                     width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     height: parent.height - AppMetrics.pad * 2 - 32px;
-                    // Two-way binding so Rust can save/restore the scroll
-                    // position per folder. Lets Back / Up land where the user
-                    // was, not at the top of the new folder.
                     viewport-y <=> root.primary_list_scroll_y;
-                    for file[index] in root.files: FileRow {
+                    viewport-width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
+                    viewport-height: Math.max(parent.height - AppMetrics.pad * 2 - 32px, root.list_content_h);
+                    changed height => {
+                        root.primary_list_viewport_h = self.height;
+                        root.sync_grid_windows();
+                    }
+                    changed viewport-y => {
+                        root.sync_grid_windows();
+                    }
+                    Rectangle {
+                        y: root.list_window_y;
                         width: parent.width;
-                        item: file;
-                        index: index;
-                        view_mode: root.view_mode;
-                        rename_index: root.active_pane == "primary" ? root.rename_index : -1;
-                        drag_target_path: root.drag_target_path;
-                        selected(i, ctrl, shift) => { root.file_selected(i, ctrl, shift); }
-                        opened(i) => { root.file_opened(i); }
-                        context(i, cx, cy) => {
-                            root.context_x = cx.clamp(0px, root.width - 240px);
-                            root.context_y = cy.clamp(0px, root.height - 440px);
-                            root.context_visible = true;
-                            root.file_context(i);
-                        }
-                        rename_commit(i, val) => {
-                            root.rename_index = -1;
-                            if (val != "") { root.rename_file(i, val); }
-                        }
-                        file_drag_requested(i) => { root.start_file_drag(i, "primary"); }
-                        marquee_started(ax, ay) => {
-                            // Translate absolute window coords into pane-local
-                            // space so the existing marquee logic (which uses
-                            // pane-relative x/y) keeps working without changes.
-                            primary_pane_root.marquee_start_x = ax - primary_pane_root.absolute-position.x;
-                            primary_pane_root.marquee_start_y = ay - primary_pane_root.absolute-position.y;
-                            primary_pane_root.marquee_x = primary_pane_root.marquee_start_x;
-                            primary_pane_root.marquee_y = primary_pane_root.marquee_start_y;
-                            primary_pane_root.marquee_w = 0;
-                            primary_pane_root.marquee_h = 0;
-                            primary_pane_root.marquee_active = true;
-                        }
-                        marquee_moved(ax, ay) => {
-                            primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, ax - primary_pane_root.absolute-position.x);
-                            primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, ay - primary_pane_root.absolute-position.y);
-                            primary_pane_root.marquee_w = abs((ax - primary_pane_root.absolute-position.x) - primary_pane_root.marquee_start_x);
-                            primary_pane_root.marquee_h = abs((ay - primary_pane_root.absolute-position.y) - primary_pane_root.marquee_start_y);
-                            root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
-                                                primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
-                        }
-                        marquee_finished => {
-                            if (primary_pane_root.marquee_active) {
-                                root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
-                                                    primary_pane_root.marquee_w, primary_pane_root.marquee_h, true);
+                        VerticalLayout {
+                            width: parent.width;
+                            for file[index] in root.list_window_files: FileRow {
+                                width: parent.width;
+                                item: file;
+                                index: root.list_window_start + index;
+                                view_mode: root.view_mode;
+                                rename_index: root.active_pane == "primary" ? root.rename_index : -1;
+                                drag_target_path: root.drag_target_path;
+                                selected(i, ctrl, shift) => { root.file_selected(i, ctrl, shift); }
+                                opened(i) => { root.file_opened(i); }
+                                context(i, cx, cy) => {
+                                    root.context_x = cx.clamp(0px, root.width - 240px);
+                                    root.context_y = cy.clamp(0px, root.height - 440px);
+                                    root.context_visible = true;
+                                    root.file_context(i);
+                                }
+                                rename_commit(i, val) => {
+                                    root.rename_index = -1;
+                                    if (val != "") { root.rename_file(i, val); }
+                                }
+                                file_drag_requested(i) => { root.start_file_drag(i, "primary"); }
+                                marquee_started(ax, ay) => {
+                                    primary_pane_root.marquee_start_x = ax - primary_pane_root.absolute-position.x;
+                                    primary_pane_root.marquee_start_y = ay - primary_pane_root.absolute-position.y;
+                                    primary_pane_root.marquee_x = primary_pane_root.marquee_start_x;
+                                    primary_pane_root.marquee_y = primary_pane_root.marquee_start_y;
+                                    primary_pane_root.marquee_w = 0;
+                                    primary_pane_root.marquee_h = 0;
+                                    primary_pane_root.marquee_active = true;
+                                }
+                                marquee_moved(ax, ay) => {
+                                    primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, ax - primary_pane_root.absolute-position.x);
+                                    primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, ay - primary_pane_root.absolute-position.y);
+                                    primary_pane_root.marquee_w = abs((ax - primary_pane_root.absolute-position.x) - primary_pane_root.marquee_start_x);
+                                    primary_pane_root.marquee_h = abs((ay - primary_pane_root.absolute-position.y) - primary_pane_root.marquee_start_y);
+                                    root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                        primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
+                                }
+                                marquee_finished => {
+                                    if (primary_pane_root.marquee_active) {
+                                        root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
+                                                            primary_pane_root.marquee_w, primary_pane_root.marquee_h, true);
+                                    }
+                                    primary_pane_root.marquee_active = false;
+                                    primary_pane_root.marquee_w = 0;
+                                    primary_pane_root.marquee_h = 0;
+                                }
                             }
-                            primary_pane_root.marquee_active = false;
-                            primary_pane_root.marquee_w = 0;
-                            primary_pane_root.marquee_h = 0;
                         }
                     }
                 }
@@ -5875,7 +5906,7 @@ export component MainWindow inherits Window {
                                 || root.empty_state == "Searching drive...";
                             width: min(360px, parent.width - 48px);
                             x: (parent.width - self.width) / 2;
-                            text: root.search_text != "" ? (root.search_scope_all ? @tr("Try a different query or switch back to this folder") : "Try a different query or search the whole drive") :
+                            text: root.search_text != "" ? (root.search_scope_all ? @tr("Try a different query or switch back to this folder") : @tr("Try a different query or search the whole drive")) :
                                   root.is_home_view ? @tr("Pin folders from the sidebar or open a drive — shortcuts collect here.") :
                                   root.in_recycle_bin ? @tr("Deleted files appear here until you empty the bin.") :
                                   root.empty_state == "Loading Recycle Bin..." ? @tr("Reading the OS Recycle Bin…") :
@@ -6193,35 +6224,48 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if root.view_mode == "list": ListView {
+                if root.view_mode == "list": ScrollView {
                     x: AppMetrics.pad;
                     y: 38px + 32px;
-                    // Reserve scroll_gutter on the right for the scroll bar -
-                    // matches the primary pane's list view so the rightmost
-                    // column and tag dot stay clear of the scroll handle.
                     width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     height: parent.height - 38px - 32px - AppMetrics.pad;
                     viewport-y <=> root.secondary_list_scroll_y;
-                    for file[index] in root.secondary_files: FileRow {
+                    viewport-width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
+                    viewport-height: Math.max(parent.height - 38px - 32px - AppMetrics.pad, root.secondary_list_content_h);
+                    changed height => {
+                        root.secondary_list_viewport_h = self.height;
+                        root.sync_grid_windows();
+                    }
+                    changed viewport-y => {
+                        root.sync_grid_windows();
+                    }
+                    Rectangle {
+                        y: root.secondary_list_window_y;
                         width: parent.width;
-                        item: file;
-                        index: index;
-                        view_mode: root.view_mode;
-                        rename_index: root.active_pane == "secondary" ? root.rename_index : -1;
-                        drag_target_path: root.drag_target_path;
-                        selected(i, ctrl, shift) => { root.secondary_file_selected(i, ctrl, shift); }
-                        opened(i) => { root.secondary_file_opened(i); }
-                        context(i, cx, cy) => {
-                            root.context_x = cx.clamp(0px, root.width - 240px);
-                            root.context_y = cy.clamp(0px, root.height - 440px);
-                            root.context_visible = true;
-                            root.secondary_file_context(i);
+                        VerticalLayout {
+                            width: parent.width;
+                            for file[index] in root.secondary_list_window_files: FileRow {
+                                width: parent.width;
+                                item: file;
+                                index: root.secondary_list_window_start + index;
+                                view_mode: root.view_mode;
+                                rename_index: root.active_pane == "secondary" ? root.rename_index : -1;
+                                drag_target_path: root.drag_target_path;
+                                selected(i, ctrl, shift) => { root.secondary_file_selected(i, ctrl, shift); }
+                                opened(i) => { root.secondary_file_opened(i); }
+                                context(i, cx, cy) => {
+                                    root.context_x = cx.clamp(0px, root.width - 240px);
+                                    root.context_y = cy.clamp(0px, root.height - 440px);
+                                    root.context_visible = true;
+                                    root.secondary_file_context(i);
+                                }
+                                rename_commit(i, val) => {
+                                    root.rename_index = -1;
+                                    if (val != "") { root.secondary_rename_file(i, val); }
+                                }
+                                file_drag_requested(i) => { root.start_file_drag(i, "secondary"); }
+                            }
                         }
-                        rename_commit(i, val) => {
-                            root.rename_index = -1;
-                            if (val != "") { root.secondary_rename_file(i, val); }
-                        }
-                        file_drag_requested(i) => { root.start_file_drag(i, "secondary"); }
                     }
                 }
 
@@ -6321,7 +6365,7 @@ export component MainWindow inherits Window {
                         }
                         Text {
                             width: parent.width;
-                            text: root.secondary_path == "" ? @tr("Enable dual pane to browse a second location") : "Empty folder";
+                            text: root.secondary_path == "" ? @tr("Enable dual pane to browse a second location") : @tr("Empty folder");
                             color: ThemePalette.text_faint;
                             font-size: 12px;
                             horizontal-alignment: center;
@@ -6616,9 +6660,19 @@ export component MainWindow inherits Window {
 
                         if root.preview_is_media: Rectangle {
                             width: parent.width;
-                            height: 48px;
+                            height: root.preview_is_image ? 220px : 56px;
+                            background: ThemePalette.bg;
+                            if root.preview_is_image: Image {
+                                x: (parent.width - 200px) / 2;
+                                y: 10px;
+                                width: 200px;
+                                height: 160px;
+                                source: root.preview_image;
+                                image-fit: contain;
+                            }
                             DialogButton {
-                                x: 16px; y: 8px;
+                                x: 16px;
+                                y: root.preview_is_image ? 176px : 8px;
                                 label: @tr("Play in default app");
                                 primary: true;
                                 clicked => { root.quick_look_play(); }
@@ -6635,7 +6689,7 @@ export component MainWindow inherits Window {
                                     ? @tr("PDF · first page rendered above. Open the file for the full document.")
                                     : (root.preview_body == ""
                                         ? @tr("Rendering PDF page… if nothing appears it may be protected or image-only — open it to view the full document.")
-                                        : "PDF · first-page text extract shown below. Open the file for the full document.");
+                                        : @tr("PDF · first-page text extract shown below. Open the file for the full document."));
                                 color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap; vertical-alignment: center;
                             }
                         }
@@ -7130,6 +7184,16 @@ export component MainWindow inherits Window {
             ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: @tr("Image Tools"); command_name: "image-tools"; picked(c) => { root.context_visible = false; root.command(c); } }
             Rectangle { height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { width: parent.width; label: @tr("Properties"); command_name: "properties"; picked(c) => { root.context_visible = false; root.command(c); } }
+            ChoiceMenuRow { width: parent.width; label: @tr("Share"); command_name: "share"; picked(c) => { root.context_visible = false; root.command(c); } }
+
+            if root.shell_menu_items.length > 0: Rectangle { height: 1px; background: ThemePalette.border; }
+            for shell_row[si] in root.shell_menu_items: ChoiceMenuRow {
+                width: parent.width;
+                label: shell_row.label;
+                command_name: "shell";
+                picked(_) => { root.context_visible = false; root.shell_verb(shell_row.command); }
+            }
+            ChoiceMenuRow { width: parent.width; label: @tr("Windows menu…"); command_name: "windows-menu"; picked(_) => { root.context_visible = false; root.windows_shell_menu(); } }
 
             Rectangle { visible: !root.is_simple; height: 1px; background: ThemePalette.border; }
             ChoiceMenuRow { visible: !root.is_simple; width: parent.width; label: @tr("Create ZIP"); command_name: "create-zip"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -7149,7 +7213,7 @@ export component MainWindow inherits Window {
                     width: parent.width - 18px;
                     x: 9px;
                     height: parent.height;
-                    text: root.context_advanced ? @tr("^ Hide advanced") : "v Advanced & Windows tools";
+                    text: root.context_advanced ? @tr("^ Hide advanced") : @tr("v Advanced & Windows tools");
                     color: ThemePalette.text_faint;
                     font-size: 11px;
                     vertical-alignment: center;
@@ -8783,6 +8847,45 @@ export component MainWindow inherits Window {
                         DialogButton { label: @tr("Rebuild"); primary: true; clicked => { root.rebuild_index(); } }
                         DialogButton { label: @tr("Debug"); clicked => { root.command("performance-debug"); } }
                     }
+
+                    Text { text: @tr("PRIVACY AND STORAGE"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text {
+                        text: @tr("Index, thumbnails, and notes stay on this PC. Clear generated caches without touching your files.");
+                        color: ThemePalette.text_muted;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                    Rectangle {
+                        height: 88px;
+                        border-radius: AppMetrics.radius;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Text {
+                            x: 14px; y: 12px; width: parent.width - 160px; height: 20px;
+                            text: @tr("App and model downloads");
+                            color: ThemePalette.text; font-size: 13px; font-weight: 700;
+                        }
+                        Text {
+                            x: 14px; y: 36px; width: parent.width - 160px; height: 36px;
+                            text: root.network_downloads_enabled
+                                ? @tr("Updates and Local AI may download when you ask.")
+                                : @tr("Downloads stay off until you turn this on or confirm an install.");
+                            color: ThemePalette.text_muted; font-size: 12px; wrap: word-wrap;
+                        }
+                        DialogButton {
+                            x: parent.width - 108px; y: 26px;
+                            label: root.network_downloads_enabled ? @tr("On") : @tr("Off");
+                            clicked => { root.toggle_network_downloads(); }
+                        }
+                    }
+                    HorizontalLayout {
+                        height: 34px;
+                        spacing: 8px;
+                        DialogButton { label: @tr("Clear caches"); clicked => { root.command("clear-local-caches"); } }
+                        DialogButton { label: @tr("Privacy details"); clicked => { root.command("privacy-storage"); } }
+                    }
                 }
             }
 
@@ -9172,7 +9275,7 @@ export component MainWindow inherits Window {
             border-radius: AppMetrics.radius;
             background: ThemePalette.panel_solid;
             clip: true;
-            Text { x: 18px; y: 16px; width: parent.width - 36px; text: @tr("Confirm delete"); color: ThemePalette.text; font-size: 18px; font-weight: 700; }
+            Text { x: 18px; y: 16px; width: parent.width - 36px; text: root.confirm_title != "" ? root.confirm_title : @tr("Confirm delete"); color: root.confirm_is_permanent ? ThemePalette.danger : ThemePalette.text; font-size: 18px; font-weight: 700; }
             confirm_body := CopyableMessageText {
                 x: 18px;
                 y: 50px;
@@ -9189,7 +9292,12 @@ export component MainWindow inherits Window {
                 spacing: 8px;
                 alignment: end;
                 DialogButton { label: @tr("Cancel"); clicked => { root.confirm_visible = false; } }
-                DialogButton { label: @tr("Delete"); primary: true; danger: true; clicked => { root.confirm_visible = false; root.confirm_delete(); } }
+                DialogButton {
+                    label: root.confirm_action != "" ? root.confirm_action : @tr("Delete");
+                    primary: true;
+                    danger: root.confirm_is_permanent;
+                    clicked => { root.confirm_visible = false; root.confirm_delete(); }
+                }
             }
         }
     }
@@ -9419,10 +9527,17 @@ export component MainWindow inherits Window {
                     LineEdit {
                         x: 12px; y: 26px; width: parent.width - 24px; height: 24px;
                         text: sc.hint;
-                        placeholder-text: @tr("Shortcut hint");
+                        placeholder-text: root.shortcut_capture_active && root.shortcut_capture_command == sc.command
+                            ? @tr("Press a key combination…")
+                            : @tr("Click, then press a shortcut");
                         font-size: 12px;
                         font-family: AppMetrics.mono_font;
-                        edited(val) => { root.shortcut_hint_changed(sc.command, val); }
+                        key-pressed(event) => {
+                            root.shortcut_capture_command = sc.command;
+                            root.shortcut_capture_active = true;
+                            root.shortcut_key(event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.text);
+                            return accept;
+                        }
                     }
                 }
             }
@@ -9454,7 +9569,7 @@ export component MainWindow inherits Window {
                         background: item.enabled ? ThemePalette.success : ThemePalette.border_strong;
                         Text {
                             width: parent.width; height: parent.height;
-                            text: item.enabled ? @tr("On") : "Off";
+                            text: item.enabled ? @tr("On") : @tr("Off");
                             color: white; font-size: 10px; font-weight: 700;
                             horizontal-alignment: center; vertical-alignment: center;
                         }
@@ -9491,11 +9606,13 @@ export component MainWindow inherits Window {
                 label: @tr("Close");
                 clicked => { root.tool_overlay_close(); }
             }
-            if root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "shortcuts" || root.tool_overlay_kind == "workspaces" || root.tool_overlay_kind == "smart-folders": DialogButton {
+            if root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "shortcuts" || root.tool_overlay_kind == "workspaces" || root.tool_overlay_kind == "smart-folders" || root.tool_overlay_kind == "versions" || root.tool_overlay_kind == "privacy": DialogButton {
                 x: parent.width - self.preferred-width - 18px; y: parent.height - 48px;
                 label: root.tool_overlay_kind == "rules" ? @tr("Run enabled")
                     : (root.tool_overlay_kind == "shortcuts" ? @tr("Save")
-                    : (root.tool_overlay_kind == "workspaces" ? @tr("Open") : "Close"));
+                    : (root.tool_overlay_kind == "versions" ? @tr("Restore")
+                    : (root.tool_overlay_kind == "privacy" ? @tr("Clear caches")
+                    : (root.tool_overlay_kind == "workspaces" ? @tr("Open") : @tr("Close")))));
                 primary: true;
                 clicked => {
                     if (root.tool_overlay_kind == "smart-folders") {
@@ -10275,39 +10392,37 @@ export component MainWindow inherits Window {
     }
 
     keys := FocusScope {
-        KeyBinding { keys: @keys(Control+T); activated => { root.new_tab(); } }
-        KeyBinding { keys: @keys(Control+W); activated => { root.tab_closed(-1); } }
-        KeyBinding { keys: @keys(Control+L); activated => { root.address_text = root.current_path; root.address_editing = true; } }
-        KeyBinding { keys: @keys(Control+Shift+F); activated => { root.command("focus-search"); } }
-        KeyBinding { keys: @keys(Control+P); activated => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; } }
-        KeyBinding { keys: @keys(Control+Comma); activated => { root.settings_visible = true; } }
-        KeyBinding { keys: @keys(Control+"1"); activated => { root.set_view("grid"); } }
-        KeyBinding { keys: @keys(Control+"2"); activated => { root.set_view("list"); } }
-        KeyBinding { keys: @keys(Control+"3"); activated => { root.set_view("gallery"); } }
-        KeyBinding { keys: @keys(Control+I); activated => { root.toggle_preview(); } }
-        KeyBinding { keys: @keys(Control+C); activated => { root.command("copy"); } }
-        KeyBinding { keys: @keys(Control+X); activated => { root.command("cut"); } }
-        KeyBinding { keys: @keys(Control+V); activated => { root.command("paste"); } }
-        KeyBinding { keys: @keys(Control+A); activated => { root.command("select-all"); } }
-        KeyBinding { keys: @keys(Control+Z); activated => { root.command("undo"); } }
-        KeyBinding { keys: @keys(Control+Y); activated => { root.command("redo"); } }
-        KeyBinding { keys: @keys(Control+N); activated => { root.command("new-window"); } }
-        KeyBinding { keys: @keys(Control+Shift+N); activated => { root.command("new-folder"); } }
-        KeyBinding { keys: @keys(Alt+LeftArrow); activated => { root.go_back(); } }
-        KeyBinding { keys: @keys(Alt+RightArrow); activated => { root.go_forward(); } }
-        KeyBinding { keys: @keys(Alt+UpArrow); activated => { root.go_up(); } }
-        KeyBinding { keys: @keys(F3); activated => { root.toggle_dual_pane(); } }
-        KeyBinding { keys: @keys(F5); activated => { root.refresh(); } }
-        KeyBinding { keys: @keys(Delete); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible) { root.command("delete"); } } }
-        KeyBinding { keys: @keys(Shift+Delete); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible) { root.command("purge"); } } }
-        KeyBinding { keys: @keys(Alt+Return); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible) { root.command("properties"); } } }
-        KeyBinding { keys: @keys(F2); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible) { root.command("rename"); } } }
-        KeyBinding { keys: @keys(Return); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.command_visible) { root.file_opened(root.selected_index); } } }
-        KeyBinding { keys: @keys(Space); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible) { root.toggle_quick_look(); } } }
-        KeyBinding { keys: @keys(Control+D); activated => { root.command("duplicates"); } }
-        KeyBinding { keys: @keys(Control+Shift+C); activated => { root.command("checksum"); } }
-        KeyBinding { keys: @keys(UpArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible) { root.file_selected(max(0, root.selected_index - 1), false, false); } } }
-        KeyBinding { keys: @keys(DownArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible) { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } } }
+        key-pressed(event) => {
+            if (root.address_editing || root.rename_index >= 0) {
+                return reject;
+            }
+            if (event.text == Key.Escape || event.text == Key.Return || event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.Tab) {
+                return reject;
+            }
+            root.shortcut_consumed = false;
+            root.shortcut_key(
+                event.modifiers.control,
+                event.modifiers.shift,
+                event.modifiers.alt,
+                event.text == Key.Delete ? "Delete"
+                    : (event.text == Key.F2 ? "F2"
+                    : (event.text == Key.F3 ? "F3"
+                    : (event.text == Key.F5 ? "F5"
+                    : (event.text == Key.LeftArrow ? "Left"
+                    : (event.text == Key.RightArrow ? "Right"
+                    : (event.text == Key.Backspace ? "Backspace"
+                    : event.text)))))));
+            if (root.shortcut_consumed) {
+                return accept;
+            }
+            return reject;
+        }
+        // Overlay-sensitive keys stay in Slint so Escape / arrows / Return
+        // still follow dialog state. Rebindable chords are dispatched from Rust.
+        KeyBinding { keys: @keys(Return); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.command_visible && !root.tool_overlay_visible) { root.file_opened(root.selected_index); } } }
+        KeyBinding { keys: @keys(Space); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.tool_overlay_visible && !root.command_visible) { root.toggle_quick_look(); } } }
+        KeyBinding { keys: @keys(UpArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible) { root.file_selected(max(0, root.selected_index - 1), false, false); } } }
+        KeyBinding { keys: @keys(DownArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible) { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } } }
         KeyBinding { keys: @keys(Escape); activated => {
             if (root.command_visible) { root.command_visible = false; }
             else if (root.settings_visible) { root.settings_visible = false; }

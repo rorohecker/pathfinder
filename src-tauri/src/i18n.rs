@@ -43,6 +43,29 @@ pub fn resolve_setting(setting: &str) -> &'static str {
 }
 
 fn detect_system_language() -> &'static str {
+    #[cfg(windows)]
+    {
+        if let Some(lang) = detect_windows_ui_language() {
+            return lang;
+        }
+    }
+    detect_from_env_lang()
+}
+
+#[cfg(windows)]
+fn detect_windows_ui_language() -> Option<&'static str> {
+    use windows::Win32::Globalization::GetUserDefaultUILanguage;
+    // LANGID primary language: Italian 0x10, Spanish 0x0A, English 0x09.
+    let primary = unsafe { GetUserDefaultUILanguage() } & 0x3FF;
+    match primary {
+        0x0010 => Some("it"),
+        0x000A => Some("es"),
+        0x0009 => Some("en"),
+        _ => None,
+    }
+}
+
+fn detect_from_env_lang() -> &'static str {
     for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
         if let Ok(val) = std::env::var(key) {
             let lower = val.to_ascii_lowercase();
@@ -268,6 +291,39 @@ fn it(en: &str) -> Option<String> {
             "Ready — auto-suggest tags for photos" => "Pronto — suggerisce tag per le foto",
             "Ready — near-duplicate detection uses a lightweight image hash (no model required)" => "Pronto — i quasi-duplicati usano un hash immagine leggero (nessun modello richiesto)",
             "Models up to date" => "Modelli aggiornati",
+            "Delete forever" => "Elimina per sempre",
+            "Move to Recycle Bin" => "Sposta nel Cestino",
+            "Move to Bin" => "Sposta nel Cestino",
+            "Share" => "Condividi",
+            "Compact View" => "Vista compatta",
+            "Open a library folder" => "Apri una cartella libreria",
+            "Click a folder to open it" => "Clicca una cartella per aprirla",
+            "No recent locations recorded yet." => "Nessuna posizione recente.",
+            "No sibling folders available." => "Nessuna cartella gemella disponibile.",
+            "Click a version, then Restore" => "Scegli una versione, poi Ripristina",
+            "No shadow copies found. Enable File History or VSS snapshots." => {
+                "Nessuna copia shadow. Attiva Cronologia file o gli snapshot VSS."
+            }
+            "OneDrive and cloud placeholders. Open in Explorer for pin controls." => {
+                "Segnaposto OneDrive e cloud. Apri in Explorer per i controlli di pinning."
+            }
+            "Thumbnails, previews, and folder cache" => "Miniature, anteprime e cache cartelle",
+            "Does not delete your files" => "Non elimina i tuoi file",
+            "Click a row and press a key combination. Save to apply." => {
+                "Clicca una riga e premi una combinazione. Salva per applicare."
+            }
+            "Documents" => "Documenti",
+            "Pictures" => "Immagini",
+            "Music" => "Musica",
+            "Videos" => "Video",
+            "Downloads" => "Download",
+            "Desktop" => "Desktop",
+            "Back" => "Indietro",
+            "Forward" => "Avanti",
+            "Up One Level" => "Cartella superiore",
+            "Focus Address Bar" => "Focus sulla barra indirizzi",
+            "Focus Search" => "Focus sulla ricerca",
+            "Command Palette" => "Tavolozza comandi",
             _ => return None,
         }
         .to_string(),
@@ -470,6 +526,39 @@ fn es(en: &str) -> Option<String> {
             "Ready — auto-suggest tags for photos" => "Listo — sugiere etiquetas para fotos",
             "Ready — near-duplicate detection uses a lightweight image hash (no model required)" => "Listo — los casi duplicados usan un hash de imagen ligero (sin modelo)",
             "Models up to date" => "Modelos actualizados",
+            "Delete forever" => "Eliminar para siempre",
+            "Move to Recycle Bin" => "Mover a la Papelera",
+            "Move to Bin" => "Mover a la Papelera",
+            "Share" => "Compartir",
+            "Compact View" => "Vista compacta",
+            "Open a library folder" => "Abrir una carpeta de biblioteca",
+            "Click a folder to open it" => "Haz clic en una carpeta para abrirla",
+            "No recent locations recorded yet." => "Aún no hay ubicaciones recientes.",
+            "No sibling folders available." => "No hay carpetas hermanas.",
+            "Click a version, then Restore" => "Elige una versión y pulsa Restaurar",
+            "No shadow copies found. Enable File History or VSS snapshots." => {
+                "No hay copias shadow. Activa Historial de archivos o instantáneas VSS."
+            }
+            "OneDrive and cloud placeholders. Open in Explorer for pin controls." => {
+                "Marcadores de OneDrive y la nube. Ábrelos en Explorer para anclar."
+            }
+            "Thumbnails, previews, and folder cache" => "Miniaturas, vistas previas y caché de carpetas",
+            "Does not delete your files" => "No elimina tus archivos",
+            "Click a row and press a key combination. Save to apply." => {
+                "Haz clic en una fila y pulsa una combinación. Guarda para aplicar."
+            }
+            "Documents" => "Documentos",
+            "Pictures" => "Imágenes",
+            "Music" => "Música",
+            "Videos" => "Vídeos",
+            "Downloads" => "Descargas",
+            "Desktop" => "Escritorio",
+            "Back" => "Atrás",
+            "Forward" => "Adelante",
+            "Up One Level" => "Subir un nivel",
+            "Focus Address Bar" => "Enfocar barra de direcciones",
+            "Focus Search" => "Enfocar búsqueda",
+            "Command Palette" => "Paleta de comandos",
             _ => return None,
         }
         .to_string(),
