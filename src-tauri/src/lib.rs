@@ -317,6 +317,7 @@ enum SidebarActivateAction {
     None,
     Navigate(String),
     NavigateThenSearch { path: String, query: String },
+    ResetStorage,
 }
 
 #[derive(Clone)]
@@ -15058,8 +15059,8 @@ impl NativeController {
             return;
         }
 
-        let first_row = ((scroll_y / row_stride) as isize - 1).max(0) as usize;
-        let visible_rows = ((viewport_h / row_stride).ceil() as usize).saturating_add(3);
+        let first_row = ((scroll_y / row_stride) as isize - 2).max(0) as usize;
+        let visible_rows = ((viewport_h / row_stride).ceil() as usize).saturating_add(5);
         let mut start = first_row.saturating_mul(cols);
         if start >= total {
             // Scroll position past end (e.g. after navigate without reset) —
@@ -15213,13 +15214,13 @@ impl NativeController {
         let mut start = 0usize;
         for i in 0..total {
             if offsets[i + 1] >= scroll_y {
-                start = i.saturating_sub(2);
+                start = i.saturating_sub(4);
                 break;
             }
             start = i;
         }
         let mut end = start;
-        while end < total && offsets[end] < scroll_y + viewport_h + row_h * 3.0 {
+        while end < total && offsets[end] < scroll_y + viewport_h + row_h * 5.0 {
             end += 1;
         }
         end = end.min(total);
@@ -15264,6 +15265,12 @@ impl NativeController {
     }
 
     fn update_selection_in_model(&mut self, ui: &MainWindow, changed: &[usize]) {
+        if ui.get_is_storage_view() {
+            ui.set_selected_index(self.selected_index);
+            self.sync_selection_count_to_ui(ui);
+            self.update_status(ui);
+            return;
+        }
         if let Some(model) = &self.files_model {
             use slint::Model;
             for &i in changed {
@@ -16556,6 +16563,12 @@ impl NativeController {
         controller: Rc<RefCell<NativeController>>,
     ) {
         if same_path_string(&self.current_path, &path) {
+            if path == "storage://"
+                && ui.get_is_storage_view()
+                && (!self.storage_selected_bucket.is_empty() || self.storage_show_all_state)
+            {
+                self.clear_storage_bucket_filter(ui);
+            }
             return;
         }
         self.sidebar_nav_pending = Some(path);
@@ -16653,6 +16666,12 @@ impl NativeController {
             return SidebarActivateAction::None;
         }
         if same_path_string(&self.current_path, &path) {
+            if path == "storage://"
+                && ui.get_is_storage_view()
+                && (!self.storage_selected_bucket.is_empty() || self.storage_show_all_state)
+            {
+                return SidebarActivateAction::ResetStorage;
+            }
             return SidebarActivateAction::None;
         }
         SidebarActivateAction::Navigate(path)
@@ -22080,6 +22099,18 @@ impl NativeController {
         ui.set_is_storage_view(true);
         ui.set_preview_visible(false);
         ui.set_storage_show_all(false);
+        // Hide the file browser underneath the storage overlay so clicks and
+        // selection updates cannot flash the previous folder through.
+        self.files.clear();
+        self.visible_files.clear();
+        self.files_model = None;
+        ui.set_files(model_from_vec(Vec::<FileItem>::new()));
+        ui.set_list_window_files(model_from_vec(Vec::<FileItem>::new()));
+        ui.set_list_window_start(0);
+        ui.set_list_window_y(0.0);
+        ui.set_grid_window_files(model_from_vec(Vec::<FileItem>::new()));
+        ui.set_grid_window_start(0);
+        ui.set_empty_state(ss(""));
         self.clear_selection(ui);
         if push_history {
             self.history.truncate(self.history_index + 1);
@@ -23684,6 +23715,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     );
                     std::mem::forget(timer);
                 }
+                SidebarActivateAction::ResetStorage => {
+                    c.borrow_mut().clear_storage_bucket_filter(&ui);
+                }
                 SidebarActivateAction::None => {}
             }
         }
@@ -23989,20 +24023,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
 
     let weak = ui.as_weak();
     let c = controller.clone();
-    let grid_sync_debounce = Rc::new(slint::Timer::default());
-    let gsd = grid_sync_debounce.clone();
     ui.on_sync_grid_windows(move || {
-        let weak2 = weak.clone();
-        let c2 = c.clone();
-        gsd.start(
-            slint::TimerMode::SingleShot,
-            Duration::from_millis(40),
-            move || {
-                if let Some(ui) = weak2.upgrade() {
-                    c2.borrow_mut().on_sync_grid_windows(&ui);
-                }
-            },
-        );
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().on_sync_grid_windows(&ui);
+        }
     });
 
     let weak = ui.as_weak();

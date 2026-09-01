@@ -1386,6 +1386,9 @@ component FileRow inherits Rectangle {
         if (root.is_renaming) { root.rename_focus_nonce += 1; }
     }
     property <bool> drag_started: false;
+    // Hold drag/marquee until the double-click window passes so a second
+    // click on an already-selected row opens instead of starting DoDragDrop.
+    property <bool> drag_armed: false;
     property <bool> is_drop_target: root.item.is_dir
         && root.drag_target_path != ""
         && root.drag_target_path == root.item.file_path;
@@ -1722,9 +1725,13 @@ component FileRow inherits Rectangle {
         enabled: !root.is_renaming;
         mouse-cursor: pointer;
         clicked => { root.selected(root.index, root.ctrl_held, root.shift_held); }
-        double-clicked => { root.opened(root.index); }
+        double-clicked => {
+            root.drag_armed = false;
+            root.drag_started = false;
+            root.opened(root.index);
+        }
         moved => {
-            if (self.pressed) {
+            if (self.pressed && root.drag_armed) {
                 if (!root.drag_started && (
                     (self.mouse-x - self.pressed-x > 6px) ||
                     (self.pressed-x - self.mouse-x > 6px) ||
@@ -1751,17 +1758,29 @@ component FileRow inherits Rectangle {
                 root.ctrl_held = event.modifiers.control;
                 root.shift_held = event.modifiers.shift;
                 root.drag_started = false;
+                root.drag_armed = false;
             }
             if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
                 if (root.drag_started && !root.item.is_selected) {
                     root.marquee_finished();
                 }
                 root.drag_started = false;
+                root.drag_armed = false;
             }
             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                 root.context(root.index,
                     self.absolute-position.x + self.mouse-x,
                     self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+
+    drag_arm_timer := Timer {
+        interval: 220ms;
+        running: touch.pressed;
+        triggered => {
+            if (touch.pressed) {
+                root.drag_armed = true;
             }
         }
     }
@@ -2700,6 +2719,13 @@ component StorageOverview inherits Rectangle {
     callback open_with(string);
     background: ThemePalette.bg;
 
+    // Absorb stray clicks on non-interactive background so they do not fall
+    // through to the file pane's empty_context handler underneath.
+    click_sink := TouchArea {
+        width: parent.width;
+        height: parent.height;
+    }
+
     VerticalLayout {
         width: parent.width;
         height: parent.height;
@@ -3036,6 +3062,11 @@ component StorageDrillIn inherits Rectangle {
     callback open_more(string);
     callback open_with(string);
     background: ThemePalette.bg;
+
+    click_sink := TouchArea {
+        width: parent.width;
+        height: parent.height;
+    }
 
     // v0.9.13: widened to match the rebuilt StorageEntryRow which
     // uses absolute right-aligned columns. Sizes here must mirror
@@ -5350,6 +5381,7 @@ export component MainWindow inherits Window {
                 empty_context := TouchArea {
                     width: parent.width;
                     height: parent.height;
+                    enabled: !root.is_storage_view;
                     // Belt-and-suspenders click handler. The pointer-event up
                     // branch below clears selection when there was no drag,
                     // but Slint also fires `clicked` for plain non-drag
@@ -5424,7 +5456,7 @@ export component MainWindow inherits Window {
                     z: 5;
                 }
 
-                if root.view_mode == "list": ListHeader {
+                if root.view_mode == "list" && !root.is_storage_view: ListHeader {
                     x: AppMetrics.pad;
                     y: AppMetrics.pad;
                     // Match the ListView width below (which reserves scroll_gutter
@@ -5435,7 +5467,7 @@ export component MainWindow inherits Window {
                     sort_col(col) => { root.sort_column(col); }
                 }
 
-                if root.view_mode == "list": ScrollView {
+                if root.view_mode == "list" && !root.is_storage_view: ScrollView {
                     x: AppMetrics.pad;
                     y: AppMetrics.pad + 32px;
                     width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
@@ -5509,7 +5541,7 @@ export component MainWindow inherits Window {
                 // Empty list folders: ListView still captures hits when length is 0.
                 // Also supports starting a marquee even though no rows exist, so a
                 // future "deselect by drag" feels consistent with non-empty folders.
-                if root.view_mode == "list" && root.files.length == 0: Rectangle {
+                if root.view_mode == "list" && root.files.length == 0 && !root.is_storage_view: Rectangle {
                     z: 12;
                     x: AppMetrics.pad;
                     y: AppMetrics.pad + 32px;
@@ -5641,7 +5673,7 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if root.view_mode != "list": ScrollView {
+                if root.view_mode != "list" && !root.is_storage_view: ScrollView {
                     x: AppMetrics.pad;
                     y: AppMetrics.pad;
                     width: parent.width - AppMetrics.pad * 2;
@@ -5793,7 +5825,7 @@ export component MainWindow inherits Window {
                 }
 
                 empty_pane := Rectangle {
-                    visible: root.files.length == 0;
+                    visible: root.files.length == 0 && !root.is_storage_view;
                     width: parent.width;
                     height: parent.height;
                     property <bool> fantasy_on: ThemePalette.active_theme == "fantasy";
@@ -10456,10 +10488,10 @@ export component MainWindow inherits Window {
         }
         // Overlay-sensitive keys stay in Slint so Escape / arrows / Return
         // still follow dialog state. Rebindable chords are dispatched from Rust.
-        KeyBinding { keys: @keys(Return); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_opened(root.selected_index); } } }
-        KeyBinding { keys: @keys(Space); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.tool_overlay_visible && !root.command_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.toggle_quick_look(); } } }
-        KeyBinding { keys: @keys(UpArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_selected(max(0, root.selected_index - 1), false, false); } } }
-        KeyBinding { keys: @keys(DownArrow); activated => { if (!root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } } }
+        KeyBinding { keys: @keys(Return); activated => { if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_opened(root.selected_index); } } }
+        KeyBinding { keys: @keys(Space); activated => { if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.tool_overlay_visible && !root.command_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.toggle_quick_look(); } } }
+        KeyBinding { keys: @keys(UpArrow); activated => { if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_selected(max(0, root.selected_index - 1), false, false); } } }
+        KeyBinding { keys: @keys(DownArrow); activated => { if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } } }
         KeyBinding { keys: @keys(Escape); activated => {
             if (root.command_visible) { root.command_visible = false; }
             else if (root.settings_visible) { root.settings_visible = false; }
@@ -10485,6 +10517,7 @@ export component MainWindow inherits Window {
             else if (root.context_visible) { root.context_visible = false; }
             else if (root.search_help_visible) { root.search_help_toggle(); }
             else if (root.address_editing) { root.address_editing = false; root.addr_suggestions = []; }
+            else if (root.is_storage_view && (root.storage_selected_bucket != "" || root.storage_show_all)) { root.storage_clear_bucket(); }
             else if (root.search_text != "") { root.search_text = ""; root.search_requested(""); }
             else if (root.selected_count > 0) { root.clear_selection(); }
         } }
