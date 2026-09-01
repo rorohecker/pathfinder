@@ -284,7 +284,7 @@ pub fn invoke_context_menu_action(path: &str, action_id: u32) -> Result<(), Stri
     with_shell_context_menu(path, |menu, _hmenu| unsafe {
         use windows::Win32::UI::Shell::CMINVOKECOMMANDINFO;
         let offset = action_id.saturating_sub(SHELL_CMD_FIRST);
-        let mut info = CMINVOKECOMMANDINFO {
+        let info = CMINVOKECOMMANDINFO {
             cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
             fMask: 0,
             hwnd: windows::Win32::Foundation::HWND(std::ptr::null_mut()),
@@ -325,7 +325,7 @@ pub fn track_shell_context_menu(
             return Ok(());
         }
         let offset = cmd.saturating_sub(SHELL_CMD_FIRST);
-        let mut info = CMINVOKECOMMANDINFO {
+        let info = CMINVOKECOMMANDINFO {
             cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
             fMask: 0,
             hwnd,
