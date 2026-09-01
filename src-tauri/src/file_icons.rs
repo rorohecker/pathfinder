@@ -11,6 +11,7 @@
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
 
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use windows::Win32::Foundation::HWND;
@@ -187,6 +188,9 @@ unsafe fn hicon_to_image(hicon: HICON) -> Option<Image> {
 
 /// Shell thumbnail (videos, photos, documents) via IShellItemImageFactory.
 pub fn shell_thumbnail(path: &str, px: i32) -> Option<Image> {
+    if crate::cloud_files::hydration_risk(Path::new(path)) {
+        return None;
+    }
     use windows::Win32::Foundation::SIZE;
     use windows::Win32::Graphics::Gdi::{
         BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC,

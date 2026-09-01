@@ -7,8 +7,8 @@ use std::sync::Mutex;
 #[cfg(windows)]
 use std::sync::OnceLock;
 
-use image::imageops::FilterType;
 use image::DynamicImage;
+use image::imageops::FilterType;
 use ndarray::{Array1, Array2, Array3, Array4, Axis};
 use once_cell::sync::Lazy;
 use ort::ep;
@@ -124,9 +124,8 @@ fn ensure_ort_environment() -> ort::Result<()> {
             // RegisterExecutionProviderLibrary wrapper in all builds; discovery
             // still informs candidate ordering and status text.
         }
-        let mapped: Result<(), String> = ort::init_from(&dll)
-            .map_err(|e| e.to_string())
-            .map(|env| {
+        let mapped: Result<(), String> =
+            ort::init_from(&dll).map_err(|e| e.to_string()).map(|env| {
                 env.commit();
             });
         *guard = Some(mapped.clone());
@@ -587,6 +586,9 @@ pub fn image_classifier_available() -> bool {
 }
 
 fn classifier_logits(path: &Path) -> Option<Vec<f32>> {
+    if crate::cloud_files::hydration_risk(path) {
+        return None;
+    }
     let img = image::open(path).ok()?.into_rgb8();
     let dyn_img = DynamicImage::ImageRgb8(img);
     let mut guard = classifier_session().ok()?;
@@ -705,6 +707,9 @@ pub fn suggest_image_tag(path: &Path) -> Option<String> {
 
 /// 8x8 difference hash as u64 for near-duplicate image detection.
 pub fn dhash64(path: &Path) -> Option<u64> {
+    if crate::cloud_files::hydration_risk(path) {
+        return None;
+    }
     let mut img = image::open(path).ok()?.into_luma8();
     if img.width() > 256 || img.height() > 256 {
         img = image::imageops::resize(&img, 64, 64, FilterType::Nearest);

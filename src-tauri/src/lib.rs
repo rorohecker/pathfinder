@@ -75,6 +75,7 @@ pub fn __test_detect_gpus() -> Vec<(String, u32, u64, bool, bool)> {
         })
         .collect()
 }
+mod cloud_files;
 mod fantasy_icons;
 mod imagenet_labels;
 mod inference;
@@ -4866,6 +4867,23 @@ fn read_preview_uncached(
     metadata: &fs::Metadata,
     max_bytes: Option<usize>,
 ) -> Result<PreviewContent, String> {
+    if cloud_files::hydration_risk(path_buf) {
+        return Ok(PreviewContent {
+            kind: "cloud-placeholder".to_string(),
+            mime: None,
+            text: Some(
+                "This file is cloud-only (online-only placeholder).\n\n\
+                 Pathfinder skipped reading it so OneDrive or another sync client \
+                 would not download it in the background.\n\n\
+                 Open the file in Explorer or double-click it here when you want \
+                 it on this device."
+                    .to_string(),
+            ),
+            data_url: None,
+            truncated: false,
+        });
+    }
+
     if metadata.is_dir() {
         return Ok(PreviewContent {
             kind: "folder".to_string(),
@@ -8172,6 +8190,9 @@ fn fetch_thumbnails(
             .par_iter()
             .filter_map(|path| {
                 let path_buf = PathBuf::from(path);
+                if cloud_files::hydration_risk(&path_buf) {
+                    return None;
+                }
                 if !is_thumbnail_image_ext(&extension(&path_buf)) {
                     return None;
                 }
@@ -9364,7 +9385,8 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
         if matches!(
             extension.as_str(),
             "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
-        ) && let Some(h) = crate::inference::dhash64(Path::new(&entry.path))
+        ) && !cloud_files::hydration_risk(Path::new(&entry.path))
+            && let Some(h) = crate::inference::dhash64(Path::new(&entry.path))
         {
             dhash_rows.push((entry.path.clone(), h.to_le_bytes().to_vec(), now));
         }
@@ -9373,6 +9395,7 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
                 extension.as_str(),
                 "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp"
             )
+            && !cloud_files::hydration_risk(Path::new(&entry.path))
         {
             let p = Path::new(&entry.path);
             if let Some(labels) = crate::inference::image_search_label_text(p) {
@@ -14475,7 +14498,10 @@ impl NativeController {
         }
         schedule_index_roots_with_refresh(roots, Some(ui.as_weak()));
         self.spawn_performance_status(ui);
-        self.show_toast(ui, "Search index and memory caches cleared. Rebuild running in background.");
+        self.show_toast(
+            ui,
+            "Search index and memory caches cleared. Rebuild running in background.",
+        );
     }
 
     fn set_index_mode(&mut self, ui: &MainWindow, mode: &str) {
@@ -15239,6 +15265,9 @@ impl NativeController {
             THUMBNAIL_POOL.spawn(move || {
                 for (path, mtime) in image_entries {
                     let pb = PathBuf::from(&path);
+                    if cloud_files::hydration_risk(&pb) {
+                        continue;
+                    }
                     let ck = thumbnail_cache_key(&pb, mtime, 160);
                     let thumb = thumbnail_cache_dir().join(format!("{ck}.jpg"));
                     if thumb.exists() {
@@ -16562,6 +16591,9 @@ impl NativeController {
             THUMBNAIL_POOL.spawn(move || {
                 for (path, mtime) in image_entries {
                     let pb = PathBuf::from(&path);
+                    if cloud_files::hydration_risk(&pb) {
+                        continue;
+                    }
                     let ck = thumbnail_cache_key(&pb, mtime, 160);
                     let thumb = thumbnail_cache_dir().join(format!("{ck}.jpg"));
                     if thumb.exists() {
@@ -17876,7 +17908,9 @@ impl NativeController {
         if is_media_ext(&ext) {
             self.preview_generation.fetch_add(1, Ordering::SeqCst);
             #[cfg(target_os = "windows")]
-            if let Some(img) = file_icons::shell_thumbnail(&entry.path, 256) {
+            if !cloud_files::hydration_risk(Path::new(&entry.path))
+                && let Some(img) = file_icons::shell_thumbnail(&entry.path, 256)
+            {
                 ui.set_preview_image(img);
                 ui.set_preview_is_image(true);
             }
@@ -17916,8 +17950,19 @@ impl NativeController {
         let type_label_owned = type_label.clone();
         std::thread::spawn(move || {
             let is_image = is_thumbnail_image_ext(&ext_owned);
+            let cloud_only = cloud_files::hydration_risk(Path::new(&path));
             let mut image_rgba = None;
-            let (body, meta, rendered) = if is_image {
+            let (body, meta, rendered) = if cloud_only {
+                (
+                    String::new(),
+                    format!(
+                        "{base_meta}\n\nCloud-only file — preview skipped to avoid downloading \
+                         from OneDrive or another sync provider. Open the file when you want it \
+                         on this device."
+                    ),
+                    String::new(),
+                )
+            } else if is_image {
                 let disk_key = thumbnail_cache_key(Path::new(&path), modified, 160);
                 let thumb_path = thumbnail_cache_dir().join(format!("{disk_key}.jpg"));
                 if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
@@ -19555,9 +19600,7 @@ impl NativeController {
             ui.get_settings_visible(),
             ui.get_welcome_visible(),
             ui.get_ui_mode_prompt_visible(),
-            ui.get_command_visible()
-                || ui.get_context_visible()
-                || ui.get_rename_presets_visible(),
+            ui.get_command_visible() || ui.get_context_visible() || ui.get_rename_presets_visible(),
             ui.get_tool_overlay_visible(),
             ui.get_compare_overlay_visible(),
             ui.get_image_tools_visible(),
