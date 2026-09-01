@@ -13263,6 +13263,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
         "",
         "performance-settings",
     ),
+    ("Settings", "Local AI Settings", "", "ai-settings"),
     ("Settings", "Privacy and Storage", "", "privacy-storage"),
     ("Settings", "Check for Updates", "", "check-updates"),
     ("Settings", "Shortcut Editor", "", "shortcut-editor"),
@@ -14208,6 +14209,19 @@ impl NativeController {
         ui.set_ai_feature_dupes(ss(&i18n::t(
             "Ready — near-duplicate detection uses a lightweight image hash (no model required)",
         )));
+    }
+
+    fn refresh_ai_settings_panel(&mut self, ui: &MainWindow) {
+        if let Ok(mut cap) = self.app_state.ai_capabilities.lock() {
+            *cap = None;
+        }
+        self.ai = compute_ai_capabilities();
+        ui.set_ai_device(ss(&self.ai.reason));
+        ui.set_ai_gpu_status(ss(&self.ai.gpu_summary));
+        ui.set_ai_label(ss(ai_status_label(&self.ai)));
+        invalidate_local_ai_ready_cache();
+        ui.set_semantic_search_available(local_ai_semantic_ready_cached());
+        self.sync_ai_settings_ui(ui);
     }
 
     /// Work deferred until after the first frame is painted so startup feels
@@ -19041,6 +19055,7 @@ impl NativeController {
             "settings" => {
                 ui.set_settings_visible(true);
                 self.spawn_performance_status(ui);
+                self.refresh_ai_settings_panel(ui);
             }
             "command-palette" => ui.set_command_visible(true),
             "view-grid" => self.set_view(ui, "grid"),
@@ -19402,6 +19417,11 @@ impl NativeController {
                 ui.set_settings_tab(ss("performance"));
                 ui.set_settings_visible(true);
                 self.spawn_performance_status(ui);
+            }
+            "ai-settings" => {
+                ui.set_settings_tab(ss("ai"));
+                ui.set_settings_visible(true);
+                self.refresh_ai_settings_panel(ui);
             }
             "privacy-storage" => self.show_privacy_storage(ui),
             "open-releases" => {

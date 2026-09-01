@@ -7629,7 +7629,7 @@ export component MainWindow inherits Window {
                     for tab_label[ti] in [@tr("Appearance"), @tr("settings-tab" => "View"), @tr("Performance"), @tr("AI")]: Rectangle {
                         property <string> tid: ti == 0 ? "appearance" : (ti == 1 ? "view" : (ti == 2 ? "performance" : "ai"));
                         property <bool> is_active: root.settings_tab == self.tid || (self.tid == "appearance" && root.settings_tab == "themes");
-                        visible: !(root.is_simple && self.tid == "ai");
+                        visible: true;
                         horizontal-stretch: 1;
                         height: parent.height;
                         background: transparent;
@@ -7655,6 +7655,9 @@ export component MainWindow inherits Window {
                             root.settings_tab = tid;
                             if (tid == "performance") {
                                 root.command("performance-settings");
+                            }
+                            if (tid == "ai") {
+                                root.command("ai-settings");
                             }
                         } }
                     }
@@ -8955,7 +8958,7 @@ export component MainWindow inherits Window {
                 }
             }
 
-            if root.settings_tab == "ai" && !root.is_simple: ScrollView {
+            if root.settings_tab == "ai": ScrollView {
                 x: 20px;
                 y: 124px;
                 width: parent.width - 40px;
