@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: pathfinder 1.0.1\n"
+"Project-Id-Version: pathfinder 1.0.2\n"
 "POT-Creation-Date: 2026-08-24 19:25+0000\n"
 "PO-Revision-Date: 2026-08-24 19:25+0000\n"
 "Last-Translator: Pathfinder contributors\n"
@@ -746,6 +746,9 @@ msgid "Storage and memory footprint"
 msgstr ""
 
 msgid "Rebuild"
+msgstr ""
+
+msgid "Rebuild index"
 msgstr ""
 
 msgid "Debug"

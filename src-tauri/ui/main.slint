@@ -8910,7 +8910,7 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         height: 34px;
                         spacing: 8px;
-                        DialogButton { label: @tr("Rebuild"); primary: true; clicked => { root.rebuild_index(); } }
+                        DialogButton { label: @tr("Rebuild index"); primary: true; clicked => { root.rebuild_index(); } }
                         DialogButton { label: @tr("Debug"); clicked => { root.command("performance-debug"); } }
                     }
 

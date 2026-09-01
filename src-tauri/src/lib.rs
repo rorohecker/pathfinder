@@ -10116,6 +10116,72 @@ fn clear_search_index() -> Result<u64, String> {
     Ok(bytes)
 }
 
+/// Wipe indexed search data while keeping the SQLite schema. Returns parent
+/// folders and indexed directory paths so Low mode can rebuild what was known.
+fn reset_search_index_data() -> Result<Vec<String>, String> {
+    let conn = open_index_connection()?;
+    let mut roots: Vec<String> = Vec::new();
+    {
+        let mut parents = conn
+            .prepare("SELECT DISTINCT parent FROM files WHERE parent != ''")
+            .map_err(|e| e.to_string())?;
+        roots.extend(
+            parents
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(Result::ok),
+        );
+        let mut dirs = conn
+            .prepare("SELECT path FROM files WHERE is_dir = 1")
+            .map_err(|e| e.to_string())?;
+        roots.extend(
+            dirs.query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(Result::ok),
+        );
+    }
+    roots.sort_unstable();
+    roots.dedup();
+    conn.execute_batch(
+        "
+        DELETE FROM files;
+        DELETE FROM files_fts;
+        DELETE FROM path_embeddings;
+        DELETE FROM image_dhash;
+        DELETE FROM image_desc_embeddings;
+        DELETE FROM ai_index_meta;
+        ",
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = conn.execute("VACUUM", []);
+    invalidate_local_ai_ready_cache();
+    Ok(roots)
+}
+
+fn performance_footprint_text(status: &IndexStatus) -> String {
+    let ram_line = match process_memory_stats() {
+        Some((ws, private_mb)) => {
+            format!("Memory in use right now: {ws} MB working set ({private_mb} MB private)")
+        }
+        None => "Memory in use: not available on this platform".to_string(),
+    };
+    let ai_bytes = local_ai::actual_disk_usage_bytes();
+    format!(
+        "{ram_line}\nIndex database: {} on disk\nThumbnail cache: {} of {} budget\nLocal AI models: {}\n\nLocations:\n  {}\n  {}\n  {}",
+        format_size_short(status.index_bytes),
+        format_size_short(status.thumbnail_bytes),
+        format_size_short(status.thumbnail_limit),
+        if ai_bytes == 0 {
+            "not installed".to_string()
+        } else {
+            format_size_short(ai_bytes)
+        },
+        native_index_file().display(),
+        thumbnail_cache_dir().display(),
+        local_ai::ai_dir().display(),
+    )
+}
+
 #[tauri::command]
 fn set_update_checks_enabled(_enabled: bool) -> Result<(), String> {
     // No-op. Update checks are mandatory and the setting is ignored.
@@ -10797,6 +10863,13 @@ fn indexing_permitted() -> bool {
 }
 
 fn schedule_index_roots(roots: Vec<String>) {
+    schedule_index_roots_with_refresh(roots, None);
+}
+
+fn schedule_index_roots_with_refresh(
+    roots: Vec<String>,
+    perf_refresh: Option<slint::Weak<MainWindow>>,
+) {
     if roots.is_empty() {
         return;
     }
@@ -10864,6 +10937,23 @@ fn schedule_index_roots(roots: Vec<String>) {
                 let _ = index_directory_entries(&parent, &entries);
                 std::thread::sleep(Duration::from_millis(5));
             }
+        }
+        if let Some(weak) = perf_refresh {
+            let status = index_stats();
+            let footprint = performance_footprint_text(&status);
+            let index_line = format!(
+                "{} files indexed | {} on disk | thumbnails {} of {} cap",
+                status.indexed_files,
+                format_size_short(status.index_bytes),
+                format_size_short(status.thumbnail_bytes),
+                format_size_short(status.thumbnail_limit),
+            );
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_index_status(ss(index_line));
+                    ui.set_performance_footprint(ss(footprint));
+                }
+            });
         }
     });
 }
@@ -14208,29 +14298,7 @@ impl NativeController {
         let weak = ui.as_weak();
         std::thread::spawn(move || {
             let status = index_status_for_settings_with_drives(&settings, Some(&drives));
-            let ram_line = match process_memory_stats() {
-                Some((ws, private_mb)) => {
-                    format!(
-                        "Memory in use right now: {ws} MB working set ({private_mb} MB private)"
-                    )
-                }
-                None => "Memory in use: not available on this platform".to_string(),
-            };
-            let ai_bytes = local_ai::actual_disk_usage_bytes();
-            let footprint = format!(
-                "{ram_line}\nIndex database: {} on disk\nThumbnail cache: {} of {} budget\nLocal AI models: {}\n\nLocations:\n  {}\n  {}\n  {}",
-                format_size_short(status.index_bytes),
-                format_size_short(status.thumbnail_bytes),
-                format_size_short(status.thumbnail_limit),
-                if ai_bytes == 0 {
-                    "not installed".to_string()
-                } else {
-                    format_size_short(ai_bytes)
-                },
-                native_index_file().display(),
-                thumbnail_cache_dir().display(),
-                local_ai::ai_dir().display(),
-            );
+            let footprint = performance_footprint_text(&status);
             let index_line = format!(
                 "{} files indexed | {} on disk | thumbnails {} of {} cap | {}",
                 status.indexed_files,
@@ -14349,21 +14417,51 @@ impl NativeController {
         );
         ui.set_performance_intro(ss(intro));
 
-        let ram_line = match process_memory_stats() {
-            Some((ws, private_mb)) => {
-                format!("Memory in use right now: {ws} MB working set ({private_mb} MB private)")
+        ui.set_performance_footprint(ss(performance_footprint_text(&status)));
+    }
+
+    fn clear_runtime_caches(&mut self) {
+        if let Ok(mut cache) = self.app_state.directory_cache.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.app_state.preview_cache.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.app_state.git_cache.lock() {
+            cache.clear();
+        }
+        self.thumbnail_memory.clear();
+    }
+
+    fn rebuild_search_index(&mut self, ui: &MainWindow) {
+        self.clear_runtime_caches();
+        let mode_roots = index_roots_for_mode_with_drives(&self.settings, Some(&self.drives));
+        let roots = if mode_roots.is_empty() {
+            match reset_search_index_data() {
+                Ok(visited) => visited,
+                Err(error) => {
+                    self.show_toast_kind(ui, error, "error");
+                    return;
+                }
             }
-            None => "Memory in use: not available on this platform".to_string(),
+        } else {
+            if let Err(error) = reset_search_index_data() {
+                self.show_toast_kind(ui, error, "error");
+                return;
+            }
+            mode_roots
         };
-        let footprint = format!(
-            "{ram_line}\nIndex database: {} on disk\nThumbnail cache: {} of {} budget\n\nLocations:\n  {}\n  {}",
-            format_size_short(status.index_bytes),
-            format_size_short(status.thumbnail_bytes),
-            format_size_short(status.thumbnail_limit),
-            native_index_file().display(),
-            thumbnail_cache_dir().display(),
-        );
-        ui.set_performance_footprint(ss(footprint));
+        if roots.is_empty() {
+            self.sync_performance_status(ui);
+            self.show_toast(
+                ui,
+                "Nothing indexed yet. Open some folders first, or switch to Balanced indexing.",
+            );
+            return;
+        }
+        schedule_index_roots_with_refresh(roots, Some(ui.as_weak()));
+        self.spawn_performance_status(ui);
+        self.show_toast(ui, "Search index and memory caches cleared. Rebuild running in background.");
     }
 
     fn set_index_mode(&mut self, ui: &MainWindow, mode: &str) {
@@ -19280,24 +19378,16 @@ impl NativeController {
             "performance-debug" => self.show_performance_debug(ui),
             "clear-thumbnail-cache" => match clear_thumbnail_cache() {
                 Ok(bytes) => {
+                    self.thumbnail_memory.clear();
                     self.sync_performance_status(ui);
                     self.show_toast(ui, format!("Cleared {}", format_size_short(bytes)));
                 }
                 Err(error) => self.show_toast(ui, error),
             },
             "clear-local-caches" => {
-                if let Ok(mut cache) = self.app_state.directory_cache.lock() {
-                    cache.clear();
-                }
-                if let Ok(mut cache) = self.app_state.preview_cache.lock() {
-                    cache.clear();
-                }
-                if let Ok(mut cache) = self.app_state.git_cache.lock() {
-                    cache.clear();
-                }
+                self.clear_runtime_caches();
                 match clear_thumbnail_cache() {
                     Ok(bytes) => {
-                        self.thumbnail_memory.clear();
                         self.sync_performance_status(ui);
                         self.show_toast(
                             ui,
@@ -19307,15 +19397,7 @@ impl NativeController {
                     Err(error) => self.show_toast(ui, error),
                 }
             }
-            "rebuild-index" => {
-                let roots = index_roots_for_mode(&self.settings);
-                if roots.is_empty() {
-                    self.show_toast(ui, "Low mode indexes folders as you open them.");
-                } else {
-                    schedule_index_roots(roots);
-                    self.show_toast(ui, "Index rebuild started in the background.");
-                }
-            }
+            "rebuild-index" => self.rebuild_search_index(ui),
             "performance-settings" => {
                 ui.set_settings_tab(ss("performance"));
                 ui.set_settings_visible(true);
@@ -24201,6 +24283,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             ctrl.settings.network_downloads_enabled = !ctrl.settings.network_downloads_enabled;
             ui.set_network_downloads_enabled(ctrl.settings.network_downloads_enabled);
             ctrl.save_settings();
+            if ui.get_settings_visible() {
+                ctrl.spawn_performance_status(&ui);
+            }
         }
     });
     let weak = ui.as_weak();
@@ -24542,6 +24627,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c_ai = controller.clone();
     ui.on_ai_install_confirm(move || {
         if let Some(ui) = weak.upgrade() {
+            if !c_ai.borrow().settings.network_downloads_enabled {
+                c_ai.borrow_mut().show_toast(
+                    &ui,
+                    "Turn on App and model downloads in Settings → Performance first.",
+                );
+                return;
+            }
             let profile = {
                 let b = c_ai.borrow();
                 if b.settings.ai_profile.is_empty() {
@@ -24589,6 +24681,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c_ai = controller.clone();
     ui.on_ai_repair(move || {
         if let Some(ui) = weak.upgrade() {
+            if !c_ai.borrow().settings.network_downloads_enabled {
+                c_ai.borrow_mut().show_toast(
+                    &ui,
+                    "Turn on App and model downloads in Settings → Performance first.",
+                );
+                return;
+            }
             let progress = c_ai.borrow().ai_progress.clone();
             local_ai::start_repair(progress);
             ui.set_ai_install_state(SharedString::from("downloading"));
@@ -24599,6 +24698,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c_ai = controller.clone();
     ui.on_ai_update_models(move || {
         if let Some(ui) = weak.upgrade() {
+            if !c_ai.borrow().settings.network_downloads_enabled {
+                c_ai.borrow_mut().show_toast(
+                    &ui,
+                    "Turn on App and model downloads in Settings → Performance first.",
+                );
+                return;
+            }
             let progress = c_ai.borrow().ai_progress.clone();
             local_ai::start_model_update(progress);
             ui.set_ai_install_state(SharedString::from("updating"));
@@ -24809,6 +24915,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             match clear_thumbnail_cache() {
                 Ok(bytes) => {
+                    c.borrow_mut().thumbnail_memory.clear();
                     c.borrow().sync_performance_status(&ui);
                     c.borrow_mut()
                         .show_toast(&ui, format!("Cleared {}", format_size_short(bytes)));
@@ -24822,15 +24929,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_rebuild_index(move || {
         if let Some(ui) = weak.upgrade() {
-            let roots = index_roots_for_mode(&c.borrow().settings);
-            if roots.is_empty() {
-                c.borrow_mut()
-                    .show_toast(&ui, "Low mode indexes folders as you open them.");
-            } else {
-                schedule_index_roots(roots);
-                c.borrow_mut()
-                    .show_toast(&ui, "Index rebuild started in the background.");
-            }
+            c.borrow_mut().rebuild_search_index(&ui);
         }
     });
 
@@ -25428,7 +25527,21 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                             ui.set_ai_gpu_status(ss(&caps.gpu_summary));
                             ui.set_ai_label(ss(ai_status_label(&caps)));
                             invalidate_local_ai_ready_cache();
-                            ui.set_semantic_search_available(local_ai_semantic_ready_cached());
+                            let semantic_ready = local_ai_semantic_ready_cached();
+                            let image_ready = local_ai_image_search_ready_cached();
+                            ui.set_semantic_search_available(semantic_ready);
+                            if semantic_ready {
+                                ctrl.settings.search_semantic_mode = true;
+                                ui.set_search_semantic_mode(true);
+                            }
+                            if image_ready {
+                                ctrl.settings.clip_search_enabled = true;
+                                ui.set_clip_search_enabled(true);
+                            }
+                            ctrl.save_settings();
+                            ctrl.sync_ai_settings_ui(&ui);
+                            ctrl.spawn_performance_status(&ui);
+                            ctrl.show_toast(&ui, "Local AI installed. Semantic search is ready.");
                         }
                     }
                     prev_ai_cell.set(ai_state);
