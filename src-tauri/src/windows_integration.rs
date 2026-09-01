@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
 use std::process::Command;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -296,7 +295,7 @@ pub fn invoke_context_menu_action(path: &str, action_id: u32) -> Result<(), Stri
             dwHotKey: 0,
             hIcon: windows::Win32::Foundation::HANDLE::default(),
         };
-        menu.InvokeCommand(&mut info).map_err(|e| e.to_string())
+        menu.InvokeCommand(&info).map_err(|e| e.to_string())
     })
 }
 
@@ -337,7 +336,7 @@ pub fn track_shell_context_menu(
             dwHotKey: 0,
             hIcon: windows::Win32::Foundation::HANDLE::default(),
         };
-        menu.InvokeCommand(&mut info).map_err(|e| e.to_string())
+        menu.InvokeCommand(&info).map_err(|e| e.to_string())
     })
 }
 
