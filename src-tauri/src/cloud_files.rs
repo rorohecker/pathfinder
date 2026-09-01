@@ -33,27 +33,6 @@ pub fn hydration_risk_from_attrs(attrs: u32) -> bool {
         || attrs & FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS != 0
 }
 
-/// Path is under a well-known desktop sync folder (OneDrive Personal, etc.).
-#[cfg(target_os = "windows")]
-fn path_under_cloud_sync_root(path: &Path) -> bool {
-    let lower = path.to_string_lossy().to_ascii_lowercase();
-    // Normalise to backslashes so `Users\me\OneDrive\...` matches reliably.
-    let norm = lower.replace('/', "\\");
-    const MARKERS: &[&str] = [
-        "\\onedrive\\",
-        "\\onedrive - ",
-        "\\icloudrive\\",
-        "\\dropbox\\",
-        "\\google drive\\",
-        "\\my drive\\",
-        "\\proton drive\\",
-        "\\protondrive\\",
-        "\\box\\",
-        "\\mega\\",
-    ];
-    MARKERS.iter().any(|m| norm.contains(m))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,15 +46,6 @@ mod tests {
             ));
             assert!(hydration_risk_from_attrs(FILE_ATTRIBUTE_OFFLINE));
             assert!(!hydration_risk_from_attrs(0x20)); // FILE_ATTRIBUTE_ARCHIVE
-        }
-    }
-
-    #[test]
-    fn onedrive_path_heuristic() {
-        #[cfg(target_os = "windows")]
-        {
-            let p = Path::new(r"C:\Users\me\OneDrive\Pictures\vacation.jpg");
-            assert!(path_under_cloud_sync_root(p));
         }
     }
 }
