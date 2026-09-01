@@ -1700,6 +1700,9 @@ fn apply_rename_preset(preset: &str, file_name: &str) -> Option<String> {
 }
 
 fn quick_sha256(path: &Path, max_bytes: u64) -> Option<String> {
+    if cloud_files::hydration_risk(path) {
+        return None;
+    }
     let mut file = File::open(path).ok()?;
     let mut hasher = Sha256::new();
     let mut remaining = max_bytes;
@@ -5755,6 +5758,9 @@ fn find_duplicates_impl(dir: &Path, min: u64) -> Result<Vec<Vec<FileEntry>>, Str
         full_candidates
             .par_iter()
             .filter_map(|p| {
+                if cloud_files::hydration_risk(p) {
+                    return None;
+                }
                 let meta = fs::metadata(p).ok()?;
                 let mut file = File::open(p).ok()?;
                 let mut hasher = Sha256::new();
@@ -23760,6 +23766,9 @@ impl NativeController {
     }
 
     fn read_exif_summary(path: &Path) -> Option<String> {
+        if cloud_files::hydration_risk(path) {
+            return None;
+        }
         let file = File::open(path).ok()?;
         let mut bufreader = std::io::BufReader::new(file);
         let exif = exif::Reader::new()
