@@ -2335,7 +2335,6 @@ component StorageEntryRow inherits Rectangle {
         height: parent.height;
         mouse-cursor: pointer;
         clicked => { root.open(); }
-        double-clicked => { root.open(); }
     }
     if root.show_actions: Rectangle {
         x: parent.width - root.actions_w - 2px;
@@ -4111,6 +4110,7 @@ export component MainWindow inherits Window {
                         property <length> px: 0;
                         property <length> py: 0;
                         property <bool> dragging: false;
+                        double-clicked => { root.maximize(); }
                         pointer-event(event) => {
                             if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
                                 self.px = self.mouse-x; self.py = self.mouse-y; self.dragging = false;
