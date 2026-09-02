@@ -1732,6 +1732,7 @@ component FileRow inherits Rectangle {
         height: parent.height - root.group_header_h;
         enabled: !root.is_renaming;
         mouse-cursor: pointer;
+        double-click-interval: 500ms;
         clicked => { root.selected(root.index, root.ctrl_held, root.shift_held); }
         double-clicked => {
             root.drag_armed = false;
@@ -1796,7 +1797,7 @@ component FileRow inherits Rectangle {
     }
 
     recent_click_timer := Timer {
-        interval: 450ms;
+        interval: 500ms;
         running: root.recent_click;
         triggered => { root.recent_click = false; }
     }

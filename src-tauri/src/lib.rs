@@ -25359,8 +25359,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_maximize(move || {
         if let Some(ui) = weak.upgrade() {
             let window = ui.window();
-            window.set_maximized(!window.is_maximized());
-            sync_window_maximized_ui(&ui);
+            let next = !window.is_maximized();
+            window.set_maximized(next);
+            ui.set_window_maximized(next);
         }
     });
 
@@ -26748,60 +26749,49 @@ fn sync_titlebar_hit_regions(tabs: &[TabItem]) {
     TITLEBAR_TABS_RIGHT_LOGICAL.store(right.to_bits(), Ordering::Release);
 }
 
-/// Keep the custom titlebar maximize glyph in sync when the OS toggles
-/// maximized state (Win+Up, snap layouts, double-click titlebar, etc.).
-fn register_window_maximize_state_sync(ui: &MainWindow) {
-    use i_slint_backend_winit::EventResult;
-    use i_slint_backend_winit::WinitWindowAccessor;
-    use i_slint_backend_winit::winit::event::WindowEvent;
-
-    let weak = ui.as_weak();
-    ui.window().on_winit_window_event(move |_win, event| {
-        if !matches!(event, WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
-            return EventResult::Propagate;
-        }
-        let w = weak.clone();
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = w.upgrade() {
-                sync_window_maximized_ui(&ui);
-            }
-        });
-        EventResult::Propagate
-    });
-}
-
 /// Map mouse back / forward to the same Slint callbacks as the toolbar.
 /// Registered on the winit event path so navigation works even when a custom
 /// `WNDPROC` subclass is not first in the chain (winit already handles
 /// `WM_XBUTTONDOWN` in the client area and emits `MouseInput`).
-fn register_winit_mouse_side_button_navigation(ui: &MainWindow) {
+///
+/// Also keeps the custom titlebar maximize glyph in sync when the OS toggles
+/// maximized state (Win+Up, snap layouts, double-click titlebar, etc.).
+fn register_winit_window_handlers(ui: &MainWindow) {
     use i_slint_backend_winit::EventResult;
     use i_slint_backend_winit::WinitWindowAccessor;
     use i_slint_backend_winit::winit::event::{ElementState, MouseButton, WindowEvent};
 
-    let weak = ui.as_weak();
+    let weak_nav = ui.as_weak();
+    let weak_max = ui.as_weak();
     ui.window().on_winit_window_event(move |_win, event| {
-        let WindowEvent::MouseInput { state, button, .. } = event else {
-            return EventResult::Propagate;
-        };
-        if *state != ElementState::Pressed {
-            return EventResult::Propagate;
-        }
-        let go_back = matches!(button, MouseButton::Back);
-        let go_forward = matches!(button, MouseButton::Forward);
-        if !go_back && !go_forward {
-            return EventResult::Propagate;
-        }
-        let w = weak.clone();
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(ui) = w.upgrade() {
-                if go_back {
-                    ui.invoke_go_back();
-                } else {
-                    ui.invoke_go_forward();
+        if let WindowEvent::MouseInput { state, button, .. } = event {
+            if *state == ElementState::Pressed {
+                let go_back = matches!(button, MouseButton::Back);
+                let go_forward = matches!(button, MouseButton::Forward);
+                if go_back || go_forward {
+                    let w = weak_nav.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = w.upgrade() {
+                            if go_back {
+                                ui.invoke_go_back();
+                            } else {
+                                ui.invoke_go_forward();
+                            }
+                        }
+                    });
                 }
             }
-        });
+        }
+
+        if matches!(event, WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
+            let w = weak_max.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = w.upgrade() {
+                    sync_window_maximized_ui(&ui);
+                }
+            });
+        }
+
         EventResult::Propagate
     });
 }
@@ -27980,8 +27970,7 @@ pub fn run() {
     ui.show().expect("failed to show Pathfinder window");
     controller.borrow_mut().finish_startup(&ui);
     apply_mica(&ui);
-    register_winit_mouse_side_button_navigation(&ui);
-    register_window_maximize_state_sync(&ui);
+    register_winit_window_handlers(&ui);
     install_mouse_nav(&ui);
 
     // Register IDropTarget so files dropped from Explorer land in the current folder.
