@@ -1390,7 +1390,7 @@ component FileRow inherits Rectangle {
     // click on an already-selected row opens instead of starting DoDragDrop.
     property <bool> drag_armed: false;
     // When the user releases a click, remember position/time so the next
-    // press at the same spot within ~450ms suppresses drag arming. That
+    // press at the same spot within ~500ms suppresses drag arming. That
     // keeps a second tap on PDF/HTML rows from starting DoDragDrop before
     // Slint can emit double-clicked.
     property <length> last_up_x: 0;
@@ -1732,7 +1732,6 @@ component FileRow inherits Rectangle {
         height: parent.height - root.group_header_h;
         enabled: !root.is_renaming;
         mouse-cursor: pointer;
-        double-click-interval: 500ms;
         clicked => { root.selected(root.index, root.ctrl_held, root.shift_held); }
         double-clicked => {
             root.drag_armed = false;
