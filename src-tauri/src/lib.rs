@@ -25360,6 +25360,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         if let Some(ui) = weak.upgrade() {
             let window = ui.window();
             window.set_maximized(!window.is_maximized());
+            sync_window_maximized_ui(&ui);
         }
     });
 
@@ -26469,6 +26470,10 @@ fn start_native_drag(ui: &MainWindow) {
     }
 }
 
+fn sync_window_maximized_ui(ui: &MainWindow) {
+    ui.set_window_maximized(ui.window().is_maximized());
+}
+
 fn configure_native_window(ui: &MainWindow, settings: &NativeSettings) {
     use i_slint_backend_winit::WinitWindowAccessor;
     use i_slint_backend_winit::winit::dpi::{LogicalPosition, LogicalSize};
@@ -26509,6 +26514,7 @@ fn configure_native_window(ui: &MainWindow, settings: &NativeSettings) {
             }
         }
     });
+    sync_window_maximized_ui(ui);
 }
 
 #[cfg(target_os = "windows")]
@@ -26740,6 +26746,28 @@ fn sync_titlebar_hit_regions(tabs: &[TabItem]) {
         right += TAB_MAX + TAB_SPACING;
     }
     TITLEBAR_TABS_RIGHT_LOGICAL.store(right.to_bits(), Ordering::Release);
+}
+
+/// Keep the custom titlebar maximize glyph in sync when the OS toggles
+/// maximized state (Win+Up, snap layouts, double-click titlebar, etc.).
+fn register_window_maximize_state_sync(ui: &MainWindow) {
+    use i_slint_backend_winit::EventResult;
+    use i_slint_backend_winit::WinitWindowAccessor;
+    use i_slint_backend_winit::winit::event::WindowEvent;
+
+    let weak = ui.as_weak();
+    ui.window().on_winit_window_event(move |_win, event| {
+        if !matches!(event, WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
+            return EventResult::Propagate;
+        }
+        let w = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = w.upgrade() {
+                sync_window_maximized_ui(&ui);
+            }
+        });
+        EventResult::Propagate
+    });
 }
 
 /// Map mouse back / forward to the same Slint callbacks as the toolbar.
@@ -27953,6 +27981,7 @@ pub fn run() {
     controller.borrow_mut().finish_startup(&ui);
     apply_mica(&ui);
     register_winit_mouse_side_button_navigation(&ui);
+    register_window_maximize_state_sync(&ui);
     install_mouse_nav(&ui);
 
     // Register IDropTarget so files dropped from Explorer land in the current folder.

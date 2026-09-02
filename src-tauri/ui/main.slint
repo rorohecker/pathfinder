@@ -1389,6 +1389,14 @@ component FileRow inherits Rectangle {
     // Hold drag/marquee until the double-click window passes so a second
     // click on an already-selected row opens instead of starting DoDragDrop.
     property <bool> drag_armed: false;
+    // When the user releases a click, remember position/time so the next
+    // press at the same spot within ~450ms suppresses drag arming. That
+    // keeps a second tap on PDF/HTML rows from starting DoDragDrop before
+    // Slint can emit double-clicked.
+    property <length> last_up_x: 0;
+    property <length> last_up_y: 0;
+    property <bool> recent_click: false;
+    property <bool> suppress_drag_arm: false;
     property <bool> is_drop_target: root.item.is_dir
         && root.drag_target_path != ""
         && root.drag_target_path == root.item.file_path;
@@ -1728,6 +1736,8 @@ component FileRow inherits Rectangle {
         double-clicked => {
             root.drag_armed = false;
             root.drag_started = false;
+            root.suppress_drag_arm = true;
+            root.recent_click = false;
             root.opened(root.index);
         }
         moved => {
@@ -1758,14 +1768,24 @@ component FileRow inherits Rectangle {
                 root.ctrl_held = event.modifiers.control;
                 root.shift_held = event.modifiers.shift;
                 root.drag_started = false;
+                root.suppress_drag_arm = root.recent_click
+                    && abs(self.mouse-x - root.last_up_x) <= 8px
+                    && abs(self.mouse-y - root.last_up_y) <= 8px;
+                root.recent_click = false;
                 root.drag_armed = false;
             }
             if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
                 if (root.drag_started && !root.item.is_selected) {
                     root.marquee_finished();
                 }
+                if (!root.drag_started) {
+                    root.last_up_x = self.mouse-x;
+                    root.last_up_y = self.mouse-y;
+                    root.recent_click = true;
+                }
                 root.drag_started = false;
                 root.drag_armed = false;
+                root.suppress_drag_arm = false;
             }
             if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                 root.context(root.index,
@@ -1775,11 +1795,17 @@ component FileRow inherits Rectangle {
         }
     }
 
+    recent_click_timer := Timer {
+        interval: 450ms;
+        running: root.recent_click;
+        triggered => { root.recent_click = false; }
+    }
+
     drag_arm_timer := Timer {
         interval: 220ms;
         running: touch.pressed;
         triggered => {
-            if (touch.pressed) {
+            if (touch.pressed && !root.suppress_drag_arm) {
                 root.drag_armed = true;
             }
         }
@@ -1998,7 +2024,7 @@ component ChoiceMenuRow inherits Rectangle {
         : root.command_name == "delete" ? "M3 6h18 M8 6V4h8v2 M19 6l-1 14H6L5 6"
         : root.command_name == "new-folder" ? "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z M12 11v6 M9 14h6"
         : root.command_name == "new-file" ? "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M12 11v6 M9 14h6"
-        : root.command_name == "properties" ? "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z M12 16v-4 M12 8h.01"
+        : root.command_name == "properties" ? "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M8 12h8 M8 16h6 M8 8h2"
         : root.command_name == "batch-rename" ? "M4 7V4h16v3 M9 20h6 M12 4v16 M4 15h16"
         : root.command_name == "checksum" ? "M9 11l3 3L22 4 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"
         : root.command_name == "note" ? "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8 M10 9H8"
@@ -2309,6 +2335,7 @@ component StorageEntryRow inherits Rectangle {
         height: parent.height;
         mouse-cursor: pointer;
         clicked => { root.open(); }
+        double-clicked => { root.open(); }
     }
     if root.show_actions: Rectangle {
         x: parent.width - root.actions_w - 2px;
@@ -3836,6 +3863,7 @@ export component MainWindow inherits Window {
     callback maximize();
     callback close();
     callback drag_window();
+    in-out property <bool> window_maximized: false;
     callback confirm_delete();
     callback confirm_cancel();
     callback prompt_accept(string);
@@ -4136,8 +4164,10 @@ export component MainWindow inherits Window {
                 y: 0;
                 button_width: 46px;
                 button_height: 36px;
-                icon_data: "M7 7h10v10H7z";
-                tooltip: @tr("Maximize");
+                icon_data: root.window_maximized
+                    ? "M8 4h8v4H4v8h4V8h8V4z M12 8h8v12h-8V8z"
+                    : "M5 5h14v14H5z";
+                tooltip: root.window_maximized ? @tr("Restore") : @tr("Maximize");
                 tooltip_above: true;
                 clicked => { root.maximize(); }
             }
@@ -4436,7 +4466,7 @@ export component MainWindow inherits Window {
             }
             ToolButton { x: root.is_simple ? parent.sel_left + (5 + parent.sel_shift) * parent.sel_step : parent.sel_r - (3 - parent.sel_left_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6 M15 3h6v6 M10 14L21 3"; text_label: @tr("Open"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Open (Enter)"); clicked => { root.command("open"); } }
             ToolButton { visible: root.selected_count == 1 && parent.sel_show_open_with; x: root.is_simple ? parent.sel_left + (6 + parent.sel_shift) * parent.sel_step : parent.sel_r - (2 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M4 7h16 M9 20h6 M12 4v16"; text_label: @tr("Open with"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Open With"); clicked => { root.command("open-with"); } }
-            ToolButton { visible: parent.sel_show_info; x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_r - (1 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M8 16h8 M16 12H8 M14 8H8 M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"; text_label: @tr("Info"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Properties"); clicked => { root.command("properties"); } }
+            ToolButton { visible: parent.sel_show_info; x: root.is_simple ? parent.sel_left + (7 + parent.sel_shift) * parent.sel_step : parent.sel_r - (1 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M8 12h8 M8 16h6 M8 8h2"; text_label: @tr("Info"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Properties"); clicked => { root.command("properties"); } }
             ToolButton { visible: parent.sel_show_select_all; x: root.is_simple ? parent.sel_left + (8 + parent.sel_shift) * parent.sel_step : parent.sel_r - (0 - parent.sel_right_trim) * parent.sel_norm_step; y: root.is_simple ? 16px : 6px; button_width: parent.sel_btn_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M9 11l3 3 8-8 M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"; text_label: @tr("Select all"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Select All (Ctrl+A)"); clicked => { root.command("select-all"); } }
             ToolButton { x: parent.sel_right - parent.sel_clear_w; y: root.is_simple ? 16px : 6px; button_width: parent.sel_clear_w; tooltip_above: parent.sel_tooltip_above; icon_data: "M18 6L6 18 M6 6l12 12"; text_label: @tr("Clear"); show_caption: root.is_simple; button_height: root.is_simple ? 56px : 31px; tooltip: @tr("Clear selection (Esc)"); clicked => { root.clear_selection(); } }
         }
