@@ -11490,7 +11490,13 @@ fn model_from_vec<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
 fn double_click_interval() -> Duration {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::UI::WindowsAndMessaging::GetDoubleClickTime;
+        // Link user32 directly. windows-rs 0.62 does not export
+        // GetDoubleClickTime from Win32_UI_WindowsAndMessaging, which broke
+        // v1.0.6–v1.0.8 Windows CI.
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetDoubleClickTime() -> u32;
+        }
         Duration::from_millis(unsafe { GetDoubleClickTime() }.max(200) as u64)
     }
     #[cfg(not(target_os = "windows"))]
