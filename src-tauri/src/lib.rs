@@ -3657,9 +3657,62 @@ unsafe fn wide_to_string(p: windows::core::PWSTR) -> String {
     String::from_utf16_lossy(slice)
 }
 
+/// Open `path` with the Windows file association (default verb).
+/// `cmd /c start` (used by the `open` crate) drops some types — notably
+/// `.html` / `.htm` — instead of launching the default browser (Chrome).
+#[cfg(target_os = "windows")]
+fn open_with_shell_execute(path: &str) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::core::PCWSTR;
+
+    let path_wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // So HTML relative assets resolve, and so shortcuts/.lnk start in the
+    // folder the user is looking at.
+    let dir_wide: Option<Vec<u16>> = Path::new(path).parent().map(|parent| {
+        OsStr::new(parent)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    });
+
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        hwnd: HWND(std::ptr::null_mut()),
+        // NULL verb = the registered default (open → Chrome for HTML, etc.).
+        lpVerb: PCWSTR::null(),
+        lpFile: PCWSTR(path_wide.as_ptr()),
+        lpParameters: PCWSTR::null(),
+        lpDirectory: dir_wide
+            .as_ref()
+            .map(|d| PCWSTR(d.as_ptr()))
+            .unwrap_or(PCWSTR::null()),
+        nShow: 1, // SW_SHOWNORMAL
+        ..Default::default()
+    };
+
+    unsafe { ShellExecuteExW(&mut info).map_err(|e| e.to_string()) }
+}
+
 #[tauri::command]
 fn open_file(path: String) -> Result<(), String> {
-    open::that(&path).map_err(|e| e.to_string())
+    #[cfg(target_os = "windows")]
+    {
+        match open_with_shell_execute(&path) {
+            Ok(()) => Ok(()),
+            Err(shell_err) => open::that(&path)
+                .map_err(|fallback_err| format!("{shell_err}; fallback: {fallback_err}")),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        open::that(&path).map_err(|e| e.to_string())
+    }
 }
 
 #[tauri::command]
@@ -11511,7 +11564,9 @@ mod double_click_open_tests {
     fn second_click_same_row_opens() {
         let mut last = None;
         let t0 = Instant::now();
-        assert!(!is_activation_double_click(&mut last, 3, false, false, false, t0));
+        assert!(!is_activation_double_click(
+            &mut last, 3, false, false, false, t0
+        ));
         assert!(is_activation_double_click(
             &mut last,
             3,
@@ -11526,7 +11581,9 @@ mod double_click_open_tests {
     fn slow_second_click_does_not_open() {
         let mut last = None;
         let t0 = Instant::now();
-        assert!(!is_activation_double_click(&mut last, 3, false, false, false, t0));
+        assert!(!is_activation_double_click(
+            &mut last, 3, false, false, false, t0
+        ));
         assert!(!is_activation_double_click(
             &mut last,
             3,
@@ -11541,7 +11598,9 @@ mod double_click_open_tests {
     fn modifier_click_does_not_open() {
         let mut last = None;
         let t0 = Instant::now();
-        assert!(!is_activation_double_click(&mut last, 3, false, false, false, t0));
+        assert!(!is_activation_double_click(
+            &mut last, 3, false, false, false, t0
+        ));
         assert!(!is_activation_double_click(
             &mut last,
             3,
@@ -11550,6 +11609,31 @@ mod double_click_open_tests {
             false,
             t0 + Duration::from_millis(80)
         ));
+    }
+}
+
+#[cfg(test)]
+mod open_file_routing_tests {
+    use super::*;
+
+    #[test]
+    fn html_and_common_files_use_the_default_app_not_archive_view() {
+        for ext in [
+            "html", "htm", "pdf", "png", "jpg", "svg", "md", "txt", "docx", "xlsx", "exe", "lnk",
+            "url", "mp4", "mp3", "json", "css", "js",
+        ] {
+            assert!(
+                !is_archive_ext(ext),
+                "{ext} must open with the default app (e.g. HTML in Chrome), not the archive viewer"
+            );
+        }
+    }
+
+    #[test]
+    fn archive_extensions_stay_in_app() {
+        for ext in ["zip", "7z", "rar", "tar", "gz", "xz"] {
+            assert!(is_archive_ext(ext), "{ext}");
+        }
     }
 }
 
@@ -23196,9 +23280,7 @@ impl NativeController {
                 title: ss(&i18n::t("Runtime caches")),
                 subtitle: ss(format!(
                     "{} folders · {} previews · {} watchers",
-                    info.directory_cache_entries,
-                    info.preview_cache_entries,
-                    info.watcher_count
+                    info.directory_cache_entries, info.preview_cache_entries, info.watcher_count
                 )),
                 meta: ss(""),
                 enabled: false,
@@ -23828,9 +23910,7 @@ impl NativeController {
             return;
         };
         match action {
-            "open" => {
-                let _ = open::that(&entry.path);
-            }
+            "open" => self.open_selected(ui),
             "copy-path" => match copy_text_to_clipboard(&entry.path) {
                 Ok(()) => self.show_toast_kind(ui, "Path copied", "success"),
                 Err(e) => self.show_toast(ui, e),
@@ -24429,11 +24509,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
+    let c_ql = controller.clone();
     ui.on_quick_look_play(move || {
         if let Some(ui) = weak.upgrade() {
             let path = ui.get_quick_look_path().to_string();
             if !path.is_empty() {
-                let _ = open::that(&path);
+                if let Err(error) = open_file(path) {
+                    c_ql.borrow_mut().show_toast(&ui, error);
+                }
             }
         }
     });
@@ -24934,10 +25017,12 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let weak = ui.as_weak();
     let c_browser = controller.clone();
     ui.on_open_preview_in_browser(move || {
-        if let Some(_ui) = weak.upgrade() {
-            let ctrl = c_browser.borrow();
+        if let Some(ui) = weak.upgrade() {
+            let mut ctrl = c_browser.borrow_mut();
             if let Some(entry) = ctrl.selected_entry() {
-                let _ = open::that(&entry.path);
+                if let Err(error) = open_file(entry.path) {
+                    ctrl.show_toast(&ui, error);
+                }
             }
         }
     });
@@ -27032,7 +27117,10 @@ fn register_winit_window_handlers(ui: &MainWindow) {
             }
         }
 
-        if matches!(event, WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
+        if matches!(
+            event,
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
+        ) {
             let w = weak_max.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {

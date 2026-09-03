@@ -1580,9 +1580,12 @@ component FileRow inherits Rectangle {
 
     if root.view_mode == "list": Rectangle {
         visible: root.item.has_tag;
-        // Pull the dot in from the right edge so it does not get hidden
-        // by the ListView's scroll bar (~scroll_gutter wide).
-        x: parent.width - AppMetrics.scroll_gutter - 14px;
+        // Sit in the 16px gap between Name and Size so the dot does not
+        // paint over Type. When meta columns are hidden, keep it inside
+        // the scrollbar gutter.
+        x: root.show_list_size
+            ? (parent.width - root.list_right_zone - 12px)
+            : (parent.width - AppMetrics.scroll_gutter - 14px);
         y: root.group_header_h + (parent.height - root.group_header_h - 9px) / 2;
         width: 9px;
         height: 9px;
@@ -1690,7 +1693,7 @@ component FileRow inherits Rectangle {
     if root.view_mode == "compact" && !root.is_renaming: Text {
         x: 30px;
         y: 0;
-        width: parent.width - 38px;
+        width: parent.width - 38px - (root.item.has_tag ? 14px : 0px);
         height: parent.height;
         text: root.item.name;
         color: root.item.is_selected ? ThemePalette.text : ThemePalette.text_muted;
@@ -2772,7 +2775,7 @@ component StorageOverview inherits Rectangle {
             }
             Text {
                 x: 16px; y: 8px;
-                width: parent.width - 220px; height: 18px;
+                width: parent.width - 228px; height: 18px;
                 text: "Storage · " + root.root_label;
                 color: ThemePalette.text;
                 font-size: 15px;
@@ -2782,7 +2785,7 @@ component StorageOverview inherits Rectangle {
             }
             Text {
                 x: 16px; y: 28px;
-                width: parent.width - 220px; height: 14px;
+                width: parent.width - 228px; height: 14px;
                 text: root.disk_summary != "" ? root.disk_summary : root.total_text;
                 color: ThemePalette.text_muted;
                 font-size: 11px;
@@ -2791,7 +2794,7 @@ component StorageOverview inherits Rectangle {
             }
             if root.drives.length > 1: HorizontalLayout {
                 x: 16px; y: 46px;
-                width: parent.width - 220px;
+                width: parent.width - 228px;
                 height: 20px;
                 spacing: 6px;
                 alignment: start;
@@ -9584,7 +9587,7 @@ export component MainWindow inherits Window {
     }
 
     if root.tool_overlay_visible: Rectangle {
-        z: root.tool_overlay_kind == "privacy" ? 180 : 110;
+        z: 180;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
@@ -9647,17 +9650,17 @@ export component MainWindow inherits Window {
                             background: item.accent;
                         }
                         Text {
-                            x: 20px; y: 6px; width: parent.width - 72px; height: 20px;
+                            x: 20px; y: 6px; width: parent.width - 128px; height: 20px;
                             text: item.title;
                             color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
                         }
                         Text {
-                            x: 20px; y: 28px; width: parent.width - 72px; height: 22px;
+                            x: 20px; y: 28px; width: parent.width - 128px; height: 22px;
                             text: item.subtitle;
                             color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
                         }
                         if item.meta != "": Text {
-                            x: parent.width - 56px; y: 0; width: 48px; height: parent.height;
+                            x: parent.width - 100px; y: 0; width: 88px; height: parent.height;
                             text: item.meta;
                             color: ThemePalette.text_faint; font-size: 11px;
                             horizontal-alignment: right; vertical-alignment: center; overflow: elide;
@@ -9718,12 +9721,12 @@ export component MainWindow inherits Window {
                         background: item.accent;
                     }
                     Text {
-                        x: 20px; y: 8px; width: parent.width - (root.tool_overlay_kind == "rules" ? 120px : 90px); height: 20px;
+                        x: 20px; y: 8px; width: parent.width - (root.tool_overlay_kind == "rules" ? 140px : 118px); height: 20px;
                         text: item.title;
                         color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
                     }
                     Text {
-                        x: 20px; y: 28px; width: parent.width - (root.tool_overlay_kind == "rules" ? 120px : 90px); height: 16px;
+                        x: 20px; y: 28px; width: parent.width - (root.tool_overlay_kind == "rules" ? 140px : 118px); height: 16px;
                         text: item.subtitle;
                         color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
                     }
@@ -9743,7 +9746,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     if item.meta != "": Text {
-                        x: parent.width - 48px; y: 0; width: 36px; height: parent.height;
+                        x: parent.width - 90px; y: 0; width: 78px; height: parent.height;
                         text: item.meta;
                         color: ThemePalette.text_faint; font-size: 11px;
                         horizontal-alignment: right; vertical-alignment: center; overflow: elide;
