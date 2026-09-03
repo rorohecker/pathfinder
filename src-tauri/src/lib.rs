@@ -8716,6 +8716,10 @@ struct NativeController {
     preview_generation: Arc<AtomicU64>,
     preview_ready: Arc<AtomicBool>,
     pending_preview_result: Arc<Mutex<Option<PreviewResult>>>,
+    /// Last left-click on a file row (index, secondary pane, time) for open.
+    last_file_click: Option<(i32, bool, Instant)>,
+    /// Last path handed to the OS opener, to ignore duplicate double-open.
+    last_opened: Option<(String, Instant)>,
 }
 
 #[derive(Clone)]
@@ -11430,6 +11434,125 @@ fn model_from_vec<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
     ModelRc::new(VecModel::from(items))
 }
 
+fn double_click_interval() -> Duration {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::GetDoubleClickTime;
+        Duration::from_millis(unsafe { GetDoubleClickTime() }.max(200) as u64)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Duration::from_millis(500)
+    }
+}
+
+/// True when this click should open (same row, no modifiers, within the OS
+/// double-click interval). Survives FileRow rebuilds that drop Slint's own
+/// `double-clicked` event.
+fn is_activation_double_click(
+    last: &mut Option<(i32, bool, Instant)>,
+    index: i32,
+    secondary: bool,
+    ctrl: bool,
+    shift: bool,
+    now: Instant,
+) -> bool {
+    if ctrl || shift || index < 0 {
+        *last = Some((index, secondary, now));
+        return false;
+    }
+    let is_double = last.is_some_and(|(i, sec, at)| {
+        i == index
+            && sec == secondary
+            && now.saturating_duration_since(at) <= double_click_interval()
+    });
+    *last = if is_double {
+        None
+    } else {
+        Some((index, secondary, now))
+    };
+    is_double
+}
+
+fn patch_window_file_selection(
+    model: ModelRc<FileItem>,
+    start: i32,
+    changed: &[usize],
+    selected: &HashSet<usize>,
+) {
+    use slint::Model;
+    let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() else {
+        return;
+    };
+    let start = start.max(0) as usize;
+    for &i in changed {
+        if i < start {
+            continue;
+        }
+        let row = i - start;
+        if row >= m.row_count() {
+            continue;
+        }
+        if let Some(mut item) = m.row_data(row) {
+            let want = selected.contains(&i);
+            if item.is_selected != want {
+                item.is_selected = want;
+                m.set_row_data(row, item);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod double_click_open_tests {
+    use super::*;
+
+    #[test]
+    fn second_click_same_row_opens() {
+        let mut last = None;
+        let t0 = Instant::now();
+        assert!(!is_activation_double_click(&mut last, 3, false, false, false, t0));
+        assert!(is_activation_double_click(
+            &mut last,
+            3,
+            false,
+            false,
+            false,
+            t0 + Duration::from_millis(120)
+        ));
+    }
+
+    #[test]
+    fn slow_second_click_does_not_open() {
+        let mut last = None;
+        let t0 = Instant::now();
+        assert!(!is_activation_double_click(&mut last, 3, false, false, false, t0));
+        assert!(!is_activation_double_click(
+            &mut last,
+            3,
+            false,
+            false,
+            false,
+            t0 + Duration::from_millis(900)
+        ));
+    }
+
+    #[test]
+    fn modifier_click_does_not_open() {
+        let mut last = None;
+        let t0 = Instant::now();
+        assert!(!is_activation_double_click(&mut last, 3, false, false, false, t0));
+        assert!(!is_activation_double_click(
+            &mut last,
+            3,
+            false,
+            true,
+            false,
+            t0 + Duration::from_millis(80)
+        ));
+    }
+}
+
 fn build_breadcrumbs(path: &str) -> Vec<ChoiceItem> {
     if path == "recycle://" {
         return vec![ChoiceItem {
@@ -13961,6 +14084,8 @@ impl NativeController {
             preview_generation: Arc::new(AtomicU64::new(0)),
             preview_ready: Arc::new(AtomicBool::new(false)),
             pending_preview_result: Arc::new(Mutex::new(None)),
+            last_file_click: None,
+            last_opened: None,
         }
     }
 
@@ -15448,10 +15573,23 @@ impl NativeController {
         ui.set_selected_index(self.selected_index);
         self.sync_selection_count_to_ui(ui);
         self.update_status(ui);
-        if ui.get_view_mode().as_str() != "list" {
-            self.sync_grid_window(ui, false);
+        // Patch the visible window in place. Replacing list_window_files /
+        // grid_window_files here destroys FileRow TouchAreas and drops Slint's
+        // double-clicked event, so the second click only re-selects.
+        if ui.get_view_mode().as_str() == "list" {
+            patch_window_file_selection(
+                ui.get_list_window_files(),
+                ui.get_list_window_start(),
+                changed,
+                &self.selected_set,
+            );
         } else {
-            self.sync_list_window(ui, false);
+            patch_window_file_selection(
+                ui.get_grid_window_files(),
+                ui.get_grid_window_start(),
+                changed,
+                &self.selected_set,
+            );
         }
     }
 
@@ -17681,6 +17819,17 @@ impl NativeController {
         self.update_selection_in_model(ui, &changed);
     }
 
+    fn should_skip_duplicate_open(&mut self, path: &str) -> bool {
+        let now = Instant::now();
+        if self.last_opened.as_ref().is_some_and(|(p, at)| {
+            p == path && now.saturating_duration_since(*at) < Duration::from_millis(400)
+        }) {
+            return true;
+        }
+        self.last_opened = Some((path.to_string(), now));
+        false
+    }
+
     fn open_index(&mut self, ui: &MainWindow, index: i32) {
         self.active_pane = ActivePane::Primary;
         if index < 0 {
@@ -17689,6 +17838,9 @@ impl NativeController {
         let Some(entry) = self.visible_files.get(index as usize).cloned() else {
             return;
         };
+        if self.should_skip_duplicate_open(&entry.path) {
+            return;
+        }
         if let Some(archive) = self.active_archive.clone() {
             if entry.kind == FileKind::Directory {
                 if let Some((_, prefix)) = parse_archive_virtual_path(&entry.path) {
@@ -18756,10 +18908,20 @@ impl NativeController {
         }
         ui.set_selected_index(self.secondary_selected_index);
         self.sync_selection_count_to_ui(ui);
-        if ui.get_view_mode().as_str() != "list" {
-            self.sync_grid_window(ui, true);
+        if ui.get_view_mode().as_str() == "list" {
+            patch_window_file_selection(
+                ui.get_secondary_list_window_files(),
+                ui.get_secondary_list_window_start(),
+                changed,
+                &self.secondary_selected_set,
+            );
         } else {
-            self.sync_list_window(ui, true);
+            patch_window_file_selection(
+                ui.get_secondary_grid_window_files(),
+                ui.get_secondary_grid_window_start(),
+                changed,
+                &self.secondary_selected_set,
+            );
         }
     }
 
@@ -19044,6 +19206,9 @@ impl NativeController {
     fn secondary_file_opened(&mut self, ui: &MainWindow, index: i32) {
         self.active_pane = ActivePane::Secondary;
         if let Some(entry) = self.secondary_visible_files.get(index as usize).cloned() {
+            if self.should_skip_duplicate_open(&entry.path) {
+                return;
+            }
             if entry.kind == FileKind::Directory {
                 self.secondary_navigate(ui, entry.path);
             } else if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
@@ -23883,9 +24048,30 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let pd = preview_debounce.clone();
     ui.on_file_selected(move |index, ctrl, shift| {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut()
-                .select_with_modifiers(&ui, index, ctrl, shift);
-            c.borrow().sync_active_pane(&ui);
+            let mut ctrl_mut = c.borrow_mut();
+            if is_activation_double_click(
+                &mut ctrl_mut.last_file_click,
+                index,
+                false,
+                ctrl,
+                shift,
+                Instant::now(),
+            ) {
+                ctrl_mut.open_index(&ui, index);
+                return;
+            }
+            let same_file = !ctrl
+                && !shift
+                && index >= 0
+                && ctrl_mut.selected_index == index
+                && ctrl_mut.selected_set.len() == 1
+                && ctrl_mut.selected_set.contains(&(index as usize));
+            ctrl_mut.select_with_modifiers(&ui, index, ctrl, shift);
+            ctrl_mut.sync_active_pane(&ui);
+            drop(ctrl_mut);
+            if same_file {
+                return;
+            }
         }
         // Debounce preview update by 150ms so fast arrow-key navigation
         // doesn't trigger an expensive read for each skipped file.
@@ -24536,9 +24722,30 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let pd = preview_debounce.clone();
     ui.on_secondary_file_selected(move |index, ctrl, shift| {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut()
-                .secondary_file_selected(&ui, index, ctrl, shift);
-            c.borrow().sync_active_pane(&ui);
+            let mut ctrl_mut = c.borrow_mut();
+            if is_activation_double_click(
+                &mut ctrl_mut.last_file_click,
+                index,
+                true,
+                ctrl,
+                shift,
+                Instant::now(),
+            ) {
+                ctrl_mut.secondary_file_opened(&ui, index);
+                return;
+            }
+            let same_file = !ctrl
+                && !shift
+                && index >= 0
+                && ctrl_mut.secondary_selected_index == index
+                && ctrl_mut.secondary_selected_set.len() == 1
+                && ctrl_mut.secondary_selected_set.contains(&(index as usize));
+            ctrl_mut.secondary_file_selected(&ui, index, ctrl, shift);
+            ctrl_mut.sync_active_pane(&ui);
+            drop(ctrl_mut);
+            if same_file {
+                return;
+            }
         }
         let weak2 = weak.clone();
         let c2 = c.clone();
