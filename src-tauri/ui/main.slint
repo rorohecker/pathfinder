@@ -7697,14 +7697,14 @@ export component MainWindow inherits Window {
             if root.settings_tab == "appearance" || root.settings_tab == "themes": ScrollView {
                 x: 20px;
                 y: 124px;
-                width: parent.width - 40px;
+                width: parent.width - 26px;
                 height: parent.height - 136px;
 
                 VerticalLayout {
-                    // Inner content stops scroll_gutter short of the ScrollView
+                    // Inner content stops settings_scroll_gutter short of the ScrollView
                     // right edge so the scroll bar lives in its own lane rather
                     // than painting on top of the theme tile right column.
-                    width: parent.width - AppMetrics.scroll_gutter;
+                    width: parent.width - AppMetrics.settings_scroll_gutter;
                     spacing: 18px;
                     padding-bottom: 16px;
 
@@ -8694,11 +8694,11 @@ export component MainWindow inherits Window {
             if root.settings_tab == "view": ScrollView {
                 x: 20px;
                 y: 124px;
-                width: parent.width - 40px;
+                width: parent.width - 26px;
                 height: parent.height - 136px;
 
                 VerticalLayout {
-                width: parent.width - AppMetrics.scroll_gutter;
+                width: parent.width - AppMetrics.settings_scroll_gutter;
                 spacing: 12px;
                 padding-bottom: 16px;
 
@@ -8868,11 +8868,11 @@ export component MainWindow inherits Window {
             if root.settings_tab == "performance": ScrollView {
                 x: 20px;
                 y: 124px;
-                width: parent.width - 40px;
+                width: parent.width - 26px;
                 height: parent.height - 136px;
 
                 VerticalLayout {
-                    width: parent.width - AppMetrics.scroll_gutter;
+                    width: parent.width - AppMetrics.settings_scroll_gutter;
                     spacing: 14px;
                     padding-bottom: 16px;
 
@@ -8991,11 +8991,11 @@ export component MainWindow inherits Window {
             if root.settings_tab == "ai": ScrollView {
                 x: 20px;
                 y: 124px;
-                width: parent.width - 40px;
+                width: parent.width - 26px;
                 height: parent.height - 136px;
 
                 VerticalLayout {
-                    width: parent.width - AppMetrics.scroll_gutter;
+                    width: parent.width - AppMetrics.settings_scroll_gutter;
                     spacing: 14px;
                     padding-bottom: 16px;
 
@@ -9584,16 +9584,16 @@ export component MainWindow inherits Window {
     }
 
     if root.tool_overlay_visible: Rectangle {
-        z: 110;
+        z: root.tool_overlay_kind == "privacy" ? 180 : 110;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
         TouchArea { clicked => { root.tool_overlay_close(); } }
         Rectangle {
-            x: (parent.width - min(520px, parent.width - 32px)) / 2;
-            y: (parent.height - min(420px, parent.height - 32px)) / 2;
-            width: min(520px, parent.width - 32px);
-            height: min(420px, parent.height - 32px);
+            x: (parent.width - min(root.tool_overlay_kind == "privacy" ? 620px : 520px, parent.width - 32px)) / 2;
+            y: (parent.height - min(root.tool_overlay_kind == "privacy" ? 560px : 420px, parent.height - 32px)) / 2;
+            width: min(root.tool_overlay_kind == "privacy" ? 620px : 520px, parent.width - 32px);
+            height: min(root.tool_overlay_kind == "privacy" ? 560px : 420px, parent.height - 32px);
             border-width: 1px;
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
@@ -9607,9 +9607,67 @@ export component MainWindow inherits Window {
                 color: ThemePalette.text; font-size: 17px; font-weight: 700; overflow: elide;
             }
             Text {
-                x: 18px; y: 40px; width: parent.width - 36px; height: 18px;
+                x: 18px; y: 40px; width: parent.width - 36px;
+                height: root.tool_overlay_kind == "privacy" ? 0px : 18px;
+                visible: root.tool_overlay_kind != "privacy";
                 text: root.tool_overlay_subtitle;
                 color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
+            }
+            if root.tool_overlay_kind == "privacy": ScrollView {
+                x: 12px; y: 48px; width: parent.width - 18px; height: parent.height - 104px;
+                VerticalLayout {
+                    width: parent.width - AppMetrics.settings_scroll_gutter;
+                    spacing: 10px;
+                    padding-bottom: 12px;
+                    Text {
+                        width: parent.width;
+                        text: root.tool_overlay_subtitle;
+                        color: ThemePalette.text_muted;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                    Text {
+                        text: @tr("STORED ON THIS PC");
+                        color: ThemePalette.text_faint;
+                        font-size: 10px;
+                        font-weight: 700;
+                        letter-spacing: 1px;
+                    }
+                    for item[ti] in root.tool_overlay_items: Rectangle {
+                        width: parent.width;
+                        height: 56px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: priv_row_ta.has-hover ? ThemePalette.accent_soft : ThemePalette.panel;
+                        Rectangle {
+                            x: 8px; y: 16px; width: 4px; height: 24px;
+                            border-radius: 2px;
+                            background: item.accent;
+                        }
+                        Text {
+                            x: 20px; y: 6px; width: parent.width - 72px; height: 20px;
+                            text: item.title;
+                            color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
+                        }
+                        Text {
+                            x: 20px; y: 28px; width: parent.width - 72px; height: 22px;
+                            text: item.subtitle;
+                            color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
+                        }
+                        if item.meta != "": Text {
+                            x: parent.width - 56px; y: 0; width: 48px; height: parent.height;
+                            text: item.meta;
+                            color: ThemePalette.text_faint; font-size: 11px;
+                            horizontal-alignment: right; vertical-alignment: center; overflow: elide;
+                        }
+                        priv_row_ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.tool_overlay_activate(item.id); }
+                        }
+                    }
+                }
             }
             if root.tool_overlay_kind == "shortcuts": ScrollView {
                 x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 120px;
@@ -9647,7 +9705,7 @@ export component MainWindow inherits Window {
                     }
                 }
             }
-            if root.tool_overlay_kind != "shortcuts": ScrollView {
+            if root.tool_overlay_kind != "shortcuts" && root.tool_overlay_kind != "privacy": ScrollView {
                 x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 120px;
                 for item[ti] in root.tool_overlay_items: Rectangle {
                     width: parent.width - 8px - AppMetrics.scroll_gutter;
@@ -10527,11 +10585,11 @@ export component MainWindow inherits Window {
         KeyBinding { keys: @keys(DownArrow); activated => { if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } } }
         KeyBinding { keys: @keys(Escape); activated => {
             if (root.command_visible) { root.command_visible = false; }
+            else if (root.tool_overlay_visible) { root.tool_overlay_close(); }
             else if (root.settings_visible) { root.settings_visible = false; }
             else if (root.confirm_visible) { root.confirm_visible = false; root.confirm_cancel(); }
             else if (root.welcome_visible) { root.welcome_dismiss(); }
             else if (root.ui_mode_prompt_visible) { /* keep until a mode is chosen */ }
-            else if (root.tool_overlay_visible) { root.tool_overlay_close(); }
             else if (root.compare_overlay_visible) { root.compare_overlay_close(); }
             else if (root.dupe_overlay_visible) { root.dupe_overlay_close(); }
             else if (root.quick_look_visible) { root.quick_look_close(); }
@@ -10570,6 +10628,9 @@ export global AppMetrics {
     // Right inset reserved for vertical scroll bars (beyond pad). Kept tight so
     // the bar sits near the pane edge without covering row / column text.
     in-out property <length> scroll_gutter: 8px;
+    // Settings dialog: extra lane so the hover-widened bar stays off content
+    // and sits closer to the card's right edge.
+    in-out property <length> settings_scroll_gutter: 18px;
     in-out property <length> outer_border: 0px;
     in-out property <string> ui_font: "Noto Sans";
     in-out property <string> mono_font: "JetBrains Mono";

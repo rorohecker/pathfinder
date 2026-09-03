@@ -23153,38 +23153,68 @@ impl NativeController {
         let info = privacy_storage_info_for_state(&self.app_state, &self.settings);
         ui.set_tool_overlay_kind(ss("privacy"));
         ui.set_tool_overlay_title(ss(&i18n::t("Privacy and Storage")));
-        ui.set_tool_overlay_subtitle(ss(format!(
-            "{} · {} thumbnails · {} index",
-            info.data_dir,
-            format_size_short(info.thumbnail_cache_bytes),
-            format_size_short(info.index_bytes)
-        )));
-        let items = vec![
+        ui.set_tool_overlay_subtitle(ss(&i18n::t(&info.policy)));
+        let mut items = vec![
             ToolListItem {
-                id: ss("clear-thumbnail-cache"),
-                title: ss(&i18n::t("Clear Thumbnail Cache")),
-                subtitle: ss(format_size_short(info.thumbnail_cache_bytes)),
+                id: ss(&info.data_dir),
+                title: ss(&i18n::t("App data folder")),
+                subtitle: ss(&info.data_dir),
                 meta: ss(""),
                 enabled: true,
                 accent: color("#4f9cff"),
             },
             ToolListItem {
-                id: ss("clear-local-caches"),
-                title: ss(&i18n::t("Clear Local Caches")),
-                subtitle: ss(&i18n::t("Thumbnails, previews, and folder cache")),
+                id: ss(&info.cache_dir),
+                title: ss(&i18n::t("Cache folder")),
+                subtitle: ss(&info.cache_dir),
                 meta: ss(""),
                 enabled: true,
                 accent: color("#8b6cff"),
             },
             ToolListItem {
-                id: ss("rebuild-index"),
-                title: ss(&i18n::t("Rebuild Search Index")),
-                subtitle: ss(&i18n::t("Does not delete your files")),
-                meta: ss(""),
+                id: ss(&info.index_path),
+                title: ss(&i18n::t("Search index")),
+                subtitle: ss(&info.index_path),
+                meta: ss(format_size_short(info.index_bytes)),
                 enabled: true,
                 accent: color("#2aa96b"),
             },
+            ToolListItem {
+                id: ss(&info.thumbnail_cache_dir),
+                title: ss(&i18n::t("Thumbnail cache")),
+                subtitle: ss(&info.thumbnail_cache_dir),
+                meta: ss(format!(
+                    "{} / {}",
+                    format_size_short(info.thumbnail_cache_bytes),
+                    format_size_short(info.thumbnail_cache_limit)
+                )),
+                enabled: true,
+                accent: color("#e3a524"),
+            },
+            ToolListItem {
+                id: ss(""),
+                title: ss(&i18n::t("Runtime caches")),
+                subtitle: ss(format!(
+                    "{} folders · {} previews · {} watchers",
+                    info.directory_cache_entries,
+                    info.preview_cache_entries,
+                    info.watcher_count
+                )),
+                meta: ss(""),
+                enabled: false,
+                accent: color("#94a3b8"),
+            },
         ];
+        for stored in info.stored_items {
+            items.push(ToolListItem {
+                id: ss(&stored.path),
+                title: ss(&i18n::t(&stored.label)),
+                subtitle: ss(format!("{} · {}", stored.description, stored.path)),
+                meta: ss(format_size_short(stored.bytes)),
+                enabled: true,
+                accent: color("#64748b"),
+            });
+        }
         ui.set_tool_overlay_items(model_from_vec(items));
         ui.set_tool_overlay_visible(true);
     }
@@ -23257,8 +23287,20 @@ impl NativeController {
                 let _ = reveal_in_folder(id);
             }
             "privacy" => {
-                ui.set_tool_overlay_visible(false);
-                self.command(ui, &id);
+                if id.is_empty() {
+                    return;
+                }
+                if matches!(
+                    id.as_str(),
+                    "clear-thumbnail-cache" | "clear-local-caches" | "rebuild-index"
+                ) {
+                    self.command(ui, &id);
+                    self.show_privacy_storage(ui);
+                    return;
+                }
+                if let Err(error) = reveal_in_folder(id) {
+                    self.show_toast(ui, error);
+                }
             }
             "versions" => {
                 if let Some((path, version_id)) = id.split_once('\t') {
