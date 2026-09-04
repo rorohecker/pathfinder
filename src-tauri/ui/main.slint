@@ -10207,7 +10207,7 @@ export component MainWindow inherits Window {
 
         Rectangle {
             x: (parent.width - min(600px, parent.width - 32px)) / 2;
-            y: (parent.height - min(580px, parent.height - 32px)) / 2;
+            y: (parent.height - min(580px, parent.height - 32px)) / 2 + parent.rise;
             width: min(600px, parent.width - 32px);
             height: min(580px, parent.height - 32px);
             border-radius: AppMetrics.radius;
@@ -10220,7 +10220,7 @@ export component MainWindow inherits Window {
 
             VerticalLayout {
                 x: 28px;
-                y: 24px + parent.rise;
+                y: 24px;
                 width: parent.width - 56px;
                 spacing: 14px;
 
