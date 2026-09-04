@@ -11790,7 +11790,20 @@ mod updater_asset_tests {
         assert!(r2.available);
         assert_eq!(r2.download_url, "https://example.com/setup.exe");
         assert_eq!(r2.download_size, 12_000_000);
-        assert!(r2.message.contains("12") || r2.message.contains("MB") || r2.message.contains("available"));
+        assert!(
+            r2.message.contains("11.4") || r2.message.contains("12") || r2.message.contains("MB"),
+            "{}",
+            r2.message
+        );
+    }
+
+    #[test]
+    fn format_size_short_keeps_decimal_for_mid_mb_installers() {
+        // Real NSIS builds hover around 12.x MiB; don't round them all to "12 MB".
+        assert_eq!(format_size_short(12_856_744), "12.3 MB");
+        assert_eq!(format_size_short(12_580_410), "12.0 MB");
+        assert_eq!(format_size_short(5_242_880), "5.0 MB");
+        assert_eq!(format_size_short(150 * 1024 * 1024), "150 MB");
     }
 
     #[test]
@@ -12678,7 +12691,11 @@ fn format_size_short(bytes: u64) -> String {
         size /= 1024.0;
         index += 1;
     }
-    if index > 0 && size < 10.0 {
+    if index == 0 {
+        format!("{size} {}", units[index])
+    } else if size < 100.0 {
+        // One decimal below 100 so release installers read "12.3 MB" instead of
+        // collapsing every ~12 MiB build to the same "12 MB" label.
         format!("{size:.1} {}", units[index])
     } else {
         format!("{} {}", size.round() as u64, units[index])

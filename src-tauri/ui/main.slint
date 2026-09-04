@@ -305,13 +305,17 @@ component HoverTip inherits Rectangle {
 
 
 // Spawn host for overlays created with `if visible`. Starts transparent and
-// slightly offset; a short timer eases `shown` and `rise` so the panel
+// slightly offset; a one-shot timer eases `shown` and `rise` so the panel
 // interpolates in instead of popping at full opacity.
+// Important: do NOT key `running` off `shown < 1` — while the property is
+// animating it stays below 1, so a repeating timer would keep re-assigning
+// the targets and restart the ease (settings felt like an endless fade).
 component FadeHost inherits Rectangle {
     in property <duration> motion: 180ms;
     in property <length> spawn_from: 14px;
     property <float> shown: 0;
     out property <length> rise: spawn_from;
+    property <bool> spawn_armed: true;
     opacity: root.shown;
     animate shown {
         duration: root.motion;
@@ -323,8 +327,9 @@ component FadeHost inherits Rectangle {
     }
     Timer {
         interval: 16ms;
-        running: root.shown < 1.0;
+        running: root.spawn_armed;
         triggered => {
+            root.spawn_armed = false;
             root.shown = 1.0;
             root.rise = 0px;
         }
@@ -3993,9 +3998,9 @@ export component MainWindow inherits Window {
     in-out property <bool> update_available: false;
     in-out property <string> update_version: "";
     in-out property <string> update_download_url: "";
-    // Human size of the pending installer asset (e.g. "12.0 MB"), empty if unknown.
+    // Human size of the pending installer asset (e.g. "12.3 MB"), empty if unknown.
     in-out property <string> update_size_text: "";
-    // Live short progress while installing (e.g. "45% · 5.4 / 12.0 MB").
+    // Live short progress while installing (e.g. "45% · 5.4 / 12.3 MB").
     in-out property <string> update_progress_text: "";
     // True while an Install click is downloading the release asset.
     in-out property <bool> update_installing: false;
@@ -4088,12 +4093,13 @@ export component MainWindow inherits Window {
         border-width: AppMetrics.outer_border;
         border-color: ThemePalette.border_strong;
 
-        // Titlebar
+        // Titlebar — above theme atmospheres (z:40) so chrome stays readable.
         Rectangle {
             x: 0;
             y: 0;
             width: parent.width;
             height: root.title_h;
+            z: 50;
             background: ThemePalette.titlebar;
             border-width: 0px;
 
@@ -4363,7 +4369,7 @@ export component MainWindow inherits Window {
             y: root.title_h;
             width: sel_bar_w;
             height: root.toolbar_h;
-            z: 15;
+            z: 50;
             background: ThemePalette.panel_solid;
             Rectangle {
                 x: 0; y: 0; width: parent.width; height: parent.height;
@@ -4505,7 +4511,7 @@ export component MainWindow inherits Window {
             y: root.title_h;
             width: sel_bar_w;
             height: root.toolbar_h;
-            z: 15;
+            z: 50;
             background: ThemePalette.panel_solid;
             Rectangle {
                 x: 0; y: 0; width: parent.width; height: parent.height;
@@ -4561,7 +4567,8 @@ export component MainWindow inherits Window {
             y: root.title_h;
             width: root.width - root.sidebar_w;
             height: root.toolbar_h;
-            z: 10;
+            // Above theme atmospheres (z:40) so Icon/Compact/etc. stay on top.
+            z: 50;
             background: ThemePalette.panel;
             // Normal-mode toolbar layout is computed right-to-left so address,
             // search, sort, and view controls never overlap at narrow widths.
@@ -4569,8 +4576,13 @@ export component MainWindow inherits Window {
             property <length> tb_ops_w: root.search_text != "" ? 64px : 32px;
             property <length> tb_search_w: 208px;
             property <length> tb_sort_w: 196px;
-            property <length> tb_view_x: self.width - 318px;
-            property <length> tb_min_w_search: 167px + 80px + tb_gap + tb_search_w + tb_ops_w + tb_gap + 318px;
+            // View cluster is 318px; thumb −/+ (60px + 8px gap) sits to its left in grid/gallery.
+            property <length> tb_view_cluster_w: 318px;
+            property <length> tb_thumb_zoom_w: !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid")
+                ? 68px
+                : 0px;
+            property <length> tb_view_x: self.width - tb_view_cluster_w - tb_thumb_zoom_w;
+            property <length> tb_min_w_search: 167px + 80px + tb_gap + tb_search_w + tb_ops_w + tb_gap + tb_view_cluster_w + tb_thumb_zoom_w;
             property <length> tb_min_w_sort: tb_min_w_search + tb_gap + tb_sort_w;
             property <bool> show_toolbar_search: !root.is_simple && self.width >= tb_min_w_search;
             property <bool> show_toolbar_sort: !root.is_simple && self.width >= tb_min_w_sort;
@@ -5262,6 +5274,23 @@ export component MainWindow inherits Window {
             }
 
             Rectangle { visible: !root.is_simple; x: toolbar.tb_view_x - 11px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
+            // Thumb zoom sits left of the view cluster so −/+ never cover Icon/Compact.
+            if !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid"): HorizontalLayout {
+                x: toolbar.tb_view_x;
+                y: 8px;
+                height: 26px;
+                spacing: 4px;
+                DialogButton {
+                    label: "−";
+                    width: 28px;
+                    clicked => { root.thumb_size_changed(root.thumb_size_scale - 0.15); }
+                }
+                DialogButton {
+                    label: "+";
+                    width: 28px;
+                    clicked => { root.thumb_size_changed(root.thumb_size_scale + 0.15); }
+                }
+            }
             // View-mode cluster. 34px stride (31px button + 3px gap) so icons
             // stay centered in their hit boxes without overlapping neighbors.
             ToolButton {
@@ -5302,23 +5331,6 @@ export component MainWindow inherits Window {
                 tooltip: @tr("Details view");
                 active: root.view_mode == "list";
                 clicked => { root.set_view("list"); }
-            }
-            if !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid"): HorizontalLayout {
-                // Sit left of Gallery so auto-sized DialogButtons cannot cover Preview/Dual.
-                x: parent.width - 318px;
-                y: 8px;
-                height: 26px;
-                spacing: 4px;
-                DialogButton {
-                    label: "−";
-                    width: 28px;
-                    clicked => { root.thumb_size_changed(root.thumb_size_scale - 0.15); }
-                }
-                DialogButton {
-                    label: "+";
-                    width: 28px;
-                    clicked => { root.thumb_size_changed(root.thumb_size_scale + 0.15); }
-                }
             }
             ToolButton {
                 x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 216px;
@@ -7144,8 +7156,9 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Theme atmospheres — inside `app` so they sit above opaque chrome but
-        // below MainWindow modals. No TouchArea: clicks pass through.
+        // Theme atmospheres — inside `app` so they sit above the file area but
+        // below titlebar/toolbar chrome (z:50) and MainWindow modals.
+        // No TouchArea: clicks pass through.
         // Shared folder-idle bob — sparse updates (no per-row Timers).
         Timer {
             interval: 3600ms;
