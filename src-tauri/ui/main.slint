@@ -304,19 +304,25 @@ component HoverTip inherits Rectangle {
 }
 
 
-// Spawn host for overlays created with `if visible`. Starts transparent and
-// slightly offset; a one-shot timer eases `shown` and `rise` so the panel
-// interpolates in instead of popping at full opacity.
+// Spawn host for overlays created with `if visible`. Starts slightly offset;
+// a one-shot timer eases `shown` and `rise` so the panel interpolates in.
 // Important: do NOT key `running` off `shown < 1` — while the property is
 // animating it stays below 1, so a repeating timer would keep re-assigning
 // the targets and restart the ease (settings felt like an endless fade).
+//
+// For full-screen dimmer modals set `fade_self: false` and bind the *panel*
+// to `opacity: parent.shown` so the scrim + click-to-dismiss are instant and
+// only the card fades/rises. Keep `fade_self: true` for menus/toasts/chrome
+// that have no separate scrim.
 component FadeHost inherits Rectangle {
-    in property <duration> motion: 180ms;
-    in property <length> spawn_from: 14px;
-    property <float> shown: 0;
+    in property <duration> motion: 100ms;
+    in property <length> spawn_from: 6px;
+    // When false, host/scrim stay fully opaque; callers fade the panel instead.
+    in property <bool> fade_self: true;
+    out property <float> shown: 0;
     out property <length> rise: spawn_from;
     property <bool> spawn_armed: true;
-    opacity: root.shown;
+    opacity: root.fade_self ? root.shown : 1.0;
     animate shown {
         duration: root.motion;
         easing: cubic-bezier(0.16, 1, 0.3, 1);
@@ -326,7 +332,7 @@ component FadeHost inherits Rectangle {
         easing: cubic-bezier(0.16, 1, 0.3, 1);
     }
     Timer {
-        interval: 16ms;
+        interval: 1ms;
         running: root.spawn_armed;
         triggered => {
             root.spawn_armed = false;
@@ -4265,12 +4271,13 @@ export component MainWindow inherits Window {
             Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
         }
 
-        // Sidebar
+        // Sidebar — above theme atmospheres (z:40) like titlebar/toolbar.
         Rectangle {
             x: 0;
             y: root.title_h;
             width: root.sidebar_w;
             height: parent.height - root.title_h - root.status_h;
+            z: 50;
             background: ThemePalette.sidebar;
             border-width: 0px;
 
@@ -4341,7 +4348,7 @@ export component MainWindow inherits Window {
         // No clip so hover tooltips can draw above the strip.
         if root.selected_count > 0 && !root.is_storage_view && root.in_recycle_bin: FadeHost {
             spawn_from: 0px;
-            motion: 140ms;
+            motion: 100ms;
             property <length> sel_gap: 4px;
             property <length> sel_clear_w: root.is_simple ? 54px : 44px;
             property <length> sel_norm_step: 34px;
@@ -4455,7 +4462,7 @@ export component MainWindow inherits Window {
 
         if root.selected_count > 0 && !root.is_storage_view && !root.in_recycle_bin: FadeHost {
             spawn_from: 0px;
-            motion: 140ms;
+            motion: 100ms;
             property <int> sel_shift: root.selection_has_archive ? 1 : 0;
             property <int> sel_btn_count: 10 + sel_shift;
             property <length> sel_gap: 4px;
@@ -5275,19 +5282,25 @@ export component MainWindow inherits Window {
 
             Rectangle { visible: !root.is_simple; x: toolbar.tb_view_x - 11px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
             // Thumb zoom sits left of the view cluster so −/+ never cover Icon/Compact.
+            // ToolButton (not DialogButton) — DialogButton auto-sizes to ≥76px and
+            // would spill over the Icons/Compact hit targets despite width: 28px.
             if !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid"): HorizontalLayout {
                 x: toolbar.tb_view_x;
                 y: 8px;
                 height: 26px;
                 spacing: 4px;
-                DialogButton {
-                    label: "−";
-                    width: 28px;
+                ToolButton {
+                    button_width: 28px;
+                    button_height: 26px;
+                    text_label: "−";
+                    tooltip: @tr("Smaller thumbs");
                     clicked => { root.thumb_size_changed(root.thumb_size_scale - 0.15); }
                 }
-                DialogButton {
-                    label: "+";
-                    width: 28px;
+                ToolButton {
+                    button_width: 28px;
+                    button_height: 26px;
+                    text_label: "+";
+                    tooltip: @tr("Larger thumbs");
                     clicked => { root.thumb_size_changed(root.thumb_size_scale + 0.15); }
                 }
             }
@@ -5463,8 +5476,8 @@ export component MainWindow inherits Window {
             }
 
             if root.folder_changed_banner: FadeHost {
-                spawn_from: -10px;
-                motion: 160ms;
+                spawn_from: -8px;
+                motion: 120ms;
                 x: 0;
                 y: -2px + self.rise;
                 width: root.primary_pane_w;
@@ -5949,8 +5962,8 @@ export component MainWindow inherits Window {
                 }
 
                 if root.files.length == 0 && !root.is_storage_view: empty_pane := FadeHost {
-                    spawn_from: 10px;
-                    motion: 180ms;
+                    spawn_from: 8px;
+                    motion: 120ms;
                     y: self.rise;
                     width: parent.width;
                     height: parent.height;
@@ -6491,8 +6504,8 @@ export component MainWindow inherits Window {
                 }
 
                 if root.secondary_files.length == 0: FadeHost {
-                    spawn_from: 10px;
-                    motion: 180ms;
+                    spawn_from: 8px;
+                    motion: 120ms;
                     x: 0;
                     y: 38px + (root.view_mode == "list" ? 32px : 0px) + self.rise;
                     width: parent.width;
@@ -7250,8 +7263,8 @@ export component MainWindow inherits Window {
 
     // Context menu - file
     if root.context_visible && root.context_on_file: FadeHost {
-        spawn_from: 6px;
-        motion: 90ms;
+        spawn_from: 4px;
+        motion: 70ms;
         z: 100;
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - (root.is_simple ? 410px : 580px)) + self.rise;
@@ -7414,8 +7427,8 @@ export component MainWindow inherits Window {
 
     // Context menu - empty area
     if root.context_visible && !root.context_on_file: FadeHost {
-        spawn_from: 6px;
-        motion: 90ms;
+        spawn_from: 4px;
+        motion: 70ms;
         z: 100;
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - 278px) + self.rise;
@@ -7455,6 +7468,9 @@ export component MainWindow inherits Window {
     }
 
     if root.image_tools_visible: FadeHost {
+        fade_self: false;
+        motion: 90ms;
+        spawn_from: 6px;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
@@ -7464,6 +7480,7 @@ export component MainWindow inherits Window {
         }
 
         Rectangle {
+            opacity: parent.shown;
             x: (parent.width - 520px) / 2;
             y: 96px + parent.rise;
             width: 520px;
@@ -7601,13 +7618,16 @@ export component MainWindow inherits Window {
     }
 
     if root.command_visible: FadeHost {
-        spawn_from: -12px;
+        fade_self: false;
+        motion: 90ms;
+        spawn_from: -8px;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
         TouchArea { mouse-cursor: pointer; clicked => { root.command_visible = false; } }
 
         Rectangle {
+            opacity: parent.shown;
             x: max(16px, (parent.width - min(620px, parent.width - 32px)) / 2);
             y: max(16px, min(82px, (parent.height - min(512px, parent.height - 32px)) / 2)) + parent.rise;
             width: min(620px, parent.width - 32px);
@@ -7683,6 +7703,9 @@ export component MainWindow inherits Window {
     }
 
     if root.settings_visible: FadeHost {
+        fade_self: false;
+        motion: 90ms;
+        spawn_from: 4px;
         width: parent.width;
         height: parent.height;
         z: 165;
@@ -7690,6 +7713,7 @@ export component MainWindow inherits Window {
         TouchArea { clicked => { root.settings_visible = false; } }
 
         Rectangle {
+            opacity: parent.shown;
             x: (parent.width - min(780px, parent.width - 32px)) / 2;
             y: (parent.height - min(680px, parent.height - 32px)) / 2 + parent.rise;
             width: min(780px, parent.width - 32px);
@@ -9450,6 +9474,9 @@ export component MainWindow inherits Window {
     }
 
     if root.confirm_visible: FadeHost {
+        fade_self: false;
+        motion: 90ms;
+        spawn_from: 4px;
         width: parent.width;
         height: parent.height;
         // Above toasts (150) so destructive confirms stay on top.
@@ -9462,6 +9489,7 @@ export component MainWindow inherits Window {
             clicked => { }
         }
         confirm_panel := Rectangle {
+            opacity: parent.shown;
             x: (parent.width - 460px) / 2;
             y: (parent.height - self.height) / 2 + parent.rise;
             width: 460px;
@@ -9499,6 +9527,9 @@ export component MainWindow inherits Window {
     }
 
     if root.prompt_visible: FadeHost {
+        fade_self: false;
+        motion: 90ms;
+        spawn_from: 4px;
         z: 160;
         width: parent.width;
         height: parent.height;
@@ -9511,6 +9542,7 @@ export component MainWindow inherits Window {
         }
 
         if root.prompt_kind == "conflict": Rectangle {
+            opacity: parent.shown;
             x: (parent.width - min(460px, parent.width - 32px)) / 2;
             y: (parent.height - min(220px, parent.height - 32px)) / 2 + parent.rise;
             width: min(460px, parent.width - 32px);
@@ -9534,6 +9566,7 @@ export component MainWindow inherits Window {
         }
 
         if root.prompt_kind == "rename-conflict": Rectangle {
+            opacity: parent.shown;
             x: (parent.width - min(460px, parent.width - 32px)) / 2;
             y: (parent.height - min(220px, parent.height - 32px)) / 2 + parent.rise;
             width: min(460px, parent.width - 32px);
@@ -9554,6 +9587,7 @@ export component MainWindow inherits Window {
         }
 
         if root.prompt_kind == "batch-rename": Rectangle {
+            opacity: parent.shown;
             x: (parent.width - min(560px, parent.width - 24px)) / 2;
             y: (parent.height - min(520px, parent.height - 24px)) / 2 + parent.rise;
             width: min(560px, parent.width - 24px);
@@ -9589,6 +9623,7 @@ export component MainWindow inherits Window {
 
         // Standard text-input prompt (rename / new folder / etc.)
         if root.prompt_kind != "conflict" && root.prompt_kind != "rename-conflict" && root.prompt_kind != "batch-rename": Rectangle {
+            opacity: parent.shown;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2 + parent.rise;
             width: min(440px, parent.width - 40px);
@@ -9647,12 +9682,16 @@ export component MainWindow inherits Window {
     }
 
     if root.rename_presets_visible: FadeHost {
+        fade_self: false;
+        motion: 90ms;
+        spawn_from: 4px;
         z: 110;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
         TouchArea { clicked => { root.prompt_cancel(); } }
         Rectangle {
+            opacity: parent.shown;
             x: (parent.width - min(380px, parent.width - 32px)) / 2;
             y: (parent.height - min(320px, parent.height - 32px)) / 2 + parent.rise;
             width: min(380px, parent.width - 32px);
@@ -9681,12 +9720,16 @@ export component MainWindow inherits Window {
     }
 
     if root.tool_overlay_visible: FadeHost {
+        fade_self: false;
+        motion: 90ms;
+        spawn_from: 4px;
         z: 180;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
         TouchArea { clicked => { root.tool_overlay_close(); } }
         Rectangle {
+            opacity: parent.shown;
             x: (parent.width - min(root.tool_overlay_kind == "privacy" ? 620px : 520px, parent.width - 32px)) / 2;
             y: (parent.height - min(root.tool_overlay_kind == "privacy" ? 560px : 420px, parent.height - 32px)) / 2 + parent.rise;
             width: min(root.tool_overlay_kind == "privacy" ? 620px : 520px, parent.width - 32px);
@@ -9879,12 +9922,16 @@ export component MainWindow inherits Window {
     }
 
     if root.compare_overlay_visible: FadeHost {
+        fade_self: false;
+        motion: 90ms;
+        spawn_from: 4px;
         z: 110;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
         TouchArea { clicked => { root.compare_overlay_close(); } }
         Rectangle {
+            opacity: parent.shown;
             x: (parent.width - min(560px, parent.width - 32px)) / 2;
             y: (parent.height - min(440px, parent.height - 32px)) / 2 + parent.rise;
             width: min(560px, parent.width - 32px);
@@ -9962,12 +10009,16 @@ export component MainWindow inherits Window {
     }
 
     if root.dupe_overlay_visible: FadeHost {
+        fade_self: false;
+        motion: 90ms;
+        spawn_from: 4px;
         z: 110;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
         TouchArea { clicked => { root.dupe_overlay_close(); } }
         Rectangle {
+            opacity: parent.shown;
             x: (parent.width - min(640px, parent.width - 32px)) / 2;
             y: (parent.height - min(520px, parent.height - 32px)) / 2 + parent.rise;
             width: min(640px, parent.width - 32px);
@@ -10051,12 +10102,16 @@ export component MainWindow inherits Window {
     }
 
     if root.quick_look_visible: FadeHost {
+        fade_self: false;
+        motion: 90ms;
+        spawn_from: 4px;
         z: 120;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.55);
         TouchArea { clicked => { root.quick_look_close(); } }
         Rectangle {
+            opacity: parent.shown;
             x: (parent.width - min(640px, parent.width - 48px)) / 2;
             y: (parent.height - min(480px, parent.height - 48px)) / 2 + parent.rise;
             width: min(640px, parent.width - 48px);
@@ -10101,8 +10156,8 @@ export component MainWindow inherits Window {
     }
 
     if root.op_drawer_visible: FadeHost {
-        spawn_from: 14px;
-        motion: 200ms;
+        spawn_from: 10px;
+        motion: 120ms;
         x: (parent.width - min(420px, parent.width - 32px)) / 2;
         y: parent.height - root.status_h - 76px + self.rise;
         width: min(420px, parent.width - 32px);
@@ -10184,6 +10239,9 @@ export component MainWindow inherits Window {
     // pinning Pathfinder to the taskbar / unpinning File Explorer since
     // Windows 11 does not expose those verbs to third party apps.
     if root.welcome_visible: FadeHost {
+        fade_self: false;
+        motion: 100ms;
+        spawn_from: 6px;
         x: 0; y: 0;
         width: parent.width; height: parent.height;
         background: rgba(0, 0, 0, 0.55);
@@ -10197,6 +10255,7 @@ export component MainWindow inherits Window {
         }
 
         Rectangle {
+            opacity: parent.shown;
             x: (parent.width - min(600px, parent.width - 32px)) / 2;
             y: (parent.height - min(580px, parent.height - 32px)) / 2 + parent.rise;
             width: min(600px, parent.width - 32px);
@@ -10413,8 +10472,8 @@ export component MainWindow inherits Window {
     }
 
     if root.toast_text != "": FadeHost {
-        spawn_from: 16px;
-        motion: 220ms;
+        spawn_from: 10px;
+        motion: 140ms;
         z: 150;
         width: parent.width;
         height: parent.height;
@@ -10553,6 +10612,9 @@ export component MainWindow inherits Window {
 
     // -- UI mode first-run prompt --------------------------------------
     if root.ui_mode_prompt_visible: FadeHost {
+        fade_self: false;
+        motion: 90ms;
+        spawn_from: 4px;
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.46);
@@ -10560,6 +10622,7 @@ export component MainWindow inherits Window {
         TouchArea { clicked => {} }
 
         Rectangle {
+            opacity: parent.shown;
             x: (parent.width - min(500px, parent.width - 32px)) / 2;
             y: (parent.height - min(310px, parent.height - 32px)) / 2 + parent.rise;
             width: min(500px, parent.width - 32px);

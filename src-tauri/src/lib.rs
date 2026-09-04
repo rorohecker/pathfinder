@@ -11804,6 +11804,9 @@ mod updater_asset_tests {
         assert_eq!(format_size_short(12_580_410), "12.0 MB");
         assert_eq!(format_size_short(5_242_880), "5.0 MB");
         assert_eq!(format_size_short(150 * 1024 * 1024), "150 MB");
+        // KB ≥ 10 stays whole — avoid "10.0 KB" noise in file lists.
+        assert_eq!(format_size_short(10 * 1024), "10 KB");
+        assert_eq!(format_size_short(512), "512 B");
     }
 
     #[test]
@@ -12692,10 +12695,11 @@ fn format_size_short(bytes: u64) -> String {
         index += 1;
     }
     if index == 0 {
-        format!("{size} {}", units[index])
-    } else if size < 100.0 {
-        // One decimal below 100 so release installers read "12.3 MB" instead of
-        // collapsing every ~12 MiB build to the same "12 MB" label.
+        format!("{} {}", bytes, units[index])
+    } else if size < 10.0 || (index >= 2 && size < 100.0) {
+        // One decimal under 10 always; also under 100 for MB+ so installers
+        // read "12.3 MB" instead of collapsing every ~12 MiB build to "12 MB".
+        // KB stays whole at ≥10 ("10 KB") so file lists aren't full of ".0".
         format!("{size:.1} {}", units[index])
     } else {
         format!("{} {}", size.round() as u64, units[index])
