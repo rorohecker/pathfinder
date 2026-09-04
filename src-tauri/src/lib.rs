@@ -8629,10 +8629,12 @@ struct NativeController {
     search_all_scope: bool,
     history: Vec<String>,
     history_index: usize,
-    // Per-folder scroll memory keyed by absolute path. Updated whenever we
-    // navigate away from a folder; consulted whenever we navigate into one so
-    // Back / Up / re-entering a folder restores the row the user was looking at.
+    // Per-folder scroll memory keyed by "{path}\u{1}list" / "{path}\u{1}grid"
+    // (legacy bare-path keys still restore list). Updated on navigate-away;
+    // restored on navigate-in so Back / Up / re-enter land on the same row.
     path_scroll: HashMap<String, f32>,
+    // Clears `scroll_animating` after a programmatic restore eases in.
+    scroll_anim_timer: Option<slint::Timer>,
     // Per-drive scan results keyed by root path (e.g. "C:\\"). Lets the user
     // switch drives without re-scanning each time they revisit Storage.
     storage_caches: HashMap<String, StorageScanResult>,
@@ -14140,6 +14142,7 @@ impl NativeController {
             history: vec![current_path.clone()],
             history_index: 0,
             path_scroll: HashMap::new(),
+            scroll_anim_timer: None,
             storage_caches: HashMap::new(),
             storage_scan_pending: Arc::new(Mutex::new(None)),
             storage_scan_ready: Arc::new(AtomicBool::new(false)),
@@ -16706,14 +16709,95 @@ impl NativeController {
         }
     }
 
+    fn scroll_key(path: &str, kind: &str) -> String {
+        format!("{path}\u{1}{kind}")
+    }
+
+    fn remember_primary_scroll(&mut self, ui: &MainWindow, path: &str) {
+        if path.is_empty() {
+            return;
+        }
+        self.path_scroll.insert(
+            Self::scroll_key(path, "list"),
+            ui.get_primary_list_scroll_y(),
+        );
+        self.path_scroll.insert(
+            Self::scroll_key(path, "grid"),
+            ui.get_primary_grid_scroll_y(),
+        );
+    }
+
+    fn remember_secondary_scroll(&mut self, ui: &MainWindow, path: &str) {
+        if path.is_empty() {
+            return;
+        }
+        self.path_scroll.insert(
+            Self::scroll_key(path, "secondary"),
+            ui.get_secondary_list_scroll_y(),
+        );
+    }
+
+    fn begin_scroll_restore(&mut self, ui: &MainWindow) {
+        ui.set_scroll_animating(true);
+        let weak = ui.as_weak();
+        if self.scroll_anim_timer.is_none() {
+            self.scroll_anim_timer = Some(slint::Timer::default());
+        }
+        let timer = self
+            .scroll_anim_timer
+            .as_ref()
+            .expect("scroll_anim_timer just initialized");
+        timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(260),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_scroll_animating(false);
+                }
+            },
+        );
+    }
+
+    fn restore_primary_scroll(&mut self, ui: &MainWindow, path: &str) {
+        let list_y = self
+            .path_scroll
+            .get(&Self::scroll_key(path, "list"))
+            .or_else(|| self.path_scroll.get(path))
+            .copied()
+            .unwrap_or(0.0);
+        let grid_y = self
+            .path_scroll
+            .get(&Self::scroll_key(path, "grid"))
+            .copied()
+            .unwrap_or(0.0);
+        if list_y.abs() > 0.5 || grid_y.abs() > 0.5 {
+            self.begin_scroll_restore(ui);
+        } else {
+            ui.set_scroll_animating(false);
+        }
+        ui.set_primary_list_scroll_y(list_y);
+        ui.set_primary_grid_scroll_y(grid_y);
+    }
+
+    fn restore_secondary_scroll(&mut self, ui: &MainWindow, path: &str) {
+        let y = self
+            .path_scroll
+            .get(&Self::scroll_key(path, "secondary"))
+            .copied()
+            .unwrap_or(0.0);
+        if y.abs() > 0.5 {
+            self.begin_scroll_restore(ui);
+        }
+        ui.set_secondary_list_scroll_y(y);
+    }
+
     fn prepare_navigate_loading(&mut self, ui: &MainWindow, path: &str, push_history: bool) {
         self.active_archive = None;
         ui.set_in_recycle_bin(false);
         ui.set_is_home_view(false);
         let prev_path = self.current_path.clone();
         if !prev_path.is_empty() {
-            let y = ui.get_primary_list_scroll_y();
-            self.path_scroll.insert(prev_path.clone(), y);
+            self.remember_primary_scroll(ui, &prev_path);
             self.folder_views
                 .insert(format!("{prev_path}:view"), ui.get_view_mode().to_string());
             self.folder_views
@@ -16745,6 +16829,8 @@ impl NativeController {
         self.select_anchor = -1;
         self.files_model = None;
         ui.set_empty_state(ss("Loading folder..."));
+        // Instant reset while the folder loads — restore animates later.
+        ui.set_scroll_animating(false);
         ui.set_primary_list_scroll_y(0.0);
         ui.set_primary_grid_scroll_y(0.0);
         ui.set_grid_window_start(0);
@@ -16775,8 +16861,7 @@ impl NativeController {
         if !path_already_committed {
             let prev_path = self.current_path.clone();
             if !prev_path.is_empty() {
-                let y = ui.get_primary_list_scroll_y();
-                self.path_scroll.insert(prev_path.clone(), y);
+                self.remember_primary_scroll(ui, &prev_path);
                 self.folder_views
                     .insert(format!("{prev_path}:view"), ui.get_view_mode().to_string());
                 self.folder_views
@@ -16888,8 +16973,7 @@ impl NativeController {
             );
         }
 
-        let restore_y = self.path_scroll.get(&path).copied().unwrap_or(0.0);
-        ui.set_primary_list_scroll_y(restore_y);
+        self.restore_primary_scroll(ui, &path);
         if ui.get_view_mode().as_str() == "list" {
             self.sync_list_window(ui, false);
         } else {
@@ -19119,6 +19203,10 @@ impl NativeController {
                 self.secondary_history_pos = self.secondary_history.len() - 1;
             }
         }
+        let prev_secondary = self.secondary_path.clone();
+        if !prev_secondary.is_empty() && !same_path_string(&prev_secondary, &path) {
+            self.remember_secondary_scroll(ui, &prev_secondary);
+        }
         self.active_pane = ActivePane::Secondary;
         self.secondary_path = path.clone();
         self.secondary_selected_index = -1;
@@ -19132,6 +19220,7 @@ impl NativeController {
             self.secondary_visible_files = cached;
             self.apply_secondary_sort();
             self.update_secondary_models(ui);
+            self.restore_secondary_scroll(ui, &path);
             self.sync_selection_count_to_ui(ui);
             self.schedule_secondary_viewport_thumbs(ui);
             return;
@@ -19148,6 +19237,7 @@ impl NativeController {
         ui.set_secondary_list_window_files(model_from_vec(Vec::<FileItem>::new()));
         ui.set_secondary_list_window_start(0);
         ui.set_secondary_list_window_y(0.0);
+        ui.set_scroll_animating(false);
         ui.set_secondary_list_scroll_y(0.0);
         ui.set_secondary_path(ss(&path));
         self.sync_selection_count_to_ui(ui);
@@ -19214,6 +19304,11 @@ impl NativeController {
         self.secondary_visible_files = page.entries;
         self.apply_secondary_sort();
         self.update_secondary_models(ui);
+        // Restore once after the first paint lands at the top; skip on
+        // partial→full refresh so we don't yank the viewport mid-scroll.
+        if ui.get_secondary_list_scroll_y().abs() < 0.5 {
+            self.restore_secondary_scroll(ui, &path);
+        }
         self.sync_selection_count_to_ui(ui);
         self.schedule_secondary_viewport_thumbs(ui);
         if partial {
