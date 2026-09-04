@@ -11790,7 +11790,23 @@ mod updater_asset_tests {
         assert!(r2.available);
         assert_eq!(r2.download_url, "https://example.com/setup.exe");
         assert_eq!(r2.download_size, 12_000_000);
-        assert!(r2.message.contains("12") || r2.message.contains("MB") || r2.message.contains("available"));
+        assert!(
+            r2.message.contains("11.4") || r2.message.contains("12") || r2.message.contains("MB"),
+            "{}",
+            r2.message
+        );
+    }
+
+    #[test]
+    fn format_size_short_keeps_decimal_for_mid_mb_installers() {
+        // Real NSIS builds hover around 12.x MiB; don't round them all to "12 MB".
+        assert_eq!(format_size_short(12_856_744), "12.3 MB");
+        assert_eq!(format_size_short(12_580_410), "12.0 MB");
+        assert_eq!(format_size_short(5_242_880), "5.0 MB");
+        assert_eq!(format_size_short(150 * 1024 * 1024), "150 MB");
+        // KB ≥ 10 stays whole — avoid "10.0 KB" noise in file lists.
+        assert_eq!(format_size_short(10 * 1024), "10 KB");
+        assert_eq!(format_size_short(512), "512 B");
     }
 
     #[test]
@@ -12678,7 +12694,12 @@ fn format_size_short(bytes: u64) -> String {
         size /= 1024.0;
         index += 1;
     }
-    if index > 0 && size < 10.0 {
+    if index == 0 {
+        format!("{} {}", bytes, units[index])
+    } else if size < 10.0 || (index >= 2 && size < 100.0) {
+        // One decimal under 10 always; also under 100 for MB+ so installers
+        // read "12.3 MB" instead of collapsing every ~12 MiB build to "12 MB".
+        // KB stays whole at ≥10 ("10 KB") so file lists aren't full of ".0".
         format!("{size:.1} {}", units[index])
     } else {
         format!("{} {}", size.round() as u64, units[index])
