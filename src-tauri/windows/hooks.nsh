@@ -1,5 +1,10 @@
 ; Pathfinder NSIS hooks.
 ;
+; WebView2: Pathfinder is a Slint + winit native UI. It never creates a Tauri
+; webview window. tauri.conf.json sets bundle.windows.webviewInstallMode to
+; "skip" so the NSIS/MSI installers do not download or run the Edge WebView2
+; bootstrapper as the first install step (default Tauri behavior).
+;
 ; Auto-registration of the default folder handler was removed in v0.8.7.
 ; The previous postinstall step invoked `--install-shell-handler`, which
 ; writes 7 HKCU keys under Software\Classes\Folder\shell\open\command and

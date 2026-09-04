@@ -1,6 +1,6 @@
 {
   "productName": "Pathfinder",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "identifier": "com.fusntuff.pathfinder",
   "build": {
     "frontendDist": null
@@ -19,6 +19,9 @@
       "pdfium/pdfium.dll": "pdfium.dll"
     },
     "windows": {
+      "webviewInstallMode": {
+        "type": "skip"
+      },
       "nsis": {
         "installerHooks": "./windows/hooks.nsh"
       }
