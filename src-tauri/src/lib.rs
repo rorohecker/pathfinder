@@ -475,6 +475,9 @@ pub struct UpdateCheckResult {
     pub release_url: String,
     pub download_url: String,
     pub download_sha256: String,
+    /// GitHub release asset size in bytes (0 when unknown).
+    #[serde(default)]
+    pub download_size: u64,
     pub notes: String,
     pub message: String,
 }
@@ -10310,6 +10313,7 @@ fn update_disabled_result() -> UpdateCheckResult {
         release_url: GITHUB_RELEASES_URL.to_string(),
         download_url: String::new(),
         download_sha256: String::new(),
+        download_size: 0,
         notes: String::new(),
         message: "Update checks are off. Pathfinder will not contact GitHub until you enable or manually run update checks.".to_string(),
     }
@@ -10395,8 +10399,8 @@ fn parse_github_asset_digest(raw: &str) -> Option<String> {
 }
 
 /// Prefer a Windows `.exe` NSIS/setup asset, else `.msi`; skip `.zip` / `.7z` so
-/// in-app Install always launches a real installer.
-fn pick_release_installer(assets: &[serde_json::Value]) -> (String, String) {
+/// in-app Install always launches a real installer. Returns (url, sha256, size).
+fn pick_release_installer(assets: &[serde_json::Value]) -> (String, String, u64) {
     for ext in [".exe", ".msi"] {
         for a in assets {
             let Some(name) = a.get("name").and_then(|v| v.as_str()) else {
@@ -10417,10 +10421,11 @@ fn pick_release_installer(assets: &[serde_json::Value]) -> (String, String) {
                 .and_then(|v| v.as_str())
                 .and_then(parse_github_asset_digest)
                 .unwrap_or_default();
-            return (url.to_string(), sha);
+            let size = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+            return (url.to_string(), sha, size);
         }
     }
-    (String::new(), String::new())
+    (String::new(), String::new(), 0)
 }
 
 fn check_github_release_now() -> Result<UpdateCheckResult, String> {
@@ -10483,7 +10488,7 @@ fn check_github_release_now() -> Result<UpdateCheckResult, String> {
         .chars()
         .take(4_000)
         .collect::<String>();
-    let (download_url, download_sha256) = value
+    let (download_url, download_sha256, download_size) = value
         .get("assets")
         .and_then(|a| a.as_array())
         .map(|assets| pick_release_installer(assets))
@@ -10505,9 +10510,17 @@ fn check_github_release_now() -> Result<UpdateCheckResult, String> {
         release_url,
         download_url,
         download_sha256,
+        download_size,
         notes,
         message: if available {
-            format!("Pathfinder {latest_version} is available.")
+            if download_size > 0 {
+                format!(
+                    "Pathfinder {latest_version} is available ({}).",
+                    format_size_short(download_size)
+                )
+            } else {
+                format!("Pathfinder {latest_version} is available.")
+            }
         } else {
             "Pathfinder is up to date.".to_string()
         },
@@ -10535,6 +10548,9 @@ fn installer_suffix_from_url(url: &str) -> &'static str {
 static UPDATE_INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static UPDATE_BYTES_COPIED: AtomicU64 = AtomicU64::new(0);
 static UPDATE_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// Asset size from the GitHub release API, set when an update is offered so the
+/// progress UI knows the denominator before Content-Length arrives.
+static UPDATE_KNOWN_SIZE: AtomicU64 = AtomicU64::new(0);
 static UPDATE_EXPECTED_SHA256: Mutex<String> = Mutex::new(String::new());
 
 fn sha256_file_hex(path: &Path) -> Result<String, String> {
@@ -10553,7 +10569,9 @@ fn sha256_file_hex(path: &Path) -> Result<String, String> {
 
 fn update_download_progress_fraction() -> f32 {
     let copied = UPDATE_BYTES_COPIED.load(Ordering::Relaxed);
-    let total = UPDATE_BYTES_TOTAL.load(Ordering::Relaxed);
+    let total = UPDATE_BYTES_TOTAL
+        .load(Ordering::Relaxed)
+        .max(UPDATE_KNOWN_SIZE.load(Ordering::Relaxed));
     if total == 0 {
         return 0.0;
     }
@@ -10562,7 +10580,9 @@ fn update_download_progress_fraction() -> f32 {
 
 fn format_update_progress_label() -> String {
     let copied = UPDATE_BYTES_COPIED.load(Ordering::Relaxed);
-    let total = UPDATE_BYTES_TOTAL.load(Ordering::Relaxed);
+    let total = UPDATE_BYTES_TOTAL
+        .load(Ordering::Relaxed)
+        .max(UPDATE_KNOWN_SIZE.load(Ordering::Relaxed));
     if total > 0 {
         let pct = ((copied as f64 / total as f64) * 100.0).clamp(0.0, 100.0) as u32;
         format!(
@@ -10574,6 +10594,26 @@ fn format_update_progress_label() -> String {
         format!("Downloading update… {}", format_size_short(copied))
     } else {
         "Downloading update… connecting".to_string()
+    }
+}
+
+/// Compact status-bar label: sizes only, no "Downloading update…" prefix.
+fn format_update_progress_short() -> String {
+    let copied = UPDATE_BYTES_COPIED.load(Ordering::Relaxed);
+    let total = UPDATE_BYTES_TOTAL
+        .load(Ordering::Relaxed)
+        .max(UPDATE_KNOWN_SIZE.load(Ordering::Relaxed));
+    if total > 0 {
+        let pct = ((copied as f64 / total as f64) * 100.0).clamp(0.0, 100.0) as u32;
+        format!(
+            "{pct}% · {} / {}",
+            format_size_short(copied),
+            format_size_short(total)
+        )
+    } else if copied > 0 {
+        format_size_short(copied)
+    } else {
+        "Connecting…".to_string()
     }
 }
 
@@ -10753,9 +10793,13 @@ fn download_release_installer_ureq(
 
 fn download_release_installer(url: &str, dest: &Path) -> Result<u64, String> {
     UPDATE_BYTES_COPIED.store(0, Ordering::Relaxed);
-    let expected = probe_download_content_length(url);
+    let known = UPDATE_KNOWN_SIZE.load(Ordering::Relaxed);
+    let expected =
+        probe_download_content_length(url).or(if known > 0 { Some(known) } else { None });
     if let Some(n) = expected {
         UPDATE_BYTES_TOTAL.store(n, Ordering::Relaxed);
+    } else if known > 0 {
+        UPDATE_BYTES_TOTAL.store(known, Ordering::Relaxed);
     } else {
         UPDATE_BYTES_TOTAL.store(0, Ordering::Relaxed);
     }
@@ -11640,6 +11684,52 @@ mod open_file_routing_tests {
         for ext in ["zip", "7z", "rar", "tar", "gz", "xz"] {
             assert!(is_archive_ext(ext), "{ext}");
         }
+    }
+}
+
+#[cfg(test)]
+mod updater_asset_tests {
+    use super::*;
+
+    #[test]
+    fn pick_release_installer_prefers_exe_and_reports_size() {
+        let assets = serde_json::json!([
+            {
+                "name": "notes.zip",
+                "size": 99,
+                "browser_download_url": "https://example.com/notes.zip"
+            },
+            {
+                "name": "Pathfinder_1.0.10_x64-setup.exe",
+                "size": 12580410,
+                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "browser_download_url": "https://example.com/setup.exe"
+            },
+            {
+                "name": "Pathfinder_1.0.10_x64_en-US.msi",
+                "size": 17911808,
+                "browser_download_url": "https://example.com/setup.msi"
+            }
+        ]);
+        let arr = assets.as_array().unwrap();
+        let (url, sha, size) = pick_release_installer(arr);
+        assert_eq!(url, "https://example.com/setup.exe");
+        assert_eq!(size, 12_580_410);
+        assert_eq!(sha.len(), 64);
+    }
+
+    #[test]
+    fn format_update_progress_uses_known_size_when_total_unset() {
+        UPDATE_BYTES_COPIED.store(5_000_000, Ordering::Relaxed);
+        UPDATE_BYTES_TOTAL.store(0, Ordering::Relaxed);
+        UPDATE_KNOWN_SIZE.store(10_000_000, Ordering::Relaxed);
+        let label = format_update_progress_label();
+        assert!(label.contains('%'), "{label}");
+        assert!(label.contains('/'), "{label}");
+        let short = format_update_progress_short();
+        assert!(short.contains('/'), "{short}");
+        UPDATE_BYTES_COPIED.store(0, Ordering::Relaxed);
+        UPDATE_KNOWN_SIZE.store(0, Ordering::Relaxed);
     }
 }
 
@@ -14400,7 +14490,7 @@ impl NativeController {
         ui.set_ai_install_size_mb(mb);
         let disk = local_ai::actual_disk_usage_bytes();
         if disk > 0 {
-            ui.set_ai_disk_usage(ss(format!("On disk: {:.0} MB", disk as f64 / 1_000_000.0)));
+            ui.set_ai_disk_usage(ss(format!("On disk: {}", format_size_short(disk))));
         } else {
             ui.set_ai_disk_usage(ss(""));
         }
@@ -14429,10 +14519,7 @@ impl NativeController {
             .load(std::sync::atomic::Ordering::Acquire)
             && upd > 0
         {
-            ui.set_ai_update_status(ss(format!(
-                "Update available (~{:.0} MB)",
-                upd as f64 / 1_000_000.0
-            )));
+            ui.set_ai_update_status(ss(format!("Update available ({})", format_size_short(upd))));
         } else if matches!(m.state, local_ai::InstallState::Installed) {
             ui.set_ai_update_status(ss("Models up to date"));
         } else {
@@ -19735,17 +19822,45 @@ impl NativeController {
             }
             "check-updates" => match check_github_release_now() {
                 Ok(result) => {
+                    if result.available {
+                        UPDATE_KNOWN_SIZE.store(result.download_size, Ordering::Relaxed);
+                        if let Ok(mut g) = UPDATE_EXPECTED_SHA256.lock() {
+                            *g = result.download_sha256.clone();
+                        }
+                        ui.set_update_available(true);
+                        ui.set_update_version(ss(&result.latest_version));
+                        ui.set_update_download_url(ss(&result.download_url));
+                        ui.set_update_size_text(if result.download_size > 0 {
+                            ss(format_size_short(result.download_size))
+                        } else {
+                            ss("")
+                        });
+                    }
+                    let size_line = if result.download_size > 0 {
+                        format!(
+                            "\nInstaller: {} ({})",
+                            format_size_short(result.download_size),
+                            if result.download_url.is_empty() {
+                                "no direct asset"
+                            } else {
+                                "in-app Install ready"
+                            }
+                        )
+                    } else {
+                        String::new()
+                    };
                     ui.set_preview_title(ss("Updates"));
                     ui.set_preview_body(ss(format!(
-                        "{}\nCurrent: {}\nLatest: {}\nRelease: {}\n\n{}",
+                        "{}\nCurrent: {}\nLatest: {}\nRelease: {}{}\n\n{}",
                         result.message,
                         result.current_version,
                         result.latest_version,
                         result.release_url,
+                        size_line,
                         result.notes
                     )));
                     ui.set_preview_meta(ss(
-                        "No files are downloaded from update checks. Open the release to install manually.",
+                        "Update checks only read GitHub release metadata. Install downloads the listed installer size.",
                     ));
                 }
                 Err(error) => {
@@ -25506,9 +25621,15 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 return;
             }
             UPDATE_BYTES_COPIED.store(0, Ordering::Relaxed);
-            UPDATE_BYTES_TOTAL.store(0, Ordering::Relaxed);
+            let known = UPDATE_KNOWN_SIZE.load(Ordering::Relaxed);
+            if known > 0 {
+                UPDATE_BYTES_TOTAL.store(known, Ordering::Relaxed);
+            } else {
+                UPDATE_BYTES_TOTAL.store(0, Ordering::Relaxed);
+            }
             ui.set_update_installing(true);
             ui.set_update_download_progress(0.0);
+            ui.set_update_progress_text(ss(&format_update_progress_short()));
             // Pin this toast for the whole download — the normal toast timer
             // would dismiss it in ~6s while the CDN transfer can take a minute.
             let initial = format_update_progress_label();
@@ -25916,7 +26037,25 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         };
                         ui.set_ai_download_progress(frac);
                         if let Ok(msg) = ai_progress_for_ui.message.lock() {
-                            ui.set_ai_install_message(SharedString::from(msg.as_str()));
+                            let display = if total > 0
+                                && (ai_state == local_ai::InstallState::Downloading
+                                    || ai_state == local_ai::InstallState::Updating)
+                            {
+                                format!(
+                                    "{} — {} / {}",
+                                    msg.trim(),
+                                    format_size_short(downloaded),
+                                    format_size_short(total)
+                                )
+                            } else if downloaded > 0
+                                && (ai_state == local_ai::InstallState::Downloading
+                                    || ai_state == local_ai::InstallState::Updating)
+                            {
+                                format!("{} — {}", msg.trim(), format_size_short(downloaded))
+                            } else {
+                                msg.clone()
+                            };
+                            ui.set_ai_install_message(SharedString::from(display));
                         }
                         if let Ok(ctrl) = c.try_borrow() {
                             ctrl.sync_ai_settings_ui(&ui);
@@ -26210,8 +26349,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 if let Some(ui) = weak.upgrade() {
                     if ui.get_update_installing() {
                         let label = format_update_progress_label();
+                        let short = format_update_progress_short();
                         let progress = update_download_progress_fraction();
                         ui.set_update_download_progress(progress);
+                        ui.set_update_progress_text(ss(&short));
                         ui.set_toast_text(ss(&label));
                         ui.set_toast_kind(ss("info"));
                         if let Ok(mut ctrl) = c.try_borrow_mut() {
@@ -28532,20 +28673,30 @@ pub fn run() {
                         if let Ok(mut g) = UPDATE_EXPECTED_SHA256.lock() {
                             *g = result.download_sha256.clone();
                         }
+                        UPDATE_KNOWN_SIZE.store(result.download_size, Ordering::Relaxed);
                         let ver = SharedString::from(result.latest_version.clone());
                         let dl = SharedString::from(result.download_url.clone());
+                        let size_text = if result.download_size > 0 {
+                            SharedString::from(format_size_short(result.download_size))
+                        } else {
+                            SharedString::new()
+                        };
                         let weak_pill = weak_ui_upd.clone();
                         let r = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak_pill.upgrade() {
                                 ui.set_update_available(true);
                                 ui.set_update_version(ver);
                                 ui.set_update_download_url(dl);
+                                ui.set_update_size_text(size_text);
                             }
                         });
                         if r.is_err() {
                             updater_log("invoke_from_event_loop failed - will retry next cycle");
                         } else {
-                            updater_log("pill set on UI thread");
+                            updater_log(&format!(
+                                "pill set on UI thread (asset {} bytes)",
+                                result.download_size
+                            ));
                         }
                     }
                     consecutive_failures = 0;

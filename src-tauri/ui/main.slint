@@ -3941,6 +3941,10 @@ export component MainWindow inherits Window {
     in-out property <bool> update_available: false;
     in-out property <string> update_version: "";
     in-out property <string> update_download_url: "";
+    // Human size of the pending installer asset (e.g. "12.0 MB"), empty if unknown.
+    in-out property <string> update_size_text: "";
+    // Live short progress while installing (e.g. "45% · 5.4 / 12.0 MB").
+    in-out property <string> update_progress_text: "";
     // True while an Install click is downloading the release asset.
     in-out property <bool> update_installing: false;
     // 0–1 download progress while update_installing is true.
@@ -6971,8 +6975,10 @@ export component MainWindow inherits Window {
                 Rectangle {
                     visible: root.update_available;
                     horizontal-stretch: 0;
-                    preferred-width: root.update_installing ? 220px
-                        : (root.update_download_url != "" ? 196px : 158px);
+                    preferred-width: root.update_installing ? 268px
+                        : (root.update_download_url != ""
+                            ? (root.update_size_text != "" ? 248px : 196px)
+                            : (root.update_size_text != "" ? 210px : 158px));
                     width: self.preferred-width;
                     preferred-height: 18px;
                     height: self.preferred-height;
@@ -6991,13 +6997,16 @@ export component MainWindow inherits Window {
                         x: 0; width: root.update_download_url != "" ? parent.width - 54px : parent.width;
                         height: parent.height;
                         text: root.update_installing
-                            ? ("Downloading " + Math.floor(root.update_download_progress * 100) + "%")
-                            : ("Update v" + root.update_version + " available");
+                            ? (root.update_progress_text != "" ? root.update_progress_text : "Downloading…")
+                            : (root.update_size_text != ""
+                                ? ("Update v" + root.update_version + " · " + root.update_size_text)
+                                : ("Update v" + root.update_version + " available"));
                         color: white;
                         font-size: 10px;
                         font-weight: 600;
                         horizontal-alignment: center;
                         vertical-alignment: center;
+                        overflow: elide;
                     }
                     // Click anywhere on the banner OPENS the releases page.
                     // Declared BEFORE the Install button so it sits at lower z;

@@ -446,10 +446,7 @@ pub fn active_model_info() -> Option<ActiveModelInfo> {
         query_prefix: emb.query_prefix.clone().unwrap_or_default(),
         max_seq: emb.max_seq.unwrap_or(128) as usize,
         classifier_id: clf.id.clone(),
-        classifier_input_name: clf
-            .input_name
-            .clone()
-            .unwrap_or_else(|| "data".into()),
+        classifier_input_name: clf.input_name.clone().unwrap_or_else(|| "data".into()),
         classifier_input_size: clf.input_size.unwrap_or(224),
     })
 }
@@ -543,7 +540,12 @@ fn asset_is_valid(asset: &CatalogAsset) -> bool {
     }
 }
 
-fn download_https(url: &str, dest: &Path, progress: &InstallProgress, base: u64) -> Result<u64, String> {
+fn download_https(
+    url: &str,
+    dest: &Path,
+    progress: &InstallProgress,
+    base: u64,
+) -> Result<u64, String> {
     let _ = fs::remove_file(dest);
     let part = PathBuf::from(format!("{}.part", dest.display()));
     let _ = fs::remove_file(&part);
@@ -581,6 +583,7 @@ fn ensure_asset(
     asset: &CatalogAsset,
     progress: &InstallProgress,
     accumulated: &mut u64,
+    count_cached_toward_progress: bool,
 ) -> Result<InstalledAsset, String> {
     if asset_is_valid(asset) {
         let path = if asset.extract.as_deref() == Some("ort_nupkg_win_x64") {
@@ -596,10 +599,12 @@ fn ensure_asset(
         } else {
             sha256_file(&path).unwrap_or_default()
         };
-        *accumulated = accumulated.saturating_add(bytes);
-        progress
-            .bytes_downloaded
-            .store(*accumulated, Ordering::Release);
+        if count_cached_toward_progress {
+            *accumulated = accumulated.saturating_add(bytes);
+            progress
+                .bytes_downloaded
+                .store(*accumulated, Ordering::Release);
+        }
         return Ok(InstalledAsset {
             id: asset.id.clone(),
             revision: asset.sha256.clone(),
@@ -714,7 +719,17 @@ fn install_profile_inner(
         return Err("Profile has no assets.".into());
     }
 
-    let total: u64 = assets.iter().map(|a| a.bytes).sum();
+    let total: u64 = if updating {
+        // Only bytes that still need to be fetched — already-valid assets are not
+        // part of this update transfer and must not inflate the progress bar.
+        assets
+            .iter()
+            .filter(|a| !asset_is_valid(a))
+            .map(|a| a.bytes)
+            .sum()
+    } else {
+        assets.iter().map(|a| a.bytes).sum()
+    };
     progress.bytes_total.store(total, Ordering::Release);
     progress.bytes_downloaded.store(0, Ordering::Release);
     if let Ok(mut s) = progress.state.lock() {
@@ -724,14 +739,24 @@ fn install_profile_inner(
             InstallState::Downloading
         };
     }
+    if let Ok(mut m) = progress.message.lock() {
+        *m = if updating {
+            "Updating models…".into()
+        } else {
+            "Downloading models…".into()
+        };
+    }
 
     let mut accumulated = 0u64;
     let mut installed = Vec::new();
     let mut keep_names: HashSet<String> = HashSet::new();
     keep_names.insert("onnxruntime.dll".into());
+    // Full installs count already-cached assets toward progress (skip work).
+    // Updates only count freshly downloaded bytes against the pending total.
+    let count_cached = !updating;
 
     for asset in &assets {
-        match ensure_asset(asset, &progress, &mut accumulated) {
+        match ensure_asset(asset, &progress, &mut accumulated, count_cached) {
             Ok(row) => {
                 keep_names.insert(row.local_name.clone());
                 installed.push(row);
@@ -807,8 +832,8 @@ pub fn start_install(progress: Arc<InstallProgress>, profile: Option<String>) {
     } else {
         profile
     };
-    std::thread::spawn(move || {
-        match install_profile_inner(&profile, progress.clone(), false) {
+    std::thread::spawn(
+        move || match install_profile_inner(&profile, progress.clone(), false) {
             Ok(_) => {
                 if let Ok(mut s) = progress.state.lock() {
                     *s = InstallState::Installed;
@@ -820,8 +845,8 @@ pub fn start_install(progress: Arc<InstallProgress>, profile: Option<String>) {
                 progress.busy.store(false, Ordering::Release);
             }
             Err(e) => set_error(&progress, e),
-        }
-    });
+        },
+    );
 }
 
 pub fn start_repair(progress: Arc<InstallProgress>) {
@@ -899,9 +924,7 @@ pub fn check_for_model_updates(progress: Arc<InstallProgress>) -> u64 {
         manifest.profile.clone()
     };
     let need = pending_update_bytes(&catalog, &profile);
-    progress
-        .update_available
-        .store(need > 0, Ordering::Release);
+    progress.update_available.store(need > 0, Ordering::Release);
     progress.update_bytes.store(need, Ordering::Release);
     manifest.last_update_check_at = Some(now_unix_secs());
     if need == 0 && matches!(manifest.state, InstallState::Installed) {
@@ -1059,14 +1082,8 @@ mod tests {
         assert!(c.assets.contains_key("minilm-l6-quant"));
         assert!(!c.assets["ort-directml-1.24.4"].sha256.is_empty());
         // Storage should grow Compact < Balanced < Quality.
-        assert_eq!(
-            c.profiles["balanced"].embedding_asset,
-            "bge-small-quant"
-        );
-        assert_eq!(
-            c.profiles["quality"].classifier_asset,
-            "efficientnet-lite4"
-        );
+        assert_eq!(c.profiles["balanced"].embedding_asset, "bge-small-quant");
+        assert_eq!(c.profiles["quality"].classifier_asset, "efficientnet-lite4");
     }
 
     #[test]
@@ -1074,8 +1091,14 @@ mod tests {
         let compact = approx_install_mb_for_profile("compact");
         let bal = approx_install_mb_for_profile("balanced");
         let quality = approx_install_mb_for_profile("quality");
-        assert!(compact < bal, "compact ({compact}) should be < balanced ({bal})");
-        assert!(bal < quality, "balanced ({bal}) should be < quality ({quality})");
+        assert!(
+            compact < bal,
+            "compact ({compact}) should be < balanced ({bal})"
+        );
+        assert!(
+            bal < quality,
+            "balanced ({bal}) should be < quality ({quality})"
+        );
         assert!(compact > 20);
         assert!(quality < 150);
     }
