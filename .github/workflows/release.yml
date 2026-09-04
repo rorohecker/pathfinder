@@ -35,10 +35,14 @@ jobs:
         run: cargo tauri build
 
       - name: Upload installers to release
+        # Creates/updates the tag release only once the installers exist so
+        # /releases/latest never points at an empty tag (that made older
+        # Pathfinder builds open GitHub instead of downloading).
         uses: softprops/action-gh-release@v2
         with:
           draft: false
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/msi/*.msi

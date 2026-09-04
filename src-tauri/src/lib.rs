@@ -113,6 +113,10 @@ const MAX_OPERATION_QUEUE_ITEMS: usize = 200;
 static MAX_HEAVY_OPS: LazyLock<usize> = LazyLock::new(|| (num_cpus() / 2).clamp(2, 6));
 const GITHUB_LATEST_RELEASE_API: &str =
     "https://api.github.com/repos/rorohecker/pathfinder/releases/latest";
+/// Recent releases — used when `/latest` is a newer tag that still has no
+/// `.exe`/`.msi` (common while the Windows installer workflow is uploading).
+const GITHUB_RELEASES_LIST_API: &str =
+    "https://api.github.com/repos/rorohecker/pathfinder/releases?per_page=15";
 const GITHUB_RELEASES_URL: &str = "https://github.com/rorohecker/pathfinder/releases";
 
 static ACTIVE_HEAVY_OPS: AtomicUsize = AtomicUsize::new(0);
@@ -10430,8 +10434,7 @@ fn pick_release_installer(assets: &[serde_json::Value]) -> (String, String, u64)
     (String::new(), String::new(), 0)
 }
 
-fn check_github_release_now() -> Result<UpdateCheckResult, String> {
-    updater_log(&format!("GET {GITHUB_LATEST_RELEASE_API} (in-process)"));
+fn github_api_get_json(url: &str) -> Result<serde_json::Value, String> {
     let agent = github_http_user_agent();
     let auth_header = std::env::var("PATHFINDER_GITHUB_TOKEN")
         .or_else(|_| std::env::var("GITHUB_TOKEN"))
@@ -10439,7 +10442,7 @@ fn check_github_release_now() -> Result<UpdateCheckResult, String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .map(|tok| format!("Bearer {tok}"));
-    let mut req = ureq::get(GITHUB_LATEST_RELEASE_API)
+    let mut req = ureq::get(url)
         .set("User-Agent", &agent)
         .set("Accept", "application/vnd.github+json")
         .set("X-GitHub-Api-Version", "2022-11-28");
@@ -10466,11 +10469,20 @@ fn check_github_release_now() -> Result<UpdateCheckResult, String> {
         updater_log(&msg);
         return Err(msg);
     }
-    let value: serde_json::Value = resp.into_json().map_err(|e| {
+    resp.into_json().map_err(|e| {
         let msg = format!("GitHub JSON decode failed: {e}");
         updater_log(&msg);
         msg
-    })?;
+    })
+}
+
+/// Build an update result from one GitHub release JSON object.
+/// `available` is true only when the tag is newer **and** a real installer URL
+/// exists — otherwise the status-bar pill would only open the releases page.
+fn update_result_from_release(
+    value: &serde_json::Value,
+    current_version: &str,
+) -> UpdateCheckResult {
     let latest_raw = value
         .get("tag_name")
         .and_then(|v| v.as_str())
@@ -10495,38 +10507,96 @@ fn check_github_release_now() -> Result<UpdateCheckResult, String> {
         .and_then(|a| a.as_array())
         .map(|assets| pick_release_installer(assets))
         .unwrap_or_default();
-    if download_url.is_empty() {
-        eprintln!("[updater] no .exe or .msi release asset found for in-app install");
-    }
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
-    let available =
-        !latest_version.is_empty() && version_is_newer(&latest_version, &current_version);
-    Ok(UpdateCheckResult {
-        available,
-        current_version: current_version.clone(),
-        latest_version: if latest_version.is_empty() {
-            current_version.clone()
+    let newer = !latest_version.is_empty() && version_is_newer(&latest_version, current_version);
+    let available = newer && !download_url.is_empty();
+    let message = if available {
+        if download_size > 0 {
+            format!(
+                "Pathfinder {latest_version} is available ({}).",
+                format_size_short(download_size)
+            )
         } else {
-            latest_version.clone()
+            format!("Pathfinder {latest_version} is available.")
+        }
+    } else if newer && download_url.is_empty() {
+        format!("Pathfinder {latest_version} is publishing — installer not ready yet.")
+    } else {
+        "Pathfinder is up to date.".to_string()
+    };
+    UpdateCheckResult {
+        available,
+        current_version: current_version.to_string(),
+        latest_version: if latest_version.is_empty() {
+            current_version.to_string()
+        } else {
+            latest_version
         },
         release_url,
         download_url,
         download_sha256,
         download_size,
         notes,
-        message: if available {
-            if download_size > 0 {
-                format!(
-                    "Pathfinder {latest_version} is available ({}).",
-                    format_size_short(download_size)
-                )
-            } else {
-                format!("Pathfinder {latest_version} is available.")
+        message,
+    }
+}
+
+fn check_github_release_now() -> Result<UpdateCheckResult, String> {
+    updater_log(&format!("GET {GITHUB_LATEST_RELEASE_API} (in-process)"));
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let latest_json = github_api_get_json(GITHUB_LATEST_RELEASE_API)?;
+    let result = update_result_from_release(&latest_json, &current_version);
+    if result.available {
+        updater_log(&format!(
+            "installable latest={} size={} url={}",
+            result.latest_version, result.download_size, result.download_url
+        ));
+        return Ok(result);
+    }
+
+    // `/releases/latest` can point at a tag whose Windows installers are still
+    // uploading. Older clients then saw "Update available" with an empty
+    // download URL and every click opened GitHub. Prefer the newest published
+    // release that actually has an .exe/.msi and is newer than us.
+    let newer_without_asset = version_is_newer(&result.latest_version, &current_version)
+        && result.download_url.is_empty();
+    if newer_without_asset {
+        updater_log(&format!(
+            "latest {} has no installer yet; scanning recent releases",
+            result.latest_version
+        ));
+        match github_api_get_json(GITHUB_RELEASES_LIST_API) {
+            Ok(list) => {
+                if let Some(arr) = list.as_array() {
+                    for rel in arr {
+                        if rel.get("draft").and_then(|d| d.as_bool()) == Some(true) {
+                            continue;
+                        }
+                        if rel.get("prerelease").and_then(|d| d.as_bool()) == Some(true) {
+                            continue;
+                        }
+                        let cand = update_result_from_release(rel, &current_version);
+                        if cand.available {
+                            updater_log(&format!(
+                                "fallback installable release={} size={}",
+                                cand.latest_version, cand.download_size
+                            ));
+                            return Ok(cand);
+                        }
+                    }
+                }
             }
-        } else {
-            "Pathfinder is up to date.".to_string()
-        },
-    })
+            Err(e) => updater_log(&format!("releases list failed: {e}")),
+        }
+        // Keep available=false so we never show a pill that can only open GitHub.
+        updater_log(&result.message);
+        return Ok(result);
+    }
+
+    updater_log(&format!(
+        "no installable update (latest={} available={})",
+        result.latest_version, result.available
+    ));
+    Ok(result)
 }
 
 /// `.msi` vs `.exe` from the download URL path (GitHub `browser_download_url`).
@@ -11692,6 +11762,36 @@ mod open_file_routing_tests {
 #[cfg(test)]
 mod updater_asset_tests {
     use super::*;
+
+    #[test]
+    fn update_available_requires_installer_url() {
+        let bare = serde_json::json!({
+            "tag_name": "v9.9.9",
+            "html_url": "https://example.com/r",
+            "body": "notes",
+            "assets": []
+        });
+        let r = update_result_from_release(&bare, "1.0.0");
+        assert!(!r.available, "empty assets must not advertise an installable update");
+        assert!(r.download_url.is_empty());
+        assert!(r.message.contains("publishing") || r.message.contains("not ready"));
+
+        let with_exe = serde_json::json!({
+            "tag_name": "v9.9.9",
+            "html_url": "https://example.com/r",
+            "body": "notes",
+            "assets": [{
+                "name": "Pathfinder_9.9.9_x64-setup.exe",
+                "size": 12_000_000,
+                "browser_download_url": "https://example.com/setup.exe"
+            }]
+        });
+        let r2 = update_result_from_release(&with_exe, "1.0.0");
+        assert!(r2.available);
+        assert_eq!(r2.download_url, "https://example.com/setup.exe");
+        assert_eq!(r2.download_size, 12_000_000);
+        assert!(r2.message.contains("12") || r2.message.contains("MB") || r2.message.contains("available"));
+    }
 
     #[test]
     fn pick_release_installer_prefers_exe_and_reports_size() {
@@ -25712,7 +25812,11 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             }
             let url = ui.get_update_download_url().to_string();
             if url.is_empty() {
-                let _ = open::that(GITHUB_RELEASES_URL);
+                c.borrow_mut().show_toast_kind(
+                    &ui,
+                    "Installer is not ready yet — try again in a minute.",
+                    "warning",
+                );
                 return;
             }
             UPDATE_BYTES_COPIED.store(0, Ordering::Relaxed);
@@ -25741,7 +25845,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 ctrl.toast_last_shown = Some(std::time::Instant::now());
             }
             let weak2 = weak.clone();
-            let url_fallback = url.clone();
             std::thread::spawn(move || {
                 match download_and_install_update(&url) {
                     Ok(()) => {
@@ -25764,18 +25867,16 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     }
                     Err(e) => {
                         updater_log(&format!("install failed: {e}"));
-                        let open_url = url_fallback;
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak2.upgrade() {
                                 ui.set_update_installing(false);
                                 ui.set_update_download_progress(0.0);
                                 ui.set_toast_text(ss(&format!(
-                                    "Update failed: {e} — opening download page…"
+                                    "Update failed: {e}. Click the update pill to retry."
                                 )));
                                 ui.set_toast_kind(ss("error"));
+                                ui.set_toast_action(ss(""));
                             }
-                            // Last resort: browser download so the user is never stuck.
-                            let _ = open::that(&open_url);
                         });
                     }
                 }

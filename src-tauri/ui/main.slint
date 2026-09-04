@@ -7083,7 +7083,8 @@ export component MainWindow inherits Window {
                         background: rgba(255, 255, 255, 0.28);
                     }
                     Text {
-                        x: 0; width: root.update_download_url != "" ? parent.width - 54px : parent.width;
+                        x: 0; width: root.update_download_url != "" && !root.update_installing
+                            ? parent.width - 54px : parent.width;
                         height: parent.height;
                         text: root.update_installing
                             ? (root.update_progress_text != "" ? root.update_progress_text : "Downloading…")
@@ -7097,58 +7098,35 @@ export component MainWindow inherits Window {
                         vertical-alignment: center;
                         overflow: elide;
                     }
-                    // Click anywhere on the banner OPENS the releases page.
-                    // Declared BEFORE the Install button so it sits at lower z;
-                    // also shrinks its width when the Install pill is shown so
-                    // there's a generous gap that can't be misrouted.
+                    // Whole banner installs in-app when a direct asset URL is set.
+                    // Never route to GitHub from this pill — that was the 1.0.5
+                    // trap when /latest had a tag but no .exe/.msi yet.
                     TouchArea {
                         x: 0;
                         y: 0;
-                        width: root.update_download_url != "" ? parent.width - 60px : parent.width;
+                        width: parent.width;
                         height: parent.height;
                         mouse-cursor: pointer;
                         clicked => {
                             if (!root.update_installing) {
-                                root.command("open-releases");
+                                root.install_update();
                             }
                         }
                     }
-                    // Install pill - declared AFTER the banner TouchArea so it
-                    // wins z-order for clicks on its area. z is set explicitly
-                    // too as belt-and-suspenders against any Slint hit-test
-                    // ordering quirk. The TouchArea inside also extends a 4px
-                    // grace area to the left of the visible pill so clicks
-                    // near the button's left edge still land on Install.
-                    if root.update_download_url != "": Rectangle {
+                    if root.update_download_url != "" && !root.update_installing: Rectangle {
                         z: 100;
                         x: parent.width - 52px; y: 1px;
                         width: 50px; height: parent.height - 2px;
                         border-radius: 8px;
-                        background: root.update_installing
-                            ? rgba(0, 0, 0, 0.45)
-                            : rgba(0, 0, 0, 0.25);
+                        background: rgba(0, 0, 0, 0.25);
                         Text {
                             width: parent.width; height: parent.height;
-                            text: root.update_installing ? "…" : @tr("Install");
+                            text: @tr("Install");
                             color: white;
                             font-size: 10px;
                             font-weight: 700;
                             horizontal-alignment: center;
                             vertical-alignment: center;
-                        }
-                        TouchArea {
-                            // Extend slightly outside the visible pill so the
-                            // hit area is a few pixels larger than the paint.
-                            x: -4px;
-                            y: -2px;
-                            width: parent.width + 8px;
-                            height: parent.height + 4px;
-                            mouse-cursor: pointer;
-                            clicked => {
-                                if (!root.update_installing) {
-                                    root.install_update();
-                                }
-                            }
                         }
                     }
                 }
