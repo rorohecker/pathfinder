@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Pathfinder MSI (WiX). Replaces the Tauri MSI target.
+  Build (from src-tauri, after cargo build --release + pdfium copy):
+    candle -arch x64 -dVersion=1.0.14 -dSourceDir=target\release\stage windows\pathfinder.wxs
+    light -out target\release\bundle\msi\Pathfinder_1.0.14_x64_en-US.msi pathfinder.wixobj
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="Pathfinder"
+    Language="1033"
+    Version="$(var.Version)"
+    Manufacturer="Pathfinder"
+    UpgradeCode="A7C3E9F1-4B2D-4E8A-9C1F-6D5E8A2B3C4D">
+    <Package
+      InstallerVersion="500"
+      Compressed="yes"
+      InstallScope="perUser"
+      Description="Pathfinder file manager"
+      Manufacturer="Pathfinder" />
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Pathfinder is already installed."
+      Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="icons\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="INSTALLFOLDER" Name="Pathfinder" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="Pathfinder" />
+      </Directory>
+      <Directory Id="DesktopFolder" Name="Desktop" />
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="B1C2D3E4-F5A6-4789-ABCD-EF0123456789">
+        <File Id="PathfinderExe" Source="$(var.SourceDir)\pathfinder.exe" KeyPath="yes" Checksum="yes" />
+        <File Id="PdfiumDll" Source="$(var.SourceDir)\pdfium.dll" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Pathfinder\Pathfinder"
+          Name="InstallDir"
+          Type="string"
+          Value="[INSTALLFOLDER]"
+          KeyPath="no" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="StartMenuShortcut" Guid="C2D3E4F5-A6B7-4890-BCDE-F01234567890">
+        <Shortcut
+          Id="StartMenuPathfinder"
+          Name="Pathfinder"
+          Description="Pathfinder file manager"
+          Target="[INSTALLFOLDER]pathfinder.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="AppIcon" />
+        <RemoveFolder Id="RemoveProgramMenuDir" Directory="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Pathfinder\Pathfinder"
+          Name="StartMenuShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="D3E4F5A6-B7C8-4901-CDEF-012345678901">
+        <Shortcut
+          Id="DesktopPathfinder"
+          Name="Pathfinder"
+          Description="Pathfinder file manager"
+          Target="[INSTALLFOLDER]pathfinder.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="AppIcon" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Pathfinder\Pathfinder"
+          Name="DesktopShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!--
+      CustomAction for shell-handler cleanup on uninstall. Best-effort; MSI may
+      skip if the exe was already removed. Matches NSIS PREUNINSTALL behavior.
+    -->
+    <CustomAction
+      Id="UninstallShellHandler"
+      FileKey="PathfinderExe"
+      ExeCommand="--uninstall-shell-handler"
+      Execute="immediate"
+      Impersonate="yes"
+      Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="UninstallShellHandler" Before="RemoveFiles">REMOVE="ALL"</Custom>
+    </InstallExecuteSequence>
+
+    <Feature Id="Main" Title="Pathfinder" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+  </Product>
+</Wix>

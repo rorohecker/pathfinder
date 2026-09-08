@@ -2,7 +2,7 @@
 # no more multi-GB ghost cache. Cargo never garbage-collects old per-build-hash
 # directories under target/debug/incremental/, so they accumulate forever - a
 # clean checkout here had 354 stale snapshots totaling 70 GB. Most large Rust
-# projects (including Tauri's release docs) recommend turning this off.
+# Rust projects recommend turning this off.
 [build]
 incremental = false
 

@@ -7820,6 +7820,9 @@ export component MainWindow inherits Window {
                 y: 124px;
                 width: parent.width - 26px;
                 height: parent.height - 136px;
+                // Cache the heavy theme grid so wheel scrolling doesn't repaint
+                // every tile from scratch each frame (Explorer-like smoothness).
+                cache-rendering-hint: true;
 
                 VerticalLayout {
                     // Inner content stops settings_scroll_gutter short of the ScrollView
@@ -8817,6 +8820,7 @@ export component MainWindow inherits Window {
                 y: 124px;
                 width: parent.width - 26px;
                 height: parent.height - 136px;
+                cache-rendering-hint: true;
 
                 VerticalLayout {
                 width: parent.width - AppMetrics.settings_scroll_gutter;
@@ -8991,6 +8995,7 @@ export component MainWindow inherits Window {
                 y: 124px;
                 width: parent.width - 26px;
                 height: parent.height - 136px;
+                cache-rendering-hint: true;
 
                 VerticalLayout {
                     width: parent.width - AppMetrics.settings_scroll_gutter;
@@ -9114,6 +9119,7 @@ export component MainWindow inherits Window {
                 y: 124px;
                 width: parent.width - 26px;
                 height: parent.height - 136px;
+                cache-rendering-hint: true;
 
                 VerticalLayout {
                     width: parent.width - AppMetrics.settings_scroll_gutter;

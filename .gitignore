@@ -1,4 +1,4 @@
-# Rust / Tauri build output
+# Rust build output
 src-tauri/target/
 
 # Local cargo / udeps artifacts under src-tauri (never commit)

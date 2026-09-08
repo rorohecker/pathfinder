@@ -26,5 +26,4 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/fonts/Lora-Regular.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/FiraCode-Regular.ttf");
     println!("cargo:rerun-if-changed=lang");
-    tauri_build::build()
 }
