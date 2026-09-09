@@ -63,7 +63,7 @@ $wxs = Join-Path $root "windows\pathfinder.wxs"
 & candle -nologo -arch x64 "-dVersion=$Version" "-dSourceDir=$stage" "-dIconPath=$icon" -out $wixObj $wxs
 if ($LASTEXITCODE -ne 0) { throw "candle failed" }
 $msi = Join-Path $msiOut "Pathfinder_${Version}_x64_en-US.msi"
-& light -nologo -out $msi $wixObj
+& light -nologo -sice:ICE91 -out $msi $wixObj
 if ($LASTEXITCODE -ne 0) { throw "light failed" }
 Remove-Item -Force $wixObj -ErrorAction SilentlyContinue
 
