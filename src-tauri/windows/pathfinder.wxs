@@ -41,7 +41,8 @@
 
     <DirectoryRef Id="INSTALLFOLDER">
       <Component Id="MainExecutable" Guid="B1C2D3E4-F5A6-4789-ABCD-EF0123456789">
-        <File Id="PathfinderExe" Source="$(var.SourceDir)\pathfinder.exe" KeyPath="yes" Checksum="yes" />
+        <!-- Per-user (LocalAppData) components require an HKCU registry KeyPath (ICE38). -->
+        <File Id="PathfinderExe" Source="$(var.SourceDir)\pathfinder.exe" KeyPath="no" Checksum="yes" />
         <File Id="PdfiumDll" Source="$(var.SourceDir)\pdfium.dll" />
         <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
         <RegistryValue
@@ -50,7 +51,7 @@
           Name="InstallDir"
           Type="string"
           Value="[INSTALLFOLDER]"
-          KeyPath="no" />
+          KeyPath="yes" />
       </Component>
     </DirectoryRef>
 
