@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot\..
+$root = (Get-Location).Path
 
 if (-not $Version) {
     $toml = Get-Content .\Cargo.toml -Raw
@@ -29,30 +30,39 @@ Write-Host "Building Pathfinder $Version (release)..."
 cargo build --release --locked
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
-$stage = "target\release\stage"
+$stage = Join-Path $root "target\release\stage"
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
-Copy-Item -Force "target\release\pathfinder.exe" "$stage\pathfinder.exe"
-Copy-Item -Force "pdfium\pdfium.dll" "$stage\pdfium.dll"
+Copy-Item -Force (Join-Path $root "target\release\pathfinder.exe") (Join-Path $stage "pathfinder.exe")
+Copy-Item -Force (Join-Path $root "pdfium\pdfium.dll") (Join-Path $stage "pdfium.dll")
 
-$nsisOut = "target\release\bundle\nsis"
-$msiOut = "target\release\bundle\msi"
+$nsisOut = Join-Path $root "target\release\bundle\nsis"
+$msiOut = Join-Path $root "target\release\bundle\msi"
 New-Item -ItemType Directory -Force -Path $nsisOut | Out-Null
 New-Item -ItemType Directory -Force -Path $msiOut | Out-Null
 
-$setup = Join-Path (Resolve-Path $nsisOut) "Pathfinder_${Version}_x64-setup.exe"
+$setup = Join-Path $nsisOut "Pathfinder_${Version}_x64-setup.exe"
+$exe = Join-Path $stage "pathfinder.exe"
+$pdfium = Join-Path $stage "pdfium.dll"
+$icon = Join-Path $root "icons\icon.ico"
+$nsi = Join-Path $root "windows\installer.nsi"
+
+# makensis changes into the script directory unless /NOCD is passed, so always
+# feed absolute paths for inputs/outputs and the installer icon.
 Write-Host "Building NSIS installer -> $setup"
-& makensis /DVERSION=$Version `
+& makensis /NOCD /DVERSION=$Version `
     "/DOUTFILE=$setup" `
-    "/DMAINBINARYPATH=$stage\pathfinder.exe" `
-    "/DPDFIUM_PATH=$stage\pdfium.dll" `
-    "windows\installer.nsi"
+    "/DMAINBINARYPATH=$exe" `
+    "/DPDFIUM_PATH=$pdfium" `
+    "/DICON_PATH=$icon" `
+    "$nsi"
 if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
 
 Write-Host "Building MSI..."
-$wixObj = "pathfinder.wixobj"
-& candle -nologo -arch x64 "-dVersion=$Version" "-dSourceDir=$stage" -out $wixObj "windows\pathfinder.wxs"
+$wixObj = Join-Path $root "pathfinder.wixobj"
+$wxs = Join-Path $root "windows\pathfinder.wxs"
+& candle -nologo -arch x64 "-dVersion=$Version" "-dSourceDir=$stage" "-dIconPath=$icon" -out $wixObj $wxs
 if ($LASTEXITCODE -ne 0) { throw "candle failed" }
-$msi = Join-Path (Resolve-Path $msiOut) "Pathfinder_${Version}_x64_en-US.msi"
+$msi = Join-Path $msiOut "Pathfinder_${Version}_x64_en-US.msi"
 & light -nologo -out $msi $wixObj
 if ($LASTEXITCODE -ne 0) { throw "light failed" }
 Remove-Item -Force $wixObj -ErrorAction SilentlyContinue

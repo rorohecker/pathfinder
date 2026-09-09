@@ -29,6 +29,11 @@
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"
 !define MANUPRODUCTKEY "Software\${MANUFACTURER}\${PRODUCTNAME}"
 
+; Paths relative to this script (windows/). Override via /D from pack.ps1 when needed.
+!ifndef ICON_PATH
+  !define ICON_PATH "..\icons\icon.ico"
+!endif
+
 Unicode true
 ManifestDPIAware true
 SetCompressor /SOLID lzma
@@ -38,14 +43,15 @@ OutFile "${OUTFILE}"
 InstallDir "$LOCALAPPDATA\${PRODUCTNAME}"
 InstallDirRegKey HKCU "${MANUPRODUCTKEY}" ""
 RequestExecutionLevel user
-Icon "icons\icon.ico"
-UninstallIcon "icons\icon.ico"
+Icon "${ICON_PATH}"
+UninstallIcon "${ICON_PATH}"
 
 !include MUI2.nsh
 !include FileFunc.nsh
+!include LogicLib.nsh
 
-!define MUI_ICON "icons\icon.ico"
-!define MUI_UNICON "icons\icon.ico"
+!define MUI_ICON "${ICON_PATH}"
+!define MUI_UNICON "${ICON_PATH}"
 !define MUI_ABORTWARNING
 
 !insertmacro MUI_PAGE_WELCOME
