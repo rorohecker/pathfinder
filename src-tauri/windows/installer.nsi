@@ -1,6 +1,6 @@
 ; Pathfinder Windows NSIS installer (replaces the Tauri bundler).
 ; Build (from src-tauri after `cargo build --release`):
-;   makensis /DVERSION=1.0.14 windows/installer.nsi
+;   makensis /DVERSION=1.0.15 windows/installer.nsi
 ;
 ; Defines (optional overrides):
 ;   VERSION          - product version (required)
@@ -66,10 +66,16 @@ Section "Install"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
+  ; Start Menu shortcuts always refresh so the target stays current after updates.
   CreateDirectory "$SMPROGRAMS\${PRODUCTNAME}"
   CreateShortCut "$SMPROGRAMS\${PRODUCTNAME}\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
   CreateShortCut "$SMPROGRAMS\${PRODUCTNAME}\Uninstall.lnk" "$INSTDIR\uninstall.exe"
-  CreateShortCut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+
+  ; Desktop shortcut: create on interactive installs only. Silent/auto-update
+  ; (/S, including legacy /UPDATE) must not keep re-dropping a Desktop icon.
+  ${IfNot} ${Silent}
+    CreateShortCut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe"
+  ${EndIf}
 
   WriteRegStr HKCU "${MANUPRODUCTKEY}" "" $INSTDIR
   WriteRegStr HKCU "${UNINSTKEY}" "DisplayName" "${PRODUCTNAME}"

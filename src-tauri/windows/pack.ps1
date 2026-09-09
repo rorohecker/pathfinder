@@ -9,10 +9,19 @@ Set-Location $PSScriptRoot\..
 
 if (-not $Version) {
     $toml = Get-Content .\Cargo.toml -Raw
-    if ($toml -match 'version\s*=\s*"([^"]+)"') {
+    # Prefer [package] version, not a dependency version later in the file.
+    if ($toml -match '(?ms)^\[package\].*?^version\s*=\s*"([^"]+)"') {
+        $Version = $Matches[1]
+    } elseif ($toml -match 'version\s*=\s*"([^"]+)"') {
         $Version = $Matches[1]
     } else {
         throw "Could not read version from Cargo.toml"
+    }
+}
+
+foreach ($tool in @("makensis", "candle", "light")) {
+    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+        throw "$tool not found on PATH. Install NSIS and WiX Toolset v3."
     }
 }
 
