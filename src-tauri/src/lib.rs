@@ -24,7 +24,6 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime};
-use tauri::{AppHandle, Manager, State, Window};
 use walkdir::WalkDir;
 
 #[cfg(target_os = "windows")]
@@ -2098,9 +2097,9 @@ fn pdfium_library_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // Bundled next to the executable (Tauri resource) …
+            // Bundled next to the executable by windows/pack.ps1 …
             candidates.push(dir.join("pdfium.dll"));
-            // … or under a nested resources folder, depending on bundler.
+            // … or under a nested resources folder for alternate layouts.
             candidates.push(dir.join("resources").join("pdfium.dll"));
         }
     }
@@ -2516,19 +2515,7 @@ impl AppState {
     }
 }
 
-fn bookmarks_path(app: &AppHandle) -> PathBuf {
-    app.path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("bookmarks.json")
-}
 
-fn user_pins_path(app: &AppHandle) -> PathBuf {
-    app.path()
-        .app_data_dir()
-        .unwrap_or_else(|_| native_data_dir())
-        .join("user_pins.json")
-}
 
 fn push_known(list: &mut Vec<KnownFolder>, id: &str, name: &str, path: Option<PathBuf>) {
     if let Some(path) = path {
@@ -3082,20 +3069,7 @@ fn local_ai_image_search_ready_cached() -> bool {
     local_ai_semantic_ready_cached() && crate::inference::image_classifier_available()
 }
 
-#[tauri::command]
-fn list_directory(state: State<'_, AppState>, path: String) -> Result<Vec<FileEntry>, String> {
-    if let Some(entries) = state.cached_directory(&path) {
-        return Ok(entries);
-    }
 
-    let dir = PathBuf::from(&path);
-    let entries = list_directory_uncached(&dir)?;
-    state.store_directory(&path, entries.clone());
-    schedule_index_directory(path, entries.clone());
-    Ok(entries)
-}
-
-#[tauri::command]
 fn get_file_info(path: String) -> Result<FileInfo, String> {
     let path_buf = PathBuf::from(&path);
     if !path_buf.exists() {
@@ -3128,14 +3102,12 @@ fn get_file_info(path: String) -> Result<FileInfo, String> {
     })
 }
 
-#[tauri::command]
 fn get_home_directory() -> Result<String, String> {
     dirs::home_dir()
         .map(|p| p.to_string_lossy().to_string())
         .ok_or_else(|| "Could not determine home directory".to_string())
 }
 
-#[tauri::command]
 fn get_known_folders() -> Vec<KnownFolder> {
     let mut folders = Vec::new();
     push_known(&mut folders, "home", "Home", dirs::home_dir());
@@ -3148,7 +3120,6 @@ fn get_known_folders() -> Vec<KnownFolder> {
     folders
 }
 
-#[tauri::command]
 fn get_parent_path(path: String) -> Option<String> {
     PathBuf::from(&path)
         .parent()
@@ -3156,7 +3127,6 @@ fn get_parent_path(path: String) -> Option<String> {
         .filter(|p| !p.is_empty())
 }
 
-#[tauri::command]
 fn join_path(parent: String, child: String) -> Result<String, String> {
     if child.contains('/') || child.contains('\\') {
         return Err("Name cannot contain path separators".to_string());
@@ -3167,12 +3137,10 @@ fn join_path(parent: String, child: String) -> Result<String, String> {
         .to_string())
 }
 
-#[tauri::command]
 fn path_exists(path: String) -> bool {
     Path::new(&path).exists()
 }
 
-#[tauri::command]
 fn get_drives() -> Vec<DriveInfo> {
     let mut drives = Vec::new();
 
@@ -3706,7 +3674,6 @@ fn open_with_shell_execute(path: &str) -> Result<(), String> {
     unsafe { ShellExecuteExW(&mut info).map_err(|e| e.to_string()) }
 }
 
-#[tauri::command]
 fn open_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -3722,7 +3689,6 @@ fn open_file(path: String) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
 fn reveal_in_folder(path: String) -> Result<(), String> {
     let path_buf = PathBuf::from(&path);
 
@@ -4140,144 +4106,11 @@ fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-fn rename_file(
-    state: State<'_, AppState>,
-    path: String,
-    new_name: String,
-) -> Result<String, String> {
-    let new_name = new_name.trim();
-    if new_name.is_empty() {
-        return Err("Name cannot be empty".to_string());
-    }
-    if new_name.contains('/') || new_name.contains('\\') {
-        return Err("Name cannot contain path separators".to_string());
-    }
 
-    let src = PathBuf::from(&path);
-    let parent = src.parent().ok_or("No parent directory")?;
-    let dst = parent.join(new_name);
-    if dst.exists() && !same_destination(&src, &dst) {
-        return Err(format!("'{new_name}' already exists"));
-    }
 
-    fs::rename(&src, &dst).map_err(|e| e.to_string())?;
-    state.invalidate_path(&src);
-    state.invalidate_path(&dst);
-    state.log_op("rename", &path, Some(&dst.to_string_lossy()));
-    Ok(dst.to_string_lossy().to_string())
-}
 
-#[tauri::command]
-fn delete_file(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    let path_buf = PathBuf::from(&path);
-    if !path_buf.exists() {
-        return Err(format!("Path does not exist: {path}"));
-    }
-    trash::delete(&path_buf).map_err(|e| e.to_string())?;
-    state.invalidate_path(&path_buf);
-    Ok(())
-}
 
-#[tauri::command]
-fn create_directory(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    let path_buf = PathBuf::from(&path);
-    if path_buf.exists() {
-        return Err(format!("Folder already exists: {}", path_buf.display()));
-    }
-    fs::create_dir_all(&path_buf).map_err(|e| e.to_string())?;
-    state.invalidate_path(&path_buf);
-    Ok(())
-}
 
-#[tauri::command]
-fn copy_file(state: State<'_, AppState>, from: String, to: String) -> Result<(), String> {
-    let src = PathBuf::from(&from);
-    let dst = PathBuf::from(&to);
-    if dst.exists() {
-        return Err(format!("Destination already exists: {}", dst.display()));
-    }
-
-    let result = if src.is_dir() {
-        copy_dir_recursive(&state, &src, &dst)
-    } else {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::copy(&src, &dst).map(|_| ()).map_err(|e| e.to_string())
-    };
-    if result.is_ok() {
-        state.invalidate_path(&dst);
-        state.log_op("copy", &from, Some(&to));
-    }
-    result
-}
-
-#[tauri::command]
-fn move_file(state: State<'_, AppState>, from: String, to: String) -> Result<(), String> {
-    let src = PathBuf::from(&from);
-    let dst = PathBuf::from(&to);
-    if dst.exists() {
-        return Err(format!("Destination already exists: {}", dst.display()));
-    }
-
-    if fs::rename(&src, &dst).is_ok() {
-        state.invalidate_path(&src);
-        state.invalidate_path(&dst);
-        return Ok(());
-    }
-
-    let result = if src.is_dir() {
-        copy_dir_recursive(&state, &src, &dst)?;
-        fs::remove_dir_all(&src).map_err(|e| e.to_string())
-    } else {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::copy(&src, &dst).map_err(|e| e.to_string())?;
-        fs::remove_file(&src).map_err(|e| e.to_string())
-    };
-    if result.is_ok() {
-        state.invalidate_path(&src);
-        state.invalidate_path(&dst);
-        state.log_op("move", &from, Some(&to));
-    }
-    result
-}
-
-#[tauri::command]
-fn search_files(
-    state: State<'_, AppState>,
-    query: String,
-    path: String,
-    max_results: Option<usize>,
-    use_indexed: Option<bool>,
-) -> Result<Vec<FileEntry>, String> {
-    let dir = PathBuf::from(&path);
-    if !dir.is_dir() {
-        return Err(format!("Not a directory: {path}"));
-    }
-
-    let max = max_results.unwrap_or(400).min(2000);
-    if use_indexed.unwrap_or(false) {
-        let token = state.search_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let (entries, _) = hybrid_search_background(&state, &path, &query, max, token);
-        if state.search_generation.load(Ordering::SeqCst) == token {
-            return Ok(entries);
-        }
-        return Ok(Vec::new());
-    }
-
-    let token = state.search_generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let mut output = live_search_scan(&state, &path, &query, max, token);
-
-    if state.search_generation.load(Ordering::SeqCst) != token {
-        return Ok(Vec::new());
-    }
-
-    sort_entries(&mut output);
-    Ok(output)
-}
 
 #[cfg(target_os = "windows")]
 fn windows_index_search_impl(
@@ -4368,7 +4201,6 @@ fn windows_index_search_impl(
     Err("Windows Search index is only available on Windows".to_string())
 }
 
-#[tauri::command]
 fn windows_index_search(
     query: String,
     path: String,
@@ -4606,28 +4438,6 @@ fn publish_search_result(
     ready.store(true, Ordering::Release);
 }
 
-#[tauri::command]
-fn read_preview(
-    state: State<'_, AppState>,
-    path: String,
-    max_bytes: Option<usize>,
-) -> Result<PreviewContent, String> {
-    let path_buf = PathBuf::from(&path);
-    let metadata = fs::metadata(&path_buf).map_err(|e| e.to_string())?;
-    let key = format!(
-        "{}|{}|{}",
-        cache_key(&path_buf),
-        unix_secs(metadata.modified()),
-        max_bytes.unwrap_or(512 * 1024)
-    );
-    if let Some(content) = state.preview(&key) {
-        return Ok(content);
-    }
-
-    let content = read_preview_uncached(&path_buf, &metadata, max_bytes)?;
-    state.store_preview(key, content.clone());
-    Ok(content)
-}
 
 fn find_7z() -> Option<PathBuf> {
     if ProcessCommand::new("7z")
@@ -5127,49 +4937,7 @@ fn read_preview_uncached(
     })
 }
 
-#[tauri::command]
-fn warm_preview_cache(state: State<'_, AppState>, paths: Vec<String>, max_bytes: Option<usize>) {
-    if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= *MAX_HEAVY_OPS {
-        ACTIVE_HEAVY_OPS.fetch_sub(1, Ordering::SeqCst);
-        return;
-    }
-    let app_state = state.inner().clone();
-    std::thread::spawn(move || {
-        let _guard = HeavyOpGuard;
-        paths.into_par_iter().for_each(|path| {
-            let path_buf = PathBuf::from(&path);
-            let Ok(metadata) = fs::metadata(&path_buf) else {
-                return;
-            };
-            let key = format!(
-                "{}|{}|{}",
-                cache_key(&path_buf),
-                unix_secs(metadata.modified()),
-                max_bytes.unwrap_or(256 * 1024)
-            );
-            if app_state.preview(&key).is_none() {
-                if let Ok(content) = read_preview_uncached(&path_buf, &metadata, max_bytes) {
-                    app_state.store_preview(key, content);
-                }
-            }
-        });
-    });
-}
 
-#[tauri::command]
-fn prefetch_paths(state: State<'_, AppState>, paths: Vec<String>) {
-    let app_state = state.inner().clone();
-    std::thread::spawn(move || {
-        paths.into_par_iter().for_each(|path| {
-            let dir = PathBuf::from(&path);
-            if dir.is_dir() && app_state.cached_directory(&path).is_none() {
-                if let Ok(entries) = list_directory_uncached(&dir) {
-                    app_state.store_directory(&path, entries);
-                }
-            }
-        });
-    });
-}
 
 fn ensure_watched_paths(app_state: &AppState, paths: &[String]) -> Result<(), String> {
     let mut watchers = app_state
@@ -5231,10 +4999,6 @@ fn ensure_watched_paths(app_state: &AppState, paths: &[String]) -> Result<(), St
     Ok(())
 }
 
-#[tauri::command]
-fn watch_paths(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
-    ensure_watched_paths(state.inner(), &paths)
-}
 
 fn detect_npu_names() -> Vec<String> {
     // SetupDi class enumeration is roughly 1000x faster than spawning PowerShell
@@ -5402,158 +5166,20 @@ fn ai_status_label(capabilities: &AiCapabilities) -> &'static str {
     }
 }
 
-#[tauri::command]
-fn get_ai_capabilities(state: State<'_, AppState>) -> AiCapabilities {
-    if let Ok(mut cached) = state.ai_capabilities.lock() {
-        if let Some(capabilities) = cached.clone() {
-            return capabilities;
-        }
-        let capabilities = compute_ai_capabilities();
-        *cached = Some(capabilities.clone());
-        capabilities
-    } else {
-        compute_ai_capabilities()
-    }
-}
 
-#[tauri::command]
-fn ai_semantic_search(
-    state: State<'_, AppState>,
-    query: String,
-    path: String,
-    max_results: Option<usize>,
-) -> Result<Vec<FileEntry>, String> {
-    let capabilities = get_ai_capabilities(state.clone());
-    let _ = capabilities;
-    search_files(state, query, path, max_results, Some(true))
-}
 
-#[tauri::command]
-fn ai_summarize_file(state: State<'_, AppState>, path: String) -> Result<String, String> {
-    let capabilities = get_ai_capabilities(state.clone());
-    let _ = capabilities;
 
-    let preview = read_preview(state, path, Some(64 * 1024))?;
-    if let Some(text) = preview.text {
-        let first = text
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .take(4)
-            .collect::<Vec<_>>()
-            .join(" ");
-        return Ok(if first.chars().count() > 500 {
-            format!("{}...", first.chars().take(500).collect::<String>())
-        } else {
-            first
-        });
-    }
-    Ok(format!("{} file preview is available.", preview.kind))
-}
 
-#[tauri::command]
-fn get_bookmarks(app: AppHandle) -> Vec<Bookmark> {
-    get_user_pins(app)
-        .into_iter()
-        .map(|pin| Bookmark {
-            name: pin.name,
-            path: pin.path,
-        })
-        .collect()
-}
 
-#[tauri::command]
-fn save_bookmarks(app: AppHandle, bookmarks: Vec<Bookmark>) -> Result<(), String> {
-    let pins = bookmarks
-        .into_iter()
-        .map(bookmark_to_pin)
-        .collect::<Vec<_>>();
-    save_user_pins(app, pins)
-}
 
-#[tauri::command]
-fn get_user_pins(app: AppHandle) -> Vec<UserPin> {
-    let path = user_pins_path(&app);
-    if let Ok(data) = fs::read_to_string(&path) {
-        if let Ok(pins) = serde_json::from_str::<Vec<UserPin>>(&data) {
-            return pins
-                .into_iter()
-                .filter(|pin| Path::new(&pin.path).exists())
-                .collect();
-        }
-    }
 
-    native_user_pins()
-}
 
-#[tauri::command]
-fn save_user_pins(app: AppHandle, pins: Vec<UserPin>) -> Result<(), String> {
-    let path = user_pins_path(&app);
-    write_json_file(&path, &pins)?;
-    let _ = save_native_user_pins(&pins);
-    Ok(())
-}
 
-#[tauri::command]
-fn add_user_pin(
-    app: AppHandle,
-    path: String,
-    name: Option<String>,
-) -> Result<Vec<UserPin>, String> {
-    let path_buf = PathBuf::from(&path);
-    if !path_buf.exists() {
-        return Err(format!("Path does not exist: {path}"));
-    }
-    let normalized = path_buf.to_string_lossy().to_string();
-    let mut pins = get_user_pins(app.clone());
-    pins.retain(|pin| !same_path_string(&pin.path, &normalized));
-    pins.insert(
-        0,
-        UserPin {
-            name: pin_name_for_path(&path_buf, name),
-            path: normalized,
-            kind: if path_buf.is_dir() { "folder" } else { "file" }.to_string(),
-            pinned_at: now_unix_secs(),
-        },
-    );
-    save_user_pins(app, pins.clone())?;
-    Ok(pins)
-}
 
-#[tauri::command]
-fn remove_user_pin(app: AppHandle, path: String) -> Result<Vec<UserPin>, String> {
-    let mut pins = get_user_pins(app.clone());
-    pins.retain(|pin| !same_path_string(&pin.path, &path));
-    save_user_pins(app, pins.clone())?;
-    Ok(pins)
-}
 
-#[tauri::command]
-fn minimize_window(window: Window) -> Result<(), String> {
-    window.minimize().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn toggle_maximize_window(window: Window) -> Result<(), String> {
-    if window.is_maximized().map_err(|e| e.to_string())? {
-        window.unmaximize().map_err(|e| e.to_string())
-    } else {
-        window.maximize().map_err(|e| e.to_string())
-    }
-}
-
-#[tauri::command]
-fn close_window(window: Window) -> Result<(), String> {
-    window.close().map_err(|e| e.to_string())
-}
 
 // ----- helpers -----
 
-fn app_data_file(app: &AppHandle, name: &str) -> PathBuf {
-    app.path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(name)
-}
 
 fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path, fallback: T) -> T {
     fs::read_to_string(path)
@@ -5572,7 +5198,6 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
 
 // ----- checksum -----
 
-#[tauri::command]
 fn get_checksum(path: String) -> Result<HashMap<String, String>, String> {
     let mut file = File::open(&path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
@@ -5591,7 +5216,6 @@ fn get_checksum(path: String) -> Result<HashMap<String, String>, String> {
 
 // ----- terminal -----
 
-#[tauri::command]
 fn open_terminal(path: String) -> Result<(), String> {
     let dir = if Path::new(&path).is_dir() {
         path.clone()
@@ -5627,42 +5251,10 @@ fn open_terminal(path: String) -> Result<(), String> {
 
 // ----- file notes -----
 
-#[tauri::command]
-fn get_all_notes(app: AppHandle) -> HashMap<String, String> {
-    read_json_file(&app_data_file(&app, "notes.json"), HashMap::new())
-}
 
-#[tauri::command]
-fn save_file_note(app: AppHandle, path: String, note: String) -> Result<(), String> {
-    let file = app_data_file(&app, "notes.json");
-    let mut notes: HashMap<String, String> = read_json_file(&file, HashMap::new());
-    if note.trim().is_empty() {
-        notes.remove(&path);
-    } else {
-        notes.insert(path, note.trim().to_string());
-    }
-    write_json_file(&file, &notes)
-}
 
 // ----- batch rename -----
 
-#[tauri::command]
-fn batch_rename(state: State<'_, AppState>, ops: Vec<RenameOp>) -> Result<Vec<String>, String> {
-    let mut completed = Vec::new();
-    for op in &ops {
-        let src = Path::new(&op.from);
-        let dst = Path::new(&op.to);
-        if dst.exists() {
-            return Err(format!("'{}' already exists", dst.display()));
-        }
-        fs::rename(src, dst).map_err(|e| format!("{}: {}", op.from, e))?;
-        state.invalidate_path(src);
-        state.invalidate_path(dst);
-        state.log_op("rename", &op.from, Some(&op.to));
-        completed.push(op.to.clone());
-    }
-    Ok(completed)
-}
 
 // ----- git status -----
 
@@ -5699,42 +5291,9 @@ fn parse_git_porcelain(stdout: &[u8], base_path: &str) -> GitStatusMap {
     statuses
 }
 
-#[tauri::command]
-fn get_git_status(state: State<'_, AppState>, path: String) -> Result<GitStatusMap, String> {
-    let key = cache_key_str(&path);
-    if let Ok(cache) = state.git_cache.lock() {
-        if let Some((arc, at)) = cache.get(&key) {
-            if at.elapsed() < Duration::from_secs(10) {
-                return Ok((**arc).clone());
-            }
-        }
-    }
-
-    let output = ProcessCommand::new("git")
-        .args(["-C", &path, "status", "--porcelain", "-u"])
-        .no_window()
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-        return Err("Not a git repository".to_string());
-    }
-
-    let arc = Arc::new(parse_git_porcelain(&output.stdout, &path));
-    if let Ok(mut cache) = state.git_cache.lock() {
-        cache.insert(key, (Arc::clone(&arc), Instant::now()));
-        if cache.len() > 32 {
-            if let Some(k) = cache.keys().next().cloned() {
-                cache.remove(&k);
-            }
-        }
-    }
-    Ok((*arc).clone())
-}
 
 // ----- image info -----
 
-#[tauri::command]
 fn get_image_info(path: String) -> Result<ImageInfo, String> {
     let ext = extension(Path::new(&path));
     if is_image_ext(&ext) && !is_thumbnail_image_ext(&ext) {
@@ -5867,7 +5426,6 @@ fn duplicate_reclaimable_bytes(groups: &[Vec<FileEntry>]) -> (u64, u64, u64) {
     (group_count, duplicate_count, reclaimable)
 }
 
-#[tauri::command]
 fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEntry>>, String> {
     if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= *MAX_HEAVY_OPS {
         ACTIVE_HEAVY_OPS.fetch_sub(1, Ordering::SeqCst);
@@ -5959,7 +5517,6 @@ fn build_storage_tree(root: &Path, max_depth: u32) -> StorageNode {
     build(&entries, &sizes, 0)
 }
 
-#[tauri::command]
 fn get_storage_tree(path: String, max_depth: Option<u32>) -> Result<StorageNode, String> {
     let dir = PathBuf::from(&path);
     if !dir.is_dir() {
@@ -7124,7 +6681,6 @@ fn num_cpus() -> usize {
         .clamp(2, 32)
 }
 
-#[tauri::command]
 fn scan_storage_root(root: String, top_n: Option<usize>) -> Result<StorageScanResult, String> {
     let dir = PathBuf::from(&root);
     if !dir.is_dir() {
@@ -7690,170 +7246,25 @@ fn archive_format_from_path(path: &Path) -> String {
     }
 }
 
-#[tauri::command]
-fn extract_archive(state: State<'_, AppState>, path: String, dest: String) -> Result<(), String> {
-    extract_archive_impl(&state, &path, &dest, &[], None, "keep")
-}
 
-#[tauri::command]
 fn list_archive(path: String, max_items: Option<usize>) -> Result<Vec<ArchiveEntry>, String> {
     list_archive_entries(Path::new(&path), max_items.unwrap_or(500).min(5_000))
 }
 
-#[tauri::command]
-fn extract_archive_selected(
-    state: State<'_, AppState>,
-    path: String,
-    dest: String,
-    selected: Vec<String>,
-    password: Option<String>,
-    conflict: Option<String>,
-) -> Result<(), String> {
-    extract_archive_impl(
-        &state,
-        &path,
-        &dest,
-        &selected,
-        password.as_deref(),
-        conflict.as_deref().unwrap_or("keep"),
-    )
-}
 
-#[tauri::command]
-fn create_archive(
-    state: State<'_, AppState>,
-    paths: Vec<String>,
-    dest: String,
-) -> Result<(), String> {
-    create_archive_impl(&state, &paths, &dest)
-}
 
 // ----- saved searches -----
 
-#[tauri::command]
-fn get_saved_searches(app: AppHandle) -> Vec<SavedSearch> {
-    read_json_file(&app_data_file(&app, "searches.json"), vec![])
-}
 
-#[tauri::command]
-fn save_search(app: AppHandle, name: String, query: String, scope: String) -> Result<(), String> {
-    let file = app_data_file(&app, "searches.json");
-    let mut searches: Vec<SavedSearch> = read_json_file(&file, vec![]);
-    searches.retain(|s| s.name != name);
-    searches.insert(0, SavedSearch { name, query, scope });
-    if searches.len() > 50 {
-        searches.truncate(50);
-    }
-    write_json_file(&file, &searches)
-}
 
-#[tauri::command]
-fn delete_saved_search(app: AppHandle, name: String) -> Result<(), String> {
-    let file = app_data_file(&app, "searches.json");
-    let mut searches: Vec<SavedSearch> = read_json_file(&file, vec![]);
-    searches.retain(|s| s.name != name);
-    write_json_file(&file, &searches)
-}
 
 // ----- session -----
 
-#[tauri::command]
-fn save_session(app: AppHandle, tabs: Vec<SessionTab>) -> Result<(), String> {
-    write_json_file(&app_data_file(&app, "session.json"), &tabs)
-}
 
-#[tauri::command]
-fn load_session(app: AppHandle) -> Result<Vec<SessionTab>, String> {
-    let path = app_data_file(&app, "session.json");
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-    Ok(read_json_file(&path, vec![]))
-}
 
 // ----- operation log / undo -----
 
-#[tauri::command]
-fn get_operation_log(state: State<'_, AppState>) -> Vec<FileOp> {
-    state
-        .operation_log
-        .lock()
-        .map(|l| l.clone())
-        .unwrap_or_default()
-}
 
-#[tauri::command]
-fn undo_last_operation(state: State<'_, AppState>) -> Result<String, String> {
-    let op = state
-        .operation_log
-        .lock()
-        .map_err(|_| "Lock failed")?
-        .pop()
-        .ok_or("Nothing to undo")?;
-
-    match op.kind.as_str() {
-        "rename" => {
-            let from = op.to.as_deref().ok_or("Missing destination")?;
-            let to = &op.from;
-            let src = Path::new(from);
-            let dst = Path::new(to);
-            if dst.exists() {
-                return Err(format!("'{}' already exists", dst.display()));
-            }
-            fs::rename(src, dst).map_err(|e| e.to_string())?;
-            state.invalidate_path(src);
-            state.invalidate_path(dst);
-            Ok(format!("Renamed back to '{}'", dst.display()))
-        }
-        "copy" => {
-            let copied = op.to.as_deref().ok_or("Missing destination")?;
-            let p = Path::new(copied);
-            if p.is_dir() {
-                fs::remove_dir_all(p).map_err(|e| e.to_string())?;
-            } else {
-                fs::remove_file(p).map_err(|e| e.to_string())?;
-            }
-            state.invalidate_path(p);
-            Ok(format!("Deleted copy '{}'", p.display()))
-        }
-        "move" => {
-            let from = op.to.as_deref().ok_or("Missing destination")?;
-            let to = &op.from;
-            let src = Path::new(from);
-            let dst = Path::new(to);
-            if dst.exists() {
-                return Err(format!("'{}' already exists", dst.display()));
-            }
-            fs::rename(src, dst).map_err(|e| e.to_string())?;
-            state.invalidate_path(src);
-            state.invalidate_path(dst);
-            Ok(format!("Moved back to '{}'", dst.display()))
-        }
-        "delete" => {
-            undo_delete_from_trash(op.trash_id.as_deref(), Some(op.from.as_str()))?;
-            Ok(format!("Restored '{}'", op.from))
-        }
-        "batch_rename" => {
-            let ops = op.batch.ok_or("Missing batch rename metadata")?;
-            for item in ops.iter().rev() {
-                let old_name = Path::new(&item.from)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| item.from.clone());
-                let src = Path::new(&item.to);
-                let dst = src.parent().map(|p| p.join(&old_name)).ok_or("No parent")?;
-                if dst.exists() {
-                    return Err(format!("'{}' already exists", dst.display()));
-                }
-                fs::rename(src, &dst).map_err(|e| e.to_string())?;
-                state.invalidate_path(src);
-                state.invalidate_path(&dst);
-            }
-            Ok(format!("Undid batch rename ({} items)", ops.len()))
-        }
-        _ => Err(format!("Cannot undo '{}'", op.kind)),
-    }
-}
 
 fn is_image_ext(ext: &str) -> bool {
     matches!(
@@ -8240,83 +7651,6 @@ fn clear_thumbnail_cache() -> Result<u64, String> {
     Ok(before)
 }
 
-/// Generate or return a cached JPEG thumbnail data URL.
-/// Runs per-path in parallel via Rayon; returns all available thumbnails in one IPC call.
-#[tauri::command]
-fn fetch_thumbnails(
-    state: State<'_, AppState>,
-    paths: Vec<String>,
-    size: Option<u32>,
-) -> HashMap<String, String> {
-    let app_state = state.inner().clone();
-    let px = size.unwrap_or(160).clamp(64, 512);
-
-    THUMBNAIL_POOL.install(|| {
-        paths
-            .par_iter()
-            .filter_map(|path| {
-                let path_buf = PathBuf::from(path);
-                if cloud_files::hydration_risk(&path_buf) {
-                    return None;
-                }
-                if !is_thumbnail_image_ext(&extension(&path_buf)) {
-                    return None;
-                }
-                let metadata = fs::metadata(&path_buf).ok()?;
-                if metadata.len() > 30 * 1024 * 1024 {
-                    return None;
-                }
-                let mtime = unix_secs(metadata.modified());
-                let key = format!("thumb|{}|{}|{}", cache_key(&path_buf), mtime, px);
-                let disk_key = thumbnail_cache_key(&path_buf, mtime, px);
-
-                if let Some(cached) = app_state.preview(&key) {
-                    return cached.data_url.map(|url| (path.clone(), url));
-                }
-
-                if let Some(data_url) = read_thumbnail_from_disk(&disk_key, mtime, px) {
-                    app_state.store_preview(
-                        key,
-                        PreviewContent {
-                            kind: "image".to_string(),
-                            mime: Some("image/jpeg".to_string()),
-                            text: None,
-                            data_url: Some(data_url.clone()),
-                            truncated: false,
-                        },
-                    );
-                    return Some((path.clone(), data_url));
-                }
-
-                let img = image::open(&path_buf).ok()?;
-                let thumb = img.thumbnail(px, px);
-                let mut buf = Vec::new();
-                thumb
-                    .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Jpeg)
-                    .ok()?;
-                let data_url = store_thumbnail_on_disk(
-                    &path_buf,
-                    mtime,
-                    px,
-                    &buf,
-                    THUMBNAIL_CACHE_LIMIT_BYTES,
-                )
-                .unwrap_or_else(|| thumbnail_data_url(&buf));
-                app_state.store_preview(
-                    key,
-                    PreviewContent {
-                        kind: "image".to_string(),
-                        mime: Some("image/jpeg".to_string()),
-                        text: None,
-                        data_url: Some(data_url.clone()),
-                        truncated: false,
-                    },
-                );
-                Some((path.clone(), data_url))
-            })
-            .collect()
-    })
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -8639,6 +7973,23 @@ struct NativeController {
     path_scroll: HashMap<String, f32>,
     // Clears `scroll_animating` after a programmatic restore eases in.
     scroll_anim_timer: Option<slint::Timer>,
+    // Coalesce ScrollView viewport-y sync to ~1× per frame (File Explorer style).
+    scroll_sync_timer: Option<slint::Timer>,
+    scroll_sync_dirty: bool,
+    scroll_sync_scheduled: bool,
+    last_scroll_sync_at: Instant,
+    // Cached list virtualization offsets — rebuilt only when the full model or
+    // row height changes, not on every pixel of scroll.
+    list_layout_rev: u64,
+    list_layout_row_h: f32,
+    list_layout_offsets: Vec<f32>,
+    secondary_list_layout_rev: u64,
+    secondary_list_layout_row_h: f32,
+    secondary_list_layout_offsets: Vec<f32>,
+    files_model_rev: u64,
+    secondary_files_model_rev: u64,
+    // Decoded thumbs waiting to merge into thumbnail_memory (off UI-thread).
+    pending_thumb_rgba: Arc<Mutex<Vec<(String, Vec<u8>, u32, u32)>>>,
     // Per-drive scan results keyed by root path (e.g. "C:\\"). Lets the user
     // switch drives without re-scanning each time they revisit Storage.
     storage_caches: HashMap<String, StorageScanResult>,
@@ -10179,29 +9530,8 @@ fn privacy_storage_info_for_state(
     }
 }
 
-#[tauri::command]
-fn get_privacy_storage_info(state: State<'_, AppState>) -> PrivacyStorageInfo {
-    let settings = read_native_json("settings.json", NativeSettings::default());
-    privacy_storage_info_for_state(&state, &settings)
-}
 
-#[tauri::command]
-fn clear_local_caches(state: State<'_, AppState>) -> Result<PrivacyStorageInfo, String> {
-    if let Ok(mut cache) = state.directory_cache.lock() {
-        cache.clear();
-    }
-    if let Ok(mut cache) = state.preview_cache.lock() {
-        cache.clear();
-    }
-    if let Ok(mut cache) = state.git_cache.lock() {
-        cache.clear();
-    }
-    let _ = clear_thumbnail_cache()?;
-    let settings = read_native_json("settings.json", NativeSettings::default());
-    Ok(privacy_storage_info_for_state(&state, &settings))
-}
 
-#[tauri::command]
 fn clear_search_index() -> Result<u64, String> {
     let path = native_index_file();
     let bytes = file_size_or_zero(&path);
@@ -10277,11 +9607,8 @@ fn performance_footprint_text(status: &IndexStatus) -> String {
     )
 }
 
-#[tauri::command]
 fn set_update_checks_enabled(_enabled: bool) -> Result<(), String> {
     // No-op. Update checks are mandatory and the setting is ignored.
-    // Kept as a tauri command for backward compatibility with any older
-    // frontend code that might still try to call it.
     Ok(())
 }
 
@@ -10957,12 +10284,9 @@ fn download_and_install_update(url: &str) -> Result<(), String> {
                 // MSI upgrades in place when the UpgradeCode matches; /qn is silent.
                 format!("msiexec.exe /i \"{installer_str}\" /qn /norestart")
             } else {
-                // Tauri's NSIS installer: `/S` is silent, `/UPDATE` makes it patch
-                // the existing install in place - it skips running the previous
-                // version's uninstaller, preserves app data, and does not recreate
-                // shortcuts. Without `/UPDATE`, even a silent run first executes the
-                // old uninstaller, which is the "uninstall then reinstall" the user
-                // was seeing.
+                // Our NSIS installer overwrites in place under InstallDirRegKey.
+                // `/S` is silent. `/UPDATE` is accepted as a no-op for compatibility
+                // with older updater scripts that still pass Tauri's flag.
                 format!("\"{installer_str}\" /S /UPDATE")
             };
             let script = format!(
@@ -11014,7 +10338,6 @@ del \"%~f0\"\r\n"
     result
 }
 
-#[tauri::command]
 fn check_for_updates() -> Result<UpdateCheckResult, String> {
     // Update check is mandatory and cannot be disabled. The user always sees
     // a pill in the status bar when a newer version exists; they choose
@@ -11023,12 +10346,10 @@ fn check_for_updates() -> Result<UpdateCheckResult, String> {
     check_github_release_now()
 }
 
-#[tauri::command]
 fn check_for_updates_now() -> Result<UpdateCheckResult, String> {
     check_github_release_now()
 }
 
-#[tauri::command]
 fn open_update_release(release_url: Option<String>) -> Result<(), String> {
     let url = release_url
         .filter(|url| url.starts_with("https://github.com/"))
@@ -11036,7 +10357,6 @@ fn open_update_release(release_url: Option<String>) -> Result<(), String> {
     open::that(url).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
 fn apply_update(release_url: Option<String>) -> Result<(), String> {
     // Deliberately opens the signed GitHub Releases page instead of downloading silently.
     open_update_release(release_url)
@@ -11282,12 +10602,10 @@ fn smart_folders_for_path(current_path: &str) -> Vec<SmartFolder> {
         .collect()
 }
 
-#[tauri::command]
 fn get_smart_folders(path: String) -> Vec<SmartFolder> {
     smart_folders_for_path(&path)
 }
 
-#[tauri::command]
 fn rename_smart_folder(id: String, name: String) -> Result<Vec<SmartFolder>, String> {
     let mut labels = smart_folder_labels();
     let name = name.trim();
@@ -11300,12 +10618,10 @@ fn rename_smart_folder(id: String, name: String) -> Result<Vec<SmartFolder>, Str
     Ok(smart_folders_for_path(""))
 }
 
-#[tauri::command]
 fn get_tag_labels() -> HashMap<String, String> {
     read_native_json("tag_labels.json", HashMap::new())
 }
 
-#[tauri::command]
 fn rename_tag_label(id: String, name: String) -> Result<HashMap<String, String>, String> {
     let mut labels = get_tag_labels();
     let name = name.trim();
@@ -11601,6 +10917,28 @@ fn rgba_u8(r: u8, g: u8, b: u8, alpha: f32) -> Color {
 
 fn model_from_vec<T: Clone + 'static>(items: Vec<T>) -> ModelRc<T> {
     ModelRc::new(VecModel::from(items))
+}
+
+/// Update an existing window `VecModel` in place (Explorer-style row recycle).
+/// Preserves model identity so FileRow TouchAreas survive scroll and double-click
+/// still works. Falls back to replacing via `set` when the model isn't a VecModel.
+fn patch_or_set_window_files(
+    current: ModelRc<FileItem>,
+    items: Vec<FileItem>,
+    mut set: impl FnMut(ModelRc<FileItem>),
+) {
+    use slint::Model;
+    if let Some(m) = current.as_any().downcast_ref::<VecModel<FileItem>>() {
+        if m.row_count() == items.len() {
+            for (i, item) in items.into_iter().enumerate() {
+                m.set_row_data(i, item);
+            }
+            return;
+        }
+        m.set_vec(items);
+        return;
+    }
+    set(model_from_vec(items));
 }
 
 fn double_click_interval() -> Duration {
@@ -14264,6 +13602,19 @@ impl NativeController {
             history_index: 0,
             path_scroll: HashMap::new(),
             scroll_anim_timer: None,
+            scroll_sync_timer: None,
+            scroll_sync_dirty: false,
+            scroll_sync_scheduled: false,
+            last_scroll_sync_at: Instant::now() - Duration::from_secs(60),
+            list_layout_rev: 0,
+            list_layout_row_h: 0.0,
+            list_layout_offsets: Vec::new(),
+            secondary_list_layout_rev: 0,
+            secondary_list_layout_row_h: 0.0,
+            secondary_list_layout_offsets: Vec::new(),
+            files_model_rev: 0,
+            secondary_files_model_rev: 0,
+            pending_thumb_rgba: Arc::new(Mutex::new(Vec::new())),
             storage_caches: HashMap::new(),
             storage_scan_pending: Arc::new(Mutex::new(None)),
             storage_scan_ready: Arc::new(AtomicBool::new(false)),
@@ -15510,6 +14861,8 @@ impl NativeController {
         let model = model_from_vec(items);
         ui.set_files(model.clone());
         self.files_model = Some(model);
+        self.files_model_rev = self.files_model_rev.wrapping_add(1);
+        self.list_layout_offsets.clear();
         let tabs = self.tab_items();
         #[cfg(target_os = "windows")]
         sync_titlebar_hit_regions(&tabs);
@@ -15629,8 +14982,10 @@ impl NativeController {
             return;
         }
 
-        let first_row = ((scroll_y / row_stride) as isize - 2).max(0) as usize;
-        let visible_rows = ((viewport_h / row_stride).ceil() as usize).saturating_add(5);
+        // ± overscan like Explorer's recycled icon view — enough runway that
+        // fast wheel flicks rarely show empty cells before the next sync.
+        let first_row = ((scroll_y / row_stride) as isize - 3).max(0) as usize;
+        let visible_rows = ((viewport_h / row_stride).ceil() as usize).saturating_add(7);
         let mut start = first_row.saturating_mul(cols);
         if start >= total {
             // Scroll position past end (e.g. after navigate without reset) —
@@ -15639,7 +14994,10 @@ impl NativeController {
         }
         let end = (start + visible_rows * cols).min(total);
 
-        // Warm disk thumbs for the window (cheap exists()+decode).
+        // Warm disk thumbs off the UI thread (File Explorer loads icons async).
+        // Cap a couple of synchronous cache hits for the first paint of a settle.
+        let mut sync_budget = 2usize;
+        let mut async_loads: Vec<(String, PathBuf)> = Vec::new();
         for entry in files.iter().take(end).skip(start) {
             let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
             if !is_thumbnail_image_ext(&ext) || self.thumbnail_memory.contains_key(&entry.path) {
@@ -15650,14 +15008,38 @@ impl NativeController {
             if !thumb_path.exists() {
                 continue;
             }
-            if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
-                let (w, h) = img.dimensions();
-                let raw = img.into_raw();
-                let buf =
-                    slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
-                self.thumbnail_memory
-                    .insert(entry.path.clone(), slint::Image::from_rgba8(buf));
+            if sync_budget > 0 {
+                sync_budget -= 1;
+                if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
+                    let (w, h) = img.dimensions();
+                    let raw = img.into_raw();
+                    let buf =
+                        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
+                    self.thumbnail_memory
+                        .insert(entry.path.clone(), slint::Image::from_rgba8(buf));
+                }
+            } else {
+                async_loads.push((entry.path.clone(), thumb_path));
             }
+        }
+        if !async_loads.is_empty() {
+            let pending = self.pending_thumb_rgba.clone();
+            let ready_flag = self.thumbnail_ready.clone();
+            THUMBNAIL_POOL.spawn(move || {
+                let mut decoded = Vec::new();
+                for (path, thumb_path) in async_loads.into_iter().take(24) {
+                    if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
+                        let (w, h) = img.dimensions();
+                        decoded.push((path, img.into_raw(), w, h));
+                    }
+                }
+                if !decoded.is_empty() {
+                    if let Ok(mut lock) = pending.lock() {
+                        lock.extend(decoded);
+                    }
+                    ready_flag.store(true, Ordering::Release);
+                }
+            });
         }
 
         let max_file_size = files
@@ -15674,12 +15056,14 @@ impl NativeController {
 
         if secondary {
             ui.set_secondary_grid_window_start(start as i32);
-            ui.set_secondary_grid_window_files(model_from_vec(items));
+            let current = ui.get_secondary_grid_window_files();
+            patch_or_set_window_files(current, items, |m| ui.set_secondary_grid_window_files(m));
             self.enrich_secondary_viewport_start = start;
             self.enrich_secondary_viewport_end = end;
         } else {
             ui.set_grid_window_start(start as i32);
-            ui.set_grid_window_files(model_from_vec(items));
+            let current = ui.get_grid_window_files();
+            patch_or_set_window_files(current, items, |m| ui.set_grid_window_files(m));
             self.enrich_viewport_start = start;
             self.enrich_viewport_end = end;
         }
@@ -15767,33 +15151,69 @@ impl NativeController {
             return;
         };
         let total = model.row_count();
-        let mut offsets = Vec::with_capacity(total + 1);
-        offsets.push(0.0);
-        for i in 0..total {
-            let h = model
-                .row_data(i)
-                .map(|item| {
-                    row_h
-                        + if item.show_date_group_header {
-                            header_h
-                        } else {
-                            0.0
-                        }
-                })
-                .unwrap_or(row_h);
-            offsets.push(offsets[i] + h);
-        }
-        let content_h = *offsets.last().unwrap_or(&viewport_h);
-        let mut start = 0usize;
-        for i in 0..total {
-            if offsets[i + 1] >= scroll_y {
-                start = i.saturating_sub(4);
-                break;
+        let (model_rev, cached_row_h, offsets) = if secondary {
+            (
+                self.secondary_files_model_rev,
+                self.secondary_list_layout_row_h,
+                &mut self.secondary_list_layout_offsets,
+            )
+        } else {
+            (
+                self.files_model_rev,
+                self.list_layout_row_h,
+                &mut self.list_layout_offsets,
+            )
+        };
+        let cache_rev = if secondary {
+            self.secondary_list_layout_rev
+        } else {
+            self.list_layout_rev
+        };
+        let need_rebuild = cache_rev != model_rev
+            || (cached_row_h - row_h).abs() > f32::EPSILON
+            || offsets.len() != total + 1;
+        if need_rebuild {
+            let mut rebuilt = Vec::with_capacity(total + 1);
+            rebuilt.push(0.0);
+            for i in 0..total {
+                let h = model
+                    .row_data(i)
+                    .map(|item| {
+                        row_h
+                            + if item.show_date_group_header {
+                                header_h
+                            } else {
+                                0.0
+                            }
+                    })
+                    .unwrap_or(row_h);
+                rebuilt.push(rebuilt[i] + h);
             }
-            start = i;
+            if secondary {
+                self.secondary_list_layout_rev = model_rev;
+                self.secondary_list_layout_row_h = row_h;
+                self.secondary_list_layout_offsets = rebuilt;
+            } else {
+                self.list_layout_rev = model_rev;
+                self.list_layout_row_h = row_h;
+                self.list_layout_offsets = rebuilt;
+            }
         }
+        let offsets = if secondary {
+            &self.secondary_list_layout_offsets
+        } else {
+            &self.list_layout_offsets
+        };
+        let content_h = *offsets.last().unwrap_or(&viewport_h);
+        // Binary search for first row whose bottom is at/after scroll_y.
+        let mut start = offsets
+            .partition_point(|y| *y < scroll_y)
+            .saturating_sub(1)
+            .min(total.saturating_sub(1));
+        start = start.saturating_sub(6);
         let mut end = start;
-        while end < total && offsets[end] < scroll_y + viewport_h + row_h * 5.0 {
+        let overscan_bottom = scroll_y + viewport_h + row_h * 7.0;
+        while end < total && offsets[end] < overscan_bottom {
             end += 1;
         }
         end = end.min(total);
@@ -15803,16 +15223,48 @@ impl NativeController {
             ui.set_secondary_list_window_start(start as i32);
             ui.set_secondary_list_window_y(offset_y);
             ui.set_secondary_list_content_h(content_h.max(viewport_h));
-            ui.set_secondary_list_window_files(model_from_vec(items));
+            let current = ui.get_secondary_list_window_files();
+            patch_or_set_window_files(current, items, |m| ui.set_secondary_list_window_files(m));
         } else {
             ui.set_list_window_start(start as i32);
             ui.set_list_window_y(offset_y);
             ui.set_list_content_h(content_h.max(viewport_h));
-            ui.set_list_window_files(model_from_vec(items));
+            let current = ui.get_list_window_files();
+            patch_or_set_window_files(current, items, |m| ui.set_list_window_files(m));
         }
     }
 
-    /// Apply a scroll/viewport sync request from Slint (debounced there).
+    fn drain_pending_thumbnails(&mut self) -> usize {
+        let batch = self
+            .pending_thumb_rgba
+            .lock()
+            .ok()
+            .map(|mut lock| std::mem::take(&mut *lock))
+            .unwrap_or_default();
+        let n = batch.len();
+        for (path, raw, w, h) in batch {
+            let buf =
+                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
+            self.thumbnail_memory
+                .insert(path, slint::Image::from_rgba8(buf));
+        }
+        const MAX_THUMB_CACHE: usize = 180;
+        if self.thumbnail_memory.len() > MAX_THUMB_CACHE {
+            let remove_count = self.thumbnail_memory.len() - MAX_THUMB_CACHE;
+            let keys: Vec<String> = self
+                .thumbnail_memory
+                .keys()
+                .take(remove_count)
+                .cloned()
+                .collect();
+            for k in keys {
+                self.thumbnail_memory.remove(&k);
+            }
+        }
+        n
+    }
+
+    /// Apply a scroll/viewport sync (coalesced from Slint viewport-y changes).
     fn on_sync_grid_windows(&mut self, ui: &MainWindow) {
         if ui.get_view_mode().as_str() == "list" {
             self.sync_list_window(ui, false);
@@ -19258,6 +18710,8 @@ impl NativeController {
         ui.set_secondary_files(model.clone());
         ui.set_secondary_path(ss(&self.secondary_path));
         self.secondary_files_model = Some(model);
+        self.secondary_files_model_rev = self.secondary_files_model_rev.wrapping_add(1);
+        self.secondary_list_layout_offsets.clear();
         self.sync_grid_window(ui, true);
         self.sync_list_window(ui, true);
     }
@@ -24820,12 +24274,77 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
+    // Throttle viewport-y syncs to ≤1 per ~8ms while scrolling (Explorer-style).
+    // Unlike search debounce, we must NOT restart the timer on every event or the
+    // window would only refresh after the wheel stops.
+    let scroll_sync_debounce = Rc::new(slint::Timer::default());
     let weak = ui.as_weak();
     let c = controller.clone();
+    let scroll_tick = scroll_sync_debounce.clone();
     ui.on_sync_grid_windows(move || {
-        if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().on_sync_grid_windows(&ui);
+        let Some(_ui) = weak.upgrade() else {
+            return;
+        };
+        let should_arm = {
+            let mut ctrl = c.borrow_mut();
+            ctrl.scroll_sync_dirty = true;
+            ctrl.last_scroll_sync_at = Instant::now();
+            if ctrl.scroll_sync_scheduled {
+                false
+            } else {
+                ctrl.scroll_sync_scheduled = true;
+                true
+            }
+        };
+        if !should_arm {
+            return;
         }
+        let weak_tick = weak.clone();
+        let c_tick = c.clone();
+        let tick_again = scroll_tick.clone();
+        scroll_tick.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(8),
+            move || {
+                let Some(ui) = weak_tick.upgrade() else {
+                    return;
+                };
+                let mut ctrl = c_tick.borrow_mut();
+                if !ctrl.scroll_sync_dirty {
+                    ctrl.scroll_sync_scheduled = false;
+                    return;
+                }
+                // Keep scheduled=true for the duration of sync so nested
+                // viewport-y callbacks only mark dirty (no duplicate timers).
+                ctrl.scroll_sync_dirty = false;
+                ctrl.drain_pending_thumbnails();
+                ctrl.on_sync_grid_windows(&ui);
+                if ctrl.scroll_sync_dirty {
+                    drop(ctrl);
+                    let weak2 = weak_tick.clone();
+                    let c2 = c_tick.clone();
+                    tick_again.start(
+                        slint::TimerMode::SingleShot,
+                        Duration::from_millis(8),
+                        move || {
+                            if let Some(ui) = weak2.upgrade() {
+                                let mut ctrl = c2.borrow_mut();
+                                if !ctrl.scroll_sync_dirty {
+                                    ctrl.scroll_sync_scheduled = false;
+                                    return;
+                                }
+                                ctrl.scroll_sync_dirty = false;
+                                ctrl.drain_pending_thumbnails();
+                                ctrl.on_sync_grid_windows(&ui);
+                                ctrl.scroll_sync_scheduled = false;
+                            }
+                        },
+                    );
+                } else {
+                    ctrl.scroll_sync_scheduled = false;
+                }
+            },
+        );
     });
 
     let weak = ui.as_weak();
@@ -26540,8 +26059,18 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     }
                     if thumb_fired || git_fired {
                         if let Ok(mut ctrl) = c.try_borrow_mut() {
-                            ctrl.update_file_models(&ui);
-                            if ui.get_view_mode().as_str() != "list" {
+                            let drained = ctrl.drain_pending_thumbnails();
+                            let scrolling_recently = ctrl
+                                .last_scroll_sync_at
+                                .elapsed()
+                                < Duration::from_millis(180);
+                            if git_fired || !scrolling_recently {
+                                ctrl.update_file_models(&ui);
+                                if ui.get_view_mode().as_str() != "list" {
+                                    ctrl.on_sync_grid_windows(&ui);
+                                }
+                            } else if drained > 0 || thumb_fired {
+                                // Keep scroll fluid: refresh only the visible window.
                                 ctrl.on_sync_grid_windows(&ui);
                             }
                         }
@@ -27253,7 +26782,6 @@ fn apply_mica(_ui: &MainWindow) {}
 // ============================================================================
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn get_context_menu_actions(
     path: String,
 ) -> Result<Vec<windows_integration::ContextMenuAction>, String> {
@@ -27261,25 +26789,21 @@ fn get_context_menu_actions(
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn get_context_menu_actions(_path: String) -> Result<Vec<serde_json::Value>, String> {
     Err("Context menu actions are Windows-only".to_string())
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn invoke_context_menu_action(path: String, action_id: u32) -> Result<(), String> {
     windows_integration::invoke_context_menu_action(&path, action_id)
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn invoke_context_menu_action(_path: String, _action_id: u32) -> Result<(), String> {
     Err("Context menu actions are Windows-only".to_string())
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn get_previous_versions(
     path: String,
 ) -> Result<Vec<windows_integration::PreviousVersion>, String> {
@@ -27287,37 +26811,31 @@ fn get_previous_versions(
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn get_previous_versions(_path: String) -> Result<Vec<serde_json::Value>, String> {
     Err("Previous versions (VSS) are Windows-only".to_string())
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn restore_from_previous_version(path: String, version_id: String) -> Result<(), String> {
     windows_integration::restore_from_previous_version(&path, &version_id)
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn restore_from_previous_version(_path: String, _version_id: String) -> Result<(), String> {
     Err("Previous versions (VSS) are Windows-only".to_string())
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn is_process_elevated() -> bool {
     windows_integration::is_process_elevated()
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn is_process_elevated() -> bool {
     false
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn retry_as_administrator(
     operation: String,
     path: String,
@@ -27326,25 +26844,21 @@ fn retry_as_administrator(
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn retry_as_administrator(_operation: String, _path: String) -> Result<serde_json::Value, String> {
     Err("Administrator retry is Windows-only".to_string())
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn take_ownership(path: String) -> Result<windows_integration::AdminRetryResult, String> {
     windows_integration::take_ownership(&path)
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn take_ownership(_path: String) -> Result<serde_json::Value, String> {
     Err("Take ownership is Windows-only".to_string())
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn create_shortcut(
     target_path: String,
     shortcut_path: String,
@@ -27360,7 +26874,6 @@ fn create_shortcut(
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn create_shortcut(
     _target_path: String,
     _shortcut_path: String,
@@ -27371,49 +26884,41 @@ fn create_shortcut(
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn pin_to_taskbar(path: String) -> Result<windows_integration::PinningResult, String> {
     windows_integration::pin_to_taskbar(&path)
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn pin_to_taskbar(_path: String) -> Result<serde_json::Value, String> {
     Err("Taskbar pinning is Windows-only".to_string())
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn pin_to_start_menu(path: String) -> Result<windows_integration::PinningResult, String> {
     windows_integration::pin_to_start_menu(&path)
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn pin_to_start_menu(_path: String) -> Result<serde_json::Value, String> {
     Err("Start menu pinning is Windows-only".to_string())
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn unpin_from_taskbar(path: String) -> Result<windows_integration::PinningResult, String> {
     windows_integration::unpin_from_taskbar(&path)
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn unpin_from_taskbar(_path: String) -> Result<serde_json::Value, String> {
     Err("Taskbar unpinning is Windows-only".to_string())
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
 fn unpin_from_start_menu(path: String) -> Result<windows_integration::PinningResult, String> {
     windows_integration::unpin_from_start_menu(&path)
 }
 
 #[cfg(not(target_os = "windows"))]
-#[tauri::command]
 fn unpin_from_start_menu(_path: String) -> Result<serde_json::Value, String> {
     Err("Start menu unpinning is Windows-only".to_string())
 }
@@ -28481,7 +27986,6 @@ fn get_handler_registration_status() -> Result<(usize, usize), String> {
     Err("Windows only".into())
 }
 
-#[tauri::command]
 fn set_default_file_manager() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
@@ -28494,7 +27998,6 @@ fn set_default_file_manager() -> Result<String, String> {
     }
 }
 
-#[tauri::command]
 fn export_registry_file() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
@@ -28520,7 +28023,6 @@ fn export_registry_file() -> Result<String, String> {
     }
 }
 
-#[tauri::command]
 fn check_handler_registration() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {

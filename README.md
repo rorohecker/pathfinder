@@ -86,28 +86,36 @@ Grab the latest build from [Releases](https://github.com/rorohecker/pathfinder/r
 
 ## Build from source
 
-Prerequisites: [Rust](https://rustup.rs) stable, Windows build tools, and the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/).
+Prerequisites: [Rust](https://rustup.rs) stable and Windows build tools (MSVC). For installers: [NSIS](https://nsis.sourceforge.io/) and [WiX Toolset v3](https://wixtoolset.org/).
 
 ```powershell
 git clone https://github.com/rorohecker/pathfinder.git
 cd pathfinder/src-tauri
-cargo tauri build
+cargo build --release
+```
+
+Dev loop:
+
+```powershell
+cargo run
+```
+
+Windows installers (NSIS + MSI), including `pdfium.dll` and uninstall shell-handler cleanup:
+
+```powershell
+.\windows\pack.ps1
 ```
 
 Installer output lands in `src-tauri/target/release/bundle/`.
-
-```powershell
-cargo tauri dev
-```
 
 ## Tech stack
 
 | Layer | Technology |
 |-------|------------|
 | UI | Slint (native window, GPU pipeline) |
-| Backend | Rust, Tauri 2, Rayon, SQLite |
+| Backend | Rust, Rayon, SQLite |
 | Shell | Win32 APIs directly |
-| Installer | NSIS and MSI via the Tauri bundler |
+| Installer | NSIS and MSI (`windows/pack.ps1`) |
 
 ## Windows notes
 

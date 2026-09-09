@@ -4249,7 +4249,7 @@ export component MainWindow inherits Window {
                 button_width: 46px;
                 button_height: 36px;
                 icon_data: root.window_maximized
-                    ? "M8 4h8v4H4v8h4V8h8V4z M12 8h8v12h-8V8z"
+                    ? "M10 4h9v9 M5 9h9v9H5z"
                     : "M5 5h14v14H5z";
                 tooltip: root.window_maximized ? @tr("Restore") : @tr("Maximize");
                 tooltip_above: true;
@@ -7820,6 +7820,9 @@ export component MainWindow inherits Window {
                 y: 124px;
                 width: parent.width - 26px;
                 height: parent.height - 136px;
+                // Cache the heavy theme grid so wheel scrolling doesn't repaint
+                // every tile from scratch each frame (Explorer-like smoothness).
+                cache-rendering-hint: true;
 
                 VerticalLayout {
                     // Inner content stops settings_scroll_gutter short of the ScrollView
@@ -8817,6 +8820,7 @@ export component MainWindow inherits Window {
                 y: 124px;
                 width: parent.width - 26px;
                 height: parent.height - 136px;
+                cache-rendering-hint: true;
 
                 VerticalLayout {
                 width: parent.width - AppMetrics.settings_scroll_gutter;
@@ -8991,6 +8995,7 @@ export component MainWindow inherits Window {
                 y: 124px;
                 width: parent.width - 26px;
                 height: parent.height - 136px;
+                cache-rendering-hint: true;
 
                 VerticalLayout {
                     width: parent.width - AppMetrics.settings_scroll_gutter;
@@ -9114,6 +9119,7 @@ export component MainWindow inherits Window {
                 y: 124px;
                 width: parent.width - 26px;
                 height: parent.height - 136px;
+                cache-rendering-hint: true;
 
                 VerticalLayout {
                     width: parent.width - AppMetrics.settings_scroll_gutter;

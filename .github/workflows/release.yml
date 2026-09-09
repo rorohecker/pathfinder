@@ -24,15 +24,27 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
+      - name: Install NSIS
+        run: choco install nsis -y
 
-      - name: Install Tauri CLI
-        run: cargo binstall tauri-cli --version "^2" --no-confirm --locked
+      - name: Install WiX Toolset
+        run: choco install wixtoolset -y
 
-      - name: Build release bundle
+      - name: Add NSIS and WiX to PATH
+        shell: pwsh
+        run: |
+          $nsis = "C:\Program Files (x86)\NSIS"
+          $wix = "C:\Program Files (x86)\WiX Toolset v3.14\bin"
+          if (-not (Test-Path $wix)) {
+            $wix = (Get-ChildItem "C:\Program Files (x86)\WiX Toolset *" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName + "\bin"
+          }
+          echo "$nsis" >> $env:GITHUB_PATH
+          echo "$wix" >> $env:GITHUB_PATH
+
+      - name: Build release installers
         working-directory: src-tauri
-        run: cargo tauri build
+        shell: pwsh
+        run: .\windows\pack.ps1
 
       - name: Upload installers to release
         # Creates/updates the tag release only once the installers exist so

@@ -1,24 +1,12 @@
-; Pathfinder NSIS hooks.
+; Pathfinder NSIS hook notes (legacy Tauri hooks file).
 ;
-; WebView2: Pathfinder is a Slint + winit native UI. It never creates a Tauri
-; webview window. tauri.conf.json sets bundle.windows.webviewInstallMode to
-; "skip" so the NSIS/MSI installers do not download or run the Edge WebView2
-; bootstrapper as the first install step (default Tauri behavior).
+; The installer now lives in windows/installer.nsi. Uninstall still runs
+; `"$INSTDIR\pathfinder.exe" --uninstall-shell-handler` before deleting files
+; so HKCU default-folder-handler overrides are cleared.
 ;
-; Auto-registration of the default folder handler was removed in v0.8.7.
-; The previous postinstall step invoked `--install-shell-handler`, which
-; writes 7 HKCU keys under Software\Classes\Folder\shell\open\command and
-; the App Paths\explorer.exe redirect. From an unsigned binary, that exact
-; pattern triggers Windows Defender's "Trojan:Win32/Bearfoos.A!ml" heuristic
-; even though the writes are entirely legitimate and per-user only.
-;
-; Users who want Pathfinder as their default folder handler can opt in any
-; time via Settings -> Windows -> "Set as default folder handler." The CLI
-; flags --install-shell-handler / --uninstall-shell-handler still exist for
-; scripted deployments and remain unchanged.
-;
-; Uninstall still attempts to clean up any HKCU keys the user may have set
-; via Settings, so an uninstall fully reverts the system state.
+; Auto-registration of the default folder handler was removed in v0.8.7 —
+; unsigned postinstall registry writes tripped Defender Bearfoos heuristics.
+; Users opt in via Settings -> Windows -> "Set as default folder handler."
 
 !macro NSIS_HOOK_POSTINSTALL
   ; Intentionally empty. See header comment above.
