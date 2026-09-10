@@ -17615,6 +17615,8 @@ impl NativeController {
         if !self.marquee_drag_active {
             return false;
         }
+        // Prefer the latest pointer Y from Slint (updated on every moved event).
+        self.marquee_pointer_y = ui.get_marquee_pointer_y();
         let metrics = ui.global::<AppMetrics>();
         let pad = metrics.get_pad();
         let view = ui.get_view_mode();
