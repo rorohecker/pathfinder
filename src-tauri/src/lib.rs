@@ -176,7 +176,12 @@ const SEARCH_LIVE_SCAN_LIMIT: usize = 5_000;
 // walker for tens of thousands of matches delays the first visible refresh and
 // makes the second search feel faster only because the first one seeded the DB.
 const SEARCH_DRIVE_SCAN_LIMIT: usize = 25_000;
+/// Cap concurrent content-body reads during `content:` searches so deep PDF
+/// extracts cannot OOM or hydrate thousands of cloud placeholders at once.
+const SEARCH_CONTENT_READ_SLOTS: usize = 3;
 const ARCHIVE_SCHEME: &str = "archive://";
+
+static SEARCH_CONTENT_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum FileKind {
@@ -2768,7 +2773,10 @@ fn query_filter_warnings(query: &str) -> Vec<String> {
     let parsed = parse_query(query);
     let mut warnings = parsed.ignored_filters;
     if parsed.content.is_some() {
-        warnings.push("content: searches text <=1MB plus PDF/DOCX/PPTX (no OCR)".to_string());
+        warnings.push(
+            "content: searches text <=1MB plus PDF/DOCX/PPTX (no OCR); plain terms match name/path only"
+                .to_string(),
+        );
     }
     warnings
 }
@@ -2814,11 +2822,39 @@ fn extract_office_openxml_text(path: &Path, inner_prefix: &str) -> Option<String
     }
 }
 
+fn try_acquire_content_read_slot() -> bool {
+    loop {
+        let cur = SEARCH_CONTENT_INFLIGHT.load(Ordering::Relaxed);
+        if cur >= SEARCH_CONTENT_READ_SLOTS {
+            return false;
+        }
+        if SEARCH_CONTENT_INFLIGHT
+            .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+fn release_content_read_slot() {
+    SEARCH_CONTENT_INFLIGHT.fetch_sub(1, Ordering::Release);
+}
+
 fn read_text_for_search(path: &Path, metadata: &fs::Metadata) -> Option<Vec<u8>> {
+    // Never hydrate OneDrive/Dropbox placeholders during search walks.
+    if cloud_files::hydration_risk(path) {
+        return None;
+    }
     if metadata.len() > 8 * 1024 * 1024 {
         return None;
     }
     let ext = extension(path);
+    let heavy = ext == "pdf" || ext == "docx" || ext == "pptx";
+    if heavy && !try_acquire_content_read_slot() {
+        return None;
+    }
+    let _slot_guard = HeavyContentSlotGuard(heavy);
     if ext == "pdf" {
         let text = pdf_extract::extract_text(path).ok()?;
         let mut bytes = text.into_bytes();
@@ -2849,6 +2885,15 @@ fn read_text_for_search(path: &Path, metadata: &fs::Metadata) -> Option<Vec<u8>>
     let mut bytes = fs::read(path).ok()?;
     bytes.make_ascii_lowercase();
     Some(bytes)
+}
+
+struct HeavyContentSlotGuard(bool);
+impl Drop for HeavyContentSlotGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            release_content_read_slot();
+        }
+    }
 }
 
 fn matches_query(path: &Path, metadata: &fs::Metadata, parsed: &ParsedQuery) -> bool {
@@ -2891,8 +2936,10 @@ fn matches_query(path: &Path, metadata: &fs::Metadata, parsed: &ParsedQuery) -> 
         }
     }
 
-    let needs_content = parsed.content.is_some()
-        || (!parsed.terms.is_empty() && metadata.is_file() && (is_text_ext(&ext) || ext == "pdf"));
+    // Only open file bodies for explicit `content:` queries. Plain-term live
+    // scans used to read every text/PDF under the walk (drive-wide), which
+    // OOM'd / hung deep searches and hydrated cloud placeholders.
+    let needs_content = parsed.content.is_some() && metadata.is_file();
     let content = if needs_content {
         read_text_for_search(path, metadata)
     } else {
@@ -2911,14 +2958,9 @@ fn matches_query(path: &Path, metadata: &fs::Metadata, parsed: &ParsedQuery) -> 
     }
 
     for term in &parsed.terms {
-        let needle = term.as_bytes();
         let in_name = name.contains(term.as_str());
         let in_path = path_lower.contains(term.as_str());
-        let in_content = content
-            .as_ref()
-            .map(|bytes| memchr::memmem::find(bytes, needle).is_some())
-            .unwrap_or(false);
-        if !in_name && !in_path && !in_content {
+        if !in_name && !in_path {
             return false;
         }
     }
@@ -2954,16 +2996,29 @@ fn list_directory_uncached(dir: &Path) -> Result<Vec<FileEntry>, String> {
 }
 
 fn list_directory_chunk(dir: &Path, max_entries: usize) -> Result<DirectoryPage, String> {
-    if !dir.exists() {
-        return Err(format!("Path does not exist: {}", dir.display()));
-    }
-    if !dir.is_dir() {
-        return Err(format!("Not a directory: {}", dir.display()));
+    // Drive roots that are BitLocker-locked often fail exists()/is_dir() with
+    // misleading "not found" results. Prefer read_dir so we surface the real
+    // OS error and can trigger the unlock prompt.
+    let drive_root = is_filesystem_root(dir);
+    if !drive_root {
+        if !dir.exists() {
+            return Err(format!("Path does not exist: {}", dir.display()));
+        }
+        if !dir.is_dir() {
+            return Err(format!("Not a directory: {}", dir.display()));
+        }
     }
 
     let mut dir_entries: Vec<fs::DirEntry> = Vec::new();
     let mut skipped_entries = 0u32;
-    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+    let read = fs::read_dir(dir).map_err(|e| {
+        if drive_root {
+            format_volume_open_error(dir, &e)
+        } else {
+            e.to_string()
+        }
+    });
+    for entry in read? {
         match entry {
             Ok(e) => dir_entries.push(e),
             Err(_) => skipped_entries += 1,
@@ -3231,12 +3286,14 @@ fn enumerate_windows_drive_letters() -> Vec<DriveInfo> {
         };
         // Volume label. Fails silently for empty CD trays and offline network
         // mounts; we fall back to the type-specific default in that case.
+        // BitLocker-locked volumes also fail here — detect that so the sidebar
+        // shows "Locked" and navigate can trigger the unlock prompt.
         let mut label = [0u16; 261];
         let mut serial = 0u32;
         let mut max_comp = 0u32;
         let mut flags = 0u32;
         let mut fs_name = [0u16; 32];
-        let label_str = unsafe {
+        let vol_ok = unsafe {
             GetVolumeInformationW(
                 PCWSTR(wide.as_ptr()),
                 Some(&mut label),
@@ -3245,21 +3302,32 @@ fn enumerate_windows_drive_letters() -> Vec<DriveInfo> {
                 Some(&mut flags),
                 Some(&mut fs_name),
             )
-        }
-        .map(|_| {
-            let len = label.iter().position(|&c| c == 0).unwrap_or(label.len());
-            String::from_utf16_lossy(&label[..len])
-        })
-        .unwrap_or_default();
-        let label_part = if label_str.trim().is_empty() {
-            default_label.to_string()
-        } else {
-            label_str
+        };
+        let (label_part, kind) = match vol_ok {
+            Ok(()) => {
+                let len = label.iter().position(|&c| c == 0).unwrap_or(label.len());
+                let label_str = String::from_utf16_lossy(&label[..len]);
+                let label_part = if label_str.trim().is_empty() {
+                    default_label.to_string()
+                } else {
+                    label_str
+                };
+                (label_part, kind.to_string())
+            }
+            Err(_) if dtype == DRIVE_FIXED || dtype == DRIVE_REMOVABLE => {
+                // Present letter but no volume info — typically BitLocker locked
+                // or media not ready. Keep the letter visible so the user can click.
+                (
+                    format!("{default_label} (Locked)"),
+                    kind.to_string(),
+                )
+            }
+            Err(_) => (default_label.to_string(), kind.to_string()),
         };
         out.push(DriveInfo {
             name: format!("{}: {}", letter, label_part),
             path,
-            kind: kind.to_string(),
+            kind,
         });
     }
     out
@@ -4119,7 +4187,10 @@ fn windows_index_search_impl(
     query: &str,
     path: &str,
     max_results: usize,
+    cancel: Option<&(Arc<AtomicU64>, u64)>,
 ) -> Result<Vec<FileEntry>, String> {
+    use std::process::Stdio;
+
     let cleaned = tokenize_query(query)
         .into_iter()
         .filter(|token| !token.contains(':'))
@@ -4167,15 +4238,34 @@ ConvertTo-Json -InputObject @($paths) -Compress
         q = q_escaped
     );
 
-    let output = ProcessCommand::new("powershell")
+    let mut child = ProcessCommand::new("powershell")
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
         .arg("-Command")
         .arg(&script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .no_window()
-        .output()
+        .spawn()
         .map_err(|e| e.to_string())?;
+
+    loop {
+        if let Some((generation, token)) = cancel {
+            if generation.load(Ordering::Relaxed) != *token {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(Vec::new());
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => std::thread::sleep(Duration::from_millis(40)),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
 
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
@@ -4199,6 +4289,7 @@ fn windows_index_search_impl(
     _query: &str,
     _path: &str,
     _max_results: usize,
+    _cancel: Option<&(Arc<AtomicU64>, u64)>,
 ) -> Result<Vec<FileEntry>, String> {
     Err("Windows Search index is only available on Windows".to_string())
 }
@@ -4209,7 +4300,7 @@ fn windows_index_search(
     max_results: Option<usize>,
 ) -> Result<Vec<FileEntry>, String> {
     let mut entries =
-        windows_index_search_impl(&query, &path, max_results.unwrap_or(400).min(2000))?;
+        windows_index_search_impl(&query, &path, max_results.unwrap_or(400).min(2000), None)?;
     let _ = upsert_index_entries(&entries);
     sort_entries(&mut entries);
     Ok(entries)
@@ -4230,20 +4321,54 @@ fn merge_search_entries(target: &mut Vec<FileEntry>, incoming: Vec<FileEntry>, m
     }
 }
 
-/// Directories skipped during whole-drive live search (noise + extreme depth).
-fn should_skip_search_walk_dir(name: &str) -> bool {
+/// Directories skipped during live search (noise + extreme depth).
+fn should_skip_search_walk_dir(name: &str, drive_wide: bool) -> bool {
     let lower = name.to_ascii_lowercase();
-    STORAGE_SKIP_DIRS
+    if STORAGE_SKIP_DIRS
         .iter()
         .any(|skip| lower == skip.to_ascii_lowercase())
-        || matches!(
+    {
+        return true;
+    }
+    if matches!(
+        lower.as_str(),
+        "winsxs"
+            | "installer"
+            | "servicing"
+            | "assembly"
+            | "packages"
+            | "driverstore"
+            | "catroot"
+            | "catroot2"
+            | "sxs"
+            | "$windows.~bt"
+            | "$windows.~ws"
+            | "msocache"
+    ) {
+        return true;
+    }
+    // Drive-wide name search: skip OS + VCS/package trees that dominate I/O
+    // without usually matching what the user typed. Folder-scoped search still
+    // walks them so an explicit path into Windows\ or a repo keeps working.
+    if drive_wide {
+        return matches!(
             lower.as_str(),
-            "winsxs" | "installer" | "servicing" | "assembly" | "packages"
-        )
+            "windows"
+                | "node_modules"
+                | ".git"
+                | ".hg"
+                | ".svn"
+                | "__pycache__"
+                | ".cache"
+                | ".nuget"
+                | "bower_components"
+        );
+    }
+    false
 }
 
-/// Whole-drive search: walk each top-level folder in parallel with a per-tree
-/// match budget so Users\\AppData\\... is not starved by shallow Program Files hits.
+/// Whole-drive search via jwalk: parallel directory reads, global match budget,
+/// frequent cancel checks, and a skip list that avoids OS/package noise.
 fn live_search_drive_deep(
     state: &AppState,
     root: &Path,
@@ -4251,63 +4376,80 @@ fn live_search_drive_deep(
     max: usize,
     token: u64,
 ) -> Vec<FileEntry> {
+    use jwalk::WalkDir as JWalkDir;
+
     let parsed = Arc::new(parse_query(query));
     let generation = state.search_generation.clone();
-    let mut work_units: Vec<PathBuf> = fs::read_dir(root)
-        .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).collect())
-        .unwrap_or_default();
-    work_units.sort_by_key(|p| {
-        let name = p
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        match name.as_str() {
-            "users" => 0u8,
-            "programdata" => 1,
-            _ => 2,
-        }
-    });
-    let per_tree = max.saturating_div(work_units.len().max(1)).max(512);
-    let chunks: Vec<Vec<FileEntry>> = work_units
-        .into_par_iter()
-        .map(|subtree| {
-            let parsed = Arc::clone(&parsed);
+    let match_count = Arc::new(AtomicUsize::new(0));
+    let mut output: Vec<FileEntry> = Vec::with_capacity(max.min(4096));
+
+    // Single parallel walker (one pool) — nested per-subtree pools previously
+    // risked thread explosion on drives with many top-level folders.
+    let walker = JWalkDir::new(root)
+        .follow_links(false)
+        .skip_hidden(false)
+        .parallelism(jwalk::Parallelism::RayonNewPool(num_cpus().clamp(2, 8)))
+        .process_read_dir({
             let generation = generation.clone();
-            WalkDir::new(subtree)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry({
-                    let generation = generation.clone();
-                    move |e| {
-                        if generation.load(Ordering::Relaxed) != token {
-                            return false;
-                        }
-                        if e.file_type().is_dir() {
-                            let name = e.file_name().to_string_lossy();
-                            return !should_skip_search_walk_dir(&name);
-                        }
-                        true
+            let match_count = match_count.clone();
+            move |_depth, _path, _state, children| {
+                if generation.load(Ordering::Relaxed) != token
+                    || match_count.load(Ordering::Relaxed) >= max
+                {
+                    children.clear();
+                    return;
+                }
+                children.retain(|c| {
+                    let Ok(entry) = c.as_ref() else {
+                        return false;
+                    };
+                    if entry.file_type().is_dir() {
+                        let name = entry.file_name().to_string_lossy();
+                        return !should_skip_search_walk_dir(&name, true);
                     }
-                })
-                .filter_map(move |e| {
-                    if generation.load(Ordering::Relaxed) != token {
-                        return None;
+                    true
+                });
+                // Prefer likely user hits: process Users/ProgramData children first
+                // within each directory listing.
+                children.sort_by_key(|c| {
+                    let Ok(entry) = c.as_ref() else {
+                        return 2u8;
+                    };
+                    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    match name.as_str() {
+                        "users" => 0,
+                        "programdata" => 1,
+                        _ => 2,
                     }
-                    let e = e.ok()?;
-                    let path = e.path();
-                    let metadata = e.metadata().ok()?;
-                    if matches_query(path, &metadata, &parsed) {
-                        Some(path_to_entry(path, &metadata))
-                    } else {
-                        None
-                    }
-                })
-                .take(per_tree)
-                .collect()
-        })
-        .collect();
-    let mut output: Vec<FileEntry> = chunks.into_iter().flatten().take(max).collect();
+                });
+            }
+        });
+
+    for entry in walker {
+        if generation.load(Ordering::Relaxed) != token {
+            break;
+        }
+        if match_count.load(Ordering::Relaxed) >= max {
+            break;
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !matches_query(&path, &metadata, &parsed) {
+            continue;
+        }
+        let n = match_count.fetch_add(1, Ordering::Relaxed);
+        if n >= max {
+            break;
+        }
+        output.push(path_to_entry(&path, &metadata));
+    }
+
+    output.truncate(max);
     sort_entries(&mut output);
     output
 }
@@ -4319,55 +4461,69 @@ fn live_search_scan(
     max: usize,
     token: u64,
 ) -> Vec<FileEntry> {
+    use jwalk::WalkDir as JWalkDir;
+
     let dir = PathBuf::from(root);
     if is_filesystem_root(&dir) {
         return live_search_drive_deep(state, &dir, query, max, token);
     }
+
     let parsed = Arc::new(parse_query(query));
     let generation = state.search_generation.clone();
-    let is_drive_root = is_filesystem_root(&dir);
-    let mut work_units: Vec<PathBuf> = fs::read_dir(&dir)
-        .map(|rd| rd.filter_map(Result::ok).map(|e| e.path()).collect())
-        .unwrap_or_default();
-    if is_drive_root {
-        // Search-all really means the whole drive. Keep every root child and
-        // only reorder common user content to surface likely hits sooner.
-        work_units.sort_by_key(|p| {
-            let name = p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            if name == "users" { 0u8 } else { 1u8 }
+    let match_count = Arc::new(AtomicUsize::new(0));
+    let mut output: Vec<FileEntry> = Vec::with_capacity(max.min(2048));
+
+    let walker = JWalkDir::new(&dir)
+        .follow_links(false)
+        .skip_hidden(false)
+        .parallelism(jwalk::Parallelism::RayonNewPool(num_cpus().clamp(2, 6)))
+        .process_read_dir({
+            let generation = generation.clone();
+            let match_count = match_count.clone();
+            move |_depth, _path, _state, children| {
+                if generation.load(Ordering::Relaxed) != token
+                    || match_count.load(Ordering::Relaxed) >= max
+                {
+                    children.clear();
+                    return;
+                }
+                children.retain(|c| {
+                    let Ok(entry) = c.as_ref() else {
+                        return false;
+                    };
+                    if entry.file_type().is_dir() {
+                        let name = entry.file_name().to_string_lossy();
+                        return !should_skip_search_walk_dir(&name, false);
+                    }
+                    true
+                });
+            }
         });
+
+    for entry in walker {
+        if generation.load(Ordering::Relaxed) != token {
+            break;
+        }
+        if match_count.load(Ordering::Relaxed) >= max {
+            break;
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !matches_query(&path, &metadata, &parsed) {
+            continue;
+        }
+        let n = match_count.fetch_add(1, Ordering::Relaxed);
+        if n >= max {
+            break;
+        }
+        output.push(path_to_entry(&path, &metadata));
     }
 
-    let mut output: Vec<FileEntry> = work_units
-        .into_par_iter()
-        .flat_map_iter(|subtree| {
-            let parsed = Arc::clone(&parsed);
-            let generation_for_descent = Arc::clone(&generation);
-            let generation_for_match = Arc::clone(&generation);
-            WalkDir::new(subtree)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(move |_| generation_for_descent.load(Ordering::Relaxed) == token)
-                .filter_map(Result::ok)
-                .filter_map(move |entry| {
-                    if generation_for_match.load(Ordering::Relaxed) != token {
-                        return None;
-                    }
-                    let entry_path = entry.path().to_path_buf();
-                    let metadata = entry.metadata().ok()?;
-                    if matches_query(&entry_path, &metadata, &parsed) {
-                        Some(path_to_entry(&entry_path, &metadata))
-                    } else {
-                        None
-                    }
-                })
-        })
-        .take_any(max)
-        .collect();
     sort_entries(&mut output);
     output
 }
@@ -4390,7 +4546,12 @@ fn hybrid_search_background(
         return (Vec::new(), "cancelled".to_string());
     }
 
-    if let Ok(windows_results) = windows_index_search_impl(query, root, max) {
+    if let Ok(windows_results) = windows_index_search_impl(
+        query,
+        root,
+        max,
+        Some(&(state.search_generation.clone(), token)),
+    ) {
         if !windows_results.is_empty() {
             let _ = upsert_index_entries(&windows_results);
             merge_search_entries(&mut results, windows_results, max);
@@ -6692,6 +6853,44 @@ fn scan_storage_root(root: String, top_n: Option<usize>) -> Result<StorageScanRe
 }
 
 #[cfg(test)]
+mod search_query_tests {
+    use super::*;
+
+    #[test]
+    fn plain_terms_do_not_require_content_reads() {
+        let parsed = parse_query("report");
+        assert!(parsed.content.is_none());
+        assert_eq!(parsed.terms, vec!["report".to_string()]);
+    }
+
+    #[test]
+    fn content_operator_sets_content_filter() {
+        let parsed = parse_query("content:TODO ext:txt");
+        assert_eq!(parsed.content.as_deref(), Some("todo"));
+        assert_eq!(parsed.ext.as_deref(), Some("txt"));
+    }
+
+    #[test]
+    fn drive_wide_skips_windows_and_node_modules() {
+        assert!(should_skip_search_walk_dir("Windows", true));
+        assert!(should_skip_search_walk_dir("node_modules", true));
+        assert!(should_skip_search_walk_dir("WinSxS", true));
+        assert!(!should_skip_search_walk_dir("Windows", false));
+        assert!(!should_skip_search_walk_dir("Documents", true));
+    }
+
+    #[test]
+    fn volume_lock_errors_are_detected() {
+        assert!(looks_like_volume_lock_error("Access is denied. (os error 5)"));
+        assert!(looks_like_volume_lock_error("The device is not ready."));
+        assert!(looks_like_volume_lock_error(
+            "This drive is locked with BitLocker"
+        ));
+        assert!(!looks_like_volume_lock_error("Path does not exist: Z:\\missing"));
+    }
+}
+
+#[cfg(test)]
 mod path_query_tests {
     use super::*;
 
@@ -8034,6 +8233,9 @@ struct NativeController {
     // rapid sidebar clicks into a single navigate() call (last click wins).
     sidebar_nav_pending: Option<String>,
     sidebar_nav_timer: Option<slint::Timer>,
+    /// Drive root waiting for BitLocker unlock retry from the toast action.
+    bitlocker_retry_path: Option<String>,
+    bitlocker_retry_secondary: bool,
     // Total used bytes on the current scan root (from GetDiskFreeSpaceExW).
     // Used as the progress-bar denominator so % shown is real progress vs.
     // the actual amount of data on the drive, not just "bytes seen so far".
@@ -11324,14 +11526,118 @@ fn compact_drive_label(path: &str) -> String {
 
 fn user_facing_error(message: String) -> String {
     let lower = message.to_lowercase();
-    if lower.contains("access is denied")
+    if lower.contains("bitlocker")
+        || lower.contains("locked volume")
+        || lower.contains("this drive is locked")
+    {
+        message
+    } else if lower.contains("access is denied")
         || lower.contains("access denied")
         || lower.contains("permission denied")
         || lower.contains("requires elevation")
     {
         "Access denied. Windows blocked this item. Try Show More Options, Run as Administrator, or Take Ownership for protected paths.".to_string()
+    } else if lower.contains("not ready")
+        || lower.contains("device is not ready")
+        || lower.contains("the device is not ready")
+    {
+        "This drive is not ready. If it is BitLocker-protected, unlock it and try again.".to_string()
     } else {
         message
+    }
+}
+
+fn looks_like_volume_lock_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("bitlocker")
+        || lower.contains("locked volume")
+        || lower.contains("not ready")
+        || lower.contains("device is not ready")
+        || lower.contains("access is denied")
+        || lower.contains("access denied")
+        || lower.contains("permission denied")
+        || lower.contains("os error 5")
+        || lower.contains("os error 21")
+        || lower.contains("os error 433")
+        || lower.contains("os error 1168")
+        || lower.contains("cannot find the path")
+        || lower.contains("system cannot find")
+}
+
+fn format_volume_open_error(dir: &Path, err: &std::io::Error) -> String {
+    let raw = err.to_string();
+    if looks_like_volume_lock_error(&raw) {
+        format!(
+            "This drive is locked (BitLocker or media not ready): {} ({raw})",
+            dir.display()
+        )
+    } else {
+        format!("Cannot open {}: {raw}", dir.display())
+    }
+}
+
+/// Ask Windows to show the BitLocker unlock UI for a drive root.
+/// Raw `read_dir` never triggers that prompt — ShellExecute / Explorer does.
+fn prompt_bitlocker_unlock(path: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let trimmed = path.trim_end_matches(['/', '\\']);
+        let root = if trimmed.len() == 2 && trimmed.as_bytes()[1] == b':' {
+            format!("{}\\", trimmed)
+        } else if is_filesystem_root(Path::new(path)) {
+            path.to_string()
+        } else {
+            return false;
+        };
+
+        // ShellExecute "open" on the volume is what Explorer uses; it surfaces
+        // the BitLocker password dialog for locked removable/fixed drives.
+        if open_with_shell_execute(&root).is_ok() {
+            return true;
+        }
+        ProcessCommand::new("explorer")
+            .arg(&root)
+            .spawn()
+            .is_ok()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Load a directory, prompting BitLocker unlock and polling when a drive root
+/// looks locked. Used by primary and secondary pane async loaders.
+fn list_directory_chunk_with_unlock(
+    path: &str,
+    max_entries: usize,
+    generation: &AtomicU64,
+    token: u64,
+) -> Result<DirectoryPage, String> {
+    let dir = Path::new(path);
+    match list_directory_chunk(dir, max_entries) {
+        Ok(page) => Ok(page),
+        Err(err) => {
+            let drive_root = is_filesystem_root(dir);
+            if !(drive_root && looks_like_volume_lock_error(&err)) {
+                return Err(err);
+            }
+            let _ = prompt_bitlocker_unlock(path);
+            // BitLocker UI is async; poll until unlocked or the user navigates away.
+            for _ in 0..120 {
+                if generation.load(Ordering::SeqCst) != token {
+                    return Err("Navigation cancelled".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                if let Ok(page) = list_directory_chunk(dir, max_entries) {
+                    return Ok(page);
+                }
+            }
+            Err(format!(
+                "This drive is locked with BitLocker. Unlock it when prompted, then click Unlock to retry. ({err})"
+            ))
+        }
     }
 }
 
@@ -13663,6 +13969,8 @@ impl NativeController {
             nav_generation: Arc::new(AtomicU64::new(0)),
             sidebar_nav_pending: None,
             sidebar_nav_timer: None,
+            bitlocker_retry_path: None,
+            bitlocker_retry_secondary: false,
             storage_disk_used: 0,
             drive_space_cache: HashMap::new(),
             tabs,
@@ -14192,6 +14500,30 @@ impl NativeController {
 
     fn show_toast(&mut self, ui: &MainWindow, message: impl Into<String>) {
         self.show_toast_kind(ui, message, "info");
+    }
+
+    fn retry_bitlocker_unlock(&mut self, ui: &MainWindow) {
+        let Some(path) = self.bitlocker_retry_path.clone() else {
+            self.show_toast_kind(
+                ui,
+                "No locked drive to unlock. Click the drive in the sidebar first.",
+                "info",
+            );
+            return;
+        };
+        let secondary = self.bitlocker_retry_secondary;
+        let _ = prompt_bitlocker_unlock(&path);
+        ui.set_empty_state(ss(format!("Waiting for BitLocker unlock on {path}...")));
+        self.show_toast_kind(
+            ui,
+            "Enter your BitLocker password in the Windows prompt if it appears.",
+            "info",
+        );
+        if secondary {
+            self.secondary_navigate(ui, path);
+        } else {
+            self.navigate(ui, path, false);
+        }
     }
 
     fn show_toast_kind(&mut self, ui: &MainWindow, message: impl Into<String>, kind: &str) {
@@ -16684,7 +17016,12 @@ impl NativeController {
         let pending = self.pending_directory_result.clone();
         let generation = self.nav_generation.clone();
         std::thread::spawn(move || {
-            let page = match list_directory_chunk(Path::new(&path), FIRST_DIRECTORY_CHUNK) {
+            let page = match list_directory_chunk_with_unlock(
+                &path,
+                FIRST_DIRECTORY_CHUNK,
+                &generation,
+                token,
+            ) {
                 Ok(page) => page,
                 Err(err) => {
                     if generation.load(Ordering::SeqCst) != token {
@@ -18652,9 +18989,15 @@ impl NativeController {
                 let tx = tx.clone();
                 let path = path.clone();
                 let query = query.clone();
+                let generation = state.search_generation.clone();
                 std::thread::spawn(move || {
-                    let windows =
-                        windows_index_search_impl(&query, &path, limit).unwrap_or_default();
+                    let windows = windows_index_search_impl(
+                        &query,
+                        &path,
+                        limit,
+                        Some(&(generation, token)),
+                    )
+                    .unwrap_or_default();
                     let _ = tx.send(Part::Windows(windows));
                 });
             }
@@ -18675,6 +19018,8 @@ impl NativeController {
             let mut got_index = false;
             let mut got_windows = false;
             let mut got_live = false;
+            let mut last_emitted_len = 0usize;
+            let emit_step = if prefer_live_first { 150 } else { 40 };
 
             let emit = |entries: &[FileEntry], source: &str, partial: bool| {
                 if entries.is_empty() && partial {
@@ -18713,6 +19058,7 @@ impl NativeController {
                             merge_search_entries(&mut results, indexed, limit);
                             push_source(&mut source, "Pathfinder index");
                             emit(&results, &source, true);
+                            last_emitted_len = results.len();
                         }
                     }
                     Part::Windows(windows_results) => {
@@ -18722,24 +19068,29 @@ impl NativeController {
                             merge_search_entries(&mut results, windows_results, limit);
                             push_source(&mut source, "Windows Search");
                             emit(&results, &source, true);
+                            last_emitted_len = results.len();
                         }
                     }
                     Part::Live(live) => {
                         got_live = true;
                         if !live.is_empty() {
-                            let _ = upsert_index_entries(&live);
+                            // Defer SQLite upsert until the final merge — writing
+                            // tens of thousands of live hits mid-search contended
+                            // with UI readers and felt like a hang on deep walks.
                             merge_search_entries(&mut results, live, limit);
                             push_source(&mut source, "live scan");
-                            emit(&results, &source, true);
+                            if results.len() >= last_emitted_len.saturating_add(emit_step)
+                                || last_emitted_len == 0
+                            {
+                                emit(&results, &source, true);
+                                last_emitted_len = results.len();
+                            }
                         }
                     }
                 }
                 if got_index && got_windows && got_live {
                     break;
                 }
-                // Folder-scoped: once index+Windows arrived with enough hits,
-                // we still wait for live (already running) but UI already painted.
-                let _ = prefer_live_first;
             }
 
             if state.search_generation.load(Ordering::SeqCst) != token {
@@ -18747,6 +19098,12 @@ impl NativeController {
             }
             sort_entries(&mut results);
             apply_semantic_search_ranking_entries(&path, &query, semantic, clip, &mut results);
+            // Seed the local index from the merged result set (capped) so the
+            // next drive search paints from SQLite without another full walk.
+            let index_seed: Vec<FileEntry> = results.iter().take(2_000).cloned().collect();
+            if !index_seed.is_empty() {
+                let _ = upsert_index_entries(&index_seed);
+            }
             publish_search_result(&pending, &ready, &path, &query, results, source, false);
         });
     }
@@ -19103,7 +19460,12 @@ impl NativeController {
         let generation = self.secondary_nav_generation.clone();
         let state = self.app_state.clone();
         std::thread::spawn(move || {
-            let page = match list_directory_chunk(Path::new(&path), FIRST_DIRECTORY_CHUNK) {
+            let page = match list_directory_chunk_with_unlock(
+                &path,
+                FIRST_DIRECTORY_CHUNK,
+                &generation,
+                token,
+            ) {
                 Ok(page) => page,
                 Err(err) => {
                     if generation.load(Ordering::SeqCst) != token {
@@ -26213,8 +26575,30 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                             "Cannot open \"{}\"",
                                             result.path
                                         )));
-                                        ctrl.show_toast_kind(&ui, err, "error");
+                                        if looks_like_volume_lock_error(&err)
+                                            && is_filesystem_root(Path::new(&result.path))
+                                        {
+                                            ctrl.bitlocker_retry_path = Some(result.path.clone());
+                                            ctrl.bitlocker_retry_secondary = false;
+                                            ctrl.show_toast_action(
+                                                &ui,
+                                                "This drive is locked with BitLocker. Unlock it in the Windows prompt, then click Unlock.",
+                                                "warning",
+                                                "Unlock",
+                                            );
+                                            let _ = prompt_bitlocker_unlock(&result.path);
+                                        } else {
+                                            ctrl.show_toast_kind(&ui, err, "error");
+                                        }
                                     } else if ctrl.files.is_empty() {
+                                        if ctrl
+                                            .bitlocker_retry_path
+                                            .as_ref()
+                                            .is_some_and(|p| same_path_string(p, &result.path))
+                                        {
+                                            ctrl.bitlocker_retry_path = None;
+                                            ctrl.bitlocker_retry_secondary = false;
+                                        }
                                         let page = DirectoryPage {
                                             entries: result.entries,
                                             partial: result.partial,
@@ -26263,7 +26647,21 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                     // Stale secondary nav — ignore.
                                 } else if same_path_string(&ctrl.secondary_path, &result.path) {
                                     if let Some(err) = result.error {
-                                        ctrl.show_toast_kind(&ui, err, "error");
+                                        if looks_like_volume_lock_error(&err)
+                                            && is_filesystem_root(Path::new(&result.path))
+                                        {
+                                            ctrl.bitlocker_retry_path = Some(result.path.clone());
+                                            ctrl.bitlocker_retry_secondary = true;
+                                            ctrl.show_toast_action(
+                                                &ui,
+                                                "This drive is locked with BitLocker. Unlock it in the Windows prompt, then click Unlock.",
+                                                "warning",
+                                                "Unlock",
+                                            );
+                                            let _ = prompt_bitlocker_unlock(&result.path);
+                                        } else {
+                                            ctrl.show_toast_kind(&ui, err, "error");
+                                        }
                                     } else {
                                         let page = DirectoryPage {
                                             entries: result.entries,
@@ -26310,8 +26708,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                             " · first 25,000 matches"
                                         } else if !result.partial
                                             && count >= SEARCH_LIVE_SCAN_LIMIT
+                                            && !is_filesystem_root(Path::new(&result.path))
                                         {
-                                            " · results truncated"
+                                            " · first 5,000 matches"
                                         } else {
                                             ""
                                         }
@@ -26491,6 +26890,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             ctrl.dismiss_toast(&ui);
             if action.eq_ignore_ascii_case("undo") {
                 ctrl.undo(&ui);
+            } else if action.eq_ignore_ascii_case("unlock") {
+                ctrl.retry_bitlocker_unlock(&ui);
             }
         }
     });
