@@ -27054,7 +27054,6 @@ fn register_winit_window_handlers(ui: &MainWindow) {
     let weak_nav = ui.as_weak();
     let weak_max = ui.as_weak();
     let last_maximized = Rc::new(AtomicBool::new(ui.window().is_maximized()));
-    let resize_clear_timer = Rc::new(slint::Timer::default());
     ui.window().on_winit_window_event(move |win, event| {
         if let WindowEvent::MouseInput { state, button, .. } = event {
             if *state == ElementState::Pressed {
@@ -27082,7 +27081,6 @@ fn register_winit_window_handlers(ui: &MainWindow) {
             let is_max = win.is_maximized();
             let max_changed = last_maximized.swap(is_max, Ordering::SeqCst) != is_max;
             let w = weak_max.clone();
-            let clear_timer = resize_clear_timer.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
                     // Pause full-bleed atmospheres while DWM animates the
@@ -27092,7 +27090,9 @@ fn register_winit_window_handlers(ui: &MainWindow) {
                     if max_changed {
                         sync_window_maximized_ui(&ui);
                     }
+                    // Create the clear timer on the UI thread (Timer is !Send).
                     let weak_clear = ui.as_weak();
+                    let clear_timer = slint::Timer::default();
                     clear_timer.start(
                         slint::TimerMode::SingleShot,
                         Duration::from_millis(160),
@@ -27102,6 +27102,7 @@ fn register_winit_window_handlers(ui: &MainWindow) {
                             }
                         },
                     );
+                    std::mem::forget(clear_timer);
                 }
             });
         }
