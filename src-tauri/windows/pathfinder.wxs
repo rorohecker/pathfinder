@@ -2,8 +2,8 @@
 <!--
   Pathfinder MSI (WiX). Replaces the Tauri MSI target.
   Prefer windows/pack.ps1. Manual example:
-    candle -arch x64 -dVersion=1.0.15 -dSourceDir=target\release\stage -dIconPath=icons\icon.ico windows\pathfinder.wxs
-    light -out target\release\bundle\msi\Pathfinder_1.0.15_x64_en-US.msi pathfinder.wixobj
+    candle -arch x64 -dVersion=1.0.16 -dSourceDir=target\release\stage -dIconPath=icons\icon.ico windows\pathfinder.wxs
+    light -out target\release\bundle\msi\Pathfinder_1.0.16_x64_en-US.msi pathfinder.wixobj
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product

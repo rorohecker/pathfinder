@@ -2997,49 +2997,51 @@ fn list_directory_chunk(dir: &Path, max_entries: usize) -> Result<DirectoryPage,
 /// startup and navigation so hot/cold starts paint the last folder without
 /// waiting for a full `read_dir` pass; a background refresh replaces stale rows.
 fn list_directory_from_index(parent: &str) -> Option<Vec<FileEntry>> {
-    let conn = open_index_connection().ok()?;
-    let parent_key = cache_key_str(parent);
-    let mut stmt = conn
-        .prepare(
-            "SELECT path, name, extension, is_dir, size, modified
+    with_cached_index_connection(|conn| {
+        let parent_key = cache_key_str(parent);
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, name, extension, is_dir, size, modified
              FROM files WHERE parent = ?1 OR parent = ?2",
-        )
-        .ok()?;
-    let rows = stmt
-        .query_map(params![parent_key, parent], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-            ))
-        })
-        .ok()?;
-    let mut entries = Vec::new();
-    for row in rows.flatten() {
-        let (path, name, ext, is_dir, size, modified) = row;
-        let name_lower = name.to_lowercase();
-        entries.push(FileEntry {
-            path,
-            name_lower,
-            name,
-            kind: if is_dir != 0 {
-                FileKind::Directory
-            } else {
-                FileKind::File
-            },
-            size: size.max(0) as u64,
-            modified: modified.max(0) as u64,
-            extension: if ext.is_empty() { None } else { Some(ext) },
-        });
-    }
-    if entries.is_empty() {
-        return None;
-    }
-    sort_entries(&mut entries);
-    Some(entries)
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![parent_key, parent], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut entries = Vec::new();
+        for row in rows.flatten() {
+            let (path, name, ext, is_dir, size, modified) = row;
+            let name_lower = name.to_lowercase();
+            entries.push(FileEntry {
+                path,
+                name_lower,
+                name,
+                kind: if is_dir != 0 {
+                    FileKind::Directory
+                } else {
+                    FileKind::File
+                },
+                size: size.max(0) as u64,
+                modified: modified.max(0) as u64,
+                extension: if ext.is_empty() { None } else { Some(ext) },
+            });
+        }
+        if entries.is_empty() {
+            return Err("empty index listing".into());
+        }
+        sort_entries(&mut entries);
+        Ok(entries)
+    })
+    .ok()
 }
 
 static APP_STARTED: LazyLock<Instant> = LazyLock::new(Instant::now);
@@ -7978,6 +7980,11 @@ struct NativeController {
     scroll_sync_dirty: bool,
     scroll_sync_scheduled: bool,
     last_scroll_sync_at: Instant,
+    // Edge auto-scroll while rubber-band selecting near the viewport top/bottom.
+    marquee_auto_scroll_timer: Option<slint::Timer>,
+    marquee_drag_active: bool,
+    marquee_last_rect: (f32, f32, f32, f32),
+    marquee_pointer_y: f32,
     // Cached list virtualization offsets — rebuilt only when the full model or
     // row height changes, not on every pixel of scroll.
     list_layout_rev: u64,
@@ -8498,6 +8505,26 @@ fn mark_hidden(path: &Path) {
     {
         let _ = path;
     }
+}
+
+/// Per-thread cached index connection. Reuses pragma/schema setup so hot
+/// navigations (and maximized startup) don't re-open SQLite on every folder.
+fn with_cached_index_connection<T>(
+    f: impl FnOnce(&Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    thread_local! {
+        static CONN: RefCell<Option<Connection>> = const { RefCell::new(None) };
+    }
+    CONN.with(|cell| {
+        {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(open_index_connection()?);
+            }
+        }
+        let slot = cell.borrow();
+        f(slot.as_ref().expect("index connection initialized"))
+    })
 }
 
 fn open_index_connection() -> Result<Connection, String> {
@@ -9323,21 +9350,20 @@ fn suggest_paths(prefix: &str, max: usize) -> Vec<String> {
     if prefix.len() < 2 {
         return Vec::new();
     }
-    let Ok(conn) = open_index_connection() else {
-        return Vec::new();
-    };
-    // Match directories whose path starts with the typed prefix (case-insensitive)
-    let pattern = format!("{}%", like_escape(&prefix));
-    let mut stmt = match conn.prepare(
-        "SELECT path FROM files WHERE is_dir = 1 AND path LIKE ?1 ESCAPE '\\' ORDER BY path ASC LIMIT ?2",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    stmt.query_map(params![pattern, max as i64], |row| row.get::<_, String>(0))
-        .ok()
-        .map(|rows| rows.filter_map(Result::ok).collect())
-        .unwrap_or_default()
+    with_cached_index_connection(|conn| {
+        // Match directories whose path starts with the typed prefix (case-insensitive)
+        let pattern = format!("{}%", like_escape(&prefix));
+        let mut stmt = conn
+            .prepare(
+                "SELECT path FROM files WHERE is_dir = 1 AND path LIKE ?1 ESCAPE '\\' ORDER BY path ASC LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![pattern, max as i64], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(Result::ok).collect::<Vec<_>>())
+    })
+    .unwrap_or_default()
 }
 
 fn index_stats() -> IndexStatus {
@@ -13606,6 +13632,10 @@ impl NativeController {
             scroll_sync_dirty: false,
             scroll_sync_scheduled: false,
             last_scroll_sync_at: Instant::now() - Duration::from_secs(60),
+            marquee_auto_scroll_timer: None,
+            marquee_drag_active: false,
+            marquee_last_rect: (0.0, 0.0, 0.0, 0.0),
+            marquee_pointer_y: 0.0,
             list_layout_rev: 0,
             list_layout_row_h: 0.0,
             list_layout_offsets: Vec::new(),
@@ -14035,7 +14065,24 @@ impl NativeController {
     /// background threads spawned from here.
     fn finish_startup(&mut self, ui: &MainWindow) {
         let path = self.current_path.clone();
-        self.navigate(ui, path, false);
+        // Prefer in-memory cache; otherwise always take the async directory
+        // path so the first maximized frame is not blocked on SQLite open or
+        // a synchronous read_dir of a large folder. Virtual namespaces still
+        // go through navigate().
+        if path == "home://" || path == "recycle://" || path == "storage://" {
+            self.navigate(ui, path, false);
+        } else if let Some(entries) = self.app_state.cached_directory(&path) {
+            let page = DirectoryPage {
+                entries,
+                partial: false,
+                skipped_entries: 0,
+            };
+            self.apply_directory_listing(ui, path, page, false, false);
+        } else if path.is_empty() {
+            self.navigate(ui, path, false);
+        } else {
+            self.start_async_directory_load(ui, path, false);
+        }
         self.spawn_deferred_startup_data();
         let custom_theme = self.settings.custom_theme.clone();
         let weak_editor = ui.as_weak();
@@ -14058,6 +14105,8 @@ impl NativeController {
                 }
             },
         );
+        // Keep the one-shot alive until it fires (dropping would cancel it).
+        std::mem::forget(editor_timer);
         let weak = ui.as_weak();
         std::thread::spawn(move || {
             let mb = local_ai::approx_total_install_mb() as i32;
@@ -17464,6 +17513,13 @@ impl NativeController {
         h: f32,
         commit_preview: bool,
     ) {
+        if commit_preview {
+            self.stop_marquee_auto_scroll();
+        } else if w >= 2.0 || h >= 2.0 {
+            self.marquee_last_rect = (x, y, w, h);
+            self.marquee_pointer_y = ui.get_marquee_pointer_y();
+            self.marquee_drag_active = true;
+        }
         if w < 2.0 && h < 2.0 {
             return;
         }
@@ -17545,6 +17601,229 @@ impl NativeController {
         }
     }
 
+    fn stop_marquee_auto_scroll(&mut self) {
+        self.marquee_drag_active = false;
+        if let Some(timer) = self.marquee_auto_scroll_timer.as_ref() {
+            timer.stop();
+        }
+    }
+
+    /// Keep scrolling while the marquee pointer sits in the top/bottom edge
+    /// zone so rubber-band selection can reach icons below (or above) the
+    /// current viewport — File Explorer behavior.
+    fn tick_marquee_auto_scroll(&mut self, ui: &MainWindow) -> bool {
+        if !self.marquee_drag_active {
+            return false;
+        }
+        // Prefer the latest pointer Y from Slint (updated on every moved event).
+        self.marquee_pointer_y = ui.get_marquee_pointer_y();
+        let metrics = ui.global::<AppMetrics>();
+        let pad = metrics.get_pad();
+        let view = ui.get_view_mode();
+        let is_list = view.as_str() == "list";
+        let viewport_top = if is_list { pad + 32.0 } else { pad };
+        let viewport_h = if is_list {
+            ui.get_primary_list_viewport_h()
+        } else {
+            ui.get_primary_grid_viewport_h()
+        }
+        .max(80.0);
+        let viewport_bottom = viewport_top + viewport_h;
+        let zone = 40.0_f32;
+        let py = self.marquee_pointer_y;
+        let mut delta = 0.0_f32;
+        if py > viewport_bottom - zone {
+            let t = ((py - (viewport_bottom - zone)) / zone).clamp(0.0, 1.0);
+            delta = 10.0 + 26.0 * t; // px per tick, faster deeper in the zone
+        } else if py < viewport_top + zone {
+            let t = (((viewport_top + zone) - py) / zone).clamp(0.0, 1.0);
+            delta = -(10.0 + 26.0 * t);
+        }
+        if delta.abs() < 0.5 {
+            return true; // still dragging; keep timer for when pointer re-enters zone
+        }
+
+        ui.set_scroll_animating(false);
+        if is_list {
+            let content_h = ui.get_list_content_h().max(viewport_h);
+            let min_scroll = -(content_h - viewport_h).max(0.0);
+            let current = ui.get_primary_list_scroll_y();
+            let next = (current - delta).clamp(min_scroll, 0.0);
+            if (next - current).abs() < 0.25 {
+                return true;
+            }
+            ui.set_primary_list_scroll_y(next);
+        } else {
+            let cols = ui.get_grid_columns().max(1) as usize;
+            let item_h = ui.get_grid_item_h();
+            let gap = ui.get_grid_gap();
+            let row_stride = (item_h + gap).max(1.0);
+            let rows = self.visible_files.len().div_ceil(cols).max(1) as f32;
+            let content_h = (rows * row_stride).max(viewport_h);
+            let min_scroll = -(content_h - viewport_h).max(0.0);
+            let current = ui.get_primary_grid_scroll_y();
+            let next = (current - delta).clamp(min_scroll, 0.0);
+            if (next - current).abs() < 0.25 {
+                return true;
+            }
+            ui.set_primary_grid_scroll_y(next);
+        }
+        self.on_sync_grid_windows(ui);
+        let (x, y, w, h) = self.marquee_last_rect;
+        // Re-hit with the same pane-local rubber-band so newly scrolled-in
+        // icons join the selection (Explorer-style).
+        self.marquee_select_apply_only(ui, x, y, w, h);
+        true
+    }
+
+    /// Apply marquee hit-test without restarting auto-scroll bookkeeping.
+    fn marquee_select_apply_only(
+        &mut self,
+        ui: &MainWindow,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) {
+        if w < 2.0 && h < 2.0 {
+            return;
+        }
+        let metrics = ui.global::<AppMetrics>();
+        let pad = metrics.get_pad();
+        let row_h = metrics.get_row_h();
+        let grid_w = metrics.get_grid_w();
+        let grid_h = metrics.get_grid_h();
+        let mx1 = x.min(x + w);
+        let my1 = y.min(y + h);
+        let mx2 = x.max(x + w);
+        let my2 = y.max(y + h);
+        let view = ui.get_view_mode();
+        let new_set = if view.as_str() == "list" {
+            marquee_selection_list(
+                &self.visible_files,
+                &self.sort_by,
+                mx1,
+                my1,
+                mx2,
+                my2,
+                pad + 32.0,
+                ui.get_primary_list_scroll_y().abs(),
+                row_h,
+            )
+        } else {
+            let file_area_w = (ui.get_primary_pane_w() - pad * 2.0 - 12.0).max(1.0);
+            let compact = view.as_str() == "compact";
+            let cell_w_target = if compact { 200.0 } else { grid_w };
+            let cols = (file_area_w / cell_w_target).floor().max(1.0) as usize;
+            let grid_cell_w = file_area_w / cols as f32;
+            let grid_item_h = match view.as_str() {
+                "gallery" => 154.0_f32,
+                "compact" => 32.0_f32,
+                _ => grid_h,
+            };
+            let grid_gap = if compact { 2.0 } else { 8.0 };
+            marquee_selection_grid(
+                self.visible_files.len(),
+                cols,
+                mx1,
+                my1,
+                mx2,
+                my2,
+                pad,
+                ui.get_primary_grid_scroll_y().abs(),
+                grid_cell_w,
+                grid_item_h,
+                grid_gap,
+            )
+        };
+        if new_set == self.selected_set {
+            return;
+        }
+        let old = self.selected_set.clone();
+        self.selected_set = new_set;
+        self.selected_index = self
+            .selected_set
+            .iter()
+            .min()
+            .copied()
+            .map(|i| i as i32)
+            .unwrap_or(-1);
+        let changed: Vec<usize> = old
+            .symmetric_difference(&self.selected_set)
+            .copied()
+            .collect();
+        if !changed.is_empty() {
+            self.update_selection_in_model(ui, &changed);
+        }
+    }
+
+    /// Scroll the primary list/grid so `index` stays inside the viewport with
+    /// a small margin — used for keyboard and click selection near edges.
+    fn ensure_primary_selection_visible(&mut self, ui: &MainWindow, index: i32) {
+        if index < 0 {
+            return;
+        }
+        let i = index as usize;
+        let margin = 28.0_f32;
+        ui.set_scroll_animating(false);
+        if ui.get_view_mode().as_str() == "list" {
+            let viewport_h = ui.get_primary_list_viewport_h().max(80.0);
+            let row_h = ui.global::<AppMetrics>().get_row_h().max(26.0);
+            let item_top = if i < self.list_layout_offsets.len().saturating_sub(1) {
+                self.list_layout_offsets[i]
+            } else {
+                i as f32 * row_h
+            };
+            let item_bottom = if i + 1 < self.list_layout_offsets.len() {
+                self.list_layout_offsets[i + 1]
+            } else {
+                item_top + row_h
+            };
+            let content_h = ui.get_list_content_h().max(viewport_h);
+            let min_scroll = -(content_h - viewport_h).max(0.0);
+            let scroll = ui.get_primary_list_scroll_y().abs();
+            let visible_top = scroll;
+            let visible_bottom = scroll + viewport_h;
+            let mut new_scroll = scroll;
+            if item_top < visible_top + margin {
+                new_scroll = (item_top - margin).max(0.0);
+            } else if item_bottom > visible_bottom - margin {
+                new_scroll = (item_bottom - viewport_h + margin).max(0.0);
+            }
+            let next = (-new_scroll).clamp(min_scroll, 0.0);
+            if (next + scroll).abs() > 0.5 {
+                ui.set_primary_list_scroll_y(next);
+                self.on_sync_grid_windows(ui);
+            }
+        } else {
+            let cols = ui.get_grid_columns().max(1) as usize;
+            let item_h = ui.get_grid_item_h();
+            let gap = ui.get_grid_gap();
+            let row_stride = (item_h + gap).max(1.0);
+            let row = i / cols;
+            let item_top = row as f32 * row_stride;
+            let item_bottom = item_top + item_h;
+            let viewport_h = ui.get_primary_grid_viewport_h().max(80.0);
+            let rows = self.visible_files.len().div_ceil(cols).max(1) as f32;
+            let content_h = (rows * row_stride).max(viewport_h);
+            let min_scroll = -(content_h - viewport_h).max(0.0);
+            let scroll = ui.get_primary_grid_scroll_y().abs();
+            let visible_top = scroll;
+            let visible_bottom = scroll + viewport_h;
+            let mut new_scroll = scroll;
+            if item_top < visible_top + margin {
+                new_scroll = (item_top - margin).max(0.0);
+            } else if item_bottom > visible_bottom - margin {
+                new_scroll = (item_bottom - viewport_h + margin).max(0.0);
+            }
+            let next = (-new_scroll).clamp(min_scroll, 0.0);
+            if (next + scroll).abs() > 0.5 {
+                ui.set_primary_grid_scroll_y(next);
+                self.on_sync_grid_windows(ui);
+            }
+        }
+    }
+
     fn sync_active_pane(&self, ui: &MainWindow) {
         let s = if self.active_pane == ActivePane::Secondary {
             "secondary"
@@ -17621,6 +17900,7 @@ impl NativeController {
             ui.set_selected_name(ss(""));
         }
         self.update_selection_in_model(ui, &changed);
+        self.ensure_primary_selection_visible(ui, index);
         // Preview update is debounced at the callback level
     }
 
@@ -18630,6 +18910,7 @@ impl NativeController {
     }
 
     fn clear_selection(&mut self, ui: &MainWindow) {
+        self.stop_marquee_auto_scroll();
         if self.selected_index < 0
             && self.selected_set.is_empty()
             && self.secondary_selected_index < 0
@@ -19835,12 +20116,12 @@ impl NativeController {
 
         let log_ops: Vec<RenameOp> = plan
             .iter()
-            .map(|(from, new_name)| {
-                let to = Path::new(from).parent().unwrap().join(new_name);
-                RenameOp {
+            .filter_map(|(from, new_name)| {
+                let to = Path::new(from).parent()?.join(new_name);
+                Some(RenameOp {
                     from: from.clone(),
                     to: to.to_string_lossy().into_owned(),
-                }
+                })
             })
             .collect();
         self.app_state.log_op_batch_rename(log_ops);
@@ -24665,8 +24946,38 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_marquee_select(move |x, y, w, h, commit_preview| {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut()
-                .marquee_select(&ui, x, y, w, h, commit_preview);
+            let mut ctrl = c.borrow_mut();
+            ctrl.marquee_select(&ui, x, y, w, h, commit_preview);
+            if commit_preview {
+                ctrl.stop_marquee_auto_scroll();
+                return;
+            }
+            // Arm a repeating edge-scroll timer while the rubber-band is live
+            // so holding near the bottom/top keeps revealing icons.
+            if ctrl.marquee_auto_scroll_timer.is_none() {
+                ctrl.marquee_auto_scroll_timer = Some(slint::Timer::default());
+            }
+            let weak_tick = weak.clone();
+            let c_tick = c.clone();
+            let timer = ctrl
+                .marquee_auto_scroll_timer
+                .as_ref()
+                .expect("marquee timer just initialized");
+            timer.start(
+                slint::TimerMode::Repeated,
+                Duration::from_millis(16),
+                move || {
+                    let Some(ui) = weak_tick.upgrade() else {
+                        return;
+                    };
+                    let mut ctrl = c_tick.borrow_mut();
+                    if !ctrl.tick_marquee_auto_scroll(&ui) {
+                        if let Some(t) = ctrl.marquee_auto_scroll_timer.as_ref() {
+                            t.stop();
+                        }
+                    }
+                },
+            );
         }
     });
 
@@ -25152,6 +25463,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             let mut ctrl = c.borrow_mut();
             ctrl.settings.ui_mode = mode.to_string();
             ctrl.save_settings();
+            ui.set_ui_mode(ss(mode.as_str()));
             let simple = ctrl.side_items_simple();
             ui.set_side_items_simple(model_from_vec(simple));
             // Sequence the first-run flow: once the user has chosen Simple or
@@ -25555,6 +25867,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let weak = ui.as_weak();
     ui.on_maximize(move || {
         if let Some(ui) = weak.upgrade() {
+            // Pause atmospheres for the DWM maximize animation (cleared by the
+            // resize handler after ~160ms of quiet).
+            ui.set_window_resizing(true);
             let window = ui.window();
             let next = !window.is_maximized();
             window.set_maximized(next);
@@ -26711,9 +27026,10 @@ fn configure_native_window(ui: &MainWindow, settings: &NativeSettings) {
         window.set_min_inner_size(Some(LogicalSize::new(900.0, 600.0)));
         window.set_max_inner_size::<LogicalSize<f64>>(None);
 
-        if settings.window_maximized {
-            window.set_maximized(true);
-        } else if settings.window_w > 0 {
+        // Always restore a concrete size/position first. Maximizing *before*
+        // the first paint + content load is what caused the fullscreen open
+        // hitch; `run()` maximizes after the first idle frame instead.
+        if settings.window_w > 0 {
             let _ = window.request_inner_size(LogicalSize::new(
                 settings.window_w as f64,
                 settings.window_h as f64,
@@ -26744,6 +27060,47 @@ fn configure_native_window(ui: &MainWindow, settings: &NativeSettings) {
     });
     sync_window_maximized_ui(ui);
 }
+
+/// Apply the maze window icon at runtime so the taskbar / alt-tab entry is
+/// correct even when the PE resource table is missing (dev builds, older
+/// installs). Complements the winres embed in build.rs.
+fn apply_window_icon(ui: &MainWindow) {
+    use i_slint_backend_winit::WinitWindowAccessor;
+
+    let rgba = match image::load_from_memory(include_bytes!("../icons/icon.png")) {
+        Ok(img) => img.to_rgba8(),
+        Err(err) => {
+            eprintln!("[icon] failed to decode window icon: {err}");
+            return;
+        }
+    };
+    let (width, height) = rgba.dimensions();
+    let Ok(icon) = i_slint_backend_winit::winit::window::Icon::from_rgba(
+        rgba.into_raw(),
+        width,
+        height,
+    ) else {
+        eprintln!("[icon] failed to build winit Icon from RGBA");
+        return;
+    };
+    ui.window().with_winit_window(|window| {
+        window.set_window_icon(Some(icon));
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn set_app_user_model_id() {
+    use windows::core::w;
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+    // Stable id matching the former Tauri bundle identifier so pinned
+    // shortcuts and running windows group under the same taskbar button.
+    unsafe {
+        let _ = SetCurrentProcessExplicitAppUserModelID(w!("com.fusntuff.pathfinder"));
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_app_user_model_id() {}
 
 #[cfg(target_os = "windows")]
 fn apply_mica(ui: &MainWindow) {
@@ -26963,10 +27320,12 @@ fn register_winit_window_handlers(ui: &MainWindow) {
     use i_slint_backend_winit::EventResult;
     use i_slint_backend_winit::WinitWindowAccessor;
     use i_slint_backend_winit::winit::event::{ElementState, MouseButton, WindowEvent};
+    use std::sync::atomic::AtomicBool;
 
     let weak_nav = ui.as_weak();
     let weak_max = ui.as_weak();
-    ui.window().on_winit_window_event(move |_win, event| {
+    let last_maximized = Rc::new(AtomicBool::new(ui.window().is_maximized()));
+    ui.window().on_winit_window_event(move |win, event| {
         if let WindowEvent::MouseInput { state, button, .. } = event {
             if *state == ElementState::Pressed {
                 let go_back = matches!(button, MouseButton::Back);
@@ -26990,10 +27349,31 @@ fn register_winit_window_handlers(ui: &MainWindow) {
             event,
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
         ) {
+            let is_max = win.is_maximized();
+            let max_changed = last_maximized.swap(is_max, Ordering::SeqCst) != is_max;
             let w = weak_max.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
-                    sync_window_maximized_ui(&ui);
+                    // Pause full-bleed atmospheres while DWM animates the
+                    // maximize/restore size so FemtoVG isn't reflowing motes
+                    // on every intermediate resize event.
+                    ui.set_window_resizing(true);
+                    if max_changed {
+                        sync_window_maximized_ui(&ui);
+                    }
+                    // Create the clear timer on the UI thread (Timer is !Send).
+                    let weak_clear = ui.as_weak();
+                    let clear_timer = slint::Timer::default();
+                    clear_timer.start(
+                        slint::TimerMode::SingleShot,
+                        Duration::from_millis(160),
+                        move || {
+                            if let Some(ui) = weak_clear.upgrade() {
+                                ui.set_window_resizing(false);
+                            }
+                        },
+                    );
+                    std::mem::forget(clear_timer);
                 }
             });
         }
@@ -28108,6 +28488,7 @@ pub fn run() {
         use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
+    set_app_user_model_id();
 
     let _ = slint::platform::set_platform(Box::new(
         // FemtoVG (OpenGL) — vsync is on by default via winit/glutin, which
@@ -28118,6 +28499,7 @@ pub fn run() {
 
     let initial_settings: NativeSettings =
         read_native_json("settings.json", NativeSettings::default());
+    let restore_maximized = initial_settings.window_maximized;
     let ui = MainWindow::new().expect("failed to create Pathfinder window");
     // Bundled translations must be selected after the first component exists.
     apply_ui_language(&initial_settings.ui_language);
@@ -28171,10 +28553,34 @@ pub fn run() {
     });
 
     ui.show().expect("failed to show Pathfinder window");
-    controller.borrow_mut().finish_startup(&ui);
+    apply_window_icon(&ui);
     apply_mica(&ui);
     register_winit_window_handlers(&ui);
     install_mouse_nav(&ui);
+
+    // Defer maximize + first directory load until after the first paint so
+    // opening maximized (or clicking maximize mid-session) doesn't hitch on
+    // SQLite / directory listing / theme reflow in the same tick as show().
+    {
+        let weak = ui.as_weak();
+        let c = controller.clone();
+        let startup_timer = Box::new(slint::Timer::default());
+        startup_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(16),
+            move || {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                if restore_maximized {
+                    ui.window().set_maximized(true);
+                    ui.set_window_maximized(true);
+                }
+                c.borrow_mut().finish_startup(&ui);
+            },
+        );
+        Box::leak(startup_timer);
+    }
 
     // Register IDropTarget so files dropped from Explorer land in the current folder.
     //

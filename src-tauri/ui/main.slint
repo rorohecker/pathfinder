@@ -3491,6 +3491,8 @@ export component MainWindow inherits Window {
     no-frame: true;
     resize-border-width: 8px;
     title: "Pathfinder";
+    // Window / taskbar icon (also embedded into the PE via winres in build.rs).
+    icon: @image-url("../icons/icon.png");
     preferred-width: 1280px;
     preferred-height: 800px;
     min-width: 900px;
@@ -3543,6 +3545,9 @@ export component MainWindow inherits Window {
     // True while the OS window is minimized/occluded — atmospheres pause so
     // we don't burn GPU/CPU on invisible theme motion.
     in-out property <bool> window_occluded: false;
+    // True during maximize/restore resize bursts — pauses atmospheres so the
+    // full-bleed theme layers don't reflow every intermediate size.
+    in-out property <bool> window_resizing: false;
     // True on low battery (unplugged, <20%) — pauses decorative atmospheres.
     in-out property <bool> power_saver: false;
     // Decorative theme atmospheres + animated relics. Persisted in settings.json.
@@ -3939,6 +3944,10 @@ export component MainWindow inherits Window {
     // (origin at the pane's top-left). Rust converts them to file indices via
     // the same geometry (grid_columns / grid_cell_w / grid_item_h / row_h).
     callback marquee_select(length, length, length, length, bool);
+    // Pane-local Y of the active marquee pointer. Set before each live
+    // marquee_select so Rust can edge-auto-scroll when the drag nears the
+    // top/bottom of the file viewport.
+    in-out property <length> marquee_pointer_y: 0;
     callback rename_tag_prompt(string);
     callback secondary_navigate(string);
     callback secondary_file_opened(int);
@@ -5575,6 +5584,7 @@ export component MainWindow inherits Window {
                                 primary_pane_root.marquee_w = abs(self.mouse-x - primary_pane_root.marquee_start_x);
                                 primary_pane_root.marquee_h = abs(self.mouse-y - primary_pane_root.marquee_start_y);
                                 // Live update - let Rust set the selection as the rect grows.
+                                root.marquee_pointer_y = self.mouse-y;
                                 root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                     primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                             }
@@ -5658,6 +5668,7 @@ export component MainWindow inherits Window {
                                     primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, ay - primary_pane_root.absolute-position.y);
                                     primary_pane_root.marquee_w = abs((ax - primary_pane_root.absolute-position.x) - primary_pane_root.marquee_start_x);
                                     primary_pane_root.marquee_h = abs((ay - primary_pane_root.absolute-position.y) - primary_pane_root.marquee_start_y);
+                                    root.marquee_pointer_y = (ay - primary_pane_root.absolute-position.y);
                                     root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                         primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                                 }
@@ -5732,6 +5743,7 @@ export component MainWindow inherits Window {
                                     primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, parent.y + self.mouse-y);
                                     primary_pane_root.marquee_w = abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x);
                                     primary_pane_root.marquee_h = abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y);
+                                    root.marquee_pointer_y = (parent.y + self.mouse-y);
                                     root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                         primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                                 }
@@ -5802,6 +5814,7 @@ export component MainWindow inherits Window {
                                     primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, parent.y + self.mouse-y);
                                     primary_pane_root.marquee_w = abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x);
                                     primary_pane_root.marquee_h = abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y);
+                                    root.marquee_pointer_y = (parent.y + self.mouse-y);
                                     root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                         primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                                 }
@@ -5878,6 +5891,7 @@ export component MainWindow inherits Window {
                                         primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y);
                                         primary_pane_root.marquee_w = abs((self.absolute-position.x - primary_pane_root.absolute-position.x + self.mouse-x) - primary_pane_root.marquee_start_x);
                                         primary_pane_root.marquee_h = abs((self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y) - primary_pane_root.marquee_start_y);
+                                        root.marquee_pointer_y = (self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y);
                                         root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                             primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                                     }
@@ -5946,6 +5960,7 @@ export component MainWindow inherits Window {
                             primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, ay - primary_pane_root.absolute-position.y);
                             primary_pane_root.marquee_w = abs((ax - primary_pane_root.absolute-position.x) - primary_pane_root.marquee_start_x);
                             primary_pane_root.marquee_h = abs((ay - primary_pane_root.absolute-position.y) - primary_pane_root.marquee_start_y);
+                            root.marquee_pointer_y = (ay - primary_pane_root.absolute-position.y);
                             root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                 primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                         }
@@ -7177,6 +7192,7 @@ export component MainWindow inherits Window {
             interval: 3600ms;
             running: ThemePalette.theme_animations
                 && !root.window_occluded
+                && !root.window_resizing
                 && !root.power_saver
                 && (ThemePalette.active_theme == "retro" || ThemePalette.active_theme == "sunset");
             triggered => {
@@ -7187,19 +7203,20 @@ export component MainWindow inherits Window {
         // continuously (~2 min high→horizon, then back). Keeps moving even on
         // battery; only pauses when minimized or theme animations are off.
         Timer {
-            interval: 50ms;
+            interval: 100ms;
             running: ThemePalette.active_theme == "sunset"
                 && ThemePalette.theme_animations
-                && !root.window_occluded;
+                && !root.window_occluded
+                && !root.window_resizing;
             triggered => {
-                // 0.00042 × 20 Hz ≈ full arc in ~119s.
+                // 0.00084 × 10 Hz ≈ full arc in ~119s (was 0.00042 @ 20 Hz).
                 if (root.sunset_descending) {
-                    root.sunset_phase = Math.min(1.0, root.sunset_phase + 0.00042);
+                    root.sunset_phase = Math.min(1.0, root.sunset_phase + 0.00084);
                     if (root.sunset_phase >= 1.0) {
                         root.sunset_descending = false;
                     }
                 } else {
-                    root.sunset_phase = Math.max(0.0, root.sunset_phase - 0.00042);
+                    root.sunset_phase = Math.max(0.0, root.sunset_phase - 0.00084);
                     if (root.sunset_phase <= 0.0) {
                         root.sunset_descending = true;
                     }
@@ -7217,6 +7234,7 @@ export component MainWindow inherits Window {
             running: ThemePalette.active_theme == "fantasy"
                 && ThemePalette.theme_animations
                 && !root.window_occluded
+                && !root.window_resizing
                 && !root.power_saver;
         }
         RetroAtmosphere {
@@ -7229,6 +7247,7 @@ export component MainWindow inherits Window {
             running: ThemePalette.active_theme == "retro"
                 && ThemePalette.theme_animations
                 && !root.window_occluded
+                && !root.window_resizing
                 && !root.power_saver;
         }
         SunsetAtmosphere {
@@ -7241,6 +7260,7 @@ export component MainWindow inherits Window {
             running: ThemePalette.active_theme == "sunset"
                 && ThemePalette.theme_animations
                 && !root.window_occluded
+                && !root.window_resizing
                 && !root.power_saver;
             sun_cx: root.sunset_sun_cx;
             sun_cy: root.sunset_sun_cy;
@@ -10480,7 +10500,7 @@ export component MainWindow inherits Window {
     if root.toast_text != "": FadeHost {
         spawn_from: 10px;
         motion: 140ms;
-        z: 150;
+        z: 180;
         width: parent.width;
         height: parent.height;
 
@@ -10759,7 +10779,10 @@ export component MainWindow inherits Window {
             else if (root.settings_visible) { root.settings_visible = false; }
             else if (root.confirm_visible) { root.confirm_visible = false; root.confirm_cancel(); }
             else if (root.welcome_visible) { root.welcome_dismiss(); }
-            else if (root.ui_mode_prompt_visible) { /* keep until a mode is chosen */ }
+            else if (root.ui_mode_prompt_visible) {
+                root.ui_mode_prompt_visible = false;
+                root.ui_mode_prompt_choice("normal");
+            }
             else if (root.compare_overlay_visible) { root.compare_overlay_close(); }
             else if (root.dupe_overlay_visible) { root.dupe_overlay_close(); }
             else if (root.quick_look_visible) { root.quick_look_close(); }

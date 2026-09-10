@@ -26,4 +26,20 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/fonts/Lora-Regular.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/FiraCode-Regular.ttf");
     println!("cargo:rerun-if-changed=lang");
+    println!("cargo:rerun-if-changed=icons/icon.ico");
+
+    // Embed the maze icon into the PE resource table so Explorer, the taskbar,
+    // shortcuts, and Add/Remove Programs pick it up. Without this (lost when
+    // the Tauri bundler was removed) pathfinder.exe has no ICON resource and
+    // the taskbar shows a blank/generic glyph.
+    #[cfg(windows)]
+    {
+        let mut res = winres::WindowsResource::new();
+        res.set_icon("icons/icon.ico");
+        res.set("ProductName", "Pathfinder");
+        res.set("FileDescription", "Pathfinder File Manager");
+        if let Err(err) = res.compile() {
+            println!("cargo:warning=failed to embed Windows icon resource: {err}");
+        }
+    }
 }

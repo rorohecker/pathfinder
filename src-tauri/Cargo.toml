@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "1.0.15"
+version = "1.0.16"
 edition = "2024"
 
 [lib]
@@ -9,6 +9,8 @@ crate-type = ["rlib"]
 
 [build-dependencies]
 slint-build = "1"
+# Embeds icons/icon.ico into pathfinder.exe on Windows hosts (no-op compile on others).
+winres = "0.1"
 
 [dependencies]
 slint = "1"
