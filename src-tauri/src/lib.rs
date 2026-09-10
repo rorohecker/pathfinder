@@ -25192,6 +25192,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             let mut ctrl = c.borrow_mut();
             ctrl.settings.ui_mode = mode.to_string();
             ctrl.save_settings();
+            ui.set_ui_mode(ss(mode.as_str()));
             let simple = ctrl.side_items_simple();
             ui.set_side_items_simple(model_from_vec(simple));
             // Sequence the first-run flow: once the user has chosen Simple or
