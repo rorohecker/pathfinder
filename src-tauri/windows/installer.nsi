@@ -1,6 +1,6 @@
 ; Pathfinder Windows NSIS installer (replaces the Tauri bundler).
 ; Build (from src-tauri after `cargo build --release`):
-;   makensis /DVERSION=1.0.16 windows/installer.nsi
+;   makensis /DVERSION=1.0.17 windows/installer.nsi
 ;
 ; Defines (optional overrides):
 ;   VERSION          - product version (required)
