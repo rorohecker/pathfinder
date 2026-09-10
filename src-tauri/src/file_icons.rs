@@ -186,8 +186,8 @@ unsafe fn hicon_to_image(hicon: HICON) -> Option<Image> {
     }
 }
 
-/// Shell thumbnail (videos, photos, documents) via IShellItemImageFactory.
-pub fn shell_thumbnail(path: &str, px: i32) -> Option<Image> {
+/// Shell thumbnail pixels via IShellItemImageFactory (Send-friendly for workers).
+pub fn shell_thumbnail_rgba(path: &str, px: i32) -> Option<(Vec<u8>, u32, u32)> {
     if crate::cloud_files::hydration_risk(Path::new(path)) {
         return None;
     }
@@ -267,9 +267,15 @@ pub fn shell_thumbnail(path: &str, px: i32) -> Option<Image> {
             rgba.push(chunk[0]);
             rgba.push(chunk[3]);
         }
-        let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&rgba, w, h);
-        Some(Image::from_rgba8(buffer))
+        Some((rgba, w, h))
     }
+}
+
+/// Shell thumbnail (videos, photos, documents) via IShellItemImageFactory.
+pub fn shell_thumbnail(path: &str, px: i32) -> Option<Image> {
+    let (rgba, w, h) = shell_thumbnail_rgba(path, px)?;
+    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&rgba, w, h);
+    Some(Image::from_rgba8(buffer))
 }
 
 /// Convenience wrapper that picks the right strategy based on file extension.

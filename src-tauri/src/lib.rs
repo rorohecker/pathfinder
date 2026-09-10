@@ -3759,6 +3759,33 @@ fn open_file(path: String) -> Result<(), String> {
     }
 }
 
+/// ShellExecute / open handlers can stall the UI for seconds on network shares,
+/// AV scanners, or BitLocker prompts. Always fire opens off the event loop.
+fn open_file_detached(path: String) {
+    let _ = std::thread::Builder::new()
+        .name("pf-open".into())
+        .spawn(move || {
+            if let Err(err) = open_file(path) {
+                eprintln!("[open] {err}");
+            }
+        });
+}
+
+fn open_files_detached(paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("pf-open-batch".into())
+        .spawn(move || {
+            for path in paths {
+                if let Err(err) = open_file(path) {
+                    eprintln!("[open] {err}");
+                }
+            }
+        });
+}
+
 fn reveal_in_folder(path: String) -> Result<(), String> {
     let path_buf = PathBuf::from(&path);
 
@@ -8184,6 +8211,8 @@ struct NativeController {
     marquee_drag_active: bool,
     marquee_last_rect: (f32, f32, f32, f32),
     marquee_pointer_y: f32,
+    /// Alternate-frame gate for marquee re-hit while auto-scrolling.
+    marquee_hit_skip: bool,
     // Cached list virtualization offsets — rebuilt only when the full model or
     // row height changes, not on every pixel of scroll.
     list_layout_rev: u64,
@@ -8236,6 +8265,11 @@ struct NativeController {
     /// Drive root waiting for BitLocker unlock retry from the toast action.
     bitlocker_retry_path: Option<String>,
     bitlocker_retry_secondary: bool,
+    /// Cached folder/file counts for the status bar (invalidated when the
+    /// listing changes). Avoids O(n) recount on every selection/status tick
+    /// during large search paints and maximize.
+    status_cached_total: usize,
+    status_cached_dirs: usize,
     // Total used bytes on the current scan root (from GetDiskFreeSpaceExW).
     // Used as the progress-bar denominator so % shown is real progress vs.
     // the actual amount of data on the drive, not just "bytes seen so far".
@@ -13942,6 +13976,7 @@ impl NativeController {
             marquee_drag_active: false,
             marquee_last_rect: (0.0, 0.0, 0.0, 0.0),
             marquee_pointer_y: 0.0,
+            marquee_hit_skip: false,
             list_layout_rev: 0,
             list_layout_row_h: 0.0,
             list_layout_offsets: Vec::new(),
@@ -13971,6 +14006,8 @@ impl NativeController {
             sidebar_nav_timer: None,
             bitlocker_retry_path: None,
             bitlocker_retry_secondary: false,
+            status_cached_total: 0,
+            status_cached_dirs: 0,
             storage_disk_used: 0,
             drive_space_cache: HashMap::new(),
             tabs,
@@ -15038,11 +15075,15 @@ impl NativeController {
         let sel_count = sel.len();
 
         let left = if sel_count == 0 {
-            let dirs = self
-                .visible_files
-                .iter()
-                .filter(|e| e.kind == FileKind::Directory)
-                .count();
+            if self.status_cached_total != total {
+                self.status_cached_total = total;
+                self.status_cached_dirs = self
+                    .visible_files
+                    .iter()
+                    .filter(|e| e.kind == FileKind::Directory)
+                    .count();
+            }
+            let dirs = self.status_cached_dirs;
             let files = total - dirs;
             match (dirs, files) {
                 (0, f) => format!("{f} file{}", if f == 1 { "" } else { "s" }),
@@ -15166,8 +15207,11 @@ impl NativeController {
             #[cfg(target_os = "windows")]
             self.populate_system_icons(32);
         }
-        // Pre-load cached thumbnails for the first visible image files in any view.
+        // Pre-load cached thumbnails for the first visible image files — always
+        // via the thumbnail pool. Synchronous image::open here froze maximize
+        // and large-folder navigation on the UI thread.
         if enrich_visible {
+            let mut async_loads: Vec<(String, PathBuf)> = Vec::new();
             for entry in self.visible_files.iter().take(12) {
                 let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
                 if !is_thumbnail_image_ext(&ext) || self.thumbnail_memory.contains_key(&entry.path)
@@ -15176,31 +15220,28 @@ impl NativeController {
                 }
                 let disk_key = thumbnail_cache_key(Path::new(&entry.path), entry.modified, 160);
                 let thumb_path = thumbnail_cache_dir().join(format!("{disk_key}.jpg"));
-                if !thumb_path.exists() {
-                    continue;
+                if thumb_path.exists() {
+                    async_loads.push((entry.path.clone(), thumb_path));
                 }
-                if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
-                    let (w, h) = img.dimensions();
-                    let raw = img.into_raw();
-                    let buf =
-                        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
-                    self.thumbnail_memory
-                        .insert(entry.path.clone(), slint::Image::from_rgba8(buf));
-                    // Evict oldest entries when memory cache exceeds ~180 thumbs (~28 MB at 160px)
-                    const MAX_THUMB_CACHE: usize = 180;
-                    if self.thumbnail_memory.len() > MAX_THUMB_CACHE {
-                        let remove_count = self.thumbnail_memory.len() - MAX_THUMB_CACHE;
-                        let keys: Vec<String> = self
-                            .thumbnail_memory
-                            .keys()
-                            .take(remove_count)
-                            .cloned()
-                            .collect();
-                        for k in keys {
-                            self.thumbnail_memory.remove(&k);
+            }
+            if !async_loads.is_empty() {
+                let pending = self.pending_thumb_rgba.clone();
+                let ready_flag = self.thumbnail_ready.clone();
+                THUMBNAIL_POOL.spawn(move || {
+                    let mut decoded = Vec::new();
+                    for (path, thumb_path) in async_loads.into_iter().take(12) {
+                        if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
+                            let (w, h) = img.dimensions();
+                            decoded.push((path, img.into_raw(), w, h));
                         }
                     }
-                }
+                    if !decoded.is_empty() {
+                        if let Ok(mut lock) = pending.lock() {
+                            lock.extend(decoded);
+                        }
+                        ready_flag.store(true, Ordering::Release);
+                    }
+                });
             }
         }
 
@@ -15375,9 +15416,9 @@ impl NativeController {
         }
         let end = (start + visible_rows * cols).min(total);
 
-        // Warm disk thumbs off the UI thread (File Explorer loads icons async).
-        // Cap a couple of synchronous cache hits for the first paint of a settle.
-        let mut sync_budget = 2usize;
+        // Never decode thumbnails on the UI thread during scroll — even a couple
+        // of JPEG opens hitch maximize animations and wheel flicks. Queue every
+        // disk cache hit for the thumbnail pool instead.
         let mut async_loads: Vec<(String, PathBuf)> = Vec::new();
         for entry in files.iter().take(end).skip(start) {
             let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
@@ -15386,20 +15427,7 @@ impl NativeController {
             }
             let disk_key = thumbnail_cache_key(Path::new(&entry.path), entry.modified, 160);
             let thumb_path = thumbnail_cache_dir().join(format!("{disk_key}.jpg"));
-            if !thumb_path.exists() {
-                continue;
-            }
-            if sync_budget > 0 {
-                sync_budget -= 1;
-                if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
-                    let (w, h) = img.dimensions();
-                    let raw = img.into_raw();
-                    let buf =
-                        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
-                    self.thumbnail_memory
-                        .insert(entry.path.clone(), slint::Image::from_rgba8(buf));
-                }
-            } else {
+            if thumb_path.exists() {
                 async_loads.push((entry.path.clone(), thumb_path));
             }
         }
@@ -17016,6 +17044,24 @@ impl NativeController {
         let pending = self.pending_directory_result.clone();
         let generation = self.nav_generation.clone();
         std::thread::spawn(move || {
+            // Paint an index snapshot first (off UI thread) so large folders
+            // feel instant, then refresh from disk.
+            if let Some(entries) = list_directory_from_index(&path) {
+                if generation.load(Ordering::SeqCst) == token {
+                    publish_directory_pending(
+                        &pending,
+                        &ready,
+                        NativeDirectoryResult {
+                            path: path.clone(),
+                            entries,
+                            generation: token,
+                            partial: true,
+                            skipped_entries: 0,
+                            error: None,
+                        },
+                    );
+                }
+            }
             let page = match list_directory_chunk_with_unlock(
                 &path,
                 FIRST_DIRECTORY_CHUNK,
@@ -17027,18 +17073,22 @@ impl NativeController {
                     if generation.load(Ordering::SeqCst) != token {
                         return;
                     }
-                    publish_directory_pending(
-                        &pending,
-                        &ready,
-                        NativeDirectoryResult {
-                            path: path.clone(),
-                            entries: Vec::new(),
-                            generation: token,
-                            partial: false,
-                            skipped_entries: 0,
-                            error: Some(err),
-                        },
-                    );
+                    // Keep the index snapshot visible if we already painted one;
+                    // only publish the error when we have nothing else to show.
+                    if list_directory_from_index(&path).is_none() {
+                        publish_directory_pending(
+                            &pending,
+                            &ready,
+                            NativeDirectoryResult {
+                                path: path.clone(),
+                                entries: Vec::new(),
+                                generation: token,
+                                partial: false,
+                                skipped_entries: 0,
+                                error: Some(err),
+                            },
+                        );
+                    }
                     return;
                 }
             };
@@ -17268,15 +17318,9 @@ impl NativeController {
             self.apply_directory_listing(ui, path, page, push_history, false);
             return;
         }
-        if let Some(entries) = list_directory_from_index(&path) {
-            let page = DirectoryPage {
-                entries,
-                partial: true,
-                skipped_entries: 0,
-            };
-            self.apply_directory_listing(ui, path, page, push_history, false);
-            return;
-        }
+        // Index listings used to run SQLite on the UI thread here and hitch
+        // maximize / sidebar clicks on large folders. Always load off-thread;
+        // the worker paints an index snapshot first when available.
         self.start_async_directory_load(ui, path, push_history);
     }
 
@@ -18006,10 +18050,13 @@ impl NativeController {
             ui.set_primary_grid_scroll_y(next);
         }
         self.on_sync_grid_windows(ui);
-        let (x, y, w, h) = self.marquee_last_rect;
-        // Re-hit with the same pane-local rubber-band so newly scrolled-in
-        // icons join the selection (Explorer-style).
-        self.marquee_select_apply_only(ui, x, y, w, h);
+        // Re-hit every other tick so 60Hz auto-scroll doesn't redo full
+        // selection hit-testing on every frame (felt like scroll stutter).
+        self.marquee_hit_skip = !self.marquee_hit_skip;
+        if !self.marquee_hit_skip {
+            let (x, y, w, h) = self.marquee_last_rect;
+            self.marquee_select_apply_only(ui, x, y, w, h);
+        }
         true
     }
 
@@ -18335,8 +18382,8 @@ impl NativeController {
             self.navigate(ui, entry.path, true);
         } else if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
             self.open_archive_view(ui, entry.path, String::new(), true);
-        } else if let Err(error) = open_file(entry.path) {
-            self.show_toast(ui, error);
+        } else {
+            open_file_detached(entry.path);
         }
     }
 
@@ -18357,7 +18404,7 @@ impl NativeController {
 
         let mut opened_files = 0usize;
         let mut opened_dirs = 0usize;
-        let mut first_error: Option<String> = None;
+        let mut file_paths: Vec<String> = Vec::new();
         for entry in entries {
             if let Some(archive) = self.active_archive.clone() {
                 if entry.kind == FileKind::Directory {
@@ -18384,19 +18431,15 @@ impl NativeController {
                 opened_files += 1;
                 continue;
             }
-            match open_file(entry.path) {
-                Ok(()) => opened_files += 1,
-                Err(error) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                }
-            }
+            file_paths.push(entry.path);
+            opened_files += 1;
         }
 
-        if let Some(error) = first_error {
-            self.show_toast_kind(ui, error, "error");
-        } else if opened_files + opened_dirs > 0 {
+        if !file_paths.is_empty() {
+            open_files_detached(file_paths);
+        }
+
+        if opened_files + opened_dirs > 0 {
             self.show_toast_kind(
                 ui,
                 format!(
@@ -18513,22 +18556,54 @@ impl NativeController {
             format_modified(entry.modified),
         );
 
-        // Media + folders: metadata-only, no disk body read.
+        // Media + folders: metadata only. Shell thumbnails are fetched off the
+        // UI thread — IShellItemImageFactory::GetImage can stall for hundreds of
+        // ms on videos / large photos and froze selection during maximize.
         if is_media_ext(&ext) {
             self.preview_generation.fetch_add(1, Ordering::SeqCst);
-            #[cfg(target_os = "windows")]
-            if !cloud_files::hydration_risk(Path::new(&entry.path))
-                && let Some(img) = file_icons::shell_thumbnail(&entry.path, 256)
-            {
-                ui.set_preview_image(img);
-                ui.set_preview_is_image(true);
-            }
+            ui.set_preview_is_image(false);
             ui.set_preview_body(ss(format!(
                 "Media file ({ext})\n\nOpen with the system player, or use the preview action row.\n\nSize: {}\nModified: {}",
                 format_size_short(entry.size),
                 format_modified(entry.modified),
             )));
             ui.set_preview_meta(ss(base_meta));
+            #[cfg(target_os = "windows")]
+            {
+                let path = entry.path.clone();
+                let ready = self.preview_ready.clone();
+                let pending = self.pending_preview_result.clone();
+                let gen_check = self.preview_generation.clone();
+                let generation = gen_check.load(Ordering::SeqCst);
+                let meta = base_meta.clone();
+                let body = format!(
+                    "Media file ({ext})\n\nOpen with the system player, or use the preview action row.\n\nSize: {}\nModified: {}",
+                    format_size_short(entry.size),
+                    format_modified(entry.modified),
+                );
+                std::thread::spawn(move || {
+                    if cloud_files::hydration_risk(Path::new(&path)) {
+                        return;
+                    }
+                    let image_rgba = file_icons::shell_thumbnail_rgba(&path, 256)
+                        .map(|(rgba, w, h)| Arc::new((rgba, w, h)));
+                    if gen_check.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    if let Ok(mut lock) = pending.lock() {
+                        *lock = Some(PreviewResult {
+                            generation,
+                            body,
+                            meta,
+                            rendered: String::new(),
+                            pdf_image: None,
+                            image_rgba,
+                            is_image: true,
+                        });
+                    }
+                    ready.store(true, Ordering::Release);
+                });
+            }
             return;
         }
         if entry.kind == FileKind::Directory {
@@ -19704,9 +19779,7 @@ impl NativeController {
             } else if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
                 self.open_archive_view(ui, entry.path, String::new(), true);
             } else {
-                if let Err(error) = open_file(entry.path) {
-                    self.show_toast(ui, error);
-                }
+                open_file_detached(entry.path);
             }
         }
     }
@@ -25008,14 +25081,11 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
 
     let weak = ui.as_weak();
-    let c_ql = controller.clone();
     ui.on_quick_look_play(move || {
         if let Some(ui) = weak.upgrade() {
             let path = ui.get_quick_look_path().to_string();
             if !path.is_empty() {
-                if let Err(error) = open_file(path) {
-                    c_ql.borrow_mut().show_toast(&ui, error);
-                }
+                open_file_detached(path);
             }
         }
     });
@@ -25546,12 +25616,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let weak = ui.as_weak();
     let c_browser = controller.clone();
     ui.on_open_preview_in_browser(move || {
-        if let Some(ui) = weak.upgrade() {
-            let mut ctrl = c_browser.borrow_mut();
+        if let Some(_ui) = weak.upgrade() {
+            let ctrl = c_browser.borrow();
             if let Some(entry) = ctrl.selected_entry() {
-                if let Err(error) = open_file(entry.path) {
-                    ctrl.show_toast(&ui, error);
-                }
+                open_file_detached(entry.path);
             }
         }
     });
@@ -26684,11 +26752,27 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                     && ctrl.search_query == result.query
                                 {
                                     let count = result.entries.len();
+                                    let partial = result.partial;
                                     ctrl.visible_files = result.entries;
-                                    ctrl.apply_sort();
-                                    ctrl.update_models(&ui);
+                                    // Worker already name-sorted. Re-sorting
+                                    // up to 25k rows on the UI thread hitch
+                                    // maximize + typing; only re-sort when the
+                                    // user picked a non-default column.
+                                    if ctrl.sort_by != "name" || ctrl.sort_dir == "desc" {
+                                        ctrl.apply_sort();
+                                    }
+                                    // Partial search paints: skip shell-icon /
+                                    // thumb enrich so progressive results stay
+                                    // smooth. Final result does a full enrich.
+                                    if partial {
+                                        ctrl.update_file_models_quick(&ui);
+                                        ctrl.sync_sidebar_models(&ui);
+                                        ctrl.sync_fantasy_empty_kind(&ui);
+                                    } else {
+                                        ctrl.update_models(&ui);
+                                    }
                                     ctrl.update_status(&ui);
-                                    if count == 0 && !result.partial {
+                                    if count == 0 && !partial {
                                         ui.set_empty_state(ss(
                                             "No matches. Try ext:pdf, kind:image, size:>10mb, or modified:week",
                                         ));
@@ -26699,14 +26783,12 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                         "{} | {}{} ({} {}{})",
                                         result.path,
                                         result.source,
-                                        if result.partial { " — still searching" } else { "" },
+                                        if partial { " — still searching" } else { "" },
                                         count,
                                         if count == 1 { "match" } else { "matches" },
-                                        if !result.partial
-                                            && count >= SEARCH_DRIVE_SCAN_LIMIT
-                                        {
+                                        if !partial && count >= SEARCH_DRIVE_SCAN_LIMIT {
                                             " · first 25,000 matches"
-                                        } else if !result.partial
+                                        } else if !partial
                                             && count >= SEARCH_LIVE_SCAN_LIMIT
                                             && !is_filesystem_root(Path::new(&result.path))
                                         {
@@ -26715,9 +26797,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                             ""
                                         }
                                     )));
-                                    // Status bar already shows the match count;
-                                    // skip the ephemeral toast so it can't steal
-                                    // focus from more important notices (updates).
                                 }
                             }
                         }
@@ -27710,18 +27789,25 @@ fn sync_titlebar_hit_regions(tabs: &[TabItem]) {
     TITLEBAR_TABS_RIGHT_LOGICAL.store(right.to_bits(), Ordering::Release);
 }
 
-/// Map mouse back / forward to the same Slint callbacks as the toolbar.
-/// Registered on the winit event path so navigation works even when a custom
-/// `WNDPROC` subclass is not first in the chain (winit already handles
-/// `WM_XBUTTONDOWN` in the client area and emits `MouseInput`).
-///
-/// Also keeps the custom titlebar maximize glyph in sync when the OS toggles
+/// Keep the custom titlebar maximize glyph in sync when the OS toggles
 /// maximized state (Win+Up, snap layouts, double-click titlebar, etc.).
+///
+/// Also pauses Fantasy/Retro/Sunset atmospheres while DWM animates the
+/// maximize/restore size so FemtoVG isn't reflowing motes on every
+/// intermediate resize event.
 fn register_winit_window_handlers(ui: &MainWindow) {
     use i_slint_backend_winit::EventResult;
     use i_slint_backend_winit::WinitWindowAccessor;
     use i_slint_backend_winit::winit::event::{ElementState, MouseButton, WindowEvent};
+    use std::cell::RefCell;
     use std::sync::atomic::AtomicBool;
+
+    thread_local! {
+        // One reusable clear-timer. Creating+forgetting a SingleShot on every
+        // intermediate DWM resize event during maximize storms the event loop
+        // and was a primary cause of "fullscreen freezes".
+        static RESIZE_CLEAR_TIMER: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+    }
 
     let weak_nav = ui.as_weak();
     let weak_max = ui.as_weak();
@@ -27755,26 +27841,26 @@ fn register_winit_window_handlers(ui: &MainWindow) {
             let w = weak_max.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
-                    // Pause full-bleed atmospheres while DWM animates the
-                    // maximize/restore size so FemtoVG isn't reflowing motes
-                    // on every intermediate resize event.
                     ui.set_window_resizing(true);
                     if max_changed {
                         sync_window_maximized_ui(&ui);
                     }
-                    // Create the clear timer on the UI thread (Timer is !Send).
+                    // Restart the shared debounce timer instead of leaking a
+                    // new forgotten timer on every intermediate size.
                     let weak_clear = ui.as_weak();
-                    let clear_timer = slint::Timer::default();
-                    clear_timer.start(
-                        slint::TimerMode::SingleShot,
-                        Duration::from_millis(160),
-                        move || {
-                            if let Some(ui) = weak_clear.upgrade() {
-                                ui.set_window_resizing(false);
-                            }
-                        },
-                    );
-                    std::mem::forget(clear_timer);
+                    RESIZE_CLEAR_TIMER.with(|cell| {
+                        let mut slot = cell.borrow_mut();
+                        let timer = slot.get_or_insert_with(slint::Timer::default);
+                        timer.start(
+                            slint::TimerMode::SingleShot,
+                            Duration::from_millis(180),
+                            move || {
+                                if let Some(ui) = weak_clear.upgrade() {
+                                    ui.set_window_resizing(false);
+                                }
+                            },
+                        );
+                    });
                 }
             });
         }
@@ -28974,10 +29060,32 @@ pub fn run() {
                     return;
                 };
                 if restore_maximized {
+                    // Pause atmospheres for the DWM maximize animation; the
+                    // shared resize debounce clears window_resizing afterward.
+                    ui.set_window_resizing(true);
                     ui.window().set_maximized(true);
                     ui.set_window_maximized(true);
                 }
-                c.borrow_mut().finish_startup(&ui);
+                // Decouple first directory apply from the maximize animation so
+                // opening maximized never freezes on a large cached listing.
+                let weak_finish = ui.as_weak();
+                let c_finish = c.clone();
+                let delay = if restore_maximized {
+                    Duration::from_millis(48)
+                } else {
+                    Duration::from_millis(0)
+                };
+                let finish_timer = Box::new(slint::Timer::default());
+                finish_timer.start(
+                    slint::TimerMode::SingleShot,
+                    delay,
+                    move || {
+                        if let Some(ui) = weak_finish.upgrade() {
+                            c_finish.borrow_mut().finish_startup(&ui);
+                        }
+                    },
+                );
+                Box::leak(finish_timer);
             },
         );
         Box::leak(startup_timer);
