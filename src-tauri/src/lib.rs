@@ -2997,49 +2997,51 @@ fn list_directory_chunk(dir: &Path, max_entries: usize) -> Result<DirectoryPage,
 /// startup and navigation so hot/cold starts paint the last folder without
 /// waiting for a full `read_dir` pass; a background refresh replaces stale rows.
 fn list_directory_from_index(parent: &str) -> Option<Vec<FileEntry>> {
-    let conn = open_index_connection().ok()?;
-    let parent_key = cache_key_str(parent);
-    let mut stmt = conn
-        .prepare(
-            "SELECT path, name, extension, is_dir, size, modified
+    with_cached_index_connection(|conn| {
+        let parent_key = cache_key_str(parent);
+        let mut stmt = conn
+            .prepare(
+                "SELECT path, name, extension, is_dir, size, modified
              FROM files WHERE parent = ?1 OR parent = ?2",
-        )
-        .ok()?;
-    let rows = stmt
-        .query_map(params![parent_key, parent], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-            ))
-        })
-        .ok()?;
-    let mut entries = Vec::new();
-    for row in rows.flatten() {
-        let (path, name, ext, is_dir, size, modified) = row;
-        let name_lower = name.to_lowercase();
-        entries.push(FileEntry {
-            path,
-            name_lower,
-            name,
-            kind: if is_dir != 0 {
-                FileKind::Directory
-            } else {
-                FileKind::File
-            },
-            size: size.max(0) as u64,
-            modified: modified.max(0) as u64,
-            extension: if ext.is_empty() { None } else { Some(ext) },
-        });
-    }
-    if entries.is_empty() {
-        return None;
-    }
-    sort_entries(&mut entries);
-    Some(entries)
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![parent_key, parent], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut entries = Vec::new();
+        for row in rows.flatten() {
+            let (path, name, ext, is_dir, size, modified) = row;
+            let name_lower = name.to_lowercase();
+            entries.push(FileEntry {
+                path,
+                name_lower,
+                name,
+                kind: if is_dir != 0 {
+                    FileKind::Directory
+                } else {
+                    FileKind::File
+                },
+                size: size.max(0) as u64,
+                modified: modified.max(0) as u64,
+                extension: if ext.is_empty() { None } else { Some(ext) },
+            });
+        }
+        if entries.is_empty() {
+            return Err("empty index listing".into());
+        }
+        sort_entries(&mut entries);
+        Ok(entries)
+    })
+    .ok()
 }
 
 static APP_STARTED: LazyLock<Instant> = LazyLock::new(Instant::now);
@@ -8500,6 +8502,26 @@ fn mark_hidden(path: &Path) {
     }
 }
 
+/// Per-thread cached index connection. Reuses pragma/schema setup so hot
+/// navigations (and maximized startup) don't re-open SQLite on every folder.
+fn with_cached_index_connection<T>(
+    f: impl FnOnce(&Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    thread_local! {
+        static CONN: RefCell<Option<Connection>> = const { RefCell::new(None) };
+    }
+    CONN.with(|cell| {
+        {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(open_index_connection()?);
+            }
+        }
+        let slot = cell.borrow();
+        f(slot.as_ref().expect("index connection initialized"))
+    })
+}
+
 fn open_index_connection() -> Result<Connection, String> {
     let path = native_index_file();
     if let Some(parent) = path.parent() {
@@ -9323,21 +9345,20 @@ fn suggest_paths(prefix: &str, max: usize) -> Vec<String> {
     if prefix.len() < 2 {
         return Vec::new();
     }
-    let Ok(conn) = open_index_connection() else {
-        return Vec::new();
-    };
-    // Match directories whose path starts with the typed prefix (case-insensitive)
-    let pattern = format!("{}%", like_escape(&prefix));
-    let mut stmt = match conn.prepare(
-        "SELECT path FROM files WHERE is_dir = 1 AND path LIKE ?1 ESCAPE '\\' ORDER BY path ASC LIMIT ?2",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    stmt.query_map(params![pattern, max as i64], |row| row.get::<_, String>(0))
-        .ok()
-        .map(|rows| rows.filter_map(Result::ok).collect())
-        .unwrap_or_default()
+    with_cached_index_connection(|conn| {
+        // Match directories whose path starts with the typed prefix (case-insensitive)
+        let pattern = format!("{}%", like_escape(&prefix));
+        let mut stmt = conn
+            .prepare(
+                "SELECT path FROM files WHERE is_dir = 1 AND path LIKE ?1 ESCAPE '\\' ORDER BY path ASC LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![pattern, max as i64], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(Result::ok).collect::<Vec<_>>())
+    })
+    .unwrap_or_default()
 }
 
 fn index_stats() -> IndexStatus {
@@ -14035,7 +14056,24 @@ impl NativeController {
     /// background threads spawned from here.
     fn finish_startup(&mut self, ui: &MainWindow) {
         let path = self.current_path.clone();
-        self.navigate(ui, path, false);
+        // Prefer in-memory cache; otherwise always take the async directory
+        // path so the first maximized frame is not blocked on SQLite open or
+        // a synchronous read_dir of a large folder. Virtual namespaces still
+        // go through navigate().
+        if path == "home://" || path == "recycle://" || path == "storage://" {
+            self.navigate(ui, path, false);
+        } else if let Some(entries) = self.app_state.cached_directory(&path) {
+            let page = DirectoryPage {
+                entries,
+                partial: false,
+                skipped_entries: 0,
+            };
+            self.apply_directory_listing(ui, path, page, false, false);
+        } else if path.is_empty() {
+            self.navigate(ui, path, false);
+        } else {
+            self.start_async_directory_load(ui, path, false);
+        }
         self.spawn_deferred_startup_data();
         let custom_theme = self.settings.custom_theme.clone();
         let weak_editor = ui.as_weak();
@@ -14058,6 +14096,8 @@ impl NativeController {
                 }
             },
         );
+        // Keep the one-shot alive until it fires (dropping would cancel it).
+        std::mem::forget(editor_timer);
         let weak = ui.as_weak();
         std::thread::spawn(move || {
             let mb = local_ai::approx_total_install_mb() as i32;
@@ -19835,12 +19875,12 @@ impl NativeController {
 
         let log_ops: Vec<RenameOp> = plan
             .iter()
-            .map(|(from, new_name)| {
-                let to = Path::new(from).parent().unwrap().join(new_name);
-                RenameOp {
+            .filter_map(|(from, new_name)| {
+                let to = Path::new(from).parent()?.join(new_name);
+                Some(RenameOp {
                     from: from.clone(),
                     to: to.to_string_lossy().into_owned(),
-                }
+                })
             })
             .collect();
         self.app_state.log_op_batch_rename(log_ops);
@@ -25555,6 +25595,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let weak = ui.as_weak();
     ui.on_maximize(move || {
         if let Some(ui) = weak.upgrade() {
+            // Pause atmospheres for the DWM maximize animation (cleared by the
+            // resize handler after ~160ms of quiet).
+            ui.set_window_resizing(true);
             let window = ui.window();
             let next = !window.is_maximized();
             window.set_maximized(next);
@@ -26711,9 +26754,10 @@ fn configure_native_window(ui: &MainWindow, settings: &NativeSettings) {
         window.set_min_inner_size(Some(LogicalSize::new(900.0, 600.0)));
         window.set_max_inner_size::<LogicalSize<f64>>(None);
 
-        if settings.window_maximized {
-            window.set_maximized(true);
-        } else if settings.window_w > 0 {
+        // Always restore a concrete size/position first. Maximizing *before*
+        // the first paint + content load is what caused the fullscreen open
+        // hitch; `run()` maximizes after the first idle frame instead.
+        if settings.window_w > 0 {
             let _ = window.request_inner_size(LogicalSize::new(
                 settings.window_w as f64,
                 settings.window_h as f64,
@@ -26744,6 +26788,47 @@ fn configure_native_window(ui: &MainWindow, settings: &NativeSettings) {
     });
     sync_window_maximized_ui(ui);
 }
+
+/// Apply the maze window icon at runtime so the taskbar / alt-tab entry is
+/// correct even when the PE resource table is missing (dev builds, older
+/// installs). Complements the winres embed in build.rs.
+fn apply_window_icon(ui: &MainWindow) {
+    use i_slint_backend_winit::WinitWindowAccessor;
+
+    let rgba = match image::load_from_memory(include_bytes!("../icons/icon.png")) {
+        Ok(img) => img.to_rgba8(),
+        Err(err) => {
+            eprintln!("[icon] failed to decode window icon: {err}");
+            return;
+        }
+    };
+    let (width, height) = rgba.dimensions();
+    let Ok(icon) = i_slint_backend_winit::winit::window::Icon::from_rgba(
+        rgba.into_raw(),
+        width,
+        height,
+    ) else {
+        eprintln!("[icon] failed to build winit Icon from RGBA");
+        return;
+    };
+    ui.window().with_winit_window(|window| {
+        window.set_window_icon(Some(icon));
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn set_app_user_model_id() {
+    use windows::core::w;
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+    // Stable id matching the former Tauri bundle identifier so pinned
+    // shortcuts and running windows group under the same taskbar button.
+    unsafe {
+        let _ = SetCurrentProcessExplicitAppUserModelID(w!("com.fusntuff.pathfinder"));
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_app_user_model_id() {}
 
 #[cfg(target_os = "windows")]
 fn apply_mica(ui: &MainWindow) {
@@ -26963,10 +27048,13 @@ fn register_winit_window_handlers(ui: &MainWindow) {
     use i_slint_backend_winit::EventResult;
     use i_slint_backend_winit::WinitWindowAccessor;
     use i_slint_backend_winit::winit::event::{ElementState, MouseButton, WindowEvent};
+    use std::sync::atomic::AtomicBool;
 
     let weak_nav = ui.as_weak();
     let weak_max = ui.as_weak();
-    ui.window().on_winit_window_event(move |_win, event| {
+    let last_maximized = Rc::new(AtomicBool::new(ui.window().is_maximized()));
+    let resize_clear_timer = Rc::new(slint::Timer::default());
+    ui.window().on_winit_window_event(move |win, event| {
         if let WindowEvent::MouseInput { state, button, .. } = event {
             if *state == ElementState::Pressed {
                 let go_back = matches!(button, MouseButton::Back);
@@ -26990,10 +27078,29 @@ fn register_winit_window_handlers(ui: &MainWindow) {
             event,
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
         ) {
+            let is_max = win.is_maximized();
+            let max_changed = last_maximized.swap(is_max, Ordering::SeqCst) != is_max;
             let w = weak_max.clone();
+            let clear_timer = resize_clear_timer.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = w.upgrade() {
-                    sync_window_maximized_ui(&ui);
+                    // Pause full-bleed atmospheres while DWM animates the
+                    // maximize/restore size so FemtoVG isn't reflowing motes
+                    // on every intermediate resize event.
+                    ui.set_window_resizing(true);
+                    if max_changed {
+                        sync_window_maximized_ui(&ui);
+                    }
+                    let weak_clear = ui.as_weak();
+                    clear_timer.start(
+                        slint::TimerMode::SingleShot,
+                        Duration::from_millis(160),
+                        move || {
+                            if let Some(ui) = weak_clear.upgrade() {
+                                ui.set_window_resizing(false);
+                            }
+                        },
+                    );
                 }
             });
         }
@@ -28108,6 +28215,7 @@ pub fn run() {
         use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
+    set_app_user_model_id();
 
     let _ = slint::platform::set_platform(Box::new(
         // FemtoVG (OpenGL) — vsync is on by default via winit/glutin, which
@@ -28118,6 +28226,7 @@ pub fn run() {
 
     let initial_settings: NativeSettings =
         read_native_json("settings.json", NativeSettings::default());
+    let restore_maximized = initial_settings.window_maximized;
     let ui = MainWindow::new().expect("failed to create Pathfinder window");
     // Bundled translations must be selected after the first component exists.
     apply_ui_language(&initial_settings.ui_language);
@@ -28171,10 +28280,34 @@ pub fn run() {
     });
 
     ui.show().expect("failed to show Pathfinder window");
-    controller.borrow_mut().finish_startup(&ui);
+    apply_window_icon(&ui);
     apply_mica(&ui);
     register_winit_window_handlers(&ui);
     install_mouse_nav(&ui);
+
+    // Defer maximize + first directory load until after the first paint so
+    // opening maximized (or clicking maximize mid-session) doesn't hitch on
+    // SQLite / directory listing / theme reflow in the same tick as show().
+    {
+        let weak = ui.as_weak();
+        let c = controller.clone();
+        let startup_timer = Box::new(slint::Timer::default());
+        startup_timer.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(16),
+            move || {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                if restore_maximized {
+                    ui.window().set_maximized(true);
+                    ui.set_window_maximized(true);
+                }
+                c.borrow_mut().finish_startup(&ui);
+            },
+        );
+        Box::leak(startup_timer);
+    }
 
     // Register IDropTarget so files dropped from Explorer land in the current folder.
     //
