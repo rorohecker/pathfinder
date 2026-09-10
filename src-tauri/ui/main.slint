@@ -3944,6 +3944,10 @@ export component MainWindow inherits Window {
     // (origin at the pane's top-left). Rust converts them to file indices via
     // the same geometry (grid_columns / grid_cell_w / grid_item_h / row_h).
     callback marquee_select(length, length, length, length, bool);
+    // Pane-local Y of the active marquee pointer. Set before each live
+    // marquee_select so Rust can edge-auto-scroll when the drag nears the
+    // top/bottom of the file viewport.
+    in-out property <length> marquee_pointer_y: 0;
     callback rename_tag_prompt(string);
     callback secondary_navigate(string);
     callback secondary_file_opened(int);
@@ -5580,6 +5584,7 @@ export component MainWindow inherits Window {
                                 primary_pane_root.marquee_w = abs(self.mouse-x - primary_pane_root.marquee_start_x);
                                 primary_pane_root.marquee_h = abs(self.mouse-y - primary_pane_root.marquee_start_y);
                                 // Live update - let Rust set the selection as the rect grows.
+                                root.marquee_pointer_y = self.mouse-y;
                                 root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                     primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                             }
@@ -5663,6 +5668,7 @@ export component MainWindow inherits Window {
                                     primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, ay - primary_pane_root.absolute-position.y);
                                     primary_pane_root.marquee_w = abs((ax - primary_pane_root.absolute-position.x) - primary_pane_root.marquee_start_x);
                                     primary_pane_root.marquee_h = abs((ay - primary_pane_root.absolute-position.y) - primary_pane_root.marquee_start_y);
+                                    root.marquee_pointer_y = (ay - primary_pane_root.absolute-position.y);
                                     root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                         primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                                 }
@@ -5737,6 +5743,7 @@ export component MainWindow inherits Window {
                                     primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, parent.y + self.mouse-y);
                                     primary_pane_root.marquee_w = abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x);
                                     primary_pane_root.marquee_h = abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y);
+                                    root.marquee_pointer_y = (parent.y + self.mouse-y);
                                     root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                         primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                                 }
@@ -5807,6 +5814,7 @@ export component MainWindow inherits Window {
                                     primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, parent.y + self.mouse-y);
                                     primary_pane_root.marquee_w = abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x);
                                     primary_pane_root.marquee_h = abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y);
+                                    root.marquee_pointer_y = (parent.y + self.mouse-y);
                                     root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                         primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                                 }
@@ -5883,6 +5891,7 @@ export component MainWindow inherits Window {
                                         primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y);
                                         primary_pane_root.marquee_w = abs((self.absolute-position.x - primary_pane_root.absolute-position.x + self.mouse-x) - primary_pane_root.marquee_start_x);
                                         primary_pane_root.marquee_h = abs((self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y) - primary_pane_root.marquee_start_y);
+                                        root.marquee_pointer_y = (self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y);
                                         root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                             primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                                     }
@@ -5951,6 +5960,7 @@ export component MainWindow inherits Window {
                             primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, ay - primary_pane_root.absolute-position.y);
                             primary_pane_root.marquee_w = abs((ax - primary_pane_root.absolute-position.x) - primary_pane_root.marquee_start_x);
                             primary_pane_root.marquee_h = abs((ay - primary_pane_root.absolute-position.y) - primary_pane_root.marquee_start_y);
+                            root.marquee_pointer_y = (ay - primary_pane_root.absolute-position.y);
                             root.marquee_select(primary_pane_root.marquee_x, primary_pane_root.marquee_y,
                                                 primary_pane_root.marquee_w, primary_pane_root.marquee_h, false);
                         }

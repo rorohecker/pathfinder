@@ -7980,6 +7980,11 @@ struct NativeController {
     scroll_sync_dirty: bool,
     scroll_sync_scheduled: bool,
     last_scroll_sync_at: Instant,
+    // Edge auto-scroll while rubber-band selecting near the viewport top/bottom.
+    marquee_auto_scroll_timer: Option<slint::Timer>,
+    marquee_drag_active: bool,
+    marquee_last_rect: (f32, f32, f32, f32),
+    marquee_pointer_y: f32,
     // Cached list virtualization offsets — rebuilt only when the full model or
     // row height changes, not on every pixel of scroll.
     list_layout_rev: u64,
@@ -13627,6 +13632,10 @@ impl NativeController {
             scroll_sync_dirty: false,
             scroll_sync_scheduled: false,
             last_scroll_sync_at: Instant::now() - Duration::from_secs(60),
+            marquee_auto_scroll_timer: None,
+            marquee_drag_active: false,
+            marquee_last_rect: (0.0, 0.0, 0.0, 0.0),
+            marquee_pointer_y: 0.0,
             list_layout_rev: 0,
             list_layout_row_h: 0.0,
             list_layout_offsets: Vec::new(),
@@ -17504,6 +17513,13 @@ impl NativeController {
         h: f32,
         commit_preview: bool,
     ) {
+        if commit_preview {
+            self.stop_marquee_auto_scroll();
+        } else if w >= 2.0 || h >= 2.0 {
+            self.marquee_last_rect = (x, y, w, h);
+            self.marquee_pointer_y = ui.get_marquee_pointer_y();
+            self.marquee_drag_active = true;
+        }
         if w < 2.0 && h < 2.0 {
             return;
         }
@@ -17585,6 +17601,227 @@ impl NativeController {
         }
     }
 
+    fn stop_marquee_auto_scroll(&mut self) {
+        self.marquee_drag_active = false;
+        if let Some(timer) = self.marquee_auto_scroll_timer.as_ref() {
+            timer.stop();
+        }
+    }
+
+    /// Keep scrolling while the marquee pointer sits in the top/bottom edge
+    /// zone so rubber-band selection can reach icons below (or above) the
+    /// current viewport — File Explorer behavior.
+    fn tick_marquee_auto_scroll(&mut self, ui: &MainWindow) -> bool {
+        if !self.marquee_drag_active {
+            return false;
+        }
+        let metrics = ui.global::<AppMetrics>();
+        let pad = metrics.get_pad();
+        let view = ui.get_view_mode();
+        let is_list = view.as_str() == "list";
+        let viewport_top = if is_list { pad + 32.0 } else { pad };
+        let viewport_h = if is_list {
+            ui.get_primary_list_viewport_h()
+        } else {
+            ui.get_primary_grid_viewport_h()
+        }
+        .max(80.0);
+        let viewport_bottom = viewport_top + viewport_h;
+        let zone = 40.0_f32;
+        let py = self.marquee_pointer_y;
+        let mut delta = 0.0_f32;
+        if py > viewport_bottom - zone {
+            let t = ((py - (viewport_bottom - zone)) / zone).clamp(0.0, 1.0);
+            delta = 10.0 + 26.0 * t; // px per tick, faster deeper in the zone
+        } else if py < viewport_top + zone {
+            let t = (((viewport_top + zone) - py) / zone).clamp(0.0, 1.0);
+            delta = -(10.0 + 26.0 * t);
+        }
+        if delta.abs() < 0.5 {
+            return true; // still dragging; keep timer for when pointer re-enters zone
+        }
+
+        ui.set_scroll_animating(false);
+        if is_list {
+            let content_h = ui.get_list_content_h().max(viewport_h);
+            let min_scroll = -(content_h - viewport_h).max(0.0);
+            let current = ui.get_primary_list_scroll_y();
+            let next = (current - delta).clamp(min_scroll, 0.0);
+            if (next - current).abs() < 0.25 {
+                return true;
+            }
+            ui.set_primary_list_scroll_y(next);
+        } else {
+            let cols = ui.get_grid_columns().max(1) as usize;
+            let item_h = ui.get_grid_item_h();
+            let gap = ui.get_grid_gap();
+            let row_stride = (item_h + gap).max(1.0);
+            let rows = self.visible_files.len().div_ceil(cols).max(1) as f32;
+            let content_h = (rows * row_stride).max(viewport_h);
+            let min_scroll = -(content_h - viewport_h).max(0.0);
+            let current = ui.get_primary_grid_scroll_y();
+            let next = (current - delta).clamp(min_scroll, 0.0);
+            if (next - current).abs() < 0.25 {
+                return true;
+            }
+            ui.set_primary_grid_scroll_y(next);
+        }
+        self.on_sync_grid_windows(ui);
+        let (x, y, w, h) = self.marquee_last_rect;
+        // Re-hit with the same pane-local rubber-band so newly scrolled-in
+        // icons join the selection (Explorer-style).
+        self.marquee_select_apply_only(ui, x, y, w, h);
+        true
+    }
+
+    /// Apply marquee hit-test without restarting auto-scroll bookkeeping.
+    fn marquee_select_apply_only(
+        &mut self,
+        ui: &MainWindow,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) {
+        if w < 2.0 && h < 2.0 {
+            return;
+        }
+        let metrics = ui.global::<AppMetrics>();
+        let pad = metrics.get_pad();
+        let row_h = metrics.get_row_h();
+        let grid_w = metrics.get_grid_w();
+        let grid_h = metrics.get_grid_h();
+        let mx1 = x.min(x + w);
+        let my1 = y.min(y + h);
+        let mx2 = x.max(x + w);
+        let my2 = y.max(y + h);
+        let view = ui.get_view_mode();
+        let new_set = if view.as_str() == "list" {
+            marquee_selection_list(
+                &self.visible_files,
+                &self.sort_by,
+                mx1,
+                my1,
+                mx2,
+                my2,
+                pad + 32.0,
+                ui.get_primary_list_scroll_y().abs(),
+                row_h,
+            )
+        } else {
+            let file_area_w = (ui.get_primary_pane_w() - pad * 2.0 - 12.0).max(1.0);
+            let compact = view.as_str() == "compact";
+            let cell_w_target = if compact { 200.0 } else { grid_w };
+            let cols = (file_area_w / cell_w_target).floor().max(1.0) as usize;
+            let grid_cell_w = file_area_w / cols as f32;
+            let grid_item_h = match view.as_str() {
+                "gallery" => 154.0_f32,
+                "compact" => 32.0_f32,
+                _ => grid_h,
+            };
+            let grid_gap = if compact { 2.0 } else { 8.0 };
+            marquee_selection_grid(
+                self.visible_files.len(),
+                cols,
+                mx1,
+                my1,
+                mx2,
+                my2,
+                pad,
+                ui.get_primary_grid_scroll_y().abs(),
+                grid_cell_w,
+                grid_item_h,
+                grid_gap,
+            )
+        };
+        if new_set == self.selected_set {
+            return;
+        }
+        let old = self.selected_set.clone();
+        self.selected_set = new_set;
+        self.selected_index = self
+            .selected_set
+            .iter()
+            .min()
+            .copied()
+            .map(|i| i as i32)
+            .unwrap_or(-1);
+        let changed: Vec<usize> = old
+            .symmetric_difference(&self.selected_set)
+            .copied()
+            .collect();
+        if !changed.is_empty() {
+            self.update_selection_in_model(ui, &changed);
+        }
+    }
+
+    /// Scroll the primary list/grid so `index` stays inside the viewport with
+    /// a small margin — used for keyboard and click selection near edges.
+    fn ensure_primary_selection_visible(&mut self, ui: &MainWindow, index: i32) {
+        if index < 0 {
+            return;
+        }
+        let i = index as usize;
+        let margin = 28.0_f32;
+        ui.set_scroll_animating(false);
+        if ui.get_view_mode().as_str() == "list" {
+            let viewport_h = ui.get_primary_list_viewport_h().max(80.0);
+            let row_h = ui.global::<AppMetrics>().get_row_h().max(26.0);
+            let item_top = if i < self.list_layout_offsets.len().saturating_sub(1) {
+                self.list_layout_offsets[i]
+            } else {
+                i as f32 * row_h
+            };
+            let item_bottom = if i + 1 < self.list_layout_offsets.len() {
+                self.list_layout_offsets[i + 1]
+            } else {
+                item_top + row_h
+            };
+            let content_h = ui.get_list_content_h().max(viewport_h);
+            let min_scroll = -(content_h - viewport_h).max(0.0);
+            let scroll = ui.get_primary_list_scroll_y().abs();
+            let visible_top = scroll;
+            let visible_bottom = scroll + viewport_h;
+            let mut new_scroll = scroll;
+            if item_top < visible_top + margin {
+                new_scroll = (item_top - margin).max(0.0);
+            } else if item_bottom > visible_bottom - margin {
+                new_scroll = (item_bottom - viewport_h + margin).max(0.0);
+            }
+            let next = (-new_scroll).clamp(min_scroll, 0.0);
+            if (next + scroll).abs() > 0.5 {
+                ui.set_primary_list_scroll_y(next);
+                self.on_sync_grid_windows(ui);
+            }
+        } else {
+            let cols = ui.get_grid_columns().max(1) as usize;
+            let item_h = ui.get_grid_item_h();
+            let gap = ui.get_grid_gap();
+            let row_stride = (item_h + gap).max(1.0);
+            let row = i / cols;
+            let item_top = row as f32 * row_stride;
+            let item_bottom = item_top + item_h;
+            let viewport_h = ui.get_primary_grid_viewport_h().max(80.0);
+            let rows = self.visible_files.len().div_ceil(cols).max(1) as f32;
+            let content_h = (rows * row_stride).max(viewport_h);
+            let min_scroll = -(content_h - viewport_h).max(0.0);
+            let scroll = ui.get_primary_grid_scroll_y().abs();
+            let visible_top = scroll;
+            let visible_bottom = scroll + viewport_h;
+            let mut new_scroll = scroll;
+            if item_top < visible_top + margin {
+                new_scroll = (item_top - margin).max(0.0);
+            } else if item_bottom > visible_bottom - margin {
+                new_scroll = (item_bottom - viewport_h + margin).max(0.0);
+            }
+            let next = (-new_scroll).clamp(min_scroll, 0.0);
+            if (next + scroll).abs() > 0.5 {
+                ui.set_primary_grid_scroll_y(next);
+                self.on_sync_grid_windows(ui);
+            }
+        }
+    }
+
     fn sync_active_pane(&self, ui: &MainWindow) {
         let s = if self.active_pane == ActivePane::Secondary {
             "secondary"
@@ -17661,6 +17898,7 @@ impl NativeController {
             ui.set_selected_name(ss(""));
         }
         self.update_selection_in_model(ui, &changed);
+        self.ensure_primary_selection_visible(ui, index);
         // Preview update is debounced at the callback level
     }
 
@@ -18670,6 +18908,7 @@ impl NativeController {
     }
 
     fn clear_selection(&mut self, ui: &MainWindow) {
+        self.stop_marquee_auto_scroll();
         if self.selected_index < 0
             && self.selected_set.is_empty()
             && self.secondary_selected_index < 0
@@ -24705,8 +24944,38 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_marquee_select(move |x, y, w, h, commit_preview| {
         if let Some(ui) = weak.upgrade() {
-            c.borrow_mut()
-                .marquee_select(&ui, x, y, w, h, commit_preview);
+            let mut ctrl = c.borrow_mut();
+            ctrl.marquee_select(&ui, x, y, w, h, commit_preview);
+            if commit_preview {
+                ctrl.stop_marquee_auto_scroll();
+                return;
+            }
+            // Arm a repeating edge-scroll timer while the rubber-band is live
+            // so holding near the bottom/top keeps revealing icons.
+            if ctrl.marquee_auto_scroll_timer.is_none() {
+                ctrl.marquee_auto_scroll_timer = Some(slint::Timer::default());
+            }
+            let weak_tick = weak.clone();
+            let c_tick = c.clone();
+            let timer = ctrl
+                .marquee_auto_scroll_timer
+                .as_ref()
+                .expect("marquee timer just initialized");
+            timer.start(
+                slint::TimerMode::Repeated,
+                Duration::from_millis(16),
+                move || {
+                    let Some(ui) = weak_tick.upgrade() else {
+                        return;
+                    };
+                    let mut ctrl = c_tick.borrow_mut();
+                    if !ctrl.tick_marquee_auto_scroll(&ui) {
+                        if let Some(t) = ctrl.marquee_auto_scroll_timer.as_ref() {
+                            t.stop();
+                        }
+                    }
+                },
+            );
         }
     });
 
