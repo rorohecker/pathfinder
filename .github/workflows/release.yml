@@ -4,10 +4,71 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
+  # Run from main after a compile fix to attach installers to v<Cargo.toml version>.
+  workflow_dispatch:
 
 jobs:
+  decide:
+    name: Decide whether to pack
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      pack: ${{ steps.meta.outputs.pack }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            VERSION="$(awk 'BEGIN { p = 0 } /^\[package\]/ { p = 1; next } /^\[/ { p = 0 } p && /^version[[:space:]]*=/ { gsub(/"/, "", $3); print $3; exit }' src-tauri/Cargo.toml)"
+            if [ -z "${VERSION}" ]; then
+              echo "Could not read version from Cargo.toml" >&2
+              exit 1
+            fi
+            TAG="v${VERSION}"
+            PACK=true
+          elif [[ "${REF}" == refs/tags/* ]]; then
+            TAG="${REF_NAME}"
+            PACK=true
+          else
+            VERSION="$(awk 'BEGIN { p = 0 } /^\[package\]/ { p = 1; next } /^\[/ { p = 0 } p && /^version[[:space:]]*=/ { gsub(/"/, "", $3); print $3; exit }' src-tauri/Cargo.toml)"
+            if [ -z "${VERSION}" ]; then
+              echo "Could not read version from Cargo.toml" >&2
+              exit 1
+            fi
+            TAG="v${VERSION}"
+            if git ls-remote --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+              COUNT="$(gh release view "${TAG}" --json assets --jq '[.assets[] | select((.name | endswith(".exe")) or (.name | endswith(".msi")))] | length' || true)"
+              COUNT="${COUNT:-0}"
+              if [ "${COUNT}" = "0" ]; then
+                PACK=true
+              else
+                PACK=false
+              fi
+            else
+              PACK=false
+            fi
+          fi
+          {
+            echo "tag=${TAG}"
+            echo "pack=${PACK}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Resolved tag=${TAG} pack=${PACK}"
+
   build-windows:
     name: Build Windows installer
+    needs: decide
+    if: needs.decide.outputs.pack == 'true'
     runs-on: windows-latest
     permissions:
       contents: write
@@ -18,11 +79,23 @@ jobs:
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Rust dependencies
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+
+      # Fail fast before NSIS/WiX/pack so a compile error cannot spend 15+
+      # minutes and still leave /releases/latest without installers.
+      - name: Check
+        working-directory: src-tauri
+        run: cargo check --locked
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked -- -D warnings
 
       - name: Install NSIS
         run: choco install nsis -y
@@ -52,6 +125,7 @@ jobs:
         # Pathfinder builds open GitHub instead of downloading).
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.decide.outputs.tag }}
           draft: false
           generate_release_notes: true
           fail_on_unmatched_files: true

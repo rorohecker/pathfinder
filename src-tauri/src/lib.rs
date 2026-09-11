@@ -18567,7 +18567,7 @@ impl NativeController {
                 format_size_short(entry.size),
                 format_modified(entry.modified),
             )));
-            ui.set_preview_meta(ss(base_meta));
+            ui.set_preview_meta(ss(base_meta.clone()));
             #[cfg(target_os = "windows")]
             {
                 let path = entry.path.clone();
