@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - 'v*'
+  # Rebuild installers from a chosen ref (usually main after a compile fix)
+  # and attach them to an existing tag. Tag pushes still use github.ref_name.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to attach installers to (e.g. v1.0.18)'
+        required: true
+        type: string
 
 jobs:
   build-windows:
@@ -18,11 +26,23 @@ jobs:
 
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Rust dependencies
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+
+      # Fail fast before NSIS/WiX/pack so a compile error cannot spend 15+
+      # minutes and still leave /releases/latest without installers.
+      - name: Check
+        working-directory: src-tauri
+        run: cargo check --locked
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked -- -D warnings
 
       - name: Install NSIS
         run: choco install nsis -y
@@ -52,6 +72,7 @@ jobs:
         # Pathfinder builds open GitHub instead of downloading).
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           draft: false
           generate_release_notes: true
           fail_on_unmatched_files: true
