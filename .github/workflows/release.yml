@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
   # Rebuild installers from a chosen ref (usually main after a compile fix)
   # and attach them to an existing tag. Tag pushes still use github.ref_name.
   workflow_dispatch:
@@ -14,8 +16,63 @@ on:
         type: string
 
 jobs:
+  decide:
+    name: Decide whether to pack
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      pack: ${{ steps.meta.outputs.pack }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${DISPATCH_TAG}"
+            PACK=true
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            PACK=true
+          else
+            VERSION="$(python3 - <<'PY'
+import re
+from pathlib import Path
+text = Path("src-tauri/Cargo.toml").read_text()
+m = re.search(r'(?ms)^\[package\].*?^version\s*=\s*"([^"]+)"', text)
+if not m:
+    raise SystemExit("Could not read version from Cargo.toml")
+print(m.group(1))
+PY
+)"
+            TAG="v${VERSION}"
+            if git ls-remote --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+              COUNT="$(gh release view "${TAG}" --json assets --jq '[.assets[] | select((.name | endswith(".exe")) or (.name | endswith(".msi")))] | length' 2>/dev/null || true)"
+              COUNT="${COUNT:-0}"
+              if [ "${COUNT}" = "0" ]; then
+                PACK=true
+              else
+                PACK=false
+              fi
+            else
+              PACK=false
+            fi
+          fi
+          {
+            echo "tag=${TAG}"
+            echo "pack=${PACK}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Resolved tag=${TAG} pack=${PACK}"
+
   build-windows:
     name: Build Windows installer
+    needs: decide
+    if: needs.decide.outputs.pack == 'true'
     runs-on: windows-latest
     permissions:
       contents: write
@@ -72,7 +129,7 @@ jobs:
         # Pathfinder builds open GitHub instead of downloading).
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.decide.outputs.tag }}
           draft: false
           generate_release_notes: true
           fail_on_unmatched_files: true
