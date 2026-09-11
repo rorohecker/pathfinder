@@ -6,9 +6,6 @@ on:
       - 'v*'
     branches:
       - main
-      # Temporary: publish the missing v1.0.18 installers from this already-green
-      # compile-fix branch. Removed after the release assets exist.
-      - cursor/fix-base-meta-move-d758
   # Run from main after a compile fix to attach installers to v<Cargo.toml version>.
   workflow_dispatch:
 
