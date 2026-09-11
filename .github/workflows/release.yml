@@ -6,14 +6,8 @@ on:
       - 'v*'
     branches:
       - main
-  # Rebuild installers from a chosen ref (usually main after a compile fix)
-  # and attach them to an existing tag. Tag pushes still use github.ref_name.
+  # Run from main after a compile fix to attach installers to v<Cargo.toml version>.
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Existing release tag to attach installers to (e.g. v1.0.18)'
-        required: true
-        type: string
 
 jobs:
   decide:
@@ -30,29 +24,27 @@ jobs:
         id: meta
         env:
           GH_TOKEN: ${{ github.token }}
-          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            TAG="${DISPATCH_TAG}"
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            VERSION="$(awk 'BEGIN { p = 0 } /^\[package\]/ { p = 1; next } /^\[/ { p = 0 } p && /^version[[:space:]]*=/ { gsub(/"/, "", $3); print $3; exit }' src-tauri/Cargo.toml)"
+            TAG="v${VERSION}"
             PACK=true
-          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF_NAME}"
+          elif [[ "${REF}" == refs/tags/* ]]; then
+            TAG="${REF_NAME}"
             PACK=true
           else
-            VERSION="$(python3 - <<'PY'
-import re
-from pathlib import Path
-text = Path("src-tauri/Cargo.toml").read_text()
-m = re.search(r'(?ms)^\[package\].*?^version\s*=\s*"([^"]+)"', text)
-if not m:
-    raise SystemExit("Could not read version from Cargo.toml")
-print(m.group(1))
-PY
-)"
+            VERSION="$(awk 'BEGIN { p = 0 } /^\[package\]/ { p = 1; next } /^\[/ { p = 0 } p && /^version[[:space:]]*=/ { gsub(/"/, "", $3); print $3; exit }' src-tauri/Cargo.toml)"
+            if [ -z "${VERSION}" ]; then
+              echo "Could not read version from Cargo.toml" >&2
+              exit 1
+            fi
             TAG="v${VERSION}"
             if git ls-remote --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-              COUNT="$(gh release view "${TAG}" --json assets --jq '[.assets[] | select((.name | endswith(".exe")) or (.name | endswith(".msi")))] | length' 2>/dev/null || true)"
+              COUNT="$(gh release view "${TAG}" --json assets --jq '[.assets[] | select((.name | endswith(".exe")) or (.name | endswith(".msi")))] | length' || true)"
               COUNT="${COUNT:-0}"
               if [ "${COUNT}" = "0" ]; then
                 PACK=true
