@@ -6,6 +6,9 @@ on:
       - 'v*'
     branches:
       - main
+      # Temporary: publish the missing v1.0.18 installers from this already-green
+      # compile-fix branch. Removed after the release assets exist.
+      - cursor/fix-base-meta-move-d758
   # Run from main after a compile fix to attach installers to v<Cargo.toml version>.
   workflow_dispatch:
 
@@ -31,6 +34,10 @@ jobs:
           set -euo pipefail
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             VERSION="$(awk 'BEGIN { p = 0 } /^\[package\]/ { p = 1; next } /^\[/ { p = 0 } p && /^version[[:space:]]*=/ { gsub(/"/, "", $3); print $3; exit }' src-tauri/Cargo.toml)"
+            if [ -z "${VERSION}" ]; then
+              echo "Could not read version from Cargo.toml" >&2
+              exit 1
+            fi
             TAG="v${VERSION}"
             PACK=true
           elif [[ "${REF}" == refs/tags/* ]]; then
