@@ -8018,22 +8018,8 @@ export component MainWindow inherits Window {
                         font-size: 10px;
                         font-weight: 700;
                         letter-spacing: 1px;
-                        // Locked themes keep a fixed brand accent.
-                        visible: root.active_theme != "sunset"
-                            && root.active_theme != "fantasy"
-                            && root.active_theme != "retro"
-                            && root.active_theme != "cyberpunk"
-                            && root.active_theme != "warm"
-                            && root.active_theme != "terminal"
-                            && root.active_theme != "paper";
                     }
-                    if root.active_theme != "sunset"
-                        && root.active_theme != "fantasy"
-                        && root.active_theme != "retro"
-                        && root.active_theme != "cyberpunk"
-                        && root.active_theme != "warm"
-                        && root.active_theme != "terminal"
-                        && root.active_theme != "paper": Rectangle {
+                    Rectangle {
                         property <int> ac_cols: 4;
                         property <length> ac_gap: 6px;
                         property <length> ac_cell_w: (parent.width - (ac_cols - 1) * ac_gap) / ac_cols;
@@ -8050,16 +8036,9 @@ export component MainWindow inherits Window {
                     }
 
                     // Custom accent hex input. Typing a valid 7-char hex (#rrggbb)
-                    // here switches the active accent to "custom" and stores the
-                    // exact colour. Invalid or partial entries are ignored, so the
-                    // current accent stays unchanged while the user is typing.
-                    if root.active_theme != "sunset"
-                        && root.active_theme != "fantasy"
-                        && root.active_theme != "retro"
-                        && root.active_theme != "cyberpunk"
-                        && root.active_theme != "warm"
-                        && root.active_theme != "terminal"
-                        && root.active_theme != "paper": Rectangle {
+                    // switches the active accent to "custom" and stores the exact
+                    // colour used for selection highlights and chrome accents.
+                    Rectangle {
                         width: parent.width;
                         height: 42px;
                         border-radius: AppMetrics.radius_small;

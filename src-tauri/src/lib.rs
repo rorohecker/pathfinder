@@ -710,8 +710,8 @@ fn parse_hex_color(hex: &str) -> slint::Color {
     slint::Color::from_rgb_u8(0xBF, 0x3A, 0x1F)
 }
 
-fn bucket_display_name(id: &str) -> &'static str {
-    match storage_canonical_bucket(id) {
+fn bucket_display_name(id: &str) -> String {
+    let english = match storage_canonical_bucket(id) {
         "apps" => "Apps",
         "documents" => "Documents",
         "media" => "Media",
@@ -720,7 +720,8 @@ fn bucket_display_name(id: &str) -> &'static str {
         "cache" => "Cache",
         "system" => "System",
         _ => "Other",
-    }
+    };
+    i18n::t(english)
 }
 
 /// Map legacy bucket ids from older scans/cache files into the current taxonomy.
@@ -1570,11 +1571,13 @@ fn file_kind(path: &Path, metadata: &fs::Metadata) -> FileKind {
 }
 
 fn path_to_entry(entry_path: &Path, metadata: &fs::Metadata) -> FileEntry {
-    let name = entry_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+    let name = known_folder_ui_name(entry_path).unwrap_or_else(|| {
+        entry_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    });
 
     let extension = if metadata.is_file() {
         entry_path
@@ -2902,7 +2905,6 @@ fn matches_query(path: &Path, metadata: &fs::Metadata, parsed: &ParsedQuery) -> 
         .unwrap_or_default()
         .to_string_lossy()
         .to_lowercase();
-    let path_lower = path.to_string_lossy().to_lowercase();
     let ext = extension(path);
     let kind = file_type_for_query(path, metadata);
 
@@ -2957,10 +2959,17 @@ fn matches_query(path: &Path, metadata: &fs::Metadata, parsed: &ParsedQuery) -> 
         }
     }
 
+    // Match name first; only lowercase the full path when a term misses the
+    // file name. Avoids a large allocation on every walk entry during drive-wide
+    // search when the query already hits the basename.
+    let mut path_lower: Option<String> = None;
     for term in &parsed.terms {
-        let in_name = name.contains(term.as_str());
-        let in_path = path_lower.contains(term.as_str());
-        if !in_name && !in_path {
+        if name.contains(term.as_str()) {
+            continue;
+        }
+        let path_lower = path_lower
+            .get_or_insert_with(|| path.to_string_lossy().to_lowercase());
+        if !path_lower.contains(term.as_str()) {
             return false;
         }
     }
@@ -3178,10 +3187,54 @@ fn get_known_folders() -> Vec<KnownFolder> {
 }
 
 fn get_parent_path(path: String) -> Option<String> {
-    PathBuf::from(&path)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .filter(|p| !p.is_empty())
+    parent_dir_path(&path)
+}
+
+/// Parent directory for Up navigation. Trims trailing separators so
+/// `C:\Users\foo\` goes to `C:\Users` in one click (not a no-op), and
+/// treats drive roots (`C:\`) as having no parent.
+fn parent_dir_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() || trimmed == "/" {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        // "C:" after trimming "C:\" — filesystem root has no parent.
+        let bytes = trimmed.as_bytes();
+        if bytes.len() == 2 && bytes[1] == b':' {
+            return None;
+        }
+    }
+    let parent = Path::new(trimmed).parent()?;
+    let parent = parent.to_string_lossy().to_string();
+    if parent.is_empty() || same_path_string(&parent, path) {
+        return None;
+    }
+    Some(parent)
+}
+
+/// UI label for a known-folder path, using the active language.
+/// On localized Windows the on-disk name may be "Documentos" while English UI
+/// should still show "Documents".
+fn known_folder_ui_name(path: &Path) -> Option<String> {
+    let candidates: &[(&str, Option<std::path::PathBuf>)] = &[
+        ("Home", dirs::home_dir()),
+        ("Desktop", dirs::desktop_dir()),
+        ("Documents", dirs::document_dir()),
+        ("Downloads", dirs::download_dir()),
+        ("Pictures", dirs::picture_dir()),
+        ("Music", dirs::audio_dir()),
+        ("Videos", dirs::video_dir()),
+    ];
+    for (name, known) in candidates {
+        if let Some(known) = known {
+            if same_path_string(&path.to_string_lossy(), &known.to_string_lossy()) {
+                return Some(i18n::t(name));
+            }
+        }
+    }
+    None
 }
 
 fn join_path(parent: String, child: String) -> Result<String, String> {
@@ -11224,6 +11277,21 @@ fn double_click_interval() -> Duration {
 /// True when this click should open (same row, no modifiers, within the OS
 /// double-click interval). Survives FileRow rebuilds that drop Slint's own
 /// `double-clicked` event.
+fn is_duplicate_open(
+    last: &mut Option<(String, Instant)>,
+    path: &str,
+    now: Instant,
+) -> bool {
+    if last
+        .as_ref()
+        .is_some_and(|(_, at)| now.saturating_duration_since(*at) < Duration::from_millis(450))
+    {
+        return true;
+    }
+    *last = Some((path.to_string(), now));
+    false
+}
+
 fn is_activation_double_click(
     last: &mut Option<(i32, bool, Instant)>,
     index: i32,
@@ -11275,6 +11343,41 @@ fn patch_window_file_selection(
                 m.set_row_data(row, item);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod navigation_open_tests {
+    use super::*;
+
+    #[test]
+    fn parent_dir_trims_trailing_slash() {
+        let parent = parent_dir_path("/Users/demo/");
+        assert_eq!(parent.as_deref(), Some("/Users"));
+    }
+
+    #[test]
+    fn parent_dir_root_is_none() {
+        assert!(parent_dir_path("/").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parent_dir_drive_root_is_none() {
+        assert!(parent_dir_path(r#"C:\"#).is_none());
+        assert!(parent_dir_path("C:").is_none());
+    }
+
+    #[test]
+    fn duplicate_open_blocks_different_path_inside_window() {
+        let mut last = None;
+        let t0 = Instant::now();
+        assert!(!is_duplicate_open(&mut last, "/Users/a", t0));
+        assert!(is_duplicate_open(
+            &mut last,
+            "/Users/a/child",
+            t0 + Duration::from_millis(100)
+        ));
     }
 }
 
@@ -11486,7 +11589,10 @@ fn build_breadcrumbs(path: &str) -> Vec<ChoiceItem> {
         accumulated.push('\\');
         crumbs.push(ChoiceItem {
             id: ss(accumulated.trim_end_matches('\\')),
-            label: ss(part),
+            label: ss(
+                known_folder_ui_name(Path::new(accumulated.trim_end_matches(['/', '\\'])))
+                    .unwrap_or_else(|| part.to_string()),
+            ),
             description: ss(""),
             color: slint::Color::from_argb_u8(0, 0, 0, 0),
         });
@@ -12933,15 +13039,13 @@ fn theme_palette(id: &str) -> PaletteSpec {
         },
     };
 
+    // Always seed from the shared accent table. apply_theme() then applies the
+    // user's preset/custom accent on top so selection highlights stay consistent
+    // across branded themes.
     let (accent, accent_soft, accent_strong) = accent_override(id);
-    if !matches!(
-        id,
-        "warm" | "terminal" | "paper" | "retro" | "fantasy" | "cyberpunk" | "sunset"
-    ) {
-        p.accent = accent;
-        p.accent_soft = accent_soft;
-        p.accent_strong = accent_strong;
-    }
+    p.accent = accent;
+    p.accent_soft = accent_soft;
+    p.accent_strong = accent_strong;
     p
 }
 
@@ -16193,7 +16297,7 @@ impl NativeController {
             }
             let folder_expanded = false;
             items.push(SideItem {
-                label: ss(&folder.name),
+                label: ss(&i18n::t(&folder.name)),
                 path: ss(&folder.path),
                 icon: ss(match folder.id.as_str() {
                     "home" => "home",
@@ -16504,7 +16608,7 @@ impl NativeController {
                 continue;
             }
             items.push(SideItem {
-                label: ss(&folder.name),
+                label: ss(&i18n::t(&folder.name)),
                 path: ss(&folder.path),
                 icon: ss(match folder.id.as_str() {
                     "home" => "home",
@@ -18318,14 +18422,12 @@ impl NativeController {
     }
 
     fn should_skip_duplicate_open(&mut self, path: &str) -> bool {
-        let now = Instant::now();
-        if self.last_opened.as_ref().is_some_and(|(p, at)| {
-            p == path && now.saturating_duration_since(*at) < Duration::from_millis(400)
-        }) {
-            return true;
-        }
-        self.last_opened = Some((path.to_string(), now));
-        false
+        // Debounce ANY open within the window, not just the same path.
+        // Double-click fires both the activation-click open and Slint's
+        // double-clicked open; after a folder navigate the second event sees a
+        // different path at the same row index and would otherwise drill in
+        // (or open a file) one level too far.
+        is_duplicate_open(&mut self.last_opened, path, Instant::now())
     }
 
     fn open_index(&mut self, ui: &MainWindow, index: i32) {
@@ -18705,6 +18807,9 @@ impl NativeController {
             }
             return;
         }
+        if self.current_path == "home://" {
+            return;
+        }
         if self.current_path == "storage://" {
             if !self.storage_selected_bucket.is_empty() || self.storage_show_all_state {
                 self.clear_storage_bucket_filter(ui);
@@ -18738,8 +18843,13 @@ impl NativeController {
             self.navigate(ui, target, true);
             return;
         }
-        if let Some(parent) = Path::new(&self.current_path).parent() {
-            self.navigate(ui, parent.to_string_lossy().to_string(), true);
+        if let Some(parent) = parent_dir_path(&self.current_path) {
+            self.navigate(ui, parent, true);
+            return;
+        }
+        // Drive root / nowhere else to go — land on Home.
+        if self.current_path != "home://" {
+            self.navigate(ui, "home://".to_string(), true);
         }
     }
 
@@ -18774,12 +18884,7 @@ impl NativeController {
         // No history to walk (typical when the app was launched with --path or
         // from a "Show in folder" shell verb). Fall back to navigating to the
         // parent folder so Back is never a dead button.
-        if let Some(parent) = Path::new(&self.current_path)
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            && !parent.is_empty()
-            && parent != self.current_path
-        {
+        if let Some(parent) = parent_dir_path(&self.current_path) {
             self.navigate(ui, parent, true);
         }
     }
@@ -19786,13 +19891,8 @@ impl NativeController {
 
     fn secondary_go_up(&mut self, ui: &MainWindow) {
         self.active_pane = ActivePane::Secondary;
-        let parent = Path::new(&self.secondary_path)
-            .parent()
-            .map(|p| p.to_string_lossy().to_string());
-        if let Some(parent_path) = parent {
-            if !parent_path.is_empty() {
-                self.secondary_navigate(ui, parent_path);
-            }
+        if let Some(parent_path) = parent_dir_path(&self.secondary_path) {
+            self.secondary_navigate(ui, parent_path);
         }
     }
 
@@ -23640,7 +23740,7 @@ impl NativeController {
             .storage_result()
             .and_then(|r| r.buckets.iter().find(|b| b.id == bucket_id))
             .map(|b| b.name.clone())
-            .unwrap_or_else(|| bucket_display_name(&bucket_id).to_string());
+            .unwrap_or_else(|| bucket_display_name(&bucket_id));
         ui.set_storage_selected_bucket_name(ss(&name));
         if let Some(result) = self.storage_result_clone() {
             self.push_storage_top_items(ui, &result);
