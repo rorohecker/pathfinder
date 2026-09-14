@@ -18669,7 +18669,9 @@ impl NativeController {
                 format_size_short(entry.size),
                 format_modified(entry.modified),
             )));
-            ui.set_preview_meta(ss(base_meta));
+            // Clone before move so the Windows thumbnail worker can reuse the
+            // same metadata string (cfg-stripped on non-Windows).
+            ui.set_preview_meta(ss(base_meta.clone()));
             #[cfg(target_os = "windows")]
             {
                 let path = entry.path.clone();
@@ -18677,7 +18679,7 @@ impl NativeController {
                 let pending = self.pending_preview_result.clone();
                 let gen_check = self.preview_generation.clone();
                 let generation = gen_check.load(Ordering::SeqCst);
-                let meta = base_meta.clone();
+                let meta = base_meta;
                 let body = format!(
                     "Media file ({ext})\n\nOpen with the system player, or use the preview action row.\n\nSize: {}\nModified: {}",
                     format_size_short(entry.size),

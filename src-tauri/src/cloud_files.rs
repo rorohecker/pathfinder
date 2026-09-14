@@ -35,12 +35,11 @@ pub fn hydration_risk_from_attrs(attrs: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn recall_attrs_flagged() {
         #[cfg(target_os = "windows")]
         {
+            use super::*;
             assert!(hydration_risk_from_attrs(
                 FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
             ));
