@@ -14297,7 +14297,7 @@ impl NativeController {
             || {
                 rayon::join(
                     || read_native_json::<Vec<SessionTab>>("session.json", Vec::new()),
-                    || read_recent_locations_raw(),
+                    read_recent_locations_raw,
                 )
             },
             || {
@@ -14367,7 +14367,6 @@ impl NativeController {
             .unwrap_or_else(|| home.clone());
         tabs[0].path = current_path.clone();
 
-        let settings = settings;
         set_low_power_enabled(settings.low_power_enabled);
 
         Self {
