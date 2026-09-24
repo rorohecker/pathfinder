@@ -182,6 +182,18 @@ fn it(en: &str) -> Option<String> {
             "All fixed drives, highest storage" => {
                 "Tutte le unità fisse, massimo spazio"
             }
+            "Auto" => "Auto",
+            "Follow Windows Battery Saver and critical charge" => {
+                "Segue Risparmio batteria di Windows e carica critica"
+            }
+            "On" => "Attivo",
+            "Always reduce background work and theme motion" => {
+                "Riduce sempre lavoro in background e animazioni tema"
+            }
+            "Off" => "Disattivo",
+            "Full performance until you change this" => {
+                "Prestazioni complete finché non lo cambi"
+            }
             "QUICK ACCESS" => "ACCESSO RAPIDO",
             "Home" => "Home",
             "Recycle Bin" => "Cestino",
@@ -422,6 +434,18 @@ fn es(en: &str) -> Option<String> {
             "Max" => "Máxima",
             "All fixed drives, highest storage" => {
                 "Todas las unidades fijas, mayor almacenamiento"
+            }
+            "Auto" => "Auto",
+            "Follow Windows Battery Saver and critical charge" => {
+                "Sigue el Ahorro de batería de Windows y la carga crítica"
+            }
+            "On" => "Activado",
+            "Always reduce background work and theme motion" => {
+                "Siempre reduce trabajo en segundo plano y motion del tema"
+            }
+            "Off" => "Desactivado",
+            "Full performance until you change this" => {
+                "Rendimiento completo hasta que lo cambies"
             }
             "QUICK ACCESS" => "ACCESO RÁPIDO",
             "Home" => "Inicio",

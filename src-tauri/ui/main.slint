@@ -210,6 +210,9 @@ export global ThemePalette {
     in-out property <int> drag_count: 0;
     // Decorative theme motion (atmospheres + idle/hover icon anims). Settings toggle.
     in-out property <bool> theme_animations: true;
+    // Mirrors MainWindow.power_saver so row ornaments / folder bob can pause
+    // without threading the flag through every component.
+    in-out property <bool> power_saver: false;
     // Shared idle bob for retro/sunset folder glyphs — one timer in MainWindow,
     // never a per-row Timer (those stalled the UI with many folders visible).
     in-out property <bool> folder_idle_phase: false;
@@ -690,7 +693,7 @@ component SideRow inherits Rectangle {
         y: (parent.height - self.height) / 2;
         cell: 1.5px;
         kind: root.fantasy_kind;
-        running: ThemePalette.active_theme == "fantasy" && ThemePalette.theme_animations;
+        running: ThemePalette.active_theme == "fantasy" && ThemePalette.theme_animations && !ThemePalette.power_saver;
         hovered: touch.has-hover;
         chest: FantasyIconBank.chest;
         scroll: FantasyIconBank.scroll;
@@ -707,7 +710,7 @@ component SideRow inherits Rectangle {
         y: (parent.height - self.height) / 2;
         cell: 1.5px;
         kind: root.retro_kind;
-        running: ThemePalette.active_theme == "retro" && ThemePalette.theme_animations;
+        running: ThemePalette.active_theme == "retro" && ThemePalette.theme_animations && !ThemePalette.power_saver;
         hovered: touch.has-hover;
         floppy: RetroIconBank.floppy;
         cassette_a: RetroIconBank.cassette_a;
@@ -724,7 +727,7 @@ component SideRow inherits Rectangle {
         y: (parent.height - self.height) / 2;
         cell: 1.5px;
         kind: root.sunset_kind;
-        running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations;
+        running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations && !ThemePalette.power_saver;
         hovered: touch.has-hover;
         folder: SunsetIconBank.folder;
         postcard: SunsetIconBank.postcard;
@@ -880,7 +883,7 @@ component NodeVisual {
     // and office docs (PDF/DOCX/ZIP/etc.).
     property <bool> show_system_icon: root.has_system_icon && !(root.pixel_theme && root.themed_doc_ext);
 
-    property <bool> folder_anim: ThemePalette.theme_animations;
+    property <bool> folder_anim: ThemePalette.theme_animations && !ThemePalette.power_saver;
     // Shared phase from ThemePalette (one window timer) — not per-row Timers.
     property <bool> idle_bob: ThemePalette.folder_idle_phase;
 
@@ -1406,6 +1409,9 @@ component FileRow inherits Rectangle {
     in property <int> index;
     in property <string> view_mode;
     in property <int> rename_index: -1;
+    in property <bool> col_size: true;
+    in property <bool> col_modified: true;
+    in property <bool> col_type: true;
     callback selected(int, bool, bool);
     callback opened(int);
     callback context(int, length, length);
@@ -1553,9 +1559,9 @@ component FileRow inherits Rectangle {
     property <length> col_modified_w: min(132px, max(84px, root.width * 0.22));
     property <length> col_type_w: min(120px, max(72px, root.width * 0.18));
     property <length> col_gap: 10px;
-    property <bool> show_list_size: root.width >= 280px;
-    property <bool> show_list_modified: root.width >= 380px;
-    property <bool> show_list_type: root.width >= 480px;
+    property <bool> show_list_size: root.col_size && root.width >= 280px;
+    property <bool> show_list_modified: root.col_modified && root.width >= 380px;
+    property <bool> show_list_type: root.col_type && root.width >= 480px;
     property <length> list_right_zone:
         root.show_list_type ? (root.col_size_w + root.col_gap + root.col_modified_w + root.col_gap + root.col_type_w) :
         (root.show_list_modified ? (root.col_size_w + root.col_gap + root.col_modified_w) :
@@ -1913,6 +1919,9 @@ component FileRow inherits Rectangle {
 component ListHeader inherits Rectangle {
     in property <string> sort_by: "name";
     in property <string> sort_dir: "asc";
+    in property <bool> col_size: true;
+    in property <bool> col_modified: true;
+    in property <bool> col_type: true;
     callback sort_col(string);
 
     // Match FileRow's responsive layout exactly.
@@ -1920,9 +1929,9 @@ component ListHeader inherits Rectangle {
     property <length> col_modified_w: min(132px, max(84px, root.width * 0.22));
     property <length> col_type_w: min(120px, max(72px, root.width * 0.18));
     property <length> col_gap: 10px;
-    property <bool> show_size: root.width >= 280px;
-    property <bool> show_modified: root.width >= 380px;
-    property <bool> show_type: root.width >= 480px;
+    property <bool> show_size: root.col_size && root.width >= 280px;
+    property <bool> show_modified: root.col_modified && root.width >= 380px;
+    property <bool> show_type: root.col_type && root.width >= 480px;
     property <length> right_zone:
         root.show_type ? (root.col_size_w + root.col_gap + root.col_modified_w + root.col_gap + root.col_type_w) :
         (root.show_modified ? (root.col_size_w + root.col_gap + root.col_modified_w) :
@@ -3548,8 +3557,10 @@ export component MainWindow inherits Window {
     // True during maximize/restore resize bursts — pauses atmospheres so the
     // full-bleed theme layers don't reflow every intermediate size.
     in-out property <bool> window_resizing: false;
-    // True on low battery (unplugged, <20%) — pauses decorative atmospheres.
+    // True when the user has turned on Low power mode in Settings.
+    // Pauses decorative atmospheres and throttles background work.
     in-out property <bool> power_saver: false;
+    in-out property <bool> low_power_enabled: false;
     // Decorative theme atmospheres + animated relics. Persisted in settings.json.
     in-out property <bool> theme_animations: true;
     // Sunset solar cycle — shared by atmosphere + content-pane sky wash.
@@ -3669,6 +3680,9 @@ export component MainWindow inherits Window {
     in-out property <string> drag_ghost_ext: "";
     in-out property <bool> drag_ghost_is_dir: false;
     in-out property <bool> show_hidden: false;
+    in-out property <bool> list_col_size: true;
+    in-out property <bool> list_col_modified: true;
+    in-out property <bool> list_col_type: true;
     in-out property <bool> settings_visible: false;
     in-out property <string> settings_tab: "appearance";
     // Application version (pulled from CARGO_PKG_VERSION at startup).
@@ -3817,6 +3831,8 @@ export component MainWindow inherits Window {
     // (Keep Both / Replace / Skip). Set by the controller when raising a
     // ConflictPaste prompt so the UI can show appropriate affordances.
     in-out property <string> prompt_kind: "text";
+    // When true, the next conflict Skip/Replace/Keep Both is remembered for this session.
+    in-out property <bool> prompt_remember_conflict: false;
     in-out property <string> confirm_text: "";
     in-out property <length> context_x: 0px;
     in-out property <length> context_y: 0px;
@@ -3886,7 +3902,9 @@ export component MainWindow inherits Window {
     callback toggle_preview();
     callback toggle_dual_pane();
     callback toggle_hidden();
+    callback toggle_list_column(string);
     callback toggle_theme_animations();
+    callback toggle_low_power();
     callback command(string);
     callback shortcut_key(bool, bool, bool, string);
     callback shell_verb(string);
@@ -5611,6 +5629,9 @@ export component MainWindow inherits Window {
                     width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     sort_by: root.sort_by;
                     sort_dir: root.sort_dir;
+                    col_size: root.list_col_size;
+                    col_modified: root.list_col_modified;
+                    col_type: root.list_col_type;
                     sort_col(col) => { root.sort_column(col); }
                 }
 
@@ -5639,6 +5660,9 @@ export component MainWindow inherits Window {
                                 item: file;
                                 index: root.list_window_start + index;
                                 view_mode: root.view_mode;
+                                col_size: root.list_col_size;
+                                col_modified: root.list_col_modified;
+                                col_type: root.list_col_type;
                                 rename_index: root.active_pane == "primary" ? root.rename_index : -1;
                                 drag_target_path: root.drag_target_path;
                                 selected(i, ctrl, shift) => { root.file_selected(i, ctrl, shift); }
@@ -5928,6 +5952,9 @@ export component MainWindow inherits Window {
                         item: file;
                         index: root.grid_window_start + index;
                         view_mode: root.view_mode;
+                        col_size: root.list_col_size;
+                        col_modified: root.list_col_modified;
+                        col_type: root.list_col_type;
                         rename_index: root.active_pane == "primary" ? root.rename_index : -1;
                         drag_target_path: root.drag_target_path;
                         selected(i, ctrl, shift) => { root.file_selected(i, ctrl, shift); }
@@ -6026,7 +6053,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 6px;
                             kind: empty_pane.fantasy_kind;
-                            running: empty_pane.fantasy_on && ThemePalette.theme_animations;
+                            running: empty_pane.fantasy_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             hovered: empty_ta.has-hover;
                             chest: FantasyIconBank.chest;
                             scroll: FantasyIconBank.scroll;
@@ -6041,7 +6068,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 6px;
                             kind: empty_pane.retro_kind;
-                            running: empty_pane.retro_on && ThemePalette.theme_animations;
+                            running: empty_pane.retro_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             hovered: empty_ta.has-hover;
                             floppy: RetroIconBank.floppy;
                             cassette_a: RetroIconBank.cassette_a;
@@ -6056,7 +6083,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 6px;
                             kind: empty_pane.sunset_kind;
-                            running: empty_pane.sunset_on && ThemePalette.theme_animations;
+                            running: empty_pane.sunset_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             hovered: empty_ta.has-hover;
                             folder: SunsetIconBank.folder;
                             postcard: SunsetIconBank.postcard;
@@ -6399,6 +6426,9 @@ export component MainWindow inherits Window {
                     width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     sort_by: root.secondary_sort_by;
                     sort_dir: root.secondary_sort_dir;
+                    col_size: root.list_col_size;
+                    col_modified: root.list_col_modified;
+                    col_type: root.list_col_type;
                     sort_col(col) => { root.secondary_sort_column(col); }
                 }
 
@@ -6457,6 +6487,9 @@ export component MainWindow inherits Window {
                                 item: file;
                                 index: root.secondary_list_window_start + index;
                                 view_mode: root.view_mode;
+                                col_size: root.list_col_size;
+                                col_modified: root.list_col_modified;
+                                col_type: root.list_col_type;
                                 rename_index: root.active_pane == "secondary" ? root.rename_index : -1;
                                 drag_target_path: root.drag_target_path;
                                 selected(i, ctrl, shift) => { root.secondary_file_selected(i, ctrl, shift); }
@@ -6500,6 +6533,9 @@ export component MainWindow inherits Window {
                         item: file;
                         index: root.secondary_grid_window_start + index;
                         view_mode: root.view_mode;
+                        col_size: root.list_col_size;
+                        col_modified: root.list_col_modified;
+                        col_type: root.list_col_type;
                         rename_index: root.active_pane == "secondary" ? root.rename_index : -1;
                         drag_target_path: root.drag_target_path;
                         selected(i, ctrl, shift) => { root.secondary_file_selected(i, ctrl, shift); }
@@ -6535,7 +6571,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 5px;
                             kind: root.secondary_path == "" ? "tower" : "chest";
-                            running: fantasy_on && ThemePalette.theme_animations;
+                            running: fantasy_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             chest: FantasyIconBank.chest;
                             scroll: FantasyIconBank.scroll;
                             gem_a: FantasyIconBank.gem_a;
@@ -6549,7 +6585,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 5px;
                             kind: root.secondary_path == "" ? "boombox" : "floppy";
-                            running: retro_on && ThemePalette.theme_animations;
+                            running: retro_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             floppy: RetroIconBank.floppy;
                             cassette_a: RetroIconBank.cassette_a;
                             cassette_b: RetroIconBank.cassette_b;
@@ -6563,7 +6599,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 5px;
                             kind: root.secondary_path == "" ? "palm" : "folder";
-                            running: sunset_on && ThemePalette.theme_animations;
+                            running: sunset_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             folder: SunsetIconBank.folder;
                             postcard: SunsetIconBank.postcard;
                             sun_a: SunsetIconBank.sun_a;
@@ -6987,7 +7023,7 @@ export component MainWindow inherits Window {
                                 x: (parent.width - self.width) / 2;
                                 cell: 5px;
                                 kind: "scroll";
-                                running: ThemePalette.active_theme == "fantasy" && ThemePalette.theme_animations;
+                                running: ThemePalette.active_theme == "fantasy" && ThemePalette.theme_animations && !ThemePalette.power_saver;
                                 chest: FantasyIconBank.chest;
                                 scroll: FantasyIconBank.scroll;
                                 gem_a: FantasyIconBank.gem_a;
@@ -7001,7 +7037,7 @@ export component MainWindow inherits Window {
                                 x: (parent.width - self.width) / 2;
                                 cell: 5px;
                                 kind: "cassette";
-                                running: ThemePalette.active_theme == "retro" && ThemePalette.theme_animations;
+                                running: ThemePalette.active_theme == "retro" && ThemePalette.theme_animations && !ThemePalette.power_saver;
                                 floppy: RetroIconBank.floppy;
                                 cassette_a: RetroIconBank.cassette_a;
                                 cassette_b: RetroIconBank.cassette_b;
@@ -7015,7 +7051,7 @@ export component MainWindow inherits Window {
                                 x: (parent.width - self.width) / 2;
                                 cell: 5px;
                                 kind: "postcard";
-                                running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations;
+                                running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations && !ThemePalette.power_saver;
                                 folder: SunsetIconBank.folder;
                                 postcard: SunsetIconBank.postcard;
                                 sun_a: SunsetIconBank.sun_a;
@@ -7099,6 +7135,33 @@ export component MainWindow inherits Window {
                     TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.queue_pill_clicked(); }
+                    }
+                }
+                if root.power_saver: Rectangle {
+                    horizontal-stretch: 0;
+                    preferred-width: Math.max(78px, power_pill_label.preferred-width + 20px);
+                    width: self.preferred-width;
+                    preferred-height: 18px;
+                    height: self.preferred-height;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 9px;
+                    background: ThemePalette.accent_soft;
+                    border-width: 1px;
+                    border-color: ThemePalette.accent;
+                    power_pill_label := Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: @tr("Low power");
+                        color: ThemePalette.accent_strong;
+                        font-size: 10px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.toggle_low_power(); }
                     }
                 }
                 Rectangle {
@@ -7200,14 +7263,15 @@ export component MainWindow inherits Window {
             }
         }
         // Sunset sun arc: nudge phase every tick so the disc drifts slowly and
-        // continuously (~2 min high→horizon, then back). Keeps moving even on
-        // battery; only pauses when minimized or theme animations are off.
+        // continuously (~2 min high→horizon, then back). Pauses when minimized,
+        // resizing, animations off, or low-power mode (was a 10 Hz drain on battery).
         Timer {
             interval: 100ms;
             running: ThemePalette.active_theme == "sunset"
                 && ThemePalette.theme_animations
                 && !root.window_occluded
-                && !root.window_resizing;
+                && !root.window_resizing
+                && !root.power_saver;
             triggered => {
                 // 0.00084 × 10 Hz ≈ full arc in ~119s (was 0.00042 @ 20 Hz).
                 if (root.sunset_descending) {
@@ -7938,7 +8002,7 @@ export component MainWindow inherits Window {
                             y: 26px;
                             cell: 4px;
                             gap: 8px;
-                            running: root.active_theme == "fantasy" && root.settings_visible && root.theme_animations;
+                            running: root.active_theme == "fantasy" && root.settings_visible && root.theme_animations && !root.power_saver;
                             chest: FantasyIconBank.chest;
                             scroll: FantasyIconBank.scroll;
                             gem_a: FantasyIconBank.gem_a;
@@ -7969,7 +8033,7 @@ export component MainWindow inherits Window {
                             y: 26px;
                             cell: 4px;
                             gap: 8px;
-                            running: root.active_theme == "retro" && root.settings_visible && root.theme_animations;
+                            running: root.active_theme == "retro" && root.settings_visible && root.theme_animations && !root.power_saver;
                             floppy: RetroIconBank.floppy;
                             cassette_a: RetroIconBank.cassette_a;
                             cassette_b: RetroIconBank.cassette_b;
@@ -8000,7 +8064,7 @@ export component MainWindow inherits Window {
                             y: 26px;
                             cell: 4px;
                             gap: 8px;
-                            running: root.active_theme == "sunset" && root.settings_visible && root.theme_animations;
+                            running: root.active_theme == "sunset" && root.settings_visible && root.theme_animations && !root.power_saver;
                             folder: SunsetIconBank.folder;
                             postcard: SunsetIconBank.postcard;
                             sun_a: SunsetIconBank.sun_a;
@@ -8894,7 +8958,50 @@ export component MainWindow inherits Window {
                     background: ThemePalette.panel;
                     border-width: 1px;
                     border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 160px; height: parent.height; text: @tr("Theme animations"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                                    Text { text: @tr("LIST COLUMNS"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Rectangle {
+                    height: AppMetrics.row_h;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Show Size column"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Rectangle {
+                        x: parent.width - 52px; y: (parent.height - 22px) / 2; width: 40px; height: 22px; border-radius: 11px;
+                        background: root.list_col_size ? ThemePalette.accent : ThemePalette.border_strong;
+                        Rectangle { x: root.list_col_size ? 20px : 2px; y: 2px; width: 18px; height: 18px; border-radius: 9px; background: white; }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_list_column("size"); } }
+                    }
+                }
+                Rectangle {
+                    height: AppMetrics.row_h;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Show Modified column"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Rectangle {
+                        x: parent.width - 52px; y: (parent.height - 22px) / 2; width: 40px; height: 22px; border-radius: 11px;
+                        background: root.list_col_modified ? ThemePalette.accent : ThemePalette.border_strong;
+                        Rectangle { x: root.list_col_modified ? 20px : 2px; y: 2px; width: 18px; height: 18px; border-radius: 9px; background: white; }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_list_column("modified"); } }
+                    }
+                }
+                Rectangle {
+                    height: AppMetrics.row_h;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Show Type column"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Rectangle {
+                        x: parent.width - 52px; y: (parent.height - 22px) / 2; width: 40px; height: 22px; border-radius: 11px;
+                        background: root.list_col_type ? ThemePalette.accent : ThemePalette.border_strong;
+                        Rectangle { x: root.list_col_type ? 20px : 2px; y: 2px; width: 18px; height: 18px; border-radius: 9px; background: white; }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_list_column("type"); } }
+                    }
+                }
+                Text { x: 14px; width: parent.width - 160px; height: parent.height; text: @tr("Theme animations"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
                     Text {
                         x: 14px; y: parent.height - 16px; width: parent.width - 70px; height: 0px;
                         // hint reserved via sibling below when row is taller — keep compact row
@@ -9000,6 +9107,46 @@ export component MainWindow inherits Window {
                     width: parent.width - AppMetrics.settings_scroll_gutter;
                     spacing: 14px;
                     padding-bottom: 16px;
+
+                    Text { text: @tr("LOW POWER"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Rectangle {
+                        height: AppMetrics.row_h;
+                        border-radius: AppMetrics.radius;
+                        background: ThemePalette.panel;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        Text {
+                            x: 14px; width: parent.width - 160px; height: parent.height;
+                            text: @tr("Low power mode");
+                            color: ThemePalette.text; font-size: 13px; vertical-alignment: center;
+                        }
+                        Rectangle {
+                            x: parent.width - 52px;
+                            y: (parent.height - 22px) / 2;
+                            width: 40px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: root.low_power_enabled ? ThemePalette.accent : ThemePalette.border_strong;
+                            animate background { duration: 90ms; easing: ease-out; }
+                            Rectangle {
+                                x: root.low_power_enabled ? 20px : 2px;
+                                y: 2px;
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                background: white;
+                                animate x { duration: 60ms; easing: ease-out; }
+                            }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.toggle_low_power(); } }
+                        }
+                    }
+                    Text {
+                        text: @tr("Optional. When on, Pathfinder pauses theme motion, skips fresh thumbnail encodes, slows idle polling, and holds background indexing — browsing and opens stay responsive.");
+                        color: ThemePalette.text_faint;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
 
                     Text { text: @tr("SEARCH PERFORMANCE"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Text {
@@ -9549,9 +9696,9 @@ export component MainWindow inherits Window {
         if root.prompt_kind == "conflict": Rectangle {
             opacity: parent.shown;
             x: (parent.width - min(460px, parent.width - 32px)) / 2;
-            y: (parent.height - min(220px, parent.height - 32px)) / 2 + parent.rise;
+            y: (parent.height - min(250px, parent.height - 32px)) / 2 + parent.rise;
             width: min(460px, parent.width - 32px);
-            height: min(220px, parent.height - 32px);
+            height: min(250px, parent.height - 32px);
             border-width: 1px;
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
@@ -9564,6 +9711,21 @@ export component MainWindow inherits Window {
                 text: @tr("A file with the same name already exists.\n\nKeep both: save with a new name like \"file (1).txt\".\nReplace: overwrite the existing file.\nSkip: don't copy this file.");
                 font-size: 12.5px;
                 cap-height: 88px;
+            }
+            TouchArea {
+                x: 18px; y: parent.height - 78px; width: parent.width - 36px; height: 22px;
+                mouse-cursor: pointer;
+                clicked => { root.prompt_remember_conflict = !root.prompt_remember_conflict; }
+                Rectangle {
+                    width: 16px; height: 16px; y: 3px; border-radius: 3px; border-width: 1px;
+                    border-color: ThemePalette.border_strong;
+                    background: root.prompt_remember_conflict ? ThemePalette.accent : ThemePalette.panel_solid;
+                }
+                Text {
+                    x: 24px; width: parent.width - 24px; height: parent.height;
+                    text: @tr("Remember for this session");
+                    color: ThemePalette.text_muted; font-size: 12px; vertical-alignment: center;
+                }
             }
             DialogButton { x: 18px; y: parent.height - 48px; label: @tr("Skip"); clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("skip"); } }
             DialogButton { x: parent.width - 240px; y: parent.height - 48px; label: @tr("Replace"); clicked => { root.prompt_visible = false; root.prompt_kind = "text"; root.prompt_accept("replace"); } }
@@ -10299,13 +10461,13 @@ export component MainWindow inherits Window {
                         pixels: RetroIconBank.floppy;
                         cell: 3px;
                         interactive: true;
-                        running: ThemePalette.theme_animations;
+                        running: ThemePalette.theme_animations && !ThemePalette.power_saver;
                     }
                     if ThemePalette.active_theme == "sunset": SunsetFolderGlyph {
                         pixels: SunsetIconBank.folder;
                         cell: 3px;
                         interactive: true;
-                        running: ThemePalette.theme_animations;
+                        running: ThemePalette.theme_animations && !ThemePalette.power_saver;
                     }
                 }
                 Text {
@@ -10748,10 +10910,34 @@ export component MainWindow inherits Window {
         }
         // Overlay-sensitive keys stay in Slint so Escape / arrows / Return
         // still follow dialog state. Rebindable chords are dispatched from Rust.
-        KeyBinding { keys: @keys(Return); activated => { if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_opened(root.selected_index); } } }
+        KeyBinding { keys: @keys(Return); activated => {
+            if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) {
+                if (root.dual_pane && root.active_pane == "secondary") {
+                    root.secondary_file_opened(root.selected_index);
+                } else {
+                    root.file_opened(root.selected_index);
+                }
+            }
+        } }
         KeyBinding { keys: @keys(Space); activated => { if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.tool_overlay_visible && !root.command_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.toggle_quick_look(); } } }
-        KeyBinding { keys: @keys(UpArrow); activated => { if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_selected(max(0, root.selected_index - 1), false, false); } } }
-        KeyBinding { keys: @keys(DownArrow); activated => { if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false); } } }
+        KeyBinding { keys: @keys(UpArrow); activated => {
+            if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) {
+                if (root.dual_pane && root.active_pane == "secondary") {
+                    root.secondary_file_selected(max(0, root.selected_index - 1), false, false);
+                } else {
+                    root.file_selected(max(0, root.selected_index - 1), false, false);
+                }
+            }
+        } }
+        KeyBinding { keys: @keys(DownArrow); activated => {
+            if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) {
+                if (root.dual_pane && root.active_pane == "secondary") {
+                    root.secondary_file_selected(min(root.secondary_files.length - 1, root.selected_index + 1), false, false);
+                } else {
+                    root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false);
+                }
+            }
+        } }
         KeyBinding { keys: @keys(Escape); activated => {
             if (root.command_visible) { root.command_visible = false; }
             else if (root.tool_overlay_visible) { root.tool_overlay_close(); }

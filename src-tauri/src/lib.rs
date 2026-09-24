@@ -119,6 +119,10 @@ const GITHUB_RELEASES_LIST_API: &str =
 const GITHUB_RELEASES_URL: &str = "https://github.com/rorohecker/pathfinder/releases";
 
 static ACTIVE_HEAVY_OPS: AtomicUsize = AtomicUsize::new(0);
+/// 0 = off (default, opt-in), 1 = on. User toggle only — not auto OS battery.
+static LOW_POWER_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Last applied power-saver UI/worker state.
+static POWER_SAVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // Dedicated pool for thumbnail generation, sized to the machine (up to 8
 // threads). Threads run at below-normal priority on Windows so they don't
@@ -1894,8 +1898,8 @@ fn sort_entries_by(entries: &mut [FileEntry], sort_by: &str, sort_dir: &str) {
 }
 
 /// Read the OS recycle bin and return its contents as virtual FileEntry rows.
-/// Path field carries the `recycle://<original-path>` URI so the controller can
-/// reverse-look-up the trash item later (for restore / permanent delete).
+/// Path field carries `recycle://id/<id>/o/<original>` so restore / purge / undo
+/// can target a stable trash id (legacy bare `recycle://<original>` still parses).
 fn list_recycle_bin_entries() -> Vec<FileEntry> {
     let items = match trash::os_limited::list() {
         Ok(items) => items,
@@ -1905,22 +1909,35 @@ fn list_recycle_bin_entries() -> Vec<FileEntry> {
         .into_iter()
         .map(|item| {
             let original = item.original_path();
-            let original_str = original.to_string_lossy().into_owned();
             let name: String = std::path::Path::new(&item.name)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| item.name.to_string_lossy().into_owned());
-            let virtual_path = format!("recycle://{}", original_str);
+            let virtual_path = recycle_virtual_path(&item.id, &original);
             let extension = std::path::Path::new(&name)
                 .extension()
                 .map(|e| e.to_string_lossy().into_owned());
             let modified = item.time_deleted.max(0) as u64;
+            let (kind, size) = match trash::os_limited::metadata(&item) {
+                Ok(meta) => match meta.size {
+                    trash::TrashItemSize::Bytes(b) => (FileKind::File, b),
+                    trash::TrashItemSize::Entries(_) => (FileKind::Directory, 0),
+                },
+                Err(_) => {
+                    // Fall back: no extension often means folder in the bin.
+                    if extension.is_none() && !name.contains('.') {
+                        (FileKind::Directory, 0)
+                    } else {
+                        (FileKind::File, 0)
+                    }
+                }
+            };
             FileEntry {
                 path: virtual_path,
                 name_lower: name.to_lowercase(),
                 name,
-                kind: FileKind::File,
-                size: 0,
+                kind,
+                size,
                 modified,
                 extension,
             }
@@ -4062,6 +4079,44 @@ fn main_window_hwnd(ui: Option<&MainWindow>) -> windows::Win32::Foundation::HWND
     find_pathfinder_hwnd().unwrap_or(HWND(std::ptr::null_mut()))
 }
 
+/// Open the system Open With UI in "always use this app" mode when possible.
+fn set_default_app_for_file(path: &str, ui: Option<&MainWindow>) -> Result<(), String> {
+    if Path::new(path).is_dir() {
+        return Err("Set as default applies to files, not folders.".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::UI::Shell::{
+            OAIF_ALLOW_REGISTRATION, OAIF_FORCE_REGISTRATION, OAIF_REGISTER_EXT, OPENASINFO,
+            SHOpenWithDialog,
+        };
+        use windows::core::PCWSTR;
+
+        let path_wide: Vec<u16> = OsStr::new(path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let info = OPENASINFO {
+            pcszFile: PCWSTR(path_wide.as_ptr()),
+            pcszClass: PCWSTR::null(),
+            oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_FORCE_REGISTRATION | OAIF_REGISTER_EXT,
+        };
+        let hwnd = main_window_hwnd(ui);
+        let result = unsafe { SHOpenWithDialog(Some(hwnd), &info) };
+        if result.is_ok() {
+            return Ok(());
+        }
+        // Fall back to the classic Open With dialog (includes "Always").
+        open_with_dialog(path, ui)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        open_with_dialog(path, ui)
+    }
+}
+
 fn open_with_dialog(path: &str, ui: Option<&MainWindow>) -> Result<(), String> {
     if Path::new(path).is_dir() {
         return Err("Open With applies to files, not folders.".to_string());
@@ -5670,9 +5725,18 @@ fn duplicate_reclaimable_bytes(groups: &[Vec<FileEntry>]) -> (u64, u64, u64) {
 }
 
 fn find_duplicates(path: String, min_size: Option<u64>) -> Result<Vec<Vec<FileEntry>>, String> {
-    if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= *MAX_HEAVY_OPS {
+    let heavy_cap = if power_saver_active() {
+        1
+    } else {
+        *MAX_HEAVY_OPS
+    };
+    if ACTIVE_HEAVY_OPS.fetch_add(1, Ordering::SeqCst) >= heavy_cap {
         ACTIVE_HEAVY_OPS.fetch_sub(1, Ordering::SeqCst);
-        return Err("Too many operations in progress. Please wait.".to_string());
+        return Err(if power_saver_active() {
+            "Low power mode: wait for the current scan to finish.".to_string()
+        } else {
+            "Too many operations in progress. Please wait.".to_string()
+        });
     }
     let _guard = HeavyOpGuard;
     let dir = PathBuf::from(&path);
@@ -7980,10 +8044,26 @@ struct NativeSettings {
     /// Default on; when false, themed icons stay static and FX timers pause.
     #[serde(default = "default_true")]
     theme_animations: bool,
+    /// Opt-in low power mode. When true, pauses theme motion, skips fresh
+    /// thumbnail encodes, slows idle polling, and holds background indexing.
+    /// Default off — user turns it on from Settings → Performance.
+    #[serde(
+        default,
+        alias = "low_power_mode",
+        deserialize_with = "deserialize_low_power_enabled"
+    )]
+    low_power_enabled: bool,
     /// UI language: `system` | `en` | `it` | `es`. Applied via Slint bundled
     /// translations (`@tr`) and [`i18n`] for Rust-fed model strings.
     #[serde(default = "default_ui_language")]
     ui_language: String,
+    /// Persist list-view column visibility (Size / Modified / Type).
+    #[serde(default = "default_true")]
+    list_col_size: bool,
+    #[serde(default = "default_true")]
+    list_col_modified: bool,
+    #[serde(default = "default_true")]
+    list_col_type: bool,
 }
 
 fn default_ai_profile() -> String {
@@ -7996,6 +8076,30 @@ fn default_true() -> bool {
 
 fn default_ui_language() -> String {
     "system".into()
+}
+
+/// Accept bool or legacy string (`auto`/`on`/`off`) from earlier builds.
+fn deserialize_low_power_enabled<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Bool(bool),
+        Str(String),
+    }
+    Ok(match Option::<Raw>::deserialize(deserializer)? {
+        None => false,
+        Some(Raw::Bool(b)) => b,
+        // Legacy Auto/On/Off chips: only explicit "on" stays enabled.
+        Some(Raw::Str(s)) => matches!(s.to_ascii_lowercase().as_str(), "on" | "true" | "1"),
+    })
+}
+
+fn set_low_power_enabled(on: bool) {
+    LOW_POWER_ENABLED.store(on, Ordering::Relaxed);
 }
 
 impl Default for NativeSettings {
@@ -8033,7 +8137,11 @@ impl Default for NativeSettings {
             folder_color: None,
             custom_accent_hex: None,
             theme_animations: true,
+            low_power_enabled: false,
             ui_language: default_ui_language(),
+            list_col_size: true,
+            list_col_modified: true,
+            list_col_type: true,
         }
     }
 }
@@ -8231,7 +8339,7 @@ struct DeferredStartupData {
     drives: Vec<DriveInfo>,
     storage_caches: HashMap<String, StorageScanResult>,
     user_pins: Vec<UserPin>,
-    recent_locations: Vec<String>,
+    recent_locations: Vec<RecentEntry>,
 }
 
 struct NativeController {
@@ -8333,12 +8441,17 @@ struct NativeController {
     known_folders: Vec<KnownFolder>,
     drives: Vec<DriveInfo>,
     user_pins: Vec<UserPin>,
-    recent_locations: Vec<String>,
+    recent_locations: Vec<RecentEntry>,
     folder_views: HashMap<String, String>,
     // When false, entries starting with `.` and entries with the .ini
     // extension (desktop.ini, thumbs.ini, etc.) are filtered out of
     // visible_files in apply_filter. Toggled from the UI show-hidden control.
     show_hidden: bool,
+    /// Session-only paste/drop conflict policy: "skip" | "replace" | "keep".
+    session_conflict_action: Option<String>,
+    /// Paths that had watchers before a minimize pause (re-armed on restore).
+    paused_watch_paths: Vec<String>,
+    watchers_paused: bool,
     // Shared progress for the Local AI installer. Background thread writes,
     // UI polling timer reads and pushes into Slint properties.
     ai_progress: Arc<local_ai::InstallProgress>,
@@ -10677,25 +10790,93 @@ fn apply_update(release_url: Option<String>) -> Result<(), String> {
     open_update_release(release_url)
 }
 
-/// Returns false when the system is on battery with less than 20% charge.
-/// Background indexing should pause in that case to avoid draining the battery.
-fn indexing_permitted() -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
-        let mut s = SYSTEM_POWER_STATUS::default();
-        if unsafe { GetSystemPowerStatus(&mut s) }.is_err() {
-            return true;
-        }
-        // BatteryFlag 128 = no battery (desktop), 255 = status unknown
-        let no_battery = s.BatteryFlag & 128 != 0 || s.BatteryFlag == 255;
-        let plugged_in = s.ACLineStatus == 1;
-        let charge_ok = s.BatteryLifePercent == 255 || s.BatteryLifePercent >= 20;
-        no_battery || plugged_in || charge_ok
+/// Opt-in low power mode: only the Settings toggle enables Saver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PowerBudget {
+    Full,
+    Saver,
+}
+
+fn current_power_budget() -> PowerBudget {
+    if LOW_POWER_ENABLED.load(Ordering::Relaxed) {
+        PowerBudget::Saver
+    } else {
+        PowerBudget::Full
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        true
+}
+
+/// Returns false when the user has turned on low power mode.
+/// Background indexing should pause in that case.
+fn indexing_permitted() -> bool {
+    current_power_budget() == PowerBudget::Full
+}
+
+fn power_saver_active() -> bool {
+    POWER_SAVER_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Thumbnail decode / generate budgets. Saver keeps scroll smooth by favoring
+/// disk-cache hits and skipping fresh image encodes.
+fn thumb_cache_load_budget(power_saver: bool) -> usize {
+    if power_saver { 10 } else { 24 }
+}
+
+fn thumb_generate_budget(power_saver: bool) -> usize {
+    if power_saver { 0 } else { 32 }
+}
+
+#[cfg(test)]
+mod power_budget_tests {
+    use super::*;
+
+    #[test]
+    fn toggle_off_is_full() {
+        LOW_POWER_ENABLED.store(false, Ordering::Relaxed);
+        assert_eq!(current_power_budget(), PowerBudget::Full);
+        assert!(indexing_permitted());
+    }
+
+    #[test]
+    fn toggle_on_is_saver() {
+        LOW_POWER_ENABLED.store(true, Ordering::Relaxed);
+        assert_eq!(current_power_budget(), PowerBudget::Saver);
+        assert!(!indexing_permitted());
+        LOW_POWER_ENABLED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn legacy_string_deserializes() {
+        #[derive(Deserialize)]
+        struct Wrap {
+            #[serde(default, deserialize_with = "deserialize_low_power_enabled")]
+            low_power_enabled: bool,
+        }
+        let on: Wrap = serde_json::from_str(r#"{"low_power_enabled":"on"}"#).unwrap();
+        assert!(on.low_power_enabled);
+        let auto: Wrap = serde_json::from_str(r#"{"low_power_enabled":"auto"}"#).unwrap();
+        assert!(!auto.low_power_enabled);
+        let flag: Wrap = serde_json::from_str(r#"{"low_power_enabled":true}"#).unwrap();
+        assert!(flag.low_power_enabled);
+        // Also accept the old field name via NativeSettings round-trip keys —
+        // rename happened in-place; settings files may still say low_power_mode.
+    }
+
+    #[test]
+    fn legacy_low_power_mode_field_name() {
+        // Old builds wrote `"low_power_mode": "on"`. New field is
+        // `low_power_enabled`; missing/unknown keys fall back to default false
+        // unless we alias. Accept both via a thin settings probe.
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct Probe {
+            #[serde(alias = "low_power_mode", deserialize_with = "deserialize_low_power_enabled")]
+            low_power_enabled: bool,
+        }
+        let legacy: Probe =
+            serde_json::from_str(r#"{"low_power_mode":"on"}"#).unwrap();
+        assert!(legacy.low_power_enabled);
+        let off: Probe = serde_json::from_str(r#"{"low_power_mode":"off"}"#).unwrap();
+        assert!(!off.low_power_enabled);
     }
 }
 
@@ -11861,31 +12042,68 @@ fn pin_name_for_path(path: &Path, explicit_name: Option<String>) -> String {
         .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
-fn condense_recent_locations(paths: Vec<String>, max_items: usize) -> Vec<String> {
-    condense_recent_locations_inner(paths, max_items, true)
+/// Recent folder visit with timestamp for day-grouped Recents (Explorer-style).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RecentEntry {
+    path: String,
+    #[serde(default)]
+    visited_at: u64,
 }
 
-fn condense_recent_locations_fast(paths: Vec<String>, max_items: usize) -> Vec<String> {
-    condense_recent_locations_inner(paths, max_items, false)
+impl RecentEntry {
+    fn new(path: impl Into<String>, visited_at: u64) -> Self {
+        Self {
+            path: path.into(),
+            visited_at,
+        }
+    }
+}
+
+fn read_recent_locations_raw() -> Vec<RecentEntry> {
+    let path = native_data_file("recent_locations.json");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Vec::new();
+    };
+    // New format: [{ "path", "visited_at" }, ...]
+    if let Ok(entries) = serde_json::from_slice::<Vec<RecentEntry>>(&bytes) {
+        return entries;
+    }
+    // Legacy format: ["C:\\...", ...]
+    if let Ok(paths) = serde_json::from_slice::<Vec<String>>(&bytes) {
+        return paths
+            .into_iter()
+            .filter(|p| !p.trim().is_empty())
+            .map(|p| RecentEntry::new(p, 0))
+            .collect();
+    }
+    Vec::new()
+}
+
+fn condense_recent_locations(entries: Vec<RecentEntry>, max_items: usize) -> Vec<RecentEntry> {
+    condense_recent_locations_inner(entries, max_items, true)
+}
+
+fn condense_recent_locations_fast(entries: Vec<RecentEntry>, max_items: usize) -> Vec<RecentEntry> {
+    condense_recent_locations_inner(entries, max_items, false)
 }
 
 fn condense_recent_locations_inner(
-    paths: Vec<String>,
+    entries: Vec<RecentEntry>,
     max_items: usize,
     require_exists: bool,
-) -> Vec<String> {
+) -> Vec<RecentEntry> {
     let mut seen = HashSet::new();
     let mut condensed = Vec::new();
-    for path in paths {
-        if path.trim().is_empty() {
+    for entry in entries {
+        if entry.path.trim().is_empty() {
             continue;
         }
-        if require_exists && !Path::new(&path).exists() {
+        if require_exists && !Path::new(&entry.path).exists() {
             continue;
         }
-        let key = cache_key(Path::new(&path));
+        let key = cache_key(Path::new(&entry.path));
         if seen.insert(key) {
-            condensed.push(path);
+            condensed.push(entry);
         }
         if condensed.len() >= max_items {
             break;
@@ -11894,8 +12112,20 @@ fn condense_recent_locations_inner(
     condensed
 }
 
-fn validate_recent_locations(paths: Vec<String>, max_items: usize) -> Vec<String> {
-    condense_recent_locations(paths, max_items)
+fn validate_recent_locations(entries: Vec<RecentEntry>, max_items: usize) -> Vec<RecentEntry> {
+    condense_recent_locations(entries, max_items)
+}
+
+fn touch_recent_list(list: &mut Vec<RecentEntry>, path: &str, max_items: usize) {
+    if path.is_empty() || is_virtual_nav_path(path) {
+        return;
+    }
+    let now = now_unix_secs();
+    list.retain(|e| !same_path_string(&e.path, path));
+    list.insert(0, RecentEntry::new(path, now));
+    if list.len() > max_items {
+        list.truncate(max_items);
+    }
 }
 
 fn native_list_directory(state: &AppState, path: &str) -> Result<Vec<FileEntry>, String> {
@@ -12284,18 +12514,25 @@ fn native_delete_inner(
     if !measure_folder_bytes {
         trash::delete(&path_buf).map_err(|e| e.to_string())?;
         state.invalidate_path(&path_buf);
-        state.log_op_with_trash("delete", path, None, None);
+        let ids = trash_ids_for_originals(&[path.to_string()]);
+        let trash_id = ids
+            .iter()
+            .find(|(k, _)| same_path_string(k, path))
+            .map(|(_, v)| v.as_str());
+        state.log_op_with_trash("delete", path, None, trash_id);
         return Ok(());
     }
     let total = folder_size_quick(&path_buf, 25_000);
     let op_id = state.queue_start("delete", path, None, total);
     let started = Instant::now();
-    // Do not call trash::os_limited::list() here — enumerating the whole
-    // Recycle Bin after every delete is O(bin_size) and made multi-select
-    // delete feel frozen. Undo resolves by original path when needed.
     trash::delete(&path_buf).map_err(|e| e.to_string())?;
     state.invalidate_path(&path_buf);
-    state.log_op_with_trash("delete", path, None, None);
+    let ids = trash_ids_for_originals(&[path.to_string()]);
+    let trash_id = ids
+        .iter()
+        .find(|(k, _)| same_path_string(k, path))
+        .map(|(_, v)| v.as_str());
+    state.log_op_with_trash("delete", path, None, trash_id);
     state.queue_finish(
         op_id,
         "done",
@@ -12325,6 +12562,7 @@ fn native_delete_all_fast(state: &AppState, paths: &[String]) -> Result<usize, S
     let existing: Vec<String> = paths.to_vec();
     let n = existing.len();
     trash::delete_all(&existing).map_err(|e| e.to_string())?;
+    let ids = trash_ids_for_originals(&existing);
     let mut parents = HashSet::new();
     for path in &existing {
         let pb = Path::new(path);
@@ -12332,7 +12570,11 @@ fn native_delete_all_fast(state: &AppState, paths: &[String]) -> Result<usize, S
         if let Some(parent) = pb.parent() {
             parents.insert(parent.to_path_buf());
         }
-        state.log_op_with_trash("delete", path, None, None);
+        let trash_id = ids
+            .iter()
+            .find(|(k, _)| same_path_string(k, path))
+            .map(|(_, v)| v.as_str());
+        state.log_op_with_trash("delete", path, None, trash_id);
     }
     for parent in parents {
         state.invalidate_directory_path(&parent);
@@ -13761,7 +14003,10 @@ fn is_always_list_view_folder(lower: &str) -> bool {
 /// App-internal navigation targets (not filesystem paths). These often contain
 /// `/` and must never go through `resolve_path_query`.
 fn is_virtual_nav_path(path: &str) -> bool {
-    path == "recycle://" || path == "storage://" || path.starts_with(ARCHIVE_SCHEME)
+    path == "home://"
+        || path == "recycle://"
+        || path == "storage://"
+        || path.starts_with(ARCHIVE_SCHEME)
 }
 
 fn navigation_display_path(current_path: &str, archive: Option<&ArchiveView>) -> String {
@@ -13769,9 +14014,75 @@ fn navigation_display_path(current_path: &str, archive: Option<&ArchiveView>) ->
         return archive_display_path(&archive.archive_path, &archive.prefix);
     }
     match current_path {
+        "home://" => "Home".to_string(),
         "recycle://" => "Recycle Bin".to_string(),
         "storage://" => "Storage".to_string(),
         _ => current_path.to_string(),
+    }
+}
+
+/// Encode a Recycle Bin row as `recycle://id/<b64id>/o/<b64original>` so restore
+/// / purge / undo can target a stable trash id even when originals collide.
+fn recycle_virtual_path(id: &std::ffi::OsStr, original: &Path) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    format!(
+        "recycle://id/{}/o/{}",
+        URL_SAFE_NO_PAD.encode(id.to_string_lossy().as_bytes()),
+        URL_SAFE_NO_PAD.encode(original.to_string_lossy().as_bytes())
+    )
+}
+
+fn parse_recycle_virtual_path(path: &str) -> Option<(String /*id*/, String /*original*/)> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let rest = path.strip_prefix("recycle://")?;
+    // Legacy: recycle://C:\Users\...
+    if !rest.starts_with("id/") {
+        return Some((String::new(), rest.to_string()));
+    }
+    let rest = rest.strip_prefix("id/")?;
+    let (id_b64, orig_b64) = rest.split_once("/o/")?;
+    let id = String::from_utf8(URL_SAFE_NO_PAD.decode(id_b64).ok()?).ok()?;
+    let original = String::from_utf8(URL_SAFE_NO_PAD.decode(orig_b64).ok()?).ok()?;
+    Some((id, original))
+}
+
+fn recycle_id_from_virtual(path: &str) -> Option<String> {
+    let (id, _) = parse_recycle_virtual_path(path)?;
+    if id.is_empty() { None } else { Some(id) }
+}
+
+fn recycle_original_from_virtual(path: &str) -> Option<String> {
+    parse_recycle_virtual_path(path).map(|(_, o)| o)
+}
+
+/// After a delete, resolve trash ids for the given original paths (one list pass).
+fn trash_ids_for_originals(originals: &[String]) -> HashMap<String, String> {
+    let Ok(items) = trash::os_limited::list() else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for item in items {
+        let orig = item.original_path().to_string_lossy().into_owned();
+        if originals.iter().any(|p| same_path_string(p, &orig)) {
+            map.entry(orig)
+                .or_insert_with(|| item.id.to_string_lossy().into_owned());
+        }
+    }
+    map
+}
+
+/// Flush coalesced settings/session writes so quit does not drop the last edits.
+fn flush_native_json_queue() {
+    let drained: Vec<(String, Vec<u8>)> = match JSON_WRITE_QUEUE.lock() {
+        Ok(mut q) => q.drain().collect(),
+        Err(_) => return,
+    };
+    for (name, bytes) in drained {
+        let path = native_data_file(&name);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, &bytes);
     }
 }
 
@@ -13971,7 +14282,7 @@ impl NativeController {
             (tabs_raw, recent_raw),
             (folder_views_raw, (tags_raw, (tag_labels_raw, (notes_raw, user_pins_raw)))),
         ): (
-            (Vec<SessionTab>, Vec<String>),
+            (Vec<SessionTab>, Vec<RecentEntry>),
             (
                 HashMap<String, String>,
                 (
@@ -13986,7 +14297,7 @@ impl NativeController {
             || {
                 rayon::join(
                     || read_native_json::<Vec<SessionTab>>("session.json", Vec::new()),
-                    || read_native_json::<Vec<String>>("recent_locations.json", Vec::new()),
+                    read_recent_locations_raw,
                 )
             },
             || {
@@ -14055,6 +14366,8 @@ impl NativeController {
             .or(from_session)
             .unwrap_or_else(|| home.clone());
         tabs[0].path = current_path.clone();
+
+        set_low_power_enabled(settings.low_power_enabled);
 
         Self {
             app_state,
@@ -14126,6 +14439,9 @@ impl NativeController {
             recent_locations: condense_recent_locations_fast(recent_raw, 12),
             folder_views: folder_views_raw,
             show_hidden: false,
+            session_conflict_action: None,
+            paused_watch_paths: Vec::new(),
+            watchers_paused: false,
             ai_progress: {
                 let p = Arc::new(local_ai::InstallProgress::new());
                 let m = local_ai::read_manifest();
@@ -14265,10 +14581,15 @@ impl NativeController {
         ui.set_search_semantic_mode(self.settings.search_semantic_mode);
         ui.set_clip_search_enabled(self.settings.clip_search_enabled);
         ui.set_active_index_mode(ss(&self.settings.index_mode));
+        ui.set_low_power_enabled(self.settings.low_power_enabled);
+        ui.set_list_col_size(self.settings.list_col_size);
+        ui.set_list_col_modified(self.settings.list_col_modified);
+        ui.set_list_col_type(self.settings.list_col_type);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         ui.set_search_source_pref(ss(&self.search_source_pref));
         ui.set_thumb_size_scale(self.thumb_size_scale);
         self.sync_tag_chips(ui);
+        self.apply_power_budget(ui);
     }
 
     /// Refresh labels that come from Rust models after a language change.
@@ -14610,6 +14931,10 @@ impl NativeController {
         // Push live toggles on this thread so a stale worker snapshot cannot
         // revert a download/index choice the user just made.
         ui.set_active_index_mode(ss(&self.settings.index_mode));
+        ui.set_low_power_enabled(self.settings.low_power_enabled);
+        ui.set_list_col_size(self.settings.list_col_size);
+        ui.set_list_col_modified(self.settings.list_col_modified);
+        ui.set_list_col_type(self.settings.list_col_type);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         let settings = self.settings.clone();
         let drives = self.drives.clone();
@@ -14678,9 +15003,14 @@ impl NativeController {
         kind: &str,
         action: &str,
     ) {
-        let message = user_facing_error(message.into());
+        let message = i18n::t(&user_facing_error(message.into()));
+        let action = if action.is_empty() {
+            String::new()
+        } else {
+            i18n::t(action)
+        };
         self.toast_queue
-            .push_back((message, kind.to_string(), action.to_string()));
+            .push_back((message, kind.to_string(), action));
         if !self.toast_showing {
             self.advance_toast_display(ui);
         }
@@ -14734,6 +15064,10 @@ impl NativeController {
     fn sync_performance_status(&self, ui: &MainWindow) {
         let status = index_status_for_settings(&self.settings);
         ui.set_active_index_mode(ss(&self.settings.index_mode));
+        ui.set_low_power_enabled(self.settings.low_power_enabled);
+        ui.set_list_col_size(self.settings.list_col_size);
+        ui.set_list_col_modified(self.settings.list_col_modified);
+        ui.set_list_col_type(self.settings.list_col_type);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         ui.set_index_status(ss(format!(
             "{} files indexed | {} on disk | thumbnails {} of {} cap | {}",
@@ -14822,6 +15156,41 @@ impl NativeController {
         } else {
             schedule_index_roots(roots);
             self.show_toast(ui, "Background indexing started.");
+        }
+    }
+
+    fn toggle_low_power(&mut self, ui: &MainWindow) {
+        self.settings.low_power_enabled = !self.settings.low_power_enabled;
+        let on = self.settings.low_power_enabled;
+        set_low_power_enabled(on);
+        self.save_settings();
+        ui.set_low_power_enabled(on);
+        self.apply_power_budget(ui);
+        self.show_toast(
+            ui,
+            if on {
+                "Low power mode on. Background indexing and theme motion stay reduced."
+            } else {
+                "Low power mode off. Full background work and theme motion restored."
+            },
+        );
+    }
+
+    /// Sync Slint + atomics from the user low-power toggle.
+    /// When leaving saver, resume background indexing for the active mode.
+    fn apply_power_budget(&mut self, ui: &MainWindow) {
+        let saver = current_power_budget() == PowerBudget::Saver;
+        let was_saver = POWER_SAVER_ACTIVE.swap(saver, Ordering::Relaxed);
+        if ui.get_power_saver() != saver {
+            ui.set_power_saver(saver);
+        }
+        ui.global::<ThemePalette>().set_power_saver(saver);
+        ui.set_low_power_enabled(self.settings.low_power_enabled);
+        if was_saver && !saver {
+            let roots = index_roots_for_mode(&self.settings);
+            if !roots.is_empty() {
+                schedule_index_roots(roots);
+            }
         }
     }
 
@@ -15029,6 +15398,20 @@ impl NativeController {
             &self.secondary_sort_by,
             &self.secondary_sort_dir,
         );
+    }
+
+    fn apply_secondary_filter(&mut self) {
+        if self.show_hidden {
+            self.secondary_visible_files = self.secondary_files.clone();
+        } else {
+            self.secondary_visible_files = self
+                .secondary_files
+                .iter()
+                .filter(|e| !Self::is_hidden_entry(e))
+                .cloned()
+                .collect();
+        }
+        self.apply_secondary_sort();
     }
 
     fn apply_folder_filter(&mut self) {
@@ -15369,7 +15752,12 @@ impl NativeController {
             .map(|(i, entry)| {
                 let mut item = self.file_item(entry, self.selected_set.contains(&i), max_file_size);
                 if show_home_groups {
-                    let group = home_section_label(entry.modified).to_string();
+                    let group = if entry.modified > 1_000_000 {
+                        // Recent visits carry unix timestamps — Explorer-style day buckets.
+                        format!("Recent · {}", date_group_label(entry.modified))
+                    } else {
+                        home_section_label(entry.modified).to_string()
+                    };
                     if !group.is_empty() {
                         item.show_date_group_header = group != last_group;
                         item.date_group_text = SharedString::from(group.clone());
@@ -15538,9 +15926,10 @@ impl NativeController {
         if !async_loads.is_empty() {
             let pending = self.pending_thumb_rgba.clone();
             let ready_flag = self.thumbnail_ready.clone();
+            let load_budget = thumb_cache_load_budget(ui.get_power_saver());
             THUMBNAIL_POOL.spawn(move || {
                 let mut decoded = Vec::new();
-                for (path, thumb_path) in async_loads.into_iter().take(24) {
+                for (path, thumb_path) in async_loads.into_iter().take(load_budget) {
                     if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
                         let (w, h) = img.dimensions();
                         decoded.push((path, img.into_raw(), w, h));
@@ -15582,13 +15971,20 @@ impl NativeController {
         }
 
         // Generate missing thumbs for newly visible images (off UI thread).
-        let image_entries: Vec<(String, u64)> = files[start..end]
-            .iter()
-            .filter(|e| is_thumbnail_image_ext(e.extension.as_deref().unwrap_or("")))
-            .filter(|e| !self.thumbnail_memory.contains_key(&e.path))
-            .take(32)
-            .map(|e| (e.path.clone(), e.modified))
-            .collect();
+        // In low-power mode skip fresh encodes — disk-cache loads above still
+        // keep the grid feeling filled without burning CPU/battery.
+        let gen_budget = thumb_generate_budget(ui.get_power_saver());
+        let image_entries: Vec<(String, u64)> = if gen_budget == 0 {
+            Vec::new()
+        } else {
+            files[start..end]
+                .iter()
+                .filter(|e| is_thumbnail_image_ext(e.extension.as_deref().unwrap_or("")))
+                .filter(|e| !self.thumbnail_memory.contains_key(&e.path))
+                .take(gen_budget)
+                .map(|e| (e.path.clone(), e.modified))
+                .collect()
+        };
         if !image_entries.is_empty() {
             let ready_flag = self.thumbnail_ready.clone();
             THUMBNAIL_POOL.spawn(move || {
@@ -15911,7 +16307,7 @@ impl NativeController {
     }
 
     fn file_item(&self, entry: &FileEntry, selected: bool, max_file_size: u64) -> FileItem {
-        let in_recycle = self.current_path == "recycle://";
+        let in_recycle = entry.path.starts_with("recycle://");
         let tag_id = self.tags.get(&entry.path).cloned().unwrap_or_default();
         let git_status = self.git_for_entry(entry);
         let (has_thumbnail, thumbnail) = self
@@ -15981,10 +16377,12 @@ impl NativeController {
                 format_modified(entry.modified)
             }),
             type_text: ss(if in_recycle {
-                let original = entry.path.strip_prefix("recycle://").unwrap_or(&entry.path);
-                std::path::Path::new(original)
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
+                recycle_original_from_virtual(&entry.path)
+                    .and_then(|original| {
+                        std::path::Path::new(&original)
+                            .parent()
+                            .map(|p| p.to_string_lossy().to_string())
+                    })
                     .unwrap_or_default()
             } else {
                 entry_type(entry).to_string()
@@ -16443,11 +16841,12 @@ impl NativeController {
                 expandable: false,
                 expanded: false,
             });
-            for path in self.recent_locations.iter().take(5) {
+            for entry in self.recent_locations.iter().take(5) {
+                let path = entry.path.as_str();
                 let label_str = Path::new(path)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.clone());
+                    .unwrap_or_else(|| path.to_string());
                 items.push(SideItem {
                     label: ss(&label_str),
                     path: ss(path),
@@ -16893,11 +17292,7 @@ impl NativeController {
         }
         self.current_path = path.to_string();
         self.thumbnail_memory.retain(|k, _| k.starts_with(path));
-        self.recent_locations.retain(|p| !same_path_string(p, path));
-        self.recent_locations.insert(0, path.to_string());
-        if self.recent_locations.len() > 12 {
-            self.recent_locations.truncate(12);
-        }
+        touch_recent_list(&mut self.recent_locations, path, 12);
         write_native_json_async("recent_locations.json", &self.recent_locations);
         if push_history {
             self.history.truncate(self.history_index + 1);
@@ -16957,12 +17352,7 @@ impl NativeController {
             }
             self.current_path = path.clone();
             self.thumbnail_memory.retain(|k, _| k.starts_with(&path));
-            self.recent_locations
-                .retain(|p| !same_path_string(p, &path));
-            self.recent_locations.insert(0, path.clone());
-            if self.recent_locations.len() > 12 {
-                self.recent_locations.truncate(12);
-            }
+            touch_recent_list(&mut self.recent_locations, &path, 12);
             write_native_json_async("recent_locations.json", &self.recent_locations);
             if push_history {
                 self.history.truncate(self.history_index + 1);
@@ -17507,18 +17897,23 @@ impl NativeController {
     }
 
     /// Restore the currently selected recycle-bin items back to their original
-    /// paths. Looks up each file by its original_path against `trash::os_limited::list()`.
+    /// paths. Prefers trash id encoded in the virtual path.
     fn restore_from_recycle_bin(&mut self, ui: &MainWindow) {
         let target_originals: Vec<String> = self
             .selected_paths()
             .iter()
-            .filter_map(|p| p.strip_prefix("recycle://").map(|s| s.to_string()))
+            .filter_map(|p| recycle_original_from_virtual(p))
             .collect();
-        if target_originals.is_empty() {
+        let target_ids: Vec<String> = self
+            .selected_paths()
+            .iter()
+            .filter_map(|p| recycle_id_from_virtual(p))
+            .collect();
+        if target_originals.is_empty() && target_ids.is_empty() {
             self.show_toast(ui, "Select items to restore.");
             return;
         }
-        self.restore_recycle_bin_items(ui, Some(target_originals));
+        self.restore_recycle_bin_items(ui, Some(target_originals), Some(target_ids));
     }
 
     fn restore_all_from_recycle_bin(&mut self, ui: &MainWindow) {
@@ -17526,13 +17921,18 @@ impl NativeController {
             self.show_toast(ui, "Open the Recycle Bin to restore all items.");
             return;
         }
-        self.restore_recycle_bin_items(ui, None);
+        self.restore_recycle_bin_items(ui, None, None);
     }
 
-    /// Restore Recycle Bin items. `targets` filters by original path; `None` restores everything.
+    /// Restore Recycle Bin items. Prefer `target_ids` when present; else match originals.
     /// Conflicts (original path already occupied) are skipped so a mass restore can still finish.
-    fn restore_recycle_bin_items(&mut self, ui: &MainWindow, targets: Option<Vec<String>>) {
-        let all = targets.is_none();
+    fn restore_recycle_bin_items(
+        &mut self,
+        ui: &MainWindow,
+        targets: Option<Vec<String>>,
+        target_ids: Option<Vec<String>>,
+    ) {
+        let all = targets.is_none() && target_ids.is_none();
         ui.set_op_drawer_text(ss(if all {
             "Restoring all from Recycle Bin..."
         } else {
@@ -17545,15 +17945,26 @@ impl NativeController {
         std::thread::spawn(move || {
             let result = (|| -> Result<(String, Vec<String>, Vec<String>), String> {
                 let items = trash::os_limited::list().map_err(|e| e.to_string())?;
-                let candidates: Vec<trash::TrashItem> = match &targets {
-                    Some(target_originals) => items
+                let candidates: Vec<trash::TrashItem> = if all {
+                    items
+                } else {
+                    items
                         .into_iter()
                         .filter(|item| {
-                            let orig = item.original_path().to_string_lossy().into_owned();
-                            target_originals.iter().any(|t| same_path_string(t, &orig))
+                            let id = item.id.to_string_lossy();
+                            if let Some(ids) = &target_ids {
+                                if !ids.is_empty() && ids.iter().any(|t| t == id.as_ref()) {
+                                    return true;
+                                }
+                            }
+                            if let Some(origs) = &targets {
+                                let orig = item.original_path().to_string_lossy().into_owned();
+                                origs.iter().any(|t| same_path_string(t, &orig))
+                            } else {
+                                false
+                            }
                         })
-                        .collect(),
-                    None => items,
+                        .collect()
                 };
                 if candidates.is_empty() {
                     return Err(if all {
@@ -17571,6 +17982,7 @@ impl NativeController {
                 for item in candidates {
                     let orig = item.original_path();
                     let orig_display = orig.to_string_lossy().into_owned();
+                    let virt = recycle_virtual_path(&item.id, &orig);
                     if orig.exists() {
                         skipped += 1;
                         continue;
@@ -17578,7 +17990,7 @@ impl NativeController {
                     match trash::os_limited::restore_all(vec![item]) {
                         Ok(()) => {
                             restored += 1;
-                            removed_virtual.push(format!("recycle://{orig_display}"));
+                            removed_virtual.push(virt);
                             if let Some(parent) = Path::new(&orig_display).parent() {
                                 let parent_s = parent.to_string_lossy().into_owned();
                                 if !parent_s.is_empty()
@@ -17685,11 +18097,15 @@ impl NativeController {
 
     /// Permanently delete recycle-bin items identified by `recycle://` virtual paths.
     fn purge_recycle_paths(&mut self, ui: &MainWindow, virtual_paths: Vec<String>) {
+        let target_ids: Vec<String> = virtual_paths
+            .iter()
+            .filter_map(|p| recycle_id_from_virtual(p))
+            .collect();
         let target_originals: Vec<String> = virtual_paths
             .iter()
-            .filter_map(|p| p.strip_prefix("recycle://").map(|s| s.to_string()))
+            .filter_map(|p| recycle_original_from_virtual(p))
             .collect();
-        if target_originals.is_empty() {
+        if target_ids.is_empty() && target_originals.is_empty() {
             return;
         }
         // Vanish from the list immediately; background purge finishes the OS delete.
@@ -17705,6 +18121,10 @@ impl NativeController {
                 let to_purge: Vec<trash::TrashItem> = items
                     .into_iter()
                     .filter(|item| {
+                        let id = item.id.to_string_lossy();
+                        if target_ids.iter().any(|t| t == id.as_ref()) {
+                            return true;
+                        }
                         let orig = item.original_path().to_string_lossy().into_owned();
                         target_originals.iter().any(|t| same_path_string(t, &orig))
                     })
@@ -17889,6 +18309,10 @@ impl NativeController {
         if self.current_path == "recycle://" {
             // Soft refresh: keep current rows until the background list lands.
             self.open_recycle_bin_view(ui, false);
+            return;
+        }
+        if self.current_path == "home://" {
+            self.open_home_view(ui, false);
             return;
         }
         if let Some(archive) = self.active_archive.clone() {
@@ -19581,12 +20005,204 @@ impl NativeController {
         }
     }
 
+    fn push_secondary_history(&mut self, path: &str) {
+        self.secondary_history
+            .truncate(self.secondary_history_pos + 1);
+        if self.secondary_history.last().map(|p| p.as_str()) != Some(path) {
+            self.secondary_history.push(path.to_string());
+            self.secondary_history_pos = self.secondary_history.len() - 1;
+        }
+    }
+
+    fn open_secondary_home_view(&mut self, ui: &MainWindow, push_history: bool) {
+        self.active_pane = ActivePane::Secondary;
+        self.sync_active_pane(ui);
+        let mut entries = Vec::new();
+        let push_dir = |entries: &mut Vec<FileEntry>, name: &str, path: &str, section: u64| {
+            if path.is_empty() || !Path::new(path).exists() {
+                return;
+            }
+            entries.push(FileEntry {
+                path: path.to_string(),
+                name: name.to_string(),
+                name_lower: name.to_ascii_lowercase(),
+                kind: FileKind::Directory,
+                size: 0,
+                modified: section,
+                extension: None,
+            });
+        };
+        for drive in &self.drives {
+            let label = if drive.name.is_empty() {
+                drive.path.clone()
+            } else {
+                format!("{} ({})", drive.name, drive.path.trim_end_matches('\\'))
+            };
+            push_dir(&mut entries, &label, &drive.path, 1);
+        }
+        for pin in self.user_pins.iter().take(12) {
+            let kind = if pin.kind == "file" {
+                FileKind::File
+            } else {
+                FileKind::Directory
+            };
+            entries.push(FileEntry {
+                path: pin.path.clone(),
+                name: pin.name.clone(),
+                name_lower: pin.name.to_ascii_lowercase(),
+                kind,
+                size: 0,
+                modified: 2,
+                extension: Path::new(&pin.path)
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_string()),
+            });
+        }
+        for entry in self.recent_locations.iter().take(8) {
+            let path = entry.path.as_str();
+            if path == "home://" || path == "storage://" || path == "recycle://" {
+                continue;
+            }
+            let label = Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string());
+            let section = if entry.visited_at > 1_000_000 {
+                entry.visited_at
+            } else {
+                3
+            };
+            push_dir(&mut entries, &label, path, section);
+        }
+        entries.push(FileEntry {
+            path: "recycle://".to_string(),
+            name: "Recycle Bin".to_string(),
+            name_lower: "recycle bin".to_string(),
+            kind: FileKind::Directory,
+            size: 0,
+            modified: 5,
+            extension: None,
+        });
+        let path = "home://".to_string();
+        if push_history {
+            self.push_secondary_history(&path);
+        }
+        let prev = self.secondary_path.clone();
+        if !prev.is_empty() && !same_path_string(&prev, &path) {
+            self.remember_secondary_scroll(ui, &prev);
+        }
+        self.secondary_path = path;
+        self.secondary_files = entries;
+        self.secondary_selected_index = -1;
+        self.secondary_selected_set.clear();
+        self.secondary_select_anchor = -1;
+        self.secondary_visible_files = self.secondary_files.clone();
+        self.update_secondary_models(ui);
+        self.sync_selection_count_to_ui(ui);
+    }
+
+    fn open_secondary_recycle_bin(&mut self, ui: &MainWindow, push_history: bool) {
+        self.active_pane = ActivePane::Secondary;
+        self.sync_active_pane(ui);
+        let path = "recycle://".to_string();
+        if push_history {
+            self.push_secondary_history(&path);
+        }
+        let prev = self.secondary_path.clone();
+        if !prev.is_empty() && !same_path_string(&prev, &path) {
+            self.remember_secondary_scroll(ui, &prev);
+        }
+        self.secondary_path = path.clone();
+        self.secondary_selected_index = -1;
+        self.secondary_selected_set.clear();
+        self.secondary_select_anchor = -1;
+        self.secondary_files.clear();
+        self.secondary_visible_files.clear();
+        self.secondary_files_model = None;
+        ui.set_secondary_files(model_from_vec(Vec::<FileItem>::new()));
+        ui.set_secondary_path(ss(&path));
+        self.sync_selection_count_to_ui(ui);
+
+        let token = self.secondary_nav_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let ready = self.secondary_directory_ready.clone();
+        let pending = self.pending_secondary_directory_result.clone();
+        std::thread::spawn(move || {
+            let entries = list_recycle_bin_entries();
+            publish_directory_pending(
+                &pending,
+                &ready,
+                NativeDirectoryResult {
+                    path,
+                    entries,
+                    generation: token,
+                    partial: false,
+                    skipped_entries: 0,
+                    error: None,
+                },
+            );
+        });
+    }
+
+    fn open_secondary_archive_view(
+        &mut self,
+        ui: &MainWindow,
+        archive_path: String,
+        prefix: String,
+        push_history: bool,
+    ) {
+        let prefix = normalize_archive_prefix(&prefix);
+        match list_archive_virtual_dir(&archive_path, &prefix) {
+            Ok(files) => {
+                let virtual_path = archive_virtual_path(&archive_path, &prefix);
+                if push_history {
+                    self.push_secondary_history(&virtual_path);
+                }
+                let prev = self.secondary_path.clone();
+                if !prev.is_empty() && !same_path_string(&prev, &virtual_path) {
+                    self.remember_secondary_scroll(ui, &prev);
+                }
+                self.active_pane = ActivePane::Secondary;
+                self.secondary_path = virtual_path;
+                self.secondary_files = files;
+                self.secondary_selected_index = -1;
+                self.secondary_selected_set.clear();
+                self.secondary_select_anchor = -1;
+                self.sync_active_pane(ui);
+                self.apply_secondary_filter();
+                self.update_secondary_models(ui);
+                self.sync_selection_count_to_ui(ui);
+            }
+            Err(error) => self.show_toast_kind(ui, error, "error"),
+        }
+    }
+
     fn secondary_navigate(&mut self, ui: &MainWindow, path: String) {
         self.secondary_navigate_impl(ui, path, true);
     }
 
     fn secondary_navigate_impl(&mut self, ui: &MainWindow, path: String, push_history: bool) {
-        if path.is_empty() || !Path::new(&path).is_dir() {
+        if path.is_empty() {
+            return;
+        }
+        // Virtual namespaces — mirror primary navigate.
+        if path == "home://" {
+            self.open_secondary_home_view(ui, push_history);
+            return;
+        }
+        if path == "recycle://" {
+            self.open_secondary_recycle_bin(ui, push_history);
+            return;
+        }
+        if path == "storage://" {
+            // Storage analyzer is primary-only; open it there.
+            self.navigate(ui, path, push_history);
+            return;
+        }
+        if let Some((archive_path, prefix)) = parse_archive_virtual_path(&path) {
+            self.open_secondary_archive_view(ui, archive_path, prefix, push_history);
+            return;
+        }
+        if !Path::new(&path).is_dir() {
             return;
         }
         let _ = ensure_watched_paths(&self.app_state, std::slice::from_ref(&path));
@@ -19608,12 +20224,12 @@ impl NativeController {
         self.secondary_selected_set.clear();
         self.secondary_select_anchor = -1;
         self.sync_active_pane(ui);
+        ui.set_in_recycle_bin(false);
 
         // Cache hit: paint immediately (same as primary).
         if let Some(cached) = self.app_state.cached_directory(&path) {
             self.secondary_files = cached.clone();
-            self.secondary_visible_files = cached;
-            self.apply_secondary_sort();
+            self.apply_secondary_filter();
             self.update_secondary_models(ui);
             self.restore_secondary_scroll(ui, &path);
             self.sync_selection_count_to_ui(ui);
@@ -19701,8 +20317,7 @@ impl NativeController {
         }
         let partial = page.partial;
         self.secondary_files = page.entries.clone();
-        self.secondary_visible_files = page.entries;
-        self.apply_secondary_sort();
+        self.apply_secondary_filter();
         self.update_secondary_models(ui);
         // Restore once after the first paint lands at the top; skip on
         // partial→full refresh so we don't yank the viewport mid-scroll.
@@ -19884,7 +20499,7 @@ impl NativeController {
             if entry.kind == FileKind::Directory {
                 self.secondary_navigate(ui, entry.path);
             } else if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
-                self.open_archive_view(ui, entry.path, String::new(), true);
+                self.open_secondary_archive_view(ui, entry.path, String::new(), true);
             } else {
                 open_file_detached(entry.path);
             }
@@ -19893,8 +20508,41 @@ impl NativeController {
 
     fn secondary_go_up(&mut self, ui: &MainWindow) {
         self.active_pane = ActivePane::Secondary;
+        if let Some((archive_path, prefix)) = parse_archive_virtual_path(&self.secondary_path) {
+            if prefix.is_empty() {
+                // Leave the archive — prefer previous secondary history, else parent of archive file.
+                if self.secondary_history_pos > 0 {
+                    self.secondary_go_back(ui);
+                } else if let Some(parent) = parent_dir_path(&archive_path) {
+                    self.secondary_navigate(ui, parent);
+                }
+            } else {
+                self.open_secondary_archive_view(
+                    ui,
+                    archive_path,
+                    archive_parent_prefix(&prefix),
+                    true,
+                );
+            }
+            return;
+        }
+        if self.secondary_path == "home://" {
+            return;
+        }
+        if self.secondary_path == "recycle://" {
+            if self.secondary_history_pos > 0 {
+                self.secondary_go_back(ui);
+            } else {
+                self.open_secondary_home_view(ui, true);
+            }
+            return;
+        }
         if let Some(parent_path) = parent_dir_path(&self.secondary_path) {
             self.secondary_navigate(ui, parent_path);
+            return;
+        }
+        if self.secondary_path != "home://" {
+            self.open_secondary_home_view(ui, true);
         }
     }
 
@@ -20015,24 +20663,7 @@ impl NativeController {
                 self.show_toast(ui, "Cancelling running operations...");
             }
             "locked-file" => self.show_locked_file(ui),
-            "properties" => {
-                let paths = self.selected_paths();
-                if paths.is_empty() {
-                    self.show_toast(ui, "Select a file first.");
-                } else {
-                    match open_windows_properties(&paths[0]) {
-                        Ok(()) => {
-                            let msg = if paths.len() == 1 {
-                                "Opening Windows Properties".to_string()
-                            } else {
-                                format!("Opening Properties for first of {} items", paths.len())
-                            };
-                            self.show_toast(ui, msg);
-                        }
-                        Err(error) => self.show_toast(ui, error),
-                    }
-                }
-            }
+            "properties" => self.show_properties_sheet(ui),
             "show-more-options" => {
                 if let Some(entry) = self.selected_entry() {
                     if let Err(e) = open_more_options(&entry.path, ui) {
@@ -20042,19 +20673,7 @@ impl NativeController {
                     self.show_toast(ui, "Select a file first.");
                 }
             }
-            "open-with" => {
-                let paths = self.selected_paths();
-                if paths.is_empty() {
-                    self.show_toast(ui, "Select a file first.");
-                } else if paths.len() > 1 {
-                    self.show_toast(ui, "Open With applies to one file — select a single item.");
-                } else {
-                    match open_with_dialog(&paths[0], Some(ui)) {
-                        Ok(()) => {}
-                        Err(error) => self.show_toast_kind(ui, error, "error"),
-                    }
-                }
-            }
+            "open-with" => self.show_open_with_sheet(ui),
             "defender-scan" => {
                 let paths = self.selected_paths();
                 if paths.is_empty() {
@@ -20472,7 +21091,7 @@ impl NativeController {
         ) {
             return;
         }
-        let overrides = load_shortcut_overrides();
+        let overrides = self.shortcut_draft.clone();
         if let Some(cmd) = shortcuts::resolve(ctrl, shift, alt, &key, &overrides) {
             ui.set_shortcut_consumed(true);
             match cmd.as_str() {
@@ -21038,34 +21657,17 @@ impl NativeController {
             }
             Some(PendingPrompt::ConflictPaste { src, dest, cut }) => {
                 let action = value.trim().to_lowercase();
-                let mut dest_path = PathBuf::from(&dest);
-                if action == "skip" {
-                    self.show_toast(ui, "Skipped");
-                    return;
+                if ui.get_prompt_remember_conflict()
+                    && matches!(action.as_str(), "skip" | "replace" | "keep" | "")
+                {
+                    let stored = if action.is_empty() {
+                        "keep".to_string()
+                    } else {
+                        action.clone()
+                    };
+                    self.session_conflict_action = Some(stored);
                 }
-                if action == "replace" && dest_path.exists() {
-                    if let Err(error) = native_delete_path(&dest) {
-                        self.show_toast_kind(ui, error, "error");
-                        return;
-                    }
-                } else if action == "keep" || action.is_empty() {
-                    dest_path = keep_both_destination(&dest_path);
-                } else {
-                    self.show_toast(ui, "Type keep, replace, or skip.");
-                    return;
-                }
-                let result = if cut {
-                    native_move(&self.app_state, &src, &dest_path.to_string_lossy())
-                } else {
-                    native_copy(&self.app_state, &src, &dest_path.to_string_lossy())
-                };
-                match result {
-                    Ok(()) => {
-                        self.refresh_after_paste(ui, cut, std::slice::from_ref(&src));
-                        self.show_toast_kind(ui, "Conflict resolved", "success");
-                    }
-                    Err(error) => self.show_toast_kind(ui, error, "error"),
-                }
+                let _ = self.apply_conflict_resolution(ui, &src, &dest, cut, &action);
             }
             Some(PendingPrompt::RenameTag(tag_id)) => {
                 let new_label = value.trim().to_string();
@@ -21391,6 +21993,22 @@ impl NativeController {
                 continue;
             }
             if self.paste_has_real_conflict(src, &dest) {
+                if let Some(action) = self.session_conflict_action.clone() {
+                    if !self.apply_conflict_resolution(
+                        ui,
+                        src,
+                        &dest.to_string_lossy(),
+                        clipboard.cut,
+                        &action,
+                    ) {
+                        ui.set_op_drawer_visible(false);
+                        return;
+                    }
+                    if action != "skip" {
+                        pasted += 1;
+                    }
+                    continue;
+                }
                 ui.set_op_drawer_visible(false);
                 let conflict = conflict_info(Path::new(src), &dest);
                 ui.set_preview_title(ss("Copy Conflict"));
@@ -21420,6 +22038,7 @@ impl NativeController {
                 )));
                 ui.set_prompt_value(ss(""));
                 ui.set_prompt_kind(ss("conflict"));
+                ui.set_prompt_remember_conflict(false);
                 ui.set_prompt_visible(true);
                 return;
             }
@@ -21689,6 +22308,15 @@ impl NativeController {
                 continue;
             }
             if self.paste_has_real_conflict(src, &dest) {
+                match self.session_conflict_action.as_deref() {
+                    Some("skip") => continue,
+                    Some("replace") => {
+                        let _ = native_delete_path(&dest.to_string_lossy());
+                        continue;
+                    }
+                    Some("keep") | Some("") => continue,
+                    Some(_) | None => {}
+                }
                 let conflict = conflict_info(Path::new(src), &dest);
                 ui.set_preview_title(ss("Copy Conflict"));
                 ui.set_preview_body(ss(format!(
@@ -21723,6 +22351,7 @@ impl NativeController {
                 )));
                 ui.set_prompt_value(ss(""));
                 ui.set_prompt_kind(ss("conflict"));
+                ui.set_prompt_remember_conflict(false);
                 ui.set_prompt_visible(true);
                 return;
             }
@@ -21739,7 +22368,15 @@ impl NativeController {
                     return false;
                 };
                 let dest = PathBuf::from(&dest_dir).join(name);
-                !self.paste_skips_dest(src, &dest, cut) && Path::new(src).exists()
+                if self.paste_skips_dest(src, &dest, cut) || !Path::new(src).exists() {
+                    return false;
+                }
+                if self.session_conflict_action.as_deref() == Some("skip")
+                    && self.paste_has_real_conflict(src, &dest)
+                {
+                    return false;
+                }
+                true
             })
             .cloned()
             .collect();
@@ -22166,15 +22803,21 @@ impl NativeController {
                     .map(|e| e.to_string_lossy().to_string()),
             });
         }
-        for path in self.recent_locations.iter().take(8) {
+        for entry in self.recent_locations.iter().take(8) {
+            let path = entry.path.as_str();
             if path == "home://" || path == "storage://" || path == "recycle://" {
                 continue;
             }
             let label = Path::new(path)
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.clone());
-            push_dir(&mut entries, &label, path, 3);
+                .unwrap_or_else(|| path.to_string());
+            let section = if entry.visited_at > 1_000_000 {
+                entry.visited_at
+            } else {
+                3
+            };
+            push_dir(&mut entries, &label, path, section);
         }
         for search in read_native_json::<Vec<SavedSearch>>("searches.json", Vec::new())
             .into_iter()
@@ -22295,28 +22938,301 @@ impl NativeController {
         ui.set_tool_overlay_visible(true);
     }
 
-    fn show_recent_locations(&mut self, ui: &MainWindow) {
-        let items: Vec<ToolListItem> = self
-            .recent_locations
-            .iter()
-            .map(|p| ToolListItem {
-                id: ss(p),
-                title: ss(Path::new(p)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| p.clone())),
-                subtitle: ss(p),
+    fn sync_list_column_prefs(&self, ui: &MainWindow) {
+        ui.set_list_col_size(self.settings.list_col_size);
+        ui.set_list_col_modified(self.settings.list_col_modified);
+        ui.set_list_col_type(self.settings.list_col_type);
+    }
+
+    fn toggle_list_column(&mut self, ui: &MainWindow, which: &str) {
+        match which {
+            "size" => self.settings.list_col_size = !self.settings.list_col_size,
+            "modified" => self.settings.list_col_modified = !self.settings.list_col_modified,
+            "type" => self.settings.list_col_type = !self.settings.list_col_type,
+            _ => return,
+        }
+        self.save_settings();
+        self.sync_list_column_prefs(ui);
+    }
+
+    fn show_properties_sheet(&mut self, ui: &MainWindow) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        }
+        let path = paths[0].clone();
+        let meta = fs::metadata(&path).ok();
+        let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = meta
+            .as_ref()
+            .map(|m| unix_secs(m.modified()))
+            .unwrap_or(0);
+        let name = Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        let ext = Path::new(&path)
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tag = self.tags.get(&path).cloned().unwrap_or_default();
+        let kind = if path.starts_with("recycle://") {
+            "Recycle Bin item".to_string()
+        } else if is_dir {
+            "Folder".to_string()
+        } else if ext.is_empty() {
+            "File".to_string()
+        } else {
+            format!(".{ext} file")
+        };
+        let mut items = vec![
+            ToolListItem {
+                id: ss("copy-path"),
+                title: ss(&i18n::t("Copy path")),
+                subtitle: ss(&path),
                 meta: ss(""),
                 enabled: true,
                 accent: color("#4f9cff"),
-            })
-            .collect();
+            },
+            ToolListItem {
+                id: ss(""),
+                title: ss(&i18n::t("Type")),
+                subtitle: ss(&kind),
+                meta: ss("info"),
+                enabled: false,
+                accent: color("#7f8b9d"),
+            },
+            ToolListItem {
+                id: ss(""),
+                title: ss(&i18n::t("Size")),
+                subtitle: ss(if is_dir {
+                    "—".to_string()
+                } else {
+                    format_size_short(size)
+                }),
+                meta: ss("info"),
+                enabled: false,
+                accent: color("#7f8b9d"),
+            },
+            ToolListItem {
+                id: ss(""),
+                title: ss(&i18n::t("Modified")),
+                subtitle: ss(format_modified(modified)),
+                meta: ss("info"),
+                enabled: false,
+                accent: color("#7f8b9d"),
+            },
+        ];
+        if !tag.is_empty() {
+            items.push(ToolListItem {
+                id: ss(""),
+                title: ss(&i18n::t("Tag")),
+                subtitle: ss(&tag),
+                meta: ss("info"),
+                enabled: false,
+                accent: color("#7f8b9d"),
+            });
+        }
+        if paths.len() > 1 {
+            items.push(ToolListItem {
+                id: ss(""),
+                title: ss(&i18n::t("Selection")),
+                subtitle: ss(format!("{} items selected — showing first", paths.len())),
+                meta: ss("info"),
+                enabled: false,
+                accent: color("#7f8b9d"),
+            });
+        }
+        #[cfg(target_os = "windows")]
+        items.push(ToolListItem {
+            id: ss("windows-properties"),
+            title: ss(&i18n::t("Windows Properties…")),
+            subtitle: ss(&i18n::t("Open the system properties sheet")),
+            meta: ss(""),
+            enabled: true,
+            accent: color("#4f9cff"),
+        });
+        let _ = name;
+        ui.set_tool_overlay_kind(ss("properties"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Properties")));
+        ui.set_tool_overlay_subtitle(ss(&path));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
+    }
+
+    fn show_open_with_sheet(&mut self, ui: &MainWindow) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            self.show_toast(ui, "Select a file first.");
+            return;
+        }
+        if paths.len() > 1 {
+            self.show_toast(ui, "Open With applies to one file — select a single item.");
+            return;
+        }
+        let path = paths[0].clone();
+        if Path::new(&path).is_dir() {
+            self.show_toast(ui, "Open With applies to files, not folders.");
+            return;
+        }
+        let ext = Path::new(&path)
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let ext_label = if ext.is_empty() {
+            i18n::t("this file type")
+        } else {
+            format!(".{ext}")
+        };
+        let items = vec![
+            ToolListItem {
+                id: ss(format!("choose:{path}")),
+                title: ss(&i18n::t("Choose another app…")),
+                subtitle: ss(&i18n::t("Pick an app for this one time")),
+                meta: ss(""),
+                enabled: true,
+                accent: color("#4f9cff"),
+            },
+            ToolListItem {
+                id: ss(format!("set-default:{path}")),
+                title: ss(format!("{} {}", i18n::t("Set as default for"), ext_label)),
+                subtitle: ss(&i18n::t("Always open this type with the app you pick")),
+                meta: ss(""),
+                enabled: true,
+                accent: color("#37b26c"),
+            },
+        ];
+        ui.set_tool_overlay_kind(ss("open-with"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Open With")));
+        ui.set_tool_overlay_subtitle(ss(&path));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
+    }
+
+    fn apply_conflict_resolution(
+        &mut self,
+        ui: &MainWindow,
+        src: &str,
+        dest: &str,
+        cut: bool,
+        action: &str,
+    ) -> bool {
+        let mut dest_path = PathBuf::from(dest);
+        match action {
+            "skip" => {
+                self.show_toast(ui, "Skipped");
+                return true;
+            }
+            "replace" => {
+                if dest_path.exists() {
+                    if let Err(error) = native_delete_path(dest) {
+                        self.show_toast_kind(ui, error, "error");
+                        return false;
+                    }
+                }
+            }
+            "keep" | "" => {
+                dest_path = keep_both_destination(&dest_path);
+            }
+            _ => {
+                self.show_toast(ui, "Type keep, replace, or skip.");
+                return false;
+            }
+        }
+        let result = if cut {
+            native_move(&self.app_state, src, &dest_path.to_string_lossy())
+        } else {
+            native_copy(&self.app_state, src, &dest_path.to_string_lossy())
+        };
+        match result {
+            Ok(()) => {
+                let src_owned = src.to_string();
+                self.refresh_after_paste(ui, cut, std::slice::from_ref(&src_owned));
+                self.show_toast_kind(ui, "Conflict resolved", "success");
+                true
+            }
+            Err(error) => {
+                self.show_toast_kind(ui, error, "error");
+                false
+            }
+        }
+    }
+
+    fn pause_folder_watchers(&mut self) {
+        if self.watchers_paused {
+            return;
+        }
+        let paths: Vec<String> = self
+            .app_state
+            .watchers
+            .lock()
+            .map(|w| w.keys().cloned().collect())
+            .unwrap_or_default();
+        if let Ok(mut watchers) = self.app_state.watchers.lock() {
+            watchers.clear();
+        }
+        self.paused_watch_paths = paths;
+        self.watchers_paused = true;
+    }
+
+    fn resume_folder_watchers(&mut self) {
+        if !self.watchers_paused {
+            return;
+        }
+        let mut paths = std::mem::take(&mut self.paused_watch_paths);
+        if !self.current_path.is_empty() && !is_virtual_nav_path(&self.current_path) {
+            paths.push(self.current_path.clone());
+        }
+        if !self.secondary_path.is_empty() && !is_virtual_nav_path(&self.secondary_path) {
+            paths.push(self.secondary_path.clone());
+        }
+        paths.sort();
+        paths.dedup();
+        let _ = ensure_watched_paths(&self.app_state, &paths);
+        self.watchers_paused = false;
+    }
+
+    fn show_recent_locations(&mut self, ui: &MainWindow) {
+        let mut items: Vec<ToolListItem> = Vec::new();
+        let mut last_group = String::new();
+        for entry in &self.recent_locations {
+            let path = entry.path.as_str();
+            let group = if entry.visited_at > 1_000_000 {
+                date_group_label(entry.visited_at).to_string()
+            } else {
+                "Recent".to_string()
+            };
+            if group != last_group {
+                items.push(ToolListItem {
+                    id: ss(""),
+                    title: ss(&i18n::t(&group)),
+                    subtitle: ss(""),
+                    meta: ss("header"),
+                    enabled: false,
+                    accent: color("#7f8b9d"),
+                });
+                last_group = group;
+            }
+            items.push(ToolListItem {
+                id: ss(path),
+                title: ss(Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string())),
+                subtitle: ss(path),
+                meta: ss(""),
+                enabled: true,
+                accent: color("#4f9cff"),
+            });
+        }
         ui.set_tool_overlay_kind(ss("recents"));
         ui.set_tool_overlay_title(ss(&i18n::t("Recent Locations")));
         ui.set_tool_overlay_subtitle(ss(if items.is_empty() {
             i18n::t("No recent locations recorded yet.")
         } else {
-            i18n::t("Click a folder to open it")
+            i18n::t("Grouped by day — click a folder to open it")
         }));
         ui.set_tool_overlay_items(model_from_vec(items));
         ui.set_tool_overlay_visible(true);
@@ -23029,6 +23945,8 @@ impl NativeController {
              Active watchers: {} / 8\n\
              Operation queue: {} items{}\n\
              Background indexing: {}\n\
+             Low power toggle: {}\n\
+             Power saver active: {}\n\
              Current folder: {} items\n\
              Search mode: {}\n\
              Roots:\n{}",
@@ -23045,8 +23963,14 @@ impl NativeController {
             if battery_ok {
                 "permitted"
             } else {
-                "paused (low battery)"
+                "paused (low power)"
             },
+            if self.settings.low_power_enabled {
+                "on"
+            } else {
+                "off"
+            },
+            if power_saver_active() { "yes" } else { "no" },
             self.visible_files.len(),
             if self.search_query.is_empty() {
                 "browsing"
@@ -23970,8 +24894,44 @@ impl NativeController {
                 }
             }
             "libraries" | "recents" | "siblings" => {
+                if id.is_empty() {
+                    return;
+                }
                 ui.set_tool_overlay_visible(false);
                 self.navigate(ui, id, true);
+            }
+            "properties" => {
+                match id.as_str() {
+                    "copy-path" => {
+                        let path = ui.get_tool_overlay_subtitle().to_string();
+                        if !path.is_empty() {
+                            match copy_text_to_clipboard(&path) {
+                                Ok(()) => self.show_toast_kind(ui, "Path copied", "success"),
+                                Err(e) => self.show_toast_kind(ui, e, "error"),
+                            }
+                        }
+                    }
+                    "windows-properties" => {
+                        let path = ui.get_tool_overlay_subtitle().to_string();
+                        ui.set_tool_overlay_visible(false);
+                        if let Err(e) = open_windows_properties(&path) {
+                            self.show_toast(ui, e);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "open-with" => {
+                ui.set_tool_overlay_visible(false);
+                if let Some(path) = id.strip_prefix("choose:") {
+                    if let Err(e) = open_with_dialog(path, Some(ui)) {
+                        self.show_toast_kind(ui, e, "error");
+                    }
+                } else if let Some(path) = id.strip_prefix("set-default:") {
+                    if let Err(e) = set_default_app_for_file(path, Some(ui)) {
+                        self.show_toast_kind(ui, e, "error");
+                    }
+                }
             }
             "cloud" => {
                 ui.set_tool_overlay_visible(false);
@@ -25693,8 +26653,21 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             {
                 let mut ctrl = c.borrow_mut();
                 ctrl.show_hidden = new_state;
+                ctrl.apply_filter();
+                ctrl.update_models(&ui);
+                ctrl.apply_secondary_filter();
+                ctrl.update_secondary_models(&ui);
             }
-            c.borrow_mut().refresh(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c_cols = controller.clone();
+    ui.on_toggle_list_column(move |which| {
+        if let Some(ui) = weak.upgrade() {
+            c_cols
+                .borrow_mut()
+                .toggle_list_column(&ui, which.as_str());
         }
     });
 
@@ -25708,6 +26681,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             ctrl.save_settings();
             ui.global::<ThemePalette>().set_theme_animations(on);
             ui.set_theme_animations(on);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c_lp = controller.clone();
+    ui.on_toggle_low_power(move || {
+        if let Some(ui) = weak.upgrade() {
+            c_lp.borrow_mut().toggle_low_power(&ui);
         }
     });
 
@@ -26439,6 +27420,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 ctrl.save_settings();
             }
         }
+        flush_native_json_queue();
         let _ = slint::quit_event_loop();
     });
 
@@ -26485,19 +27467,19 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                             .unwrap_or(false);
                         if ui.get_window_occluded() != minimized {
                             ui.set_window_occluded(minimized);
-                        }
-                        // Battery check is cheap but not free — sample every ~5s.
-                        let skips = idle_skips_cell.get();
-                        if skips.is_multiple_of(25) {
-                            let saver = !indexing_permitted();
-                            if ui.get_power_saver() != saver {
-                                ui.set_power_saver(saver);
+                            if let Ok(mut ctrl) = c.try_borrow_mut() {
+                                if minimized {
+                                    ctrl.pause_folder_watchers();
+                                } else {
+                                    ctrl.resume_folder_watchers();
+                                }
                             }
                         }
                         minimized
                     };
                     #[cfg(not(target_os = "windows"))]
                     let minimized = false;
+
                     if minimized {
                         // Keep ready flags; only pump every 5th idle tick.
                         let skips = idle_skips_cell.get();
@@ -26546,7 +27528,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                         .unwrap_or(false);
                     #[cfg(not(target_os = "windows"))]
                     let minimized_now = false;
-                    if !minimized_now && skips.is_multiple_of(2) {
+                    let power_saver_now = weak
+                        .upgrade()
+                        .map(|ui| ui.get_power_saver())
+                        .unwrap_or(false);
+                    // Idle: keep 1 of 2 polls normally; 1 of 4 in low power.
+                    let period = if power_saver_now { 4u8 } else { 2u8 };
+                    if !minimized_now && skips % period != 1 {
                         return;
                     }
                 } else {
