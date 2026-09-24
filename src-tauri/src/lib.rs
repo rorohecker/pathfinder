@@ -21,7 +21,7 @@ use std::process::Command as ProcessCommand;
 use std::rc::Rc;
 use std::sync::{
     Arc, LazyLock, Mutex,
-    atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime};
 use walkdir::WalkDir;
@@ -119,10 +119,9 @@ const GITHUB_RELEASES_LIST_API: &str =
 const GITHUB_RELEASES_URL: &str = "https://github.com/rorohecker/pathfinder/releases";
 
 static ACTIVE_HEAVY_OPS: AtomicUsize = AtomicUsize::new(0);
-/// Low-power preference mirrored from settings for background threads.
-/// 0 = auto (OS Battery Saver / low charge), 1 = force on, 2 = force off.
-static LOW_POWER_PREF: AtomicU8 = AtomicU8::new(0);
-/// Last resolved power-saver state (UI + background workers read this).
+/// 0 = off (default, opt-in), 1 = on. User toggle only — not auto OS battery.
+static LOW_POWER_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Last applied power-saver UI/worker state.
 static POWER_SAVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // Dedicated pool for thumbnail generation, sized to the machine (up to 8
@@ -7994,11 +7993,15 @@ struct NativeSettings {
     /// Default on; when false, themed icons stay static and FX timers pause.
     #[serde(default = "default_true")]
     theme_animations: bool,
-    /// Low power preference: `auto` (Windows Battery Saver / low charge),
-    /// `on` (always), or `off` (never). Controls decorative motion, thumbnail
-    /// encode budget, and background indexing.
-    #[serde(default = "default_low_power_mode")]
-    low_power_mode: String,
+    /// Opt-in low power mode. When true, pauses theme motion, skips fresh
+    /// thumbnail encodes, slows idle polling, and holds background indexing.
+    /// Default off — user turns it on from Settings → Performance.
+    #[serde(
+        default,
+        alias = "low_power_mode",
+        deserialize_with = "deserialize_low_power_enabled"
+    )]
+    low_power_enabled: bool,
     /// UI language: `system` | `en` | `it` | `es`. Applied via Slint bundled
     /// translations (`@tr`) and [`i18n`] for Rust-fed model strings.
     #[serde(default = "default_ui_language")]
@@ -8017,15 +8020,28 @@ fn default_ui_language() -> String {
     "system".into()
 }
 
-fn default_low_power_mode() -> String {
-    "auto".into()
+/// Accept bool or legacy string (`auto`/`on`/`off`) from earlier builds.
+fn deserialize_low_power_enabled<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Bool(bool),
+        Str(String),
+    }
+    Ok(match Option::<Raw>::deserialize(deserializer)? {
+        None => false,
+        Some(Raw::Bool(b)) => b,
+        // Legacy Auto/On/Off chips: only explicit "on" stays enabled.
+        Some(Raw::Str(s)) => matches!(s.to_ascii_lowercase().as_str(), "on" | "true" | "1"),
+    })
 }
 
-fn normalize_low_power_mode(mode: &str) -> String {
-    match mode {
-        "on" | "off" | "auto" => mode.to_string(),
-        _ => "auto".to_string(),
-    }
+fn set_low_power_enabled(on: bool) {
+    LOW_POWER_ENABLED.store(on, Ordering::Relaxed);
 }
 
 impl Default for NativeSettings {
@@ -8063,7 +8079,7 @@ impl Default for NativeSettings {
             folder_color: None,
             custom_accent_hex: None,
             theme_animations: true,
-            low_power_mode: default_low_power_mode(),
+            low_power_enabled: false,
             ui_language: default_ui_language(),
         }
     }
@@ -10708,98 +10724,23 @@ fn apply_update(release_url: Option<String>) -> Result<(), String> {
     open_update_release(release_url)
 }
 
-/// Resolved power budget for background work and decorative motion.
+/// Opt-in low power mode: only the Settings toggle enables Saver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PowerBudget {
-    /// Full performance: AC power, desktop, or user forced off.
     Full,
-    /// Low-power: Windows Battery Saver, critical charge, or user forced on.
     Saver,
 }
 
-fn low_power_pref_code(pref: &str) -> u8 {
-    match pref {
-        "on" => 1,
-        "off" => 2,
-        _ => 0,
-    }
-}
-
-fn low_power_pref_label(code: u8) -> &'static str {
-    match code {
-        1 => "on",
-        2 => "off",
-        _ => "auto",
-    }
-}
-
-fn set_low_power_pref(pref: &str) {
-    LOW_POWER_PREF.store(low_power_pref_code(pref), Ordering::Relaxed);
-}
-
-/// Pure resolver so unit tests can cover Windows status combinations without Win32.
-fn resolve_power_budget(
-    preference: &str,
-    ac_line: u8,
-    battery_flag: u8,
-    battery_percent: u8,
-    system_status_flag: u8,
-) -> PowerBudget {
-    match preference {
-        "on" => PowerBudget::Saver,
-        "off" => PowerBudget::Full,
-        _ => {
-            // Auto: honor Windows Battery Saver, then critical unplugged charge.
-            // SystemStatusFlag bit 0 = Battery Saver / Energy Saver is on.
-            if system_status_flag & 1 != 0 {
-                return PowerBudget::Saver;
-            }
-            // BatteryFlag 128 = no battery (desktop), 255 = unknown
-            let no_battery = battery_flag & 128 != 0 || battery_flag == 255;
-            let plugged_in = ac_line == 1;
-            if no_battery || plugged_in {
-                return PowerBudget::Full;
-            }
-            let low_charge = battery_percent != 255 && battery_percent < 20;
-            if low_charge {
-                PowerBudget::Saver
-            } else {
-                PowerBudget::Full
-            }
-        }
-    }
-}
-
-fn query_os_power_inputs() -> (u8, u8, u8, u8) {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
-        let mut s = SYSTEM_POWER_STATUS::default();
-        if unsafe { GetSystemPowerStatus(&mut s) }.is_err() {
-            // Unknown → treat as full so we never wedge into saver by mistake.
-            return (1, 128, 255, 0);
-        }
-        (
-            s.ACLineStatus,
-            s.BatteryFlag,
-            s.BatteryLifePercent,
-            s.SystemStatusFlag,
-        )
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        (1, 128, 255, 0)
-    }
-}
-
 fn current_power_budget() -> PowerBudget {
-    let pref = low_power_pref_label(LOW_POWER_PREF.load(Ordering::Relaxed));
-    let (ac, flag, pct, sys) = query_os_power_inputs();
-    resolve_power_budget(pref, ac, flag, pct, sys)
+    if LOW_POWER_ENABLED.load(Ordering::Relaxed) {
+        PowerBudget::Saver
+    } else {
+        PowerBudget::Full
+    }
 }
 
-/// Returns false when low-power mode is active (Battery Saver, <20% unplugged, or forced).
-/// Background indexing should pause in that case to avoid draining the battery.
+/// Returns false when the user has turned on low power mode.
+/// Background indexing should pause in that case.
 fn indexing_permitted() -> bool {
     current_power_budget() == PowerBudget::Full
 }
@@ -10823,51 +10764,53 @@ mod power_budget_tests {
     use super::*;
 
     #[test]
-    fn force_on_and_off_ignore_os() {
-        assert_eq!(
-            resolve_power_budget("on", 1, 128, 255, 0),
-            PowerBudget::Saver
-        );
-        assert_eq!(
-            resolve_power_budget("off", 0, 1, 5, 1),
-            PowerBudget::Full
-        );
+    fn toggle_off_is_full() {
+        LOW_POWER_ENABLED.store(false, Ordering::Relaxed);
+        assert_eq!(current_power_budget(), PowerBudget::Full);
+        assert!(indexing_permitted());
     }
 
     #[test]
-    fn auto_respects_windows_battery_saver() {
-        assert_eq!(
-            resolve_power_budget("auto", 1, 128, 100, 1),
-            PowerBudget::Saver
-        );
-        assert_eq!(
-            resolve_power_budget("auto", 1, 128, 100, 0),
-            PowerBudget::Full
-        );
+    fn toggle_on_is_saver() {
+        LOW_POWER_ENABLED.store(true, Ordering::Relaxed);
+        assert_eq!(current_power_budget(), PowerBudget::Saver);
+        assert!(!indexing_permitted());
+        LOW_POWER_ENABLED.store(false, Ordering::Relaxed);
     }
 
     #[test]
-    fn auto_low_charge_unplugged() {
-        assert_eq!(
-            resolve_power_budget("auto", 0, 1, 15, 0),
-            PowerBudget::Saver
-        );
-        assert_eq!(
-            resolve_power_budget("auto", 0, 1, 55, 0),
-            PowerBudget::Full
-        );
-        assert_eq!(
-            resolve_power_budget("auto", 1, 1, 10, 0),
-            PowerBudget::Full
-        );
+    fn legacy_string_deserializes() {
+        #[derive(Deserialize)]
+        struct Wrap {
+            #[serde(default, deserialize_with = "deserialize_low_power_enabled")]
+            low_power_enabled: bool,
+        }
+        let on: Wrap = serde_json::from_str(r#"{"low_power_enabled":"on"}"#).unwrap();
+        assert!(on.low_power_enabled);
+        let auto: Wrap = serde_json::from_str(r#"{"low_power_enabled":"auto"}"#).unwrap();
+        assert!(!auto.low_power_enabled);
+        let flag: Wrap = serde_json::from_str(r#"{"low_power_enabled":true}"#).unwrap();
+        assert!(flag.low_power_enabled);
+        // Also accept the old field name via NativeSettings round-trip keys —
+        // rename happened in-place; settings files may still say low_power_mode.
     }
 
     #[test]
-    fn desktop_without_battery_stays_full() {
-        assert_eq!(
-            resolve_power_budget("auto", 0, 128, 255, 0),
-            PowerBudget::Full
-        );
+    fn legacy_low_power_mode_field_name() {
+        // Old builds wrote `"low_power_mode": "on"`. New field is
+        // `low_power_enabled`; missing/unknown keys fall back to default false
+        // unless we alias. Accept both via a thin settings probe.
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct Probe {
+            #[serde(alias = "low_power_mode", deserialize_with = "deserialize_low_power_enabled")]
+            low_power_enabled: bool,
+        }
+        let legacy: Probe =
+            serde_json::from_str(r#"{"low_power_mode":"on"}"#).unwrap();
+        assert!(legacy.low_power_enabled);
+        let off: Probe = serde_json::from_str(r#"{"low_power_mode":"off"}"#).unwrap();
+        assert!(!off.low_power_enabled);
     }
 }
 
@@ -14228,9 +14171,8 @@ impl NativeController {
             .unwrap_or_else(|| home.clone());
         tabs[0].path = current_path.clone();
 
-        let mut settings = settings;
-        settings.low_power_mode = normalize_low_power_mode(&settings.low_power_mode);
-        set_low_power_pref(&settings.low_power_mode);
+        let settings = settings;
+        set_low_power_enabled(settings.low_power_enabled);
 
         Self {
             app_state,
@@ -14441,7 +14383,7 @@ impl NativeController {
         ui.set_search_semantic_mode(self.settings.search_semantic_mode);
         ui.set_clip_search_enabled(self.settings.clip_search_enabled);
         ui.set_active_index_mode(ss(&self.settings.index_mode));
-        ui.set_active_low_power_mode(ss(&self.settings.low_power_mode));
+        ui.set_low_power_enabled(self.settings.low_power_enabled);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         ui.set_search_source_pref(ss(&self.search_source_pref));
         ui.set_thumb_size_scale(self.thumb_size_scale);
@@ -14562,26 +14504,6 @@ impl NativeController {
                 "#8b6cff",
             ),
             ("max", "Max", "All fixed drives, highest storage", "#d98a24"),
-        ]));
-        ui.set_low_power_choices(choice_items(&[
-            (
-                "auto",
-                "Auto",
-                "Follow Windows Battery Saver and critical charge",
-                "#4f9cff",
-            ),
-            (
-                "on",
-                "On",
-                "Always reduce background work and theme motion",
-                "#2aa96b",
-            ),
-            (
-                "off",
-                "Off",
-                "Full performance until you change this",
-                "#d98a24",
-            ),
         ]));
         ui.set_command_items(command_items());
         ui.set_ai_install_size_mb(0);
@@ -14808,7 +14730,7 @@ impl NativeController {
         // Push live toggles on this thread so a stale worker snapshot cannot
         // revert a download/index choice the user just made.
         ui.set_active_index_mode(ss(&self.settings.index_mode));
-        ui.set_active_low_power_mode(ss(&self.settings.low_power_mode));
+        ui.set_low_power_enabled(self.settings.low_power_enabled);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         let settings = self.settings.clone();
         let drives = self.drives.clone();
@@ -14933,7 +14855,7 @@ impl NativeController {
     fn sync_performance_status(&self, ui: &MainWindow) {
         let status = index_status_for_settings(&self.settings);
         ui.set_active_index_mode(ss(&self.settings.index_mode));
-        ui.set_active_low_power_mode(ss(&self.settings.low_power_mode));
+        ui.set_low_power_enabled(self.settings.low_power_enabled);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         ui.set_index_status(ss(format!(
             "{} files indexed | {} on disk | thumbnails {} of {} cap | {}",
@@ -15025,22 +14947,24 @@ impl NativeController {
         }
     }
 
-    fn set_low_power_mode(&mut self, ui: &MainWindow, mode: &str) {
-        let mode = normalize_low_power_mode(mode);
-        self.settings.low_power_mode = mode.clone();
-        set_low_power_pref(&mode);
+    fn toggle_low_power(&mut self, ui: &MainWindow) {
+        self.settings.low_power_enabled = !self.settings.low_power_enabled;
+        let on = self.settings.low_power_enabled;
+        set_low_power_enabled(on);
         self.save_settings();
-        ui.set_active_low_power_mode(ss(&mode));
+        ui.set_low_power_enabled(on);
         self.apply_power_budget(ui);
-        let msg = match mode.as_str() {
-            "on" => "Low power mode forced on. Background indexing and theme motion stay reduced.",
-            "off" => "Low power mode off. Full background work and theme motion restored.",
-            _ => "Low power mode set to Auto — follows Windows Battery Saver and critical charge.",
-        };
-        self.show_toast(ui, msg);
+        self.show_toast(
+            ui,
+            if on {
+                "Low power mode on. Background indexing and theme motion stay reduced."
+            } else {
+                "Low power mode off. Full background work and theme motion restored."
+            },
+        );
     }
 
-    /// Sync Slint + atomics from the current OS/preference power budget.
+    /// Sync Slint + atomics from the user low-power toggle.
     /// When leaving saver, resume background indexing for the active mode.
     fn apply_power_budget(&mut self, ui: &MainWindow) {
         let saver = current_power_budget() == PowerBudget::Saver;
@@ -15049,6 +14973,7 @@ impl NativeController {
             ui.set_power_saver(saver);
         }
         ui.global::<ThemePalette>().set_power_saver(saver);
+        ui.set_low_power_enabled(self.settings.low_power_enabled);
         if was_saver && !saver {
             let roots = index_roots_for_mode(&self.settings);
             if !roots.is_empty() {
@@ -23258,8 +23183,6 @@ impl NativeController {
             .unwrap_or(0);
         let op_queue_paused = self.app_state.queue_is_paused();
         let battery_ok = indexing_permitted();
-        let (ac, flag, pct, sys) = query_os_power_inputs();
-        let pref = self.settings.low_power_mode.clone();
         ui.set_preview_title(ss("Performance Debug"));
         ui.set_preview_body(ss(format!(
             "Index mode: {}\n\
@@ -23271,10 +23194,8 @@ impl NativeController {
              Active watchers: {} / 8\n\
              Operation queue: {} items{}\n\
              Background indexing: {}\n\
-             Low power preference: {}\n\
+             Low power toggle: {}\n\
              Power saver active: {}\n\
-             OS Battery Saver flag: {}\n\
-             AC line: {} | battery %: {} | battery flag: {}\n\
              Current folder: {} items\n\
              Search mode: {}\n\
              Roots:\n{}",
@@ -23293,16 +23214,12 @@ impl NativeController {
             } else {
                 "paused (low power)"
             },
-            pref,
-            if power_saver_active() { "yes" } else { "no" },
-            if sys & 1 != 0 { "on" } else { "off" },
-            ac,
-            if pct == 255 {
-                "n/a".to_string()
+            if self.settings.low_power_enabled {
+                "on"
             } else {
-                format!("{pct}%")
+                "off"
             },
-            flag,
+            if power_saver_active() { "yes" } else { "no" },
             self.visible_files.len(),
             if self.search_query.is_empty() {
                 "browsing"
@@ -25967,6 +25884,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
+    let weak = ui.as_weak();
+    let c_lp = controller.clone();
+    ui.on_toggle_low_power(move || {
+        if let Some(ui) = weak.upgrade() {
+            c_lp.borrow_mut().toggle_low_power(&ui);
+        }
+    });
+
     // HTML / Markdown preview: open the selected file in the system default
     // browser so the user can see the rendered output. The preview pane
     // itself keeps showing source code so this is the "Output" half of the
@@ -26268,14 +26193,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_index_mode_selected(move |mode| {
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut().set_index_mode(&ui, &mode);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let c = controller.clone();
-    ui.on_low_power_mode_selected(move |mode| {
-        if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().set_low_power_mode(&ui, &mode);
         }
     });
 
@@ -26733,10 +26650,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let prev_ai_cell = prev_ai_install.clone();
         let idle_poll_skips = Rc::new(Cell::new(0u8));
         let idle_skips_cell = idle_poll_skips.clone();
-        // Independent of idle skips — work_pending used to reset those to 0 and
-        // either spam GetSystemPowerStatus every tick or never sample at all.
-        let power_sample_ticks = Rc::new(Cell::new(0u32));
-        let power_ticks_cell = power_sample_ticks.clone();
         // 200ms tick when work is pending; skips every other tick when idle.
         // When minimized, skip more aggressively and pause theme atmospheres.
         timer.start(
@@ -26758,15 +26671,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     };
                     #[cfg(not(target_os = "windows"))]
                     let minimized = false;
-
-                    // Sample power every ~5s (25 × 200ms), independent of idle gating.
-                    let pt = power_ticks_cell.get().wrapping_add(1);
-                    power_ticks_cell.set(pt);
-                    if pt.is_multiple_of(25) {
-                        if let Ok(mut ctrl) = c.try_borrow_mut() {
-                            ctrl.apply_power_budget(&ui);
-                        }
-                    }
 
                     if minimized {
                         // Keep ready flags; only pump every 5th idle tick.

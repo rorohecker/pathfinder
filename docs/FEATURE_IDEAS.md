@@ -1,29 +1,33 @@
-# Pathfinder — feature ideas
+# Pathfinder — feature ideas & known bugs
 
-Ideas identified while working on low-power mode (v1.0.20). Not commitments.
+Updated with the opt-in Low power toggle (v1.0.20). Not commitments.
 
-## Near-term (fit current chrome)
+## Known bugs to fix (priority)
 
-1. **Low power mode** — shipped in this pass (Auto / On / Off, status pill, resume indexing).
-2. **List column show/hide persistence** — remember Name/Size/Modified/Type visibility per view (Phase F).
-3. **In-app Properties sheet** — themed sheet instead of (or ahead of) the native dialog for common fields.
-4. **Open With → Set default** — wire the shell default-app flow from the existing overlay.
-5. **Shortcut Editor that binds chords** — Phase B: store real accelerators, not display hints only.
-6. **Shell context verbs in Pathfinder menu** — Phase C: append capped `IContextMenu` verbs.
+1. **Dual-pane keyboard always drives the primary pane** — Arrow/Enter ignore `active_pane` and call primary `file_*` handlers.
+2. **Secondary pane ignores Show Hidden** — only primary `apply_filter` respects `show_hidden`.
+3. **Secondary navigate cannot open virtual locations** — `recycle://` / `home://` / `storage://` / archives early-return in `secondary_navigate_impl`.
+4. **Recycle Bin identity is original-path only** — colliding trash entries; folders listed as files; undo/restore ambiguous.
+5. **Delete undo never records `trash_id`** — Ctrl+Z after recreate-and-delete can restore the wrong item.
+6. **`home://` omitted from `is_virtual_nav_path`** — F5 on Home silently fails through a useless `read_dir`.
+7. **Recycle formatting keyed off primary path only** — wrong metadata when painting secondary rows.
+8. **Settings/session writes can be lost on quit** — async writer every 250ms with no flush-on-exit.
+9. **Shortcut dispatch re-reads `shortcuts.json` on every key** — disk I/O on the UI hot path.
+10. **Most Rust toasts stay English** — Slint `@tr` works; everyday `show_toast` strings often skip `i18n::t`.
 
-## Responsiveness / resources
+## Features worth adding
 
-7. **Adaptive thumbnail budget by GPU load** — extend low-power budgets when femtovg frame time spikes.
-8. **Defer git status on battery** — even outside Saver, skip git badges until idle on AC.
-9. **Pause folder watchers when occluded** — drop notify handles while minimized; re-arm on restore.
-10. **Search result progressive ranking** — show first page before semantic/AI re-rank finishes.
+1. **List column show/hide persistence** — Size/Modified/Type visibility (and widths) in settings / `folder_views`.
+2. **In-app Properties sheet** — themed overlay for size, dates, tags, path copy.
+3. **Open With → Set as default** — wire shell default-app from the existing overlay.
+4. **Session conflict policy** — remember Skip/Replace/Keep Both (optional apply-to-all).
+5. **Dual-pane parity** — virtual locations, keyboard, show-hidden, folder filter (ties to bugs 1–3).
+6. **Pause folder watchers while minimized** — drop/re-arm notify when occluded.
+7. **Defer git status on battery / low power** — skip or idle-queue badges when low power is on.
+8. **User-pinned smart folders on Home** — custom saved searches on the landing view.
+9. **Recents grouped by day** — Explorer-style day groups.
+10. **Stable Recycle Bin + undo by trash id** — encode `TrashItem.id` in virtual paths (bugs 4–5).
 
-## Discovery / organize
+## Shipped this pass
 
-11. **Pinned smart folders on Home** — one-click saved searches on the landing view.
-12. **Recents grouped by day** — Explorer-style date groups in the Recent overlay.
-13. **Conflict policy preset** — remember last Skip/Replace/Keep Both choice for the session.
-
-## Out of 1.x (still noted)
-
-- CLIP visual search, multi-window shared session, Linux/macOS app, plugin host.
+- Opt-in **Low power mode** toggle (Settings → Performance; status-bar pill toggles it off/on).

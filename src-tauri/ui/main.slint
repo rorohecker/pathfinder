@@ -3530,7 +3530,6 @@ export component MainWindow inherits Window {
     in-out property <[ChoiceItem]> accent_choices;
     in-out property <[ChoiceItem]> density_choices;
     in-out property <[ChoiceItem]> index_choices;
-    in-out property <[ChoiceItem]> low_power_choices;
     in-out property <[CommandItem]> command_items;
 
     in-out property <string> current_path: "";
@@ -3552,9 +3551,10 @@ export component MainWindow inherits Window {
     // True during maximize/restore resize bursts — pauses atmospheres so the
     // full-bleed theme layers don't reflow every intermediate size.
     in-out property <bool> window_resizing: false;
-    // True on low battery / Windows Battery Saver / forced low-power —
-    // pauses decorative atmospheres and throttles background work.
+    // True when the user has turned on Low power mode in Settings.
+    // Pauses decorative atmospheres and throttles background work.
     in-out property <bool> power_saver: false;
+    in-out property <bool> low_power_enabled: false;
     // Decorative theme atmospheres + animated relics. Persisted in settings.json.
     in-out property <bool> theme_animations: true;
     // Sunset solar cycle — shared by atmosphere + content-pane sky wash.
@@ -3573,7 +3573,6 @@ export component MainWindow inherits Window {
     property <float> sunset_warmth: Math.min(1.0, root.sunset_phase * 1.35);
     property <float> sunset_sky_bright: 0.12 + root.sunset_sun_alt * 0.88;
     in-out property <string> active_index_mode: "low";
-    in-out property <string> active_low_power_mode: "auto";
     in-out property <string> index_status: "";
     in-out property <string> thumbnail_status: "";
     in-out property <string> performance_intro: "";
@@ -3893,6 +3892,7 @@ export component MainWindow inherits Window {
     callback toggle_dual_pane();
     callback toggle_hidden();
     callback toggle_theme_animations();
+    callback toggle_low_power();
     callback command(string);
     callback shortcut_key(bool, bool, bool, string);
     callback shell_verb(string);
@@ -3907,7 +3907,6 @@ export component MainWindow inherits Window {
     callback custom_accent_changed(string);
     in-out property <string> custom_accent_hex: "#4f9cff";
     callback index_mode_selected(string);
-    callback low_power_mode_selected(string);
     callback clear_thumbnail_cache();
     callback rebuild_index();
     callback windows_set_default_folder_handler();
@@ -7132,10 +7131,7 @@ export component MainWindow inherits Window {
                     }
                     TouchArea {
                         mouse-cursor: pointer;
-                        clicked => {
-                            root.settings_tab = "performance";
-                            root.command("performance-settings");
-                        }
+                        clicked => { root.toggle_low_power(); }
                     }
                 }
                 Rectangle {
@@ -9040,31 +9036,42 @@ export component MainWindow inherits Window {
                     padding-bottom: 16px;
 
                     Text { text: @tr("LOW POWER"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
-                    Text {
-                        text: @tr("When active, Pathfinder pauses theme motion, skips fresh thumbnail encodes, slows idle polling, and holds background indexing — browsing and opens stay responsive.");
-                        color: ThemePalette.text_muted;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                        width: parent.width;
-                        height: self.preferred-height;
-                    }
                     Rectangle {
-                        width: parent.width;
-                        height: Math.ceil(root.low_power_choices.length / 2) * AppMetrics.index_chip_row_stride;
-                        for mode[i] in root.low_power_choices: ChoiceChip {
-                            x: Math.mod(i, 2) == 0 ? 0px : (parent.width / 2 + 3px);
-                            y: Math.floor(i / 2) * AppMetrics.index_chip_row_stride;
-                            width: parent.width / 2 - 3px;
-                            item: mode;
-                            active: root.active_low_power_mode == mode.id;
-                            picked(id) => { root.low_power_mode_selected(id); }
+                        height: AppMetrics.row_h;
+                        border-radius: AppMetrics.radius;
+                        background: ThemePalette.panel;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        Text {
+                            x: 14px; width: parent.width - 160px; height: parent.height;
+                            text: @tr("Low power mode");
+                            color: ThemePalette.text; font-size: 13px; vertical-alignment: center;
+                        }
+                        Rectangle {
+                            x: parent.width - 52px;
+                            y: (parent.height - 22px) / 2;
+                            width: 40px;
+                            height: 22px;
+                            border-radius: 11px;
+                            background: root.low_power_enabled ? ThemePalette.accent : ThemePalette.border_strong;
+                            animate background { duration: 90ms; easing: ease-out; }
+                            Rectangle {
+                                x: root.low_power_enabled ? 20px : 2px;
+                                y: 2px;
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                background: white;
+                                animate x { duration: 60ms; easing: ease-out; }
+                            }
+                            TouchArea { mouse-cursor: pointer; clicked => { root.toggle_low_power(); } }
                         }
                     }
-                    if root.power_saver: Text {
-                        text: @tr("Low power is active now.");
-                        color: ThemePalette.accent_strong;
-                        font-size: 12px;
-                        font-weight: 600;
+                    Text {
+                        text: @tr("Optional. When on, Pathfinder pauses theme motion, skips fresh thumbnail encodes, slows idle polling, and holds background indexing — browsing and opens stay responsive.");
+                        color: ThemePalette.text_faint;
+                        font-size: 11px;
+                        wrap: word-wrap;
                         height: self.preferred-height;
                     }
 
