@@ -296,7 +296,7 @@ msgstr ""
 msgid "Command palette"
 msgstr ""
 
-msgid "Folder changed on disk — click to refresh"
+msgid "Folder changed on disk — refresh paused while renaming"
 msgstr ""
 
 msgid "Your Home is quiet"

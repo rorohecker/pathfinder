@@ -296,8 +296,8 @@ msgstr "Azioni"
 msgid "Command palette"
 msgstr "Palette comandi"
 
-msgid "Folder changed on disk — click to refresh"
-msgstr "Cartella modificata su disco — clicca per aggiornare"
+msgid "Folder changed on disk — refresh paused while renaming"
+msgstr "Cartella modificata su disco — aggiornamento in pausa durante la rinomina"
 
 msgid "Your Home is quiet"
 msgstr "La tua Home è vuota"

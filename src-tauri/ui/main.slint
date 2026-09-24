@@ -5513,7 +5513,7 @@ export component MainWindow inherits Window {
                 background: ThemePalette.warning;
                 Text {
                     x: 12px; width: parent.width - 100px; height: parent.height;
-                    text: @tr("Folder changed on disk — click to refresh");
+                    text: @tr("Folder changed on disk — refresh paused while renaming");
                     color: white; font-size: 11.5px; font-weight: 600; vertical-alignment: center; overflow: elide;
                 }
                 TouchArea {
@@ -8958,54 +8958,7 @@ export component MainWindow inherits Window {
                     background: ThemePalette.panel;
                     border-width: 1px;
                     border-color: ThemePalette.border;
-                                    Text { text: @tr("LIST COLUMNS"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
-                Rectangle {
-                    height: AppMetrics.row_h;
-                    border-radius: AppMetrics.radius;
-                    background: ThemePalette.panel;
-                    border-width: 1px;
-                    border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Show Size column"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
-                    Rectangle {
-                        x: parent.width - 52px; y: (parent.height - 22px) / 2; width: 40px; height: 22px; border-radius: 11px;
-                        background: root.list_col_size ? ThemePalette.accent : ThemePalette.border_strong;
-                        Rectangle { x: root.list_col_size ? 20px : 2px; y: 2px; width: 18px; height: 18px; border-radius: 9px; background: white; }
-                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_list_column("size"); } }
-                    }
-                }
-                Rectangle {
-                    height: AppMetrics.row_h;
-                    border-radius: AppMetrics.radius;
-                    background: ThemePalette.panel;
-                    border-width: 1px;
-                    border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Show Modified column"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
-                    Rectangle {
-                        x: parent.width - 52px; y: (parent.height - 22px) / 2; width: 40px; height: 22px; border-radius: 11px;
-                        background: root.list_col_modified ? ThemePalette.accent : ThemePalette.border_strong;
-                        Rectangle { x: root.list_col_modified ? 20px : 2px; y: 2px; width: 18px; height: 18px; border-radius: 9px; background: white; }
-                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_list_column("modified"); } }
-                    }
-                }
-                Rectangle {
-                    height: AppMetrics.row_h;
-                    border-radius: AppMetrics.radius;
-                    background: ThemePalette.panel;
-                    border-width: 1px;
-                    border-color: ThemePalette.border;
-                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Show Type column"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
-                    Rectangle {
-                        x: parent.width - 52px; y: (parent.height - 22px) / 2; width: 40px; height: 22px; border-radius: 11px;
-                        background: root.list_col_type ? ThemePalette.accent : ThemePalette.border_strong;
-                        Rectangle { x: root.list_col_type ? 20px : 2px; y: 2px; width: 18px; height: 18px; border-radius: 9px; background: white; }
-                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_list_column("type"); } }
-                    }
-                }
-                Text { x: 14px; width: parent.width - 160px; height: parent.height; text: @tr("Theme animations"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
-                    Text {
-                        x: 14px; y: parent.height - 16px; width: parent.width - 70px; height: 0px;
-                        // hint reserved via sibling below when row is taller — keep compact row
-                    }
+                    Text { x: 14px; width: parent.width - 160px; height: parent.height; text: @tr("Theme animations"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
                     Rectangle {
                         x: parent.width - 52px;
                         y: (parent.height - 22px) / 2;
@@ -9058,6 +9011,50 @@ export component MainWindow inherits Window {
                             animate x { duration: 60ms; easing: ease-out; }
                         }
                         TouchArea { mouse-cursor: pointer; clicked => { root.toggle_preview(); } }
+                    }
+                }
+
+                Text { text: @tr("LIST COLUMNS"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                Rectangle {
+                    height: AppMetrics.row_h;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Show Size column"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Rectangle {
+                        x: parent.width - 52px; y: (parent.height - 22px) / 2; width: 40px; height: 22px; border-radius: 11px;
+                        background: root.list_col_size ? ThemePalette.accent : ThemePalette.border_strong;
+                        Rectangle { x: root.list_col_size ? 20px : 2px; y: 2px; width: 18px; height: 18px; border-radius: 9px; background: white; }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_list_column("size"); } }
+                    }
+                }
+                Rectangle {
+                    height: AppMetrics.row_h;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Show Modified column"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Rectangle {
+                        x: parent.width - 52px; y: (parent.height - 22px) / 2; width: 40px; height: 22px; border-radius: 11px;
+                        background: root.list_col_modified ? ThemePalette.accent : ThemePalette.border_strong;
+                        Rectangle { x: root.list_col_modified ? 20px : 2px; y: 2px; width: 18px; height: 18px; border-radius: 9px; background: white; }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_list_column("modified"); } }
+                    }
+                }
+                Rectangle {
+                    height: AppMetrics.row_h;
+                    border-radius: AppMetrics.radius;
+                    background: ThemePalette.panel;
+                    border-width: 1px;
+                    border-color: ThemePalette.border;
+                    Text { x: 14px; width: parent.width - 60px; height: parent.height; text: @tr("Show Type column"); color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                    Rectangle {
+                        x: parent.width - 52px; y: (parent.height - 22px) / 2; width: 40px; height: 22px; border-radius: 11px;
+                        background: root.list_col_type ? ThemePalette.accent : ThemePalette.border_strong;
+                        Rectangle { x: root.list_col_type ? 20px : 2px; y: 2px; width: 18px; height: 18px; border-radius: 9px; background: white; }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.toggle_list_column("type"); } }
                     }
                 }
 

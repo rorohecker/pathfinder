@@ -8503,6 +8503,8 @@ struct NativeController {
     search_source_pref: String,
     thumb_size_scale: f32,
     folder_changed_pending: bool,
+    /// Coalesces notify bursts so auto-refresh doesn't thrash the listing.
+    last_folder_auto_refresh: Option<Instant>,
     git_status_ready: Arc<std::sync::atomic::AtomicBool>,
     pending_git_status: Arc<Mutex<Option<Arc<GitStatusMap>>>>,
     operation_ready: Arc<std::sync::atomic::AtomicBool>,
@@ -14507,6 +14509,7 @@ impl NativeController {
             search_source_pref: "auto".to_string(),
             thumb_size_scale: 1.0,
             folder_changed_pending: false,
+            last_folder_auto_refresh: None,
             git_status_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_git_status: Arc::new(Mutex::new(None)),
             operation_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -25594,21 +25597,95 @@ impl NativeController {
     }
 
     fn check_folder_changed_banner(&mut self, ui: &MainWindow) {
-        let path = self.current_path.clone();
-        if is_virtual_nav_path(&path) {
+        let primary = self.current_path.clone();
+        let secondary = self.secondary_path.clone();
+        let dual = ui.get_dual_pane();
+        let dirty_primary = !is_virtual_nav_path(&primary)
+            && self
+                .app_state
+                .dirty_dirs
+                .lock()
+                .ok()
+                .map(|d| d.iter().any(|p| same_path_string(p, &primary)))
+                .unwrap_or(false);
+        let dirty_secondary = dual
+            && !secondary.is_empty()
+            && !is_virtual_nav_path(&secondary)
+            && self
+                .app_state
+                .dirty_dirs
+                .lock()
+                .ok()
+                .map(|d| d.iter().any(|p| same_path_string(p, &secondary)))
+                .unwrap_or(false);
+
+        if !dirty_primary && !dirty_secondary {
             self.folder_changed_pending = false;
             ui.set_folder_changed_banner(false);
             return;
         }
-        let dirty = self
-            .app_state
-            .dirty_dirs
-            .lock()
-            .ok()
-            .map(|d| d.iter().any(|p| same_path_string(p, &path)))
-            .unwrap_or(false);
-        self.folder_changed_pending = dirty;
-        ui.set_folder_changed_banner(dirty);
+
+        // Inline rename would be cancelled by a soft reload — keep the manual
+        // banner until the user finishes editing.
+        if ui.get_rename_index() >= 0 {
+            self.folder_changed_pending = true;
+            ui.set_folder_changed_banner(true);
+            return;
+        }
+
+        // Coalesce notify bursts (copy/delete storms) into one refresh.
+        if let Some(last) = self.last_folder_auto_refresh {
+            if last.elapsed() < Duration::from_millis(400) {
+                self.folder_changed_pending = true;
+                return;
+            }
+        }
+
+        self.last_folder_auto_refresh = Some(Instant::now());
+        self.folder_changed_pending = false;
+        ui.set_folder_changed_banner(false);
+
+        if dirty_primary {
+            if let Ok(mut dirty) = self.app_state.dirty_dirs.lock() {
+                dirty.retain(|p| !same_path_string(p, &primary));
+            }
+            self.refresh_primary_listing(ui);
+        }
+        if dirty_secondary {
+            if let Ok(mut dirty) = self.app_state.dirty_dirs.lock() {
+                dirty.retain(|p| !same_path_string(p, &secondary));
+            }
+            self.app_state
+                .invalidate_directory_path(Path::new(&secondary));
+            self.secondary_navigate(ui, secondary);
+        }
+    }
+
+    /// Soft-refresh the primary pane listing without respecting active_pane.
+    fn refresh_primary_listing(&mut self, ui: &MainWindow) {
+        if self.current_path == "storage://" && ui.get_is_storage_view() {
+            self.rescan_storage(ui);
+            return;
+        }
+        if self.current_path == "recycle://" {
+            self.open_recycle_bin_view(ui, false);
+            return;
+        }
+        if self.current_path == "home://" {
+            self.open_home_view(ui, false);
+            return;
+        }
+        if let Some(archive) = self.active_archive.clone() {
+            self.open_archive_view(ui, archive.archive_path, archive.prefix, false);
+            return;
+        }
+        let path = self.current_path.clone();
+        if path.is_empty() || is_virtual_nav_path(&path) {
+            return;
+        }
+        self.bump_nav_generation();
+        self.app_state.invalidate_directory_path(Path::new(&path));
+        self.schedule_full_directory_load(path);
     }
 
     fn refresh_folder_changed(&mut self, ui: &MainWindow) {
@@ -25616,9 +25693,22 @@ impl NativeController {
         if let Ok(mut dirty) = self.app_state.dirty_dirs.lock() {
             dirty.retain(|p| !same_path_string(p, &path));
         }
+        if ui.get_dual_pane() {
+            let secondary = self.secondary_path.clone();
+            if let Ok(mut dirty) = self.app_state.dirty_dirs.lock() {
+                dirty.retain(|p| !same_path_string(p, &secondary));
+            }
+        }
         self.folder_changed_pending = false;
         ui.set_folder_changed_banner(false);
-        self.refresh(ui);
+        self.last_folder_auto_refresh = Some(Instant::now());
+        self.refresh_primary_listing(ui);
+        if ui.get_dual_pane() && !self.secondary_path.is_empty() {
+            let secondary = self.secondary_path.clone();
+            self.app_state
+                .invalidate_directory_path(Path::new(&secondary));
+            self.secondary_navigate(ui, secondary);
+        }
     }
 
     fn read_exif_summary(path: &Path) -> Option<String> {
