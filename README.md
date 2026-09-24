@@ -49,6 +49,7 @@ The goal is simple: feel faster and cleaner than File Explorer, while keeping th
 - Multiple built-in themes with accent color, density, and folder color overrides
 - Mica window backdrop on Windows 11
 - Settings for Appearance, View, Performance, and AI
+- **Low power mode** — Auto follows Windows Battery Saver and critical charge; pauses theme motion, skips fresh thumbnail encodes, and holds background indexing while keeping browse/open snappy
 - Optional Local AI model pack with Compact / Balanced / Quality profiles, hashed downloads, and silent self-update (NPU → GPU → CPU)
 - One-click silent app updater: download, install, and relaunch without a wizard
 - Optional default folder handler registration

@@ -210,6 +210,9 @@ export global ThemePalette {
     in-out property <int> drag_count: 0;
     // Decorative theme motion (atmospheres + idle/hover icon anims). Settings toggle.
     in-out property <bool> theme_animations: true;
+    // Mirrors MainWindow.power_saver so row ornaments / folder bob can pause
+    // without threading the flag through every component.
+    in-out property <bool> power_saver: false;
     // Shared idle bob for retro/sunset folder glyphs — one timer in MainWindow,
     // never a per-row Timer (those stalled the UI with many folders visible).
     in-out property <bool> folder_idle_phase: false;
@@ -690,7 +693,7 @@ component SideRow inherits Rectangle {
         y: (parent.height - self.height) / 2;
         cell: 1.5px;
         kind: root.fantasy_kind;
-        running: ThemePalette.active_theme == "fantasy" && ThemePalette.theme_animations;
+        running: ThemePalette.active_theme == "fantasy" && ThemePalette.theme_animations && !ThemePalette.power_saver;
         hovered: touch.has-hover;
         chest: FantasyIconBank.chest;
         scroll: FantasyIconBank.scroll;
@@ -707,7 +710,7 @@ component SideRow inherits Rectangle {
         y: (parent.height - self.height) / 2;
         cell: 1.5px;
         kind: root.retro_kind;
-        running: ThemePalette.active_theme == "retro" && ThemePalette.theme_animations;
+        running: ThemePalette.active_theme == "retro" && ThemePalette.theme_animations && !ThemePalette.power_saver;
         hovered: touch.has-hover;
         floppy: RetroIconBank.floppy;
         cassette_a: RetroIconBank.cassette_a;
@@ -724,7 +727,7 @@ component SideRow inherits Rectangle {
         y: (parent.height - self.height) / 2;
         cell: 1.5px;
         kind: root.sunset_kind;
-        running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations;
+        running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations && !ThemePalette.power_saver;
         hovered: touch.has-hover;
         folder: SunsetIconBank.folder;
         postcard: SunsetIconBank.postcard;
@@ -880,7 +883,7 @@ component NodeVisual {
     // and office docs (PDF/DOCX/ZIP/etc.).
     property <bool> show_system_icon: root.has_system_icon && !(root.pixel_theme && root.themed_doc_ext);
 
-    property <bool> folder_anim: ThemePalette.theme_animations;
+    property <bool> folder_anim: ThemePalette.theme_animations && !ThemePalette.power_saver;
     // Shared phase from ThemePalette (one window timer) — not per-row Timers.
     property <bool> idle_bob: ThemePalette.folder_idle_phase;
 
@@ -3527,6 +3530,7 @@ export component MainWindow inherits Window {
     in-out property <[ChoiceItem]> accent_choices;
     in-out property <[ChoiceItem]> density_choices;
     in-out property <[ChoiceItem]> index_choices;
+    in-out property <[ChoiceItem]> low_power_choices;
     in-out property <[CommandItem]> command_items;
 
     in-out property <string> current_path: "";
@@ -3548,7 +3552,8 @@ export component MainWindow inherits Window {
     // True during maximize/restore resize bursts — pauses atmospheres so the
     // full-bleed theme layers don't reflow every intermediate size.
     in-out property <bool> window_resizing: false;
-    // True on low battery (unplugged, <20%) — pauses decorative atmospheres.
+    // True on low battery / Windows Battery Saver / forced low-power —
+    // pauses decorative atmospheres and throttles background work.
     in-out property <bool> power_saver: false;
     // Decorative theme atmospheres + animated relics. Persisted in settings.json.
     in-out property <bool> theme_animations: true;
@@ -3568,6 +3573,7 @@ export component MainWindow inherits Window {
     property <float> sunset_warmth: Math.min(1.0, root.sunset_phase * 1.35);
     property <float> sunset_sky_bright: 0.12 + root.sunset_sun_alt * 0.88;
     in-out property <string> active_index_mode: "low";
+    in-out property <string> active_low_power_mode: "auto";
     in-out property <string> index_status: "";
     in-out property <string> thumbnail_status: "";
     in-out property <string> performance_intro: "";
@@ -3901,6 +3907,7 @@ export component MainWindow inherits Window {
     callback custom_accent_changed(string);
     in-out property <string> custom_accent_hex: "#4f9cff";
     callback index_mode_selected(string);
+    callback low_power_mode_selected(string);
     callback clear_thumbnail_cache();
     callback rebuild_index();
     callback windows_set_default_folder_handler();
@@ -6026,7 +6033,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 6px;
                             kind: empty_pane.fantasy_kind;
-                            running: empty_pane.fantasy_on && ThemePalette.theme_animations;
+                            running: empty_pane.fantasy_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             hovered: empty_ta.has-hover;
                             chest: FantasyIconBank.chest;
                             scroll: FantasyIconBank.scroll;
@@ -6041,7 +6048,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 6px;
                             kind: empty_pane.retro_kind;
-                            running: empty_pane.retro_on && ThemePalette.theme_animations;
+                            running: empty_pane.retro_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             hovered: empty_ta.has-hover;
                             floppy: RetroIconBank.floppy;
                             cassette_a: RetroIconBank.cassette_a;
@@ -6056,7 +6063,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 6px;
                             kind: empty_pane.sunset_kind;
-                            running: empty_pane.sunset_on && ThemePalette.theme_animations;
+                            running: empty_pane.sunset_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             hovered: empty_ta.has-hover;
                             folder: SunsetIconBank.folder;
                             postcard: SunsetIconBank.postcard;
@@ -6535,7 +6542,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 5px;
                             kind: root.secondary_path == "" ? "tower" : "chest";
-                            running: fantasy_on && ThemePalette.theme_animations;
+                            running: fantasy_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             chest: FantasyIconBank.chest;
                             scroll: FantasyIconBank.scroll;
                             gem_a: FantasyIconBank.gem_a;
@@ -6549,7 +6556,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 5px;
                             kind: root.secondary_path == "" ? "boombox" : "floppy";
-                            running: retro_on && ThemePalette.theme_animations;
+                            running: retro_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             floppy: RetroIconBank.floppy;
                             cassette_a: RetroIconBank.cassette_a;
                             cassette_b: RetroIconBank.cassette_b;
@@ -6563,7 +6570,7 @@ export component MainWindow inherits Window {
                             x: (parent.width - self.width) / 2;
                             cell: 5px;
                             kind: root.secondary_path == "" ? "palm" : "folder";
-                            running: sunset_on && ThemePalette.theme_animations;
+                            running: sunset_on && ThemePalette.theme_animations && !ThemePalette.power_saver;
                             folder: SunsetIconBank.folder;
                             postcard: SunsetIconBank.postcard;
                             sun_a: SunsetIconBank.sun_a;
@@ -6987,7 +6994,7 @@ export component MainWindow inherits Window {
                                 x: (parent.width - self.width) / 2;
                                 cell: 5px;
                                 kind: "scroll";
-                                running: ThemePalette.active_theme == "fantasy" && ThemePalette.theme_animations;
+                                running: ThemePalette.active_theme == "fantasy" && ThemePalette.theme_animations && !ThemePalette.power_saver;
                                 chest: FantasyIconBank.chest;
                                 scroll: FantasyIconBank.scroll;
                                 gem_a: FantasyIconBank.gem_a;
@@ -7001,7 +7008,7 @@ export component MainWindow inherits Window {
                                 x: (parent.width - self.width) / 2;
                                 cell: 5px;
                                 kind: "cassette";
-                                running: ThemePalette.active_theme == "retro" && ThemePalette.theme_animations;
+                                running: ThemePalette.active_theme == "retro" && ThemePalette.theme_animations && !ThemePalette.power_saver;
                                 floppy: RetroIconBank.floppy;
                                 cassette_a: RetroIconBank.cassette_a;
                                 cassette_b: RetroIconBank.cassette_b;
@@ -7015,7 +7022,7 @@ export component MainWindow inherits Window {
                                 x: (parent.width - self.width) / 2;
                                 cell: 5px;
                                 kind: "postcard";
-                                running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations;
+                                running: ThemePalette.active_theme == "sunset" && ThemePalette.theme_animations && !ThemePalette.power_saver;
                                 folder: SunsetIconBank.folder;
                                 postcard: SunsetIconBank.postcard;
                                 sun_a: SunsetIconBank.sun_a;
@@ -7099,6 +7106,36 @@ export component MainWindow inherits Window {
                     TouchArea {
                         mouse-cursor: pointer;
                         clicked => { root.queue_pill_clicked(); }
+                    }
+                }
+                if root.power_saver: Rectangle {
+                    horizontal-stretch: 0;
+                    preferred-width: Math.max(78px, power_pill_label.preferred-width + 20px);
+                    width: self.preferred-width;
+                    preferred-height: 18px;
+                    height: self.preferred-height;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 9px;
+                    background: ThemePalette.accent_soft;
+                    border-width: 1px;
+                    border-color: ThemePalette.accent;
+                    power_pill_label := Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: @tr("Low power");
+                        color: ThemePalette.accent_strong;
+                        font-size: 10px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.settings_tab = "performance";
+                            root.command("performance-settings");
+                        }
                     }
                 }
                 Rectangle {
@@ -7200,14 +7237,15 @@ export component MainWindow inherits Window {
             }
         }
         // Sunset sun arc: nudge phase every tick so the disc drifts slowly and
-        // continuously (~2 min high→horizon, then back). Keeps moving even on
-        // battery; only pauses when minimized or theme animations are off.
+        // continuously (~2 min high→horizon, then back). Pauses when minimized,
+        // resizing, animations off, or low-power mode (was a 10 Hz drain on battery).
         Timer {
             interval: 100ms;
             running: ThemePalette.active_theme == "sunset"
                 && ThemePalette.theme_animations
                 && !root.window_occluded
-                && !root.window_resizing;
+                && !root.window_resizing
+                && !root.power_saver;
             triggered => {
                 // 0.00084 × 10 Hz ≈ full arc in ~119s (was 0.00042 @ 20 Hz).
                 if (root.sunset_descending) {
@@ -7938,7 +7976,7 @@ export component MainWindow inherits Window {
                             y: 26px;
                             cell: 4px;
                             gap: 8px;
-                            running: root.active_theme == "fantasy" && root.settings_visible && root.theme_animations;
+                            running: root.active_theme == "fantasy" && root.settings_visible && root.theme_animations && !root.power_saver;
                             chest: FantasyIconBank.chest;
                             scroll: FantasyIconBank.scroll;
                             gem_a: FantasyIconBank.gem_a;
@@ -7969,7 +8007,7 @@ export component MainWindow inherits Window {
                             y: 26px;
                             cell: 4px;
                             gap: 8px;
-                            running: root.active_theme == "retro" && root.settings_visible && root.theme_animations;
+                            running: root.active_theme == "retro" && root.settings_visible && root.theme_animations && !root.power_saver;
                             floppy: RetroIconBank.floppy;
                             cassette_a: RetroIconBank.cassette_a;
                             cassette_b: RetroIconBank.cassette_b;
@@ -8000,7 +8038,7 @@ export component MainWindow inherits Window {
                             y: 26px;
                             cell: 4px;
                             gap: 8px;
-                            running: root.active_theme == "sunset" && root.settings_visible && root.theme_animations;
+                            running: root.active_theme == "sunset" && root.settings_visible && root.theme_animations && !root.power_saver;
                             folder: SunsetIconBank.folder;
                             postcard: SunsetIconBank.postcard;
                             sun_a: SunsetIconBank.sun_a;
@@ -9000,6 +9038,35 @@ export component MainWindow inherits Window {
                     width: parent.width - AppMetrics.settings_scroll_gutter;
                     spacing: 14px;
                     padding-bottom: 16px;
+
+                    Text { text: @tr("LOW POWER"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text {
+                        text: @tr("When active, Pathfinder pauses theme motion, skips fresh thumbnail encodes, slows idle polling, and holds background indexing — browsing and opens stay responsive.");
+                        color: ThemePalette.text_muted;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        width: parent.width;
+                        height: self.preferred-height;
+                    }
+                    Rectangle {
+                        width: parent.width;
+                        height: Math.ceil(root.low_power_choices.length / 2) * AppMetrics.index_chip_row_stride;
+                        for mode[i] in root.low_power_choices: ChoiceChip {
+                            x: Math.mod(i, 2) == 0 ? 0px : (parent.width / 2 + 3px);
+                            y: Math.floor(i / 2) * AppMetrics.index_chip_row_stride;
+                            width: parent.width / 2 - 3px;
+                            item: mode;
+                            active: root.active_low_power_mode == mode.id;
+                            picked(id) => { root.low_power_mode_selected(id); }
+                        }
+                    }
+                    if root.power_saver: Text {
+                        text: @tr("Low power is active now.");
+                        color: ThemePalette.accent_strong;
+                        font-size: 12px;
+                        font-weight: 600;
+                        height: self.preferred-height;
+                    }
 
                     Text { text: @tr("SEARCH PERFORMANCE"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Text {
@@ -10299,13 +10366,13 @@ export component MainWindow inherits Window {
                         pixels: RetroIconBank.floppy;
                         cell: 3px;
                         interactive: true;
-                        running: ThemePalette.theme_animations;
+                        running: ThemePalette.theme_animations && !ThemePalette.power_saver;
                     }
                     if ThemePalette.active_theme == "sunset": SunsetFolderGlyph {
                         pixels: SunsetIconBank.folder;
                         cell: 3px;
                         interactive: true;
-                        running: ThemePalette.theme_animations;
+                        running: ThemePalette.theme_animations && !ThemePalette.power_saver;
                     }
                 }
                 Text {
