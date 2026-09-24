@@ -1,33 +1,31 @@
 # Pathfinder — feature ideas & known bugs
 
-Updated with the opt-in Low power toggle (v1.0.20). Not commitments.
+Updated with bug fixes + features 1/2/3/4/6/9 (v1.0.20+). Not commitments.
 
-## Known bugs to fix (priority)
+## Known bugs (addressed this pass)
 
-1. **Dual-pane keyboard always drives the primary pane** — Arrow/Enter ignore `active_pane` and call primary `file_*` handlers.
-2. **Secondary pane ignores Show Hidden** — only primary `apply_filter` respects `show_hidden`.
-3. **Secondary navigate cannot open virtual locations** — `recycle://` / `home://` / `storage://` / archives early-return in `secondary_navigate_impl`.
-4. **Recycle Bin identity is original-path only** — colliding trash entries; folders listed as files; undo/restore ambiguous.
-5. **Delete undo never records `trash_id`** — Ctrl+Z after recreate-and-delete can restore the wrong item.
-6. **`home://` omitted from `is_virtual_nav_path`** — F5 on Home silently fails through a useless `read_dir`.
-7. **Recycle formatting keyed off primary path only** — wrong metadata when painting secondary rows.
-8. **Settings/session writes can be lost on quit** — async writer every 250ms with no flush-on-exit.
-9. **Shortcut dispatch re-reads `shortcuts.json` on every key** — disk I/O on the UI hot path.
-10. **Most Rust toasts stay English** — Slint `@tr` works; everyday `show_toast` strings often skip `i18n::t`.
+1. Dual-pane keyboard drives the active pane (Arrow/Enter).
+2. Secondary pane respects Show Hidden.
+3. Secondary navigate opens `home://` / `recycle://` / archives.
+4–5. Recycle Bin identity uses `recycle://id/<b64>/o/<b64>`; delete undo records `trash_id`.
+6. `home://` is a virtual nav path; F5 refreshes Home.
+7. Recycle formatting keys off entry path (works in either pane).
+8. Settings/session JSON queue flushes on quit.
+9. Shortcut dispatch uses in-memory `shortcut_draft` (no disk read per key).
+10. High-traffic Rust toasts go through `i18n::t`.
 
-## Features worth adding
+## Features shipped this pass
 
-1. **List column show/hide persistence** — Size/Modified/Type visibility (and widths) in settings / `folder_views`.
-2. **In-app Properties sheet** — themed overlay for size, dates, tags, path copy.
-3. **Open With → Set as default** — wire shell default-app from the existing overlay.
-4. **Session conflict policy** — remember Skip/Replace/Keep Both (optional apply-to-all).
-5. **Dual-pane parity** — virtual locations, keyboard, show-hidden, folder filter (ties to bugs 1–3).
-6. **Pause folder watchers while minimized** — drop/re-arm notify when occluded.
-7. **Defer git status on battery / low power** — skip or idle-queue badges when low power is on.
-8. **User-pinned smart folders on Home** — custom saved searches on the landing view.
-9. **Recents grouped by day** — Explorer-style day groups.
-10. **Stable Recycle Bin + undo by trash id** — encode `TrashItem.id` in virtual paths (bugs 4–5).
+1. **List column show/hide persistence** — Size/Modified/Type toggles in Settings → View.
+2. **In-app Properties sheet** — tool overlay with size, dates, tag, copy path (+ Windows Properties).
+3. **Open With → Set as default** — overlay offers choose-once vs register-as-default.
+4. **Session conflict policy** — “Remember for this session” on Skip/Replace/Keep Both.
+6. **Pause folder watchers while minimized** — drop notify watchers when occluded; re-arm on restore.
+9. **Recents grouped by day** — Home + Recent Locations overlay use day buckets; visits store timestamps.
 
-## Shipped this pass
+## Still open / later
 
-- Opt-in **Low power mode** toggle (Settings → Performance; status-bar pill toggles it off/on).
+5. Dual-pane parity extras (folder filter on secondary).
+7. Defer git status on battery / low power.
+8. User-pinned smart folders on Home.
+10. (Done via bugs 4–5) Stable Recycle Bin + undo by trash id.
