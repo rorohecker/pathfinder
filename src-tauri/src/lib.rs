@@ -20508,8 +20508,41 @@ impl NativeController {
 
     fn secondary_go_up(&mut self, ui: &MainWindow) {
         self.active_pane = ActivePane::Secondary;
+        if let Some((archive_path, prefix)) = parse_archive_virtual_path(&self.secondary_path) {
+            if prefix.is_empty() {
+                // Leave the archive — prefer previous secondary history, else parent of archive file.
+                if self.secondary_history_pos > 0 {
+                    self.secondary_go_back(ui);
+                } else if let Some(parent) = parent_dir_path(&archive_path) {
+                    self.secondary_navigate(ui, parent);
+                }
+            } else {
+                self.open_secondary_archive_view(
+                    ui,
+                    archive_path,
+                    archive_parent_prefix(&prefix),
+                    true,
+                );
+            }
+            return;
+        }
+        if self.secondary_path == "home://" {
+            return;
+        }
+        if self.secondary_path == "recycle://" {
+            if self.secondary_history_pos > 0 {
+                self.secondary_go_back(ui);
+            } else {
+                self.open_secondary_home_view(ui, true);
+            }
+            return;
+        }
         if let Some(parent_path) = parent_dir_path(&self.secondary_path) {
             self.secondary_navigate(ui, parent_path);
+            return;
+        }
+        if self.secondary_path != "home://" {
+            self.open_secondary_home_view(ui, true);
         }
     }
 
