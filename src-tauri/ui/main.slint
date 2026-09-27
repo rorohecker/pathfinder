@@ -3914,6 +3914,7 @@ export component MainWindow inherits Window {
     callback windows_shell_menu();
     callback toggle_network_downloads();
     in-out property <int> toolbar_search_focus_nonce: 0;
+    in-out property <int> filter_focus_nonce: 0;
     callback theme_selected(string);
     callback accent_selected(string);
     callback density_selected(string);
@@ -5416,6 +5417,8 @@ export component MainWindow inherits Window {
                     if (!root.filter_bar_visible && root.filter_text != "") {
                         root.filter_text = "";
                         root.filter_changed("");
+                    } else if (root.filter_bar_visible) {
+                        root.filter_focus_nonce += 1;
                     }
                 }
             }
@@ -5423,8 +5426,11 @@ export component MainWindow inherits Window {
                 visible: !root.is_simple;
                 x: parent.width - 182px;
                 y: 6px;
+                opacity: (root.is_home_view || root.in_recycle_bin) ? 0.4 : 1.0;
                 icon_data: "M4 6h16 M4 12h16 M4 18h10";
-                tooltip: @tr("Flat view (all files under this folder)");
+                tooltip: (root.is_home_view || root.in_recycle_bin)
+                    ? @tr("Flat view works inside a real folder")
+                    : @tr("Flat view (all files under this folder)");
                 active: root.flat_view;
                 clicked => { root.command("toggle-flat-view"); }
             }
@@ -5552,10 +5558,9 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // Primary folder filter — toggled from the toolbar Filter button.
-            // Gate on the bool (not animated filter_bar_h) so a fixed 36px bar
-            // never overlaps the list while filter_bar_h is mid-animation.
-            if root.filter_bar_visible || root.filter_text != "": Rectangle {
+            // Primary folder filter — keep the node while height animates so
+            // closing does not leave a blank strip under the toolbar.
+            if root.filter_bar_h > 0.5px: Rectangle {
                 x: 0;
                 y: root.folder_changed_banner ? 28px : 0;
                 width: root.primary_pane_w;
@@ -5577,6 +5582,8 @@ export component MainWindow inherits Window {
                     text <=> root.filter_text;
                     font-size: 12px;
                     placeholder-text: @tr("Filter this folder…");
+                    property <int> focus_nonce: root.filter_focus_nonce;
+                    changed focus_nonce => { self.focus(); }
                     edited => { root.filter_changed(self.text); }
                     accepted => { root.filter_changed(self.text); }
                     key-pressed(e) => {
@@ -6210,7 +6217,7 @@ export component MainWindow inherits Window {
                             horizontal-alignment: center;
                         }
                         Text {
-                            visible: root.search_text != "" || root.is_home_view || root.in_recycle_bin
+                            visible: root.search_text != "" || root.filter_text != "" || root.is_home_view || root.in_recycle_bin
                                 || root.empty_state == "Loading folder..."
                                 || root.empty_state == "Loading Recycle Bin..."
                                 || root.empty_state == "Searching..."
@@ -6218,6 +6225,7 @@ export component MainWindow inherits Window {
                             width: min(360px, parent.width - 48px);
                             x: (parent.width - self.width) / 2;
                             text: root.search_text != "" ? (root.search_scope_all ? @tr("Try a different query or switch back to this folder") : @tr("Try a different query or search the whole drive")) :
+                                  root.filter_text != "" ? @tr("Clear the filter or try a different name") :
                                   root.is_home_view ? @tr("Pin folders from the sidebar or open a drive — shortcuts collect here.") :
                                   root.in_recycle_bin ? @tr("Deleted files appear here until you empty the bin.") :
                                   root.empty_state == "Loading Recycle Bin..." ? @tr("Reading the OS Recycle Bin…") :

@@ -17671,6 +17671,10 @@ impl NativeController {
         self.files.clear();
         self.visible_files.clear();
         self.search_query.clear();
+        // Folder filter is per-folder chrome — don't carry it into the next path.
+        self.folder_filter.clear();
+        ui.set_filter_text(ss(""));
+        ui.set_filter_bar_visible(false);
         self.selected_index = -1;
         self.selected_set.clear();
         self.select_anchor = -1;
@@ -17840,11 +17844,15 @@ impl NativeController {
             self.sync_grid_window(ui, false);
         }
 
-        if partial {
-            self.schedule_full_directory_load(path.clone());
-        } else if let Some(q) = self.take_pending_nav_search_for(&path) {
+        // Apply deferred smart-pin search on the first paint (including
+        // partial index/chunk loads) so the user doesn't see an unfiltered
+        // folder while the background walk finishes.
+        if let Some(q) = self.take_pending_nav_search_for(&path) {
             ui.set_search_text(ss(&q));
             self.search(ui, q);
+        }
+        if partial {
+            self.schedule_full_directory_load(path.clone());
         }
 
         let image_entries: Vec<(String, u64)> = self
@@ -20677,6 +20685,8 @@ impl NativeController {
         let prev_secondary = self.secondary_path.clone();
         if !prev_secondary.is_empty() && !same_path_string(&prev_secondary, &path) {
             self.remember_secondary_scroll(ui, &prev_secondary);
+            self.secondary_folder_filter.clear();
+            ui.set_secondary_filter_text(ss(""));
         }
         self.active_pane = ActivePane::Secondary;
         self.secondary_path = path.clone();
@@ -23283,7 +23293,7 @@ impl NativeController {
         ui.set_tool_overlay_subtitle(ss(if items.is_empty() {
             "No undoable operations yet. Ctrl+Z undoes the latest step."
         } else {
-            "Newest first. Ctrl+Z undoes one step at a time. Clear removes the stack."
+            "Newest first. Click the newest step (or Ctrl+Z) to undo one. Clear removes the stack."
         }));
         ui.set_tool_overlay_items(model_from_vec(items));
         ui.set_tool_overlay_visible(true);
@@ -23309,34 +23319,28 @@ impl NativeController {
             .unwrap_or_default();
         let paused = self.app_state.queue_is_paused();
         let mut items: Vec<ToolListItem> = Vec::new();
-        items.push(ToolListItem {
-            id: ss(if paused {
-                "ctrl:resume"
-            } else {
-                "ctrl:pause"
-            }),
-            title: ss(if paused {
-                "Resume queue"
-            } else {
-                "Pause queue"
-            }),
-            subtitle: ss(if paused {
-                "Allow new file operations to start again"
-            } else {
-                "Hold new operations; running work can still finish"
-            }),
-            meta: ss(if paused { "Paused" } else { "Live" }),
-            enabled: true,
-            accent: color(if paused { "#f0a030" } else { "#4f9cff" }),
-        });
-        items.push(ToolListItem {
-            id: ss("ctrl:cancel"),
-            title: ss("Cancel running"),
-            subtitle: ss("Stop in-flight copy/move/compress work"),
-            meta: ss(""),
-            enabled: true,
-            accent: color("#e25555"),
-        });
+        if !queue.is_empty() {
+            items.push(ToolListItem {
+                id: ss(if paused {
+                    "ctrl:resume"
+                } else {
+                    "ctrl:pause"
+                }),
+                title: ss(if paused {
+                    "Resume queue"
+                } else {
+                    "Pause queue"
+                }),
+                subtitle: ss(if paused {
+                    "Allow new file operations to start again"
+                } else {
+                    "Hold new operations; running work can still finish"
+                }),
+                meta: ss(if paused { "Paused" } else { "Live" }),
+                enabled: true,
+                accent: color(if paused { "#f0a030" } else { "#4f9cff" }),
+            });
+        }
         for item in queue.iter().rev() {
             let pct = if item.bytes_total > 0 {
                 ((item.bytes_done as f64 / item.bytes_total as f64) * 100.0).round() as u64
@@ -23382,7 +23386,7 @@ impl NativeController {
         ui.set_tool_overlay_kind(ss("operation-queue"));
         ui.set_tool_overlay_title(ss(&i18n::t("Operation Queue")));
         ui.set_tool_overlay_subtitle(ss(if queue.is_empty() {
-            "No queued file operations yet. Pause/Cancel apply to future and running work."
+            "No queued file operations yet. New copy/move/compress work will appear here."
         } else {
             "Newest first. Click a job to reveal its source. Pause holds new work; Cancel stops running jobs."
         }));
@@ -23534,6 +23538,9 @@ impl NativeController {
         self.files = entries;
         self.search_query.clear();
         ui.set_search_text(ss(""));
+        self.folder_filter.clear();
+        ui.set_filter_text(ss(""));
+        ui.set_filter_bar_visible(false);
         self.selected_index = -1;
         self.selected_set.clear();
         self.select_anchor = -1;
@@ -23545,10 +23552,8 @@ impl NativeController {
         } else {
             ""
         }));
-        // Keep list order as built (section groups); skip apply_filter sort,
-        // but still honor an active folder filter from the toolbar bar.
+        // Keep list order as built (section groups); skip apply_filter sort.
         self.visible_files = self.files.clone();
-        self.apply_folder_filter();
         self.update_models(ui);
         ui.set_side_items(model_from_vec(self.side_items()));
         ui.set_current_path(ss(&i18n::t("Home")));
@@ -25545,8 +25550,9 @@ impl NativeController {
                         } else {
                             0.5
                         };
+                        // Only target — `split_ratio` is bound to it in Slint;
+                        // writing both breaks the binding and freezes the splitter.
                         ui.set_split_ratio_target(ratio);
-                        ui.set_split_ratio(ratio);
                         let sec = if ws.secondary_path.is_empty() {
                             self.default_secondary_path()
                         } else {
@@ -25675,18 +25681,25 @@ impl NativeController {
                 let Ok(target) = id.parse::<usize>() else {
                     return;
                 };
-                let steps = {
+                let newest = {
                     let Ok(log) = self.app_state.operation_log.lock() else {
                         return;
                     };
-                    if target >= log.len() {
+                    if log.is_empty() || target >= log.len() {
                         return;
                     }
-                    log.len() - target
+                    target + 1 == log.len()
                 };
-                for _ in 0..steps {
-                    self.undo(ui);
+                // Only the newest row undoes (one step). Older rows are
+                // browse-only so a mis-click cannot rewind the whole stack.
+                if !newest {
+                    self.show_toast(
+                        ui,
+                        "Click the newest step to undo, or use Ctrl+Z repeatedly.",
+                    );
+                    return;
                 }
+                self.undo(ui);
                 self.show_undo_history(ui);
             }
             "operation-queue" => match id.as_str() {
@@ -28829,13 +28842,11 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                         }
                                         ctrl.sync_fantasy_empty_kind(&ui);
                                         ctrl.update_status(&ui);
-                                        if !partial {
-                                            if let Some(q) =
-                                                ctrl.take_pending_nav_search_for(&result.path)
-                                            {
-                                                ui.set_search_text(ss(&q));
-                                                ctrl.search(&ui, q);
-                                            }
+                                        if let Some(q) =
+                                            ctrl.take_pending_nav_search_for(&result.path)
+                                        {
+                                            ui.set_search_text(ss(&q));
+                                            ctrl.search(&ui, q);
                                         }
                                     }
                                 }
