@@ -458,6 +458,8 @@ fn es(en: &str) -> Option<String> {
             }
             "QUICK ACCESS" => "ACCESO RÁPIDO",
             "SMART FOLDERS" => "CARPETAS INTELIGENTES",
+            "RECENT" => "RECIENTES",
+            "TAGS" => "ETIQUETAS",
             "Large files" => "Archivos grandes",
             "Recently modified" => "Modificados recientemente",
             "Downloads over 30 days old" => "Descargas de más de 30 días",
