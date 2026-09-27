@@ -7482,7 +7482,7 @@ export component MainWindow inherits Window {
         z: 100;
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - (root.is_simple ? 410px : 580px)) + self.rise;
-        width: 226px;
+        width: 248px;
         height: root.is_simple ? 390px : 560px;
         border-width: 1px;
         border-color: ThemePalette.border_strong;
@@ -7495,12 +7495,12 @@ export component MainWindow inherits Window {
         ScrollView {
             x: 0;
             y: 0;
-            width: 226px;
+            width: 248px;
             height: parent.height;
-            viewport-width: 216px;
+            viewport-width: 238px;
 
         VerticalLayout {
-            width: 216px;
+            width: 238px;
             padding: 5px;
             spacing: 2px;
             // -- Recycle-bin-only actions ------------------------------
@@ -7646,7 +7646,7 @@ export component MainWindow inherits Window {
         z: 100;
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - 278px) + self.rise;
-        width: 226px;
+        width: 248px;
         height: 266px;
         border-width: 1px;
         border-color: ThemePalette.border_strong;
@@ -7657,7 +7657,7 @@ export component MainWindow inherits Window {
         clip: true;
 
         VerticalLayout {
-            width: 216px;
+            width: 238px;
             x: 5px;
             y: 5px;
             spacing: 2px;
@@ -7756,16 +7756,17 @@ export component MainWindow inherits Window {
                 background: ThemePalette.panel;
                 property <string> resize_value: "";
                 Text {
-                    x: 9px; y: 0;
-                    width: 70px; height: parent.height;
+                    x: 8px; y: 0;
+                    width: 64px; height: parent.height;
                     text: @tr("Scale %:");
                     color: ThemePalette.text_muted;
                     font-size: 12px;
                     vertical-alignment: center;
+                    overflow: elide;
                 }
                 resize_input := TextInput {
-                    x: 76px; y: 1px;
-                    width: 80px; height: parent.height - 2px;
+                    x: 74px; y: 1px;
+                    width: 88px; height: parent.height - 2px;
                     font-size: 12.5px;
                     color: ThemePalette.text;
                     vertical-alignment: center;
@@ -7777,16 +7778,16 @@ export component MainWindow inherits Window {
                     }
                 }
                 if resize_input.text == "" && !resize_input.has-focus: Text {
-                    x: 76px; y: 0;
-                    width: 80px; height: parent.height;
+                    x: 74px; y: 0;
+                    width: 88px; height: parent.height;
                     text: "e.g. 75";
                     color: ThemePalette.text_faint;
                     font-size: 12px;
                     vertical-alignment: center;
                 }
                 Rectangle {
-                    x: parent.width - 55px; y: 3px;
-                    width: 50px; height: 24px;
+                    x: parent.width - 52px; y: 3px;
+                    width: 48px; height: 24px;
                     border-radius: 5px;
                     background: apply_touch.has-hover ? ThemePalette.accent : ThemePalette.accent_soft;
                     Text {
@@ -10075,23 +10076,26 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: priv_row_ta.has-hover ? ThemePalette.accent_soft : ThemePalette.panel;
+                        property <bool> row_has_meta: item.meta != "";
+                        property <length> meta_col_w: 96px;
+                        property <length> text_right_pad: row_has_meta ? meta_col_w + 28px : 20px;
                         Rectangle {
                             x: 8px; y: 16px; width: 4px; height: 24px;
                             border-radius: 2px;
                             background: item.accent;
                         }
                         Text {
-                            x: 20px; y: 6px; width: parent.width - 128px; height: 20px;
+                            x: 20px; y: 6px; width: parent.width - 20px - text_right_pad; height: 20px;
                             text: item.title;
                             color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
                         }
                         Text {
-                            x: 20px; y: 28px; width: parent.width - 128px; height: 22px;
+                            x: 20px; y: 28px; width: parent.width - 20px - text_right_pad; height: 22px;
                             text: item.subtitle;
                             color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
                         }
                         if item.meta != "": Text {
-                            x: parent.width - 100px; y: 0; width: 88px; height: parent.height;
+                            x: parent.width - meta_col_w - 12px; y: 0; width: meta_col_w; height: parent.height;
                             text: item.meta;
                             color: ThemePalette.text_faint; font-size: 11px;
                             horizontal-alignment: right; vertical-alignment: center; overflow: elide;
@@ -10146,20 +10150,31 @@ export component MainWindow inherits Window {
                     height: 52px;
                     border-radius: AppMetrics.radius_small;
                     background: tool_row_ta.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+                    // Right-side reservation so title/subtitle never paint under
+                    // chips or the meta value column (was a fixed 118px that
+                    // still overlapped meta at parent.width-90).
+                    property <bool> row_has_chip: root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders";
+                    property <bool> row_has_meta: item.meta != "";
+                    property <length> meta_col_w: root.tool_overlay_kind == "properties" ? 200px : 72px;
+                    property <length> text_right_pad: row_has_chip ? 140px
+                        : (row_has_meta ? meta_col_w + 28px : 16px);
+                    property <bool> value_only: row_has_meta && item.subtitle == "";
                     Rectangle {
                         x: 8px; y: 16px; width: 4px; height: 20px;
                         border-radius: 2px;
                         background: item.accent;
                     }
                     Text {
-                        // Rules + smart-folders reserve 140px for the right-side chip
-                        // (and ··· on smart-folders) so title/subtitle never paint under it.
-                        x: 20px; y: 8px; width: parent.width - (root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders" ? 140px : 118px); height: 20px;
+                        x: 20px;
+                        y: value_only ? 0 : 8px;
+                        width: parent.width - 20px - text_right_pad;
+                        height: value_only ? parent.height : 20px;
                         text: item.title;
                         color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
+                        vertical-alignment: value_only ? center : top;
                     }
-                    Text {
-                        x: 20px; y: 28px; width: parent.width - (root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders" ? 140px : 118px); height: 16px;
+                    if item.subtitle != "": Text {
+                        x: 20px; y: 28px; width: parent.width - 20px - text_right_pad; height: 16px;
                         text: item.subtitle;
                         color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
                     }
@@ -10194,7 +10209,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     if item.meta != "": Text {
-                        x: parent.width - 90px; y: 0; width: 78px; height: parent.height;
+                        x: parent.width - meta_col_w - 12px; y: 0; width: meta_col_w; height: parent.height;
                         text: item.meta;
                         color: ThemePalette.text_faint; font-size: 11px;
                         horizontal-alignment: right; vertical-alignment: center; overflow: elide;

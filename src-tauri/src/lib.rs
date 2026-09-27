@@ -24255,6 +24255,9 @@ impl NativeController {
         } else {
             format!(".{ext} file")
         };
+        // Info rows use title (label) + meta (value) so the overlay can lay
+        // them out as two columns. Never put a sentinel like "info" in meta —
+        // that string was painted on the right and overlapped the label.
         let mut items = vec![
             ToolListItem {
                 id: ss("copy-path"),
@@ -24267,28 +24270,28 @@ impl NativeController {
             ToolListItem {
                 id: ss(""),
                 title: ss(&i18n::t("Type")),
-                subtitle: ss(&kind),
-                meta: ss("info"),
+                subtitle: ss(""),
+                meta: ss(&kind),
                 enabled: false,
                 accent: color("#7f8b9d"),
             },
             ToolListItem {
                 id: ss(""),
                 title: ss(&i18n::t("Size")),
-                subtitle: ss(if is_dir {
+                subtitle: ss(""),
+                meta: ss(if is_dir {
                     "—".to_string()
                 } else {
                     format_size_short(size)
                 }),
-                meta: ss("info"),
                 enabled: false,
                 accent: color("#7f8b9d"),
             },
             ToolListItem {
                 id: ss(""),
                 title: ss(&i18n::t("Modified")),
-                subtitle: ss(format_modified(modified)),
-                meta: ss("info"),
+                subtitle: ss(""),
+                meta: ss(format_modified(modified)),
                 enabled: false,
                 accent: color("#7f8b9d"),
             },
@@ -24297,8 +24300,8 @@ impl NativeController {
             items.push(ToolListItem {
                 id: ss(""),
                 title: ss(&i18n::t("Tag")),
-                subtitle: ss(&tag),
-                meta: ss("info"),
+                subtitle: ss(""),
+                meta: ss(&tag),
                 enabled: false,
                 accent: color("#7f8b9d"),
             });
@@ -24307,8 +24310,8 @@ impl NativeController {
             items.push(ToolListItem {
                 id: ss(""),
                 title: ss(&i18n::t("Selection")),
-                subtitle: ss(format!("{} items selected — showing first", paths.len())),
-                meta: ss("info"),
+                subtitle: ss(""),
+                meta: ss(format!("{} selected", paths.len())),
                 enabled: false,
                 accent: color("#7f8b9d"),
             });
@@ -24474,11 +24477,13 @@ impl NativeController {
                 "Recent".to_string()
             };
             if group != last_group {
+                // Empty meta — a "header" sentinel used to paint literally and
+                // collide with the section title in the overlay list row.
                 items.push(ToolListItem {
                     id: ss(""),
                     title: ss(&i18n::t(&group)),
                     subtitle: ss(""),
-                    meta: ss("header"),
+                    meta: ss(""),
                     enabled: false,
                     accent: color("#7f8b9d"),
                 });
