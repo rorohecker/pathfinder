@@ -10219,12 +10219,13 @@ export component MainWindow inherits Window {
                 label: @tr("Close");
                 clicked => { root.tool_overlay_close(); }
             }
-            if root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "shortcuts" || root.tool_overlay_kind == "privacy" || root.tool_overlay_kind == "undo-history": DialogButton {
+            if root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "shortcuts" || root.tool_overlay_kind == "privacy" || root.tool_overlay_kind == "undo-history" || root.tool_overlay_kind == "operation-queue": DialogButton {
                 x: parent.width - self.preferred-width - 18px; y: parent.height - 48px;
                 label: root.tool_overlay_kind == "rules" ? @tr("Run enabled")
                     : (root.tool_overlay_kind == "shortcuts" ? @tr("Save")
                     : (root.tool_overlay_kind == "undo-history" ? @tr("Clear history")
-                    : @tr("Clear caches")));
+                    : (root.tool_overlay_kind == "operation-queue" ? @tr("Cancel running")
+                    : @tr("Clear caches"))));
                 primary: true;
                 clicked => { root.tool_overlay_primary_action(); }
             }

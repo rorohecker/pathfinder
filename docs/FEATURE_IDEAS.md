@@ -36,6 +36,8 @@ Updated with dual-pane filter, low-power git deferral, Home smart pins, and safe
 - **Undo history overlay** — clickable stack undoes down to the chosen step + Clear.
 - **Flat view** — recursive listing under the current folder (capped at 8k), toolbar + Ctrl+Shift+L; async walk; F5/watch keep flat mode.
 - **Home smart pins** — open from Home navigates to a real scope (home/Downloads) before searching.
+- **Secondary sticky selection** — soft F5/watch refresh remaps secondary selection by path (no focus steal).
+- **Operation queue overlay** — clickable tool overlay with pause/resume/cancel + reveal source (replaces preview dump).
 
 ## Still open / later
 
@@ -43,5 +45,4 @@ Updated with dual-pane filter, low-power git deferral, Home smart pins, and safe
 - Skia renderer (ICU clash with windows-rs).
 - Optional Win+E hotkey (shell-level; separate from App Paths).
 - Custom list columns (tags / notes / git).
-- Transfer manager polish beyond existing operation queue.
 - Multi-window shared session (new window already spawns a process).

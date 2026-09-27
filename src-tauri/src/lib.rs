@@ -18646,9 +18646,7 @@ impl NativeController {
         ui.set_folder_changed_banner(false);
         self.sync_active_pane(ui);
         if self.active_pane == ActivePane::Secondary {
-            let path = self.secondary_path.clone();
-            self.app_state.invalidate_directory_path(Path::new(&path));
-            self.secondary_navigate(ui, path);
+            self.refresh_secondary_listing(ui);
             return;
         }
         if self.current_path == "storage://" && ui.get_is_storage_view() {
@@ -20720,8 +20718,10 @@ impl NativeController {
             return;
         }
         let partial = page.partial;
+        let sticky = self.secondary_selected_paths_sticky();
         self.secondary_files = page.entries.clone();
         self.apply_secondary_filter();
+        self.restore_secondary_selection_from_paths(&sticky);
         self.update_secondary_models(ui);
         // Restore once after the first paint lands at the top; skip on
         // partial→full refresh so we don't yank the viewport mid-scroll.
@@ -20732,6 +20732,69 @@ impl NativeController {
         self.schedule_secondary_viewport_thumbs(ui);
         if partial {
             self.schedule_full_secondary_directory_load(path);
+        }
+    }
+
+    /// Soft-refresh secondary without clearing selection or stealing focus.
+    fn refresh_secondary_listing(&mut self, ui: &MainWindow) {
+        let path = self.secondary_path.clone();
+        if path.is_empty() {
+            return;
+        }
+        if path == "home://" {
+            self.open_secondary_home_view(ui, false);
+            return;
+        }
+        if path == "recycle://" {
+            self.open_secondary_recycle_bin(ui, false);
+            return;
+        }
+        if let Some((archive_path, prefix)) = parse_archive_virtual_path(&path) {
+            self.open_secondary_archive_view(ui, archive_path, prefix, false);
+            return;
+        }
+        if !Path::new(&path).is_dir() {
+            return;
+        }
+        self.app_state.invalidate_directory_path(Path::new(&path));
+        // Bump so in-flight secondary loads are ignored; sticky selection is
+        // remapped when the new listing lands.
+        let _ = self.secondary_nav_generation.fetch_add(1, Ordering::SeqCst);
+        self.schedule_full_secondary_directory_load(path);
+    }
+
+    fn secondary_selected_paths_sticky(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self
+            .secondary_selected_set
+            .iter()
+            .filter_map(|&i| self.secondary_visible_files.get(i).map(|e| e.path.clone()))
+            .collect();
+        if paths.is_empty()
+            && self.secondary_selected_index >= 0
+            && let Some(entry) = self
+                .secondary_visible_files
+                .get(self.secondary_selected_index as usize)
+        {
+            paths.push(entry.path.clone());
+        }
+        paths
+    }
+
+    fn restore_secondary_selection_from_paths(&mut self, paths: &[String]) {
+        self.secondary_selected_set.clear();
+        self.secondary_selected_index = -1;
+        self.secondary_select_anchor = -1;
+        if paths.is_empty() {
+            return;
+        }
+        for (i, entry) in self.secondary_visible_files.iter().enumerate() {
+            if paths.iter().any(|p| same_path_string(p, &entry.path)) {
+                self.secondary_selected_set.insert(i);
+                if self.secondary_selected_index < 0 {
+                    self.secondary_selected_index = i as i32;
+                    self.secondary_select_anchor = i as i32;
+                }
+            }
         }
     }
 
@@ -23184,46 +23247,87 @@ impl NativeController {
             .lock()
             .map(|q| q.iter().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
-        let body = if queue.is_empty() {
-            "No queued file operations yet.".to_string()
+        let paused = self.app_state.queue_is_paused();
+        let mut items: Vec<ToolListItem> = Vec::new();
+        items.push(ToolListItem {
+            id: ss(if paused {
+                "ctrl:resume"
+            } else {
+                "ctrl:pause"
+            }),
+            title: ss(if paused {
+                "Resume queue"
+            } else {
+                "Pause queue"
+            }),
+            subtitle: ss(if paused {
+                "Allow new file operations to start again"
+            } else {
+                "Hold new operations; running work can still finish"
+            }),
+            meta: ss(if paused { "Paused" } else { "Live" }),
+            enabled: true,
+            accent: color(if paused { "#f0a030" } else { "#4f9cff" }),
+        });
+        items.push(ToolListItem {
+            id: ss("ctrl:cancel"),
+            title: ss("Cancel running"),
+            subtitle: ss("Stop in-flight copy/move/compress work"),
+            meta: ss(""),
+            enabled: true,
+            accent: color("#e25555"),
+        });
+        for item in queue.iter().rev() {
+            let pct = if item.bytes_total > 0 {
+                ((item.bytes_done as f64 / item.bytes_total as f64) * 100.0).round() as u64
+            } else {
+                0
+            };
+            let dst = item
+                .destination
+                .as_ref()
+                .map(|d| format!(" → {d}"))
+                .unwrap_or_default();
+            let progress = if item.bytes_total > 0 {
+                format!(
+                    "{} / {} · {}/s",
+                    format_size_short(item.bytes_done),
+                    format_size_short(item.bytes_total),
+                    format_size_short(item.speed_bps)
+                )
+            } else if !item.detail.is_empty() {
+                item.detail.clone()
+            } else {
+                item.status.clone()
+            };
+            items.push(ToolListItem {
+                id: ss(format!("op:{}", item.id)),
+                title: ss(format!("{} · {}", item.kind, item.status)),
+                subtitle: ss(format!("{}{} · {}", item.source, dst, progress)),
+                meta: ss(if item.bytes_total > 0 {
+                    format!("{pct}%")
+                } else {
+                    format!("#{}", item.id)
+                }),
+                enabled: true,
+                accent: color(match item.status.as_str() {
+                    "running" => "#4f9cff",
+                    "done" | "completed" => "#3cb371",
+                    "cancelled" | "error" | "failed" => "#e25555",
+                    "conflict" => "#f0a030",
+                    _ => "#8a93a6",
+                }),
+            });
+        }
+        ui.set_tool_overlay_kind(ss("operation-queue"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Operation Queue")));
+        ui.set_tool_overlay_subtitle(ss(if queue.is_empty() {
+            "No queued file operations yet. Pause/Cancel apply to future and running work."
         } else {
-            queue
-                .iter()
-                .rev()
-                .map(|item| {
-                    let conflict = item.conflict.as_ref().map(|c| {
-                        format!(
-                            "\n  Conflict: incoming {} modified {}, existing {} modified {}",
-                            format_size_short(c.incoming_size),
-                            format_modified(c.incoming_modified),
-                            format_size_short(c.existing_size),
-                            format_modified(c.existing_modified)
-                        )
-                    });
-                    format!(
-                        "#{id} {kind} [{status}] {done}/{total} at {speed}/s\n  {src}{dst}\n  {detail}{conflict}",
-                        id = item.id,
-                        kind = item.kind,
-                        status = item.status,
-                        done = format_size_short(item.bytes_done),
-                        total = format_size_short(item.bytes_total),
-                        speed = format_size_short(item.speed_bps),
-                        src = item.source,
-                        dst = item
-                            .destination
-                            .as_ref()
-                            .map(|d| format!(" -> {d}"))
-                            .unwrap_or_default(),
-                        detail = item.detail,
-                        conflict = conflict.unwrap_or_default()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        };
-        ui.set_preview_title(ss("Operation Queue"));
-        ui.set_preview_body(ss(body));
-        ui.set_preview_meta(ss("Pause, cancel, and retry controls are exposed through the command palette for queued work."));
+            "Newest first. Click a job to reveal its source. Pause holds new work; Cancel stops running jobs."
+        }));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
     }
 
     fn show_locked_file(&mut self, ui: &MainWindow) {
@@ -25400,6 +25504,10 @@ impl NativeController {
                                 "warning",
                             );
                         }
+                        // secondary_navigate steals focus; restore primary so
+                        // keyboard / paste / F5 match the restored active tab.
+                        self.active_pane = ActivePane::Primary;
+                        self.sync_active_pane(ui);
                     }
                     self.update_models(ui);
                     self.show_toast_kind(
@@ -25521,6 +25629,40 @@ impl NativeController {
                 }
                 self.show_undo_history(ui);
             }
+            "operation-queue" => match id.as_str() {
+                "ctrl:pause" => {
+                    self.command(ui, "queue-pause");
+                    self.show_operation_queue(ui);
+                }
+                "ctrl:resume" => {
+                    self.command(ui, "queue-resume");
+                    self.show_operation_queue(ui);
+                }
+                "ctrl:cancel" => {
+                    self.command(ui, "queue-cancel");
+                    self.show_operation_queue(ui);
+                }
+                other => {
+                    if let Some(op_id) = other.strip_prefix("op:") {
+                        let source = self
+                            .app_state
+                            .operation_queue
+                            .lock()
+                            .ok()
+                            .and_then(|q| {
+                                q.iter()
+                                    .find(|i| i.id.to_string() == op_id)
+                                    .map(|i| i.source.clone())
+                            });
+                        if let Some(source) = source {
+                            ui.set_tool_overlay_visible(false);
+                            if let Err(e) = reveal_in_folder(source) {
+                                self.show_toast(ui, e);
+                            }
+                        }
+                    }
+                }
+            },
             _ => {}
         }
     }
@@ -25616,6 +25758,10 @@ impl NativeController {
             }
             "undo-history" => {
                 self.clear_undo_history(ui);
+            }
+            "operation-queue" => {
+                self.command(ui, "queue-cancel");
+                self.show_operation_queue(ui);
             }
             "versions" => self.show_toast(ui, "Click a version to restore it."),
             _ => ui.set_tool_overlay_visible(false),
@@ -26346,9 +26492,7 @@ impl NativeController {
             if let Ok(mut dirty) = self.app_state.dirty_dirs.lock() {
                 dirty.retain(|p| !same_path_string(p, &secondary));
             }
-            self.app_state
-                .invalidate_directory_path(Path::new(&secondary));
-            self.secondary_navigate(ui, secondary);
+            self.refresh_secondary_listing(ui);
         }
     }
 
@@ -26399,10 +26543,7 @@ impl NativeController {
         self.last_folder_auto_refresh = Some(Instant::now());
         self.refresh_primary_listing(ui);
         if ui.get_dual_pane() && !self.secondary_path.is_empty() {
-            let secondary = self.secondary_path.clone();
-            self.app_state
-                .invalidate_directory_path(Path::new(&secondary));
-            self.secondary_navigate(ui, secondary);
+            self.refresh_secondary_listing(ui);
         }
     }
 
