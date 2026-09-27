@@ -20,6 +20,11 @@ Windows Registry Editor Version 5.00
 ;   - Steam "Show in folder" -> opens in Pathfinder
 ;   - Discord/Slack/other apps "Show in folder" -> opens in Pathfinder
 ;
+; SAFETY:
+;   - HKCU only — never replaces C:\Windows\explorer.exe
+;   - Desktop shell restart via full path still uses real Explorer
+;   - Pathfinder forwards shell:/CLSID/unknown explorer verbs to the system binary
+;
 ; TO UNDO:
 ;   Open Registry Editor (regedit) and delete:
 ;   HKEY_CURRENT_USER\Software\Classes\Folder

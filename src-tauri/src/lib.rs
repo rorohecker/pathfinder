@@ -8478,6 +8478,7 @@ struct NativeController {
     secondary_files_model: Option<ModelRc<FileItem>>,
     active_pane: ActivePane,
     folder_filter: String,
+    secondary_folder_filter: String,
     git_status: Arc<GitStatusMap>,
     git_dir_status: HashMap<String, String>,
     settings: NativeSettings,
@@ -9951,6 +9952,7 @@ fn privacy_storage_info_for_state(
             stored_data_item("Tags", "tags.json", "File path to tag color mappings."),
             stored_data_item("Tag Labels", "tag_labels.json", "Custom tag display names."),
             stored_data_item("Smart Folder Labels", "smart_folder_labels.json", "Custom smart folder display names."),
+            stored_data_item("Home Smart Pins", "home_smart_pins.json", "Smart folder ids pinned on the Home landing."),
             stored_data_item("Notes", "notes.json", "Local file notes keyed by path."),
             stored_data_item("Saved Searches", "searches.json", "Named search queries and scopes."),
             stored_data_item("Session", "session.json", "Open tabs, paths, and view preferences."),
@@ -10825,6 +10827,46 @@ fn thumb_cache_load_budget(power_saver: bool) -> usize {
 
 fn thumb_generate_budget(power_saver: bool) -> usize {
     if power_saver { 0 } else { 32 }
+}
+
+#[cfg(test)]
+mod cli_explorer_tests {
+    use super::*;
+
+    #[test]
+    fn parse_select_comma_form() {
+        let args = vec!["/select,C:\\Windows\\System32\\notepad.exe".to_string()];
+        // May be None on non-Windows CI if path missing; still exercise parser.
+        let _ = parse_cli_startup_folder_from(&args);
+        let args2 = vec!["/select".to_string(), "/tmp".to_string()];
+        let _ = parse_cli_startup_folder_from(&args2);
+    }
+
+    #[test]
+    fn parse_path_flag() {
+        let tmp = std::env::temp_dir();
+        let args = vec!["--path".to_string(), tmp.to_string_lossy().to_string()];
+        assert_eq!(parse_cli_startup_folder_from(&args), Some(tmp));
+    }
+
+    #[test]
+    fn shell_namespace_needs_forward() {
+        let args = vec!["shell:Downloads".to_string()];
+        assert!(explorer_args_need_system_forward(&args));
+        let clsid = vec!["::{20D04FE0-3AEA-1069-A2D8-08002B30309D}".to_string()];
+        assert!(explorer_args_need_system_forward(&clsid));
+        assert!(!explorer_args_need_system_forward(&[]));
+    }
+
+    #[test]
+    fn strip_quotes_and_resolve_token() {
+        assert_eq!(strip_cli_quotes("\"C:\\\\Foo\""), "C:\\\\Foo");
+        let tmp = std::env::temp_dir();
+        assert_eq!(
+            resolve_cli_path_token(&tmp.to_string_lossy()),
+            Some(tmp)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -12397,6 +12439,10 @@ static MD_LINK_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"\[([^\]]+)\]\(([^)\s]+)\)").unwrap());
 
 fn native_git_status(state: &AppState, path: &str) -> Arc<GitStatusMap> {
+    // Low power: skip spawning git so browse stays snappy on battery.
+    if power_saver_active() || current_power_budget() == PowerBudget::Saver {
+        return Arc::new(GitStatusMap::new());
+    }
     if !is_inside_git_worktree(Path::new(path)) {
         return Arc::new(GitStatusMap::new());
     }
@@ -12842,8 +12888,61 @@ fn home_section_label(section_id: u64) -> &'static str {
         3 => "Recent",
         4 => "Saved searches",
         5 => "Places",
+        6 => "Smart folders",
         _ => "",
     }
+}
+
+fn home_smart_pins() -> Vec<String> {
+    read_native_json("home_smart_pins.json", Vec::new())
+}
+
+fn save_home_smart_pins(pins: &[String]) -> Result<(), String> {
+    write_native_json("home_smart_pins.json", &pins)
+}
+
+/// Toggle whether a built-in smart folder id appears on the Home landing.
+/// Returns the updated pin list.
+fn toggle_home_smart_pin(id: &str) -> Result<Vec<String>, String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("Smart folder id is empty".to_string());
+    }
+    let known: Vec<String> = default_smart_folders("")
+        .into_iter()
+        .map(|f| f.id)
+        .collect();
+    if !known.iter().any(|k| k == id) {
+        return Err(format!("Unknown smart folder: {id}"));
+    }
+    let mut pins = home_smart_pins();
+    if let Some(pos) = pins.iter().position(|p| p == id) {
+        pins.remove(pos);
+    } else {
+        pins.push(id.to_string());
+    }
+    save_home_smart_pins(&pins)?;
+    Ok(pins)
+}
+
+fn home_smart_folder_entries() -> Vec<FileEntry> {
+    let pins = home_smart_pins();
+    if pins.is_empty() {
+        return Vec::new();
+    }
+    let folders = smart_folders_for_path("");
+    pins.into_iter()
+        .filter_map(|id| folders.iter().find(|f| f.id == id).cloned())
+        .map(|sf| FileEntry {
+            path: format!("smart:{}", sf.id),
+            name: sf.name.clone(),
+            name_lower: sf.name.to_ascii_lowercase(),
+            kind: FileKind::Other,
+            size: 0,
+            modified: 6,
+            extension: None,
+        })
+        .collect()
 }
 
 fn local_utc_offset_secs() -> i64 {
@@ -13891,6 +13990,133 @@ fn command_items() -> ModelRc<CommandItem> {
     command_items_filtered("")
 }
 
+/// Strip surrounding quotes Explorer sometimes leaves on path tokens.
+fn strip_cli_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2 {
+        let bytes = s.as_bytes();
+        if (bytes[0] == b'"' && bytes[s.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[s.len() - 1] == b'\'')
+        {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+/// Resolve a filesystem path token from Explorer-style CLI fragments.
+/// Files resolve to their parent directory when the parent exists.
+fn resolve_cli_path_token(raw: &str) -> Option<PathBuf> {
+    let cleaned = strip_cli_quotes(raw);
+    if cleaned.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(cleaned);
+    if p.is_file() {
+        let parent = p.parent()?;
+        if parent.as_os_str().is_empty() {
+            return None;
+        }
+        return Some(parent.to_path_buf());
+    }
+    if p.exists() {
+        return Some(p);
+    }
+    // Drive roots like `C:` may not report exists() the same on all hosts.
+    let trimmed = cleaned.trim_end_matches(['\\', '/']);
+    if trimmed.len() == 2 && trimmed.as_bytes()[1] == b':' {
+        let root = PathBuf::from(format!("{}\\", trimmed));
+        if root.exists() {
+            return Some(root);
+        }
+    }
+    None
+}
+
+/// True when an argv token is an Explorer switch we understand as "open folder"
+/// rather than a shell/desktop-only verb that must stay with real explorer.exe.
+fn is_explorer_folder_switch(token: &str) -> bool {
+    let t = token.trim_start_matches(['/', '-']).to_ascii_lowercase();
+    matches!(
+        t.as_str(),
+        "e" | "root" | "select" | "n" | "separate" | "path"
+    ) || t.starts_with("select,")
+        || t.starts_with("e,")
+        || t.starts_with("root,")
+}
+
+/// Args that must be handed to the real `C:\Windows\explorer.exe` so we never
+/// break desktop shell restart, Control Panel CLSIDs, or `shell:` namespaces.
+fn explorer_args_need_system_forward(args: &[String]) -> bool {
+    if args.is_empty() {
+        return false;
+    }
+    for a in args {
+        let lower = a.to_ascii_lowercase();
+        if lower.starts_with("shell:")
+            || lower.starts_with("::")
+            || lower.contains("::{")
+            || lower.starts_with("file:")
+        {
+            return true;
+        }
+        // Unknown slash-switches that aren't folder-open forms.
+        if (a.starts_with('/') || a.starts_with('-'))
+            && !a.starts_with("--path")
+            && !is_explorer_folder_switch(a)
+        {
+            // Comma-combined Explorer forms like `/e,/idlist,...` — forward if
+            // no filesystem path token is present in the whole arg list.
+            let has_pathish = args.iter().any(|x| {
+                let s = strip_cli_quotes(x);
+                Path::new(s).exists()
+                    || resolve_cli_path_token(s).is_some()
+                    || s.contains(":\\")
+                    || s.starts_with("\\\\")
+            });
+            if !has_pathish {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// When App Paths redirects `explorer.exe` → Pathfinder, unhandled Explorer
+/// verbs are forwarded to the real system binary so the desktop shell, CLSIDs,
+/// and `shell:` namespaces keep working. Never replaces `C:\Windows\explorer.exe`.
+#[cfg(target_os = "windows")]
+fn maybe_forward_unhandled_explorer_launch() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--install-shell-handler" | "--uninstall-shell-handler" | "--explorer-shim"
+        )
+    }) {
+        return false;
+    }
+    // If we can resolve a folder ourselves, stay in Pathfinder.
+    if parse_cli_startup_folder_from(&args).is_some() {
+        return false;
+    }
+    if !explorer_args_need_system_forward(&args) {
+        return false;
+    }
+    match folder_shell_registry::spawn_system_explorer(&args) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("[pathfinder] system explorer forward failed: {e}");
+            false
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn maybe_forward_unhandled_explorer_launch() -> bool {
+    false
+}
+
 /// Resolves the folder Pathfinder should land on at startup from process args.
 /// Accepts every form Windows / other apps pass when they want to "open a
 /// folder", so the user doesn't see broken openings from third-party callers:
@@ -13900,6 +14126,7 @@ fn command_items() -> ModelRc<CommandItem> {
 ///   - `/select,<file>` or `/select <file>` - the Explorer convention used by
 ///     "Show in folder" / "Open file location" in many apps (Chrome, Steam,
 ///     Discord, Slack, Notepad, etc). We open the file's parent directory.
+///   - `/e,<dir>`, `/root,<dir>`, and comma-combined Explorer forms.
 ///   - A bare path argument - when an app invokes us as `pathfinder.exe
 ///     C:\Users\Foo` without any flag. Treats files like /select (opens the
 ///     parent).
@@ -13908,41 +14135,51 @@ fn command_items() -> ModelRc<CommandItem> {
 /// to an existing filesystem path.
 fn parse_cli_startup_folder() -> Option<PathBuf> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    parse_cli_startup_folder_from(&args)
+}
+
+fn parse_cli_startup_folder_from(args: &[String]) -> Option<PathBuf> {
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
-        if a == "--path" {
+        if a == "--path" || a.eq_ignore_ascii_case("/path") {
             if let Some(next) = args.get(i + 1) {
-                return Some(PathBuf::from(next));
+                if let Some(p) = resolve_cli_path_token(next) {
+                    return Some(p);
+                }
             }
         } else if let Some(rest) = a.strip_prefix("--path=") {
-            if !rest.is_empty() {
-                return Some(PathBuf::from(rest));
+            if let Some(p) = resolve_cli_path_token(rest) {
+                return Some(p);
             }
-        } else if let Some(rest) = a.strip_prefix("/select,") {
-            // Explorer-style /select,<file> - open parent and (ideally) select.
-            if !rest.is_empty() {
-                let f = std::path::PathBuf::from(rest);
-                if let Some(parent) = f.parent() {
-                    if parent.exists() {
-                        return Some(parent.to_path_buf());
+        } else if a.starts_with('/') || (a.starts_with('-') && !a.starts_with("--")) {
+            // Explorer comma-forms: /select,C:\a\b.txt  /e,C:\foo  /e,/select,C:\a\b
+            // Also spaced: /select C:\a\b.txt
+            let body = a.trim_start_matches(['/', '-']);
+            let lower = body.to_ascii_lowercase();
+            if lower == "select" || lower == "e" || lower == "root" {
+                if let Some(next) = args.get(i + 1) {
+                    if let Some(p) = resolve_cli_path_token(next) {
+                        return Some(p);
+                    }
+                }
+            } else {
+                for part in body.split(',') {
+                    let part = part.trim();
+                    let pl = part.to_ascii_lowercase();
+                    if pl.is_empty() || matches!(pl.as_str(), "e" | "n" | "select" | "root" | "separate")
+                    {
+                        continue;
+                    }
+                    if let Some(p) = resolve_cli_path_token(part) {
+                        return Some(p);
                     }
                 }
             }
-        } else if a == "/select" {
-            if let Some(next) = args.get(i + 1) {
-                let f = std::path::PathBuf::from(next);
-                if let Some(parent) = f.parent() {
-                    if parent.exists() {
-                        return Some(parent.to_path_buf());
-                    }
-                }
-            }
-        } else if !a.starts_with('-') && !a.starts_with('/') {
+        } else if !a.starts_with('-') {
             // Bare path argument. Some launchers pass just the path without a
             // flag; the registry handler still sees `pathfinder.exe "path"`.
-            let p = std::path::PathBuf::from(a);
-            if p.exists() {
+            if let Some(p) = resolve_cli_path_token(a) {
                 return Some(p);
             }
         }
@@ -14472,6 +14709,7 @@ impl NativeController {
             secondary_files_model: None,
             active_pane: ActivePane::Primary,
             folder_filter: String::new(),
+            secondary_folder_filter: String::new(),
             git_status: Arc::new(HashMap::new()),
             git_dir_status: HashMap::new(),
             settings,
@@ -15172,9 +15410,9 @@ impl NativeController {
         self.show_toast(
             ui,
             if on {
-                "Low power mode on. Background indexing and theme motion stay reduced."
+                "Low power mode on. Indexing, theme motion, and git badges stay reduced."
             } else {
-                "Low power mode off. Full background work and theme motion restored."
+                "Low power mode off. Full background work, theme motion, and git badges restored."
             },
         );
     }
@@ -15189,10 +15427,37 @@ impl NativeController {
         }
         ui.global::<ThemePalette>().set_power_saver(saver);
         ui.set_low_power_enabled(self.settings.low_power_enabled);
-        if was_saver && !saver {
+        if saver {
+            self.git_status = Arc::new(GitStatusMap::new());
+            self.git_dir_status.clear();
+            self.git_status_ready.store(false, Ordering::Release);
+            if let Ok(mut lock) = self.pending_git_status.lock() {
+                *lock = None;
+            }
+            self.update_models(ui);
+        } else if was_saver {
             let roots = index_roots_for_mode(&self.settings);
             if !roots.is_empty() {
                 schedule_index_roots(roots);
+            }
+            // Refresh git badges for the current folder after leaving saver.
+            if !is_virtual_nav_path(&self.current_path)
+                && self.files.len() <= LARGE_DIRECTORY_GIT_CAP
+            {
+                let ready = self.git_status_ready.clone();
+                let pending = self.pending_git_status.clone();
+                let state = self.app_state.clone();
+                let p = self.current_path.clone();
+                std::thread::spawn(move || {
+                    if !is_inside_git_worktree(Path::new(&p)) {
+                        return;
+                    }
+                    let status = native_git_status(&state, &p);
+                    if let Ok(mut lock) = pending.lock() {
+                        *lock = Some(status);
+                    }
+                    ready.store(true, Ordering::Release);
+                });
             }
         }
     }
@@ -15404,16 +15669,14 @@ impl NativeController {
     }
 
     fn apply_secondary_filter(&mut self) {
-        if self.show_hidden {
-            self.secondary_visible_files = self.secondary_files.clone();
-        } else {
-            self.secondary_visible_files = self
-                .secondary_files
-                .iter()
-                .filter(|e| !Self::is_hidden_entry(e))
-                .cloned()
-                .collect();
-        }
+        let name_filter = self.secondary_folder_filter.trim().to_lowercase();
+        self.secondary_visible_files = self
+            .secondary_files
+            .iter()
+            .filter(|e| self.show_hidden || !Self::is_hidden_entry(e))
+            .filter(|e| name_filter.is_empty() || e.name_lower.contains(&name_filter))
+            .cloned()
+            .collect();
         self.apply_secondary_sort();
     }
 
@@ -17402,7 +17665,15 @@ impl NativeController {
         self.selected_set.clear();
         self.select_anchor = -1;
         self.files_model = None;
-        if self.files.len() <= LARGE_DIRECTORY_GIT_CAP {
+        if power_saver_active() || current_power_budget() == PowerBudget::Saver {
+            // Defer git badges entirely while low power is on.
+            self.git_status = Arc::new(GitStatusMap::new());
+            self.git_dir_status.clear();
+            self.git_status_ready.store(false, Ordering::Release);
+            if let Ok(mut lock) = self.pending_git_status.lock() {
+                *lock = None;
+            }
+        } else if self.files.len() <= LARGE_DIRECTORY_GIT_CAP {
             let ready = self.git_status_ready.clone();
             let pending = self.pending_git_status.clone();
             let state = self.app_state.clone();
@@ -20061,6 +20332,7 @@ impl NativeController {
                     .map(|e| e.to_string_lossy().to_string()),
             });
         }
+        entries.extend(home_smart_folder_entries());
         for entry in self.recent_locations.iter().take(8) {
             let path = entry.path.as_str();
             if path == "home://" || path == "storage://" || path == "recycle://" {
@@ -20442,8 +20714,16 @@ impl NativeController {
 
     fn set_folder_filter(&mut self, ui: &MainWindow, text: String) {
         self.folder_filter = text;
+        ui.set_filter_text(ss(&self.folder_filter));
         self.apply_filter();
         self.update_models(ui);
+    }
+
+    fn set_secondary_folder_filter(&mut self, ui: &MainWindow, text: String) {
+        self.secondary_folder_filter = text;
+        ui.set_secondary_filter_text(ss(&self.secondary_folder_filter));
+        self.apply_secondary_filter();
+        self.update_secondary_models(ui);
     }
 
     fn secondary_file_selected(&mut self, ui: &MainWindow, index: i32, ctrl: bool, shift: bool) {
@@ -22806,6 +23086,7 @@ impl NativeController {
                     .map(|e| e.to_string_lossy().to_string()),
             });
         }
+        entries.extend(home_smart_folder_entries());
         for entry in self.recent_locations.iter().take(8) {
             let path = entry.path.as_str();
             if path == "home://" || path == "storage://" || path == "recycle://" {
@@ -22921,21 +23202,25 @@ impl NativeController {
     }
 
     fn show_smart_folders(&mut self, ui: &MainWindow) {
+        let pinned = home_smart_pins();
         let items: Vec<ToolListItem> = smart_folders_for_path(&self.current_path)
             .into_iter()
-            .map(|s| ToolListItem {
-                id: ss(&s.id),
-                title: ss(&s.name),
-                subtitle: ss(&s.description),
-                meta: ss(""),
-                enabled: true,
-                accent: color("#4f9cff"),
+            .map(|s| {
+                let on_home = pinned.iter().any(|p| p == &s.id);
+                ToolListItem {
+                    id: ss(&s.id),
+                    title: ss(&s.name),
+                    subtitle: ss(&s.description),
+                    meta: ss(""),
+                    enabled: on_home,
+                    accent: color("#4f9cff"),
+                }
             })
             .collect();
         ui.set_tool_overlay_kind(ss("smart-folders"));
         ui.set_tool_overlay_title(ss(&i18n::t("Smart Folders")));
         ui.set_tool_overlay_subtitle(ss(
-            "Click a smart folder to filter. Labels can be renamed from More.",
+            "Click to filter. Pin toggles Home. More renames the label.",
         ));
         ui.set_tool_overlay_items(model_from_vec(items));
         ui.set_tool_overlay_visible(true);
@@ -24981,7 +25266,30 @@ impl NativeController {
     }
 
     fn tool_overlay_toggle(&mut self, ui: &MainWindow, id: String) {
-        if ui.get_tool_overlay_kind().as_str() != "rules" {
+        let kind = ui.get_tool_overlay_kind().to_string();
+        if kind == "smart-folders" {
+            match toggle_home_smart_pin(&id) {
+                Ok(pins) => {
+                    let on_home = pins.iter().any(|p| p == &id);
+                    self.show_smart_folders(ui);
+                    if self.current_path == "home://" {
+                        self.open_home_view(ui, false);
+                    }
+                    self.show_toast_kind(
+                        ui,
+                        if on_home {
+                            "Pinned smart folder to Home"
+                        } else {
+                            "Removed smart folder from Home"
+                        },
+                        "success",
+                    );
+                }
+                Err(e) => self.show_toast_kind(ui, e, "error"),
+            }
+            return;
+        }
+        if kind != "rules" {
             return;
         }
         let Ok(idx) = id.parse::<usize>() else {
@@ -26719,6 +27027,25 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             move || {
                 if let Some(ui) = weak2.upgrade() {
                     c2.borrow_mut().set_folder_filter(&ui, t.clone());
+                }
+            },
+        );
+    });
+
+    let secondary_filter_debounce = Rc::new(slint::Timer::default());
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    let sfd = secondary_filter_debounce.clone();
+    ui.on_secondary_filter_changed(move |text| {
+        let t = text.to_string();
+        let weak2 = weak.clone();
+        let c2 = c.clone();
+        sfd.start(
+            slint::TimerMode::SingleShot,
+            Duration::from_millis(150),
+            move || {
+                if let Some(ui) = weak2.upgrade() {
+                    c2.borrow_mut().set_secondary_folder_filter(&ui, t.clone());
                 }
             },
         );
@@ -30146,6 +30473,11 @@ fn handle_shell_handler_cli_flags() -> bool {
 
 pub fn run() {
     if handle_shell_handler_cli_flags() {
+        return;
+    }
+    // App Paths may redirect bare `explorer.exe` here. Forward CLSID / shell:
+    // / unknown verbs to the real system binary so the desktop never breaks.
+    if maybe_forward_unhandled_explorer_launch() {
         return;
     }
 

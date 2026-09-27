@@ -206,12 +206,23 @@ When Pathfinder is set as the default folder handler, it intercepts these shell 
 - Directory listing: First 2,500 entries in <100ms
 - Full index: Lazy-loaded in background, doesn't block UI
 
+## Safe Explorer bypass (what Pathfinder does / does not do)
+
+When you set Pathfinder as the default folder handler it:
+
+1. Writes **HKCU only** (no admin, never touches HKLM)
+2. Registers Folder / Directory / Drive `open` + `explore` verbs
+3. Adds a per-user **App Paths** redirect so bare `explorer.exe` (Chrome “Show in folder”, etc.) launches Pathfinder with the same args
+4. **Never replaces** `C:\Windows\explorer.exe` — desktop shell restart by full path still works
+5. **Forwards** unhandled verbs (`shell:`, CLSIDs, unknown switches without a folder path) to the real system Explorer so Control Panel and namespace opens keep working
+
 ## Limitations and Known Issues
 
-1. **Windows Sandbox / Virtual Machines**: Some virtua machines may have file system integration issues
+1. **Windows Sandbox / Virtual Machines**: Some virtual machines may have file system integration issues
 2. **Network paths**: UNC paths like `\\server\share` work but may be slower
-3. **Special folders**: Virtual shell folders (Control Panel, etc.) open in Explorer (by design)
-4. **System Dialogs**: Some system file picker dialogs still use Explorer (app-specific)
+3. **Special folders**: Virtual shell folders (Control Panel, etc.) open in Explorer (by design — forwarded)
+4. **System Dialogs**: Open/Save file picker dialogs still use the common dialog (not a folder handler)
+5. **Full-path explorer launches**: Apps that call `C:\Windows\explorer.exe` directly bypass App Paths; folder shell verbs still catch most “open folder” cases
 
 ## Contributing Integrations
 

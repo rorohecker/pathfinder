@@ -3867,6 +3867,7 @@ export component MainWindow inherits Window {
     in-out property <string> secondary_sort_dir: "desc";
     in-out property <string> filter_text: "";
     in-out property <bool> filter_bar_visible: false;
+    in-out property <string> secondary_filter_text: "";
     in-out property <[string]> tag_names: ["Urgent", "Important", "Review", "Done", "Personal", "Code"];
     in-out property <bool> context_on_file: false;
     in-out property <bool> context_is_archive: false;
@@ -3875,6 +3876,7 @@ export component MainWindow inherits Window {
     in-out property <bool> secondary_addr_editing: false;
 
     callback filter_commands(string);
+    callback secondary_filter_changed(string);
     callback command_run_first(string);
     callback navigate(string);
     callback crumb_navigate(int);
@@ -4076,11 +4078,13 @@ export component MainWindow inherits Window {
     property <length> simple_row2_y: 48px;
     property <length> simple_btn_w: 88px;
     property <length> simple_btn_h: 38px;
-    property <length> filter_bar_h: root.filter_bar_visible ? 36px : 0px;
+    property <length> filter_bar_h: (root.filter_bar_visible || root.filter_text != "") ? 36px : 0px;
     animate filter_bar_h {
         duration: 180ms;
         easing: cubic-bezier(0.22, 1, 0.36, 1);
     }
+    // Secondary pane filter row (always available in dual pane; keeps parity with primary).
+    property <length> secondary_filter_h: 32px;
     property <length> status_h: 26px;
     // User-set preview pane width (drag handle on its left edge writes here).
     // Clamped to a usable range so the preview never shrinks to nothing or
@@ -4610,8 +4614,8 @@ export component MainWindow inherits Window {
             property <length> tb_ops_w: root.search_text != "" ? 64px : 32px;
             property <length> tb_search_w: 208px;
             property <length> tb_sort_w: 196px;
-            // View cluster is 318px; thumb −/+ (60px + 8px gap) sits to its left in grid/gallery.
-            property <length> tb_view_cluster_w: 318px;
+            // View cluster includes Icons→Dual (+ Filter). Thumb −/+ sits to its left in grid/gallery.
+            property <length> tb_view_cluster_w: 352px;
             property <length> tb_thumb_zoom_w: !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid")
                 ? 68px
                 : 0px;
@@ -5334,7 +5338,7 @@ export component MainWindow inherits Window {
             // View-mode cluster. 34px stride (31px button + 3px gap) so icons
             // stay centered in their hit boxes without overlapping neighbors.
             ToolButton {
-                x: root.is_simple ? 10px : parent.width - 318px;
+                x: root.is_simple ? 10px : parent.width - 352px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z";
@@ -5347,7 +5351,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("grid"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 284px;
+                x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 318px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12";
@@ -5360,7 +5364,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("compact"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 250px;
+                x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 284px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01";
@@ -5373,7 +5377,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("list"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 216px;
+                x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 250px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01";
@@ -5386,7 +5390,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("gallery"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 182px;
+                x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 216px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 4h18v16H3z M14 4v16";
@@ -5397,6 +5401,21 @@ export component MainWindow inherits Window {
                 tooltip: @tr("Preview pane");
                 active: root.preview_visible;
                 clicked => { root.toggle_preview(); }
+            }
+            ToolButton {
+                visible: !root.is_simple;
+                x: parent.width - 182px;
+                y: 6px;
+                icon_data: "M4 4h16v4H4z M4 10h10v2H4z M4 14h12v2H4z";
+                tooltip: @tr("Filter folder");
+                active: root.filter_bar_visible || root.filter_text != "";
+                clicked => {
+                    root.filter_bar_visible = !root.filter_bar_visible;
+                    if (!root.filter_bar_visible && root.filter_text != "") {
+                        root.filter_text = "";
+                        root.filter_changed("");
+                    }
+                }
             }
             ToolButton { visible: !root.is_simple; x: parent.width - 148px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: @tr("Dual pane"); active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
             // Clear-sort button - appears in the gap between Dual Pane and Command Palette
@@ -5522,11 +5541,59 @@ export component MainWindow inherits Window {
                 }
             }
 
-            primary_pane_root := Rectangle {
+            // Primary folder filter — toggled from the toolbar Filter button.
+            if root.filter_bar_h > 0px: Rectangle {
                 x: 0;
                 y: root.folder_changed_banner ? 28px : 0;
                 width: root.primary_pane_w;
-                height: parent.height;
+                height: 36px;
+                background: ThemePalette.panel;
+                z: 7;
+                Text {
+                    x: 12px; y: 0; width: 48px; height: parent.height;
+                    text: @tr("Filter");
+                    color: ThemePalette.text_faint; font-size: 11px; font-weight: 600;
+                    vertical-alignment: center;
+                }
+                filter_input := LineEdit {
+                    x: 64px;
+                    y: 5px;
+                    width: parent.width - 108px;
+                    height: 26px;
+                    text <=> root.filter_text;
+                    font-size: 12px;
+                    placeholder-text: @tr("Filter this folder…");
+                    edited => { root.filter_changed(self.text); }
+                    accepted => { root.filter_changed(self.text); }
+                    key-pressed(e) => {
+                        if (e.text == Key.Escape) {
+                            root.filter_text = "";
+                            root.filter_changed("");
+                            root.filter_bar_visible = false;
+                            return accept;
+                        }
+                        return reject;
+                    }
+                }
+                ToolButton {
+                    x: parent.width - 36px; y: 4px;
+                    button_width: 28px; button_height: 28px;
+                    icon_data: "M18 6L6 18 M6 6l12 12";
+                    tooltip: @tr("Clear filter");
+                    clicked => {
+                        root.filter_text = "";
+                        root.filter_changed("");
+                        root.filter_bar_visible = false;
+                    }
+                }
+                Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
+            }
+
+            primary_pane_root := Rectangle {
+                x: 0;
+                y: (root.folder_changed_banner ? 28px : 0px) + root.filter_bar_h;
+                width: root.primary_pane_w;
+                height: parent.height - ((root.folder_changed_banner ? 28px : 0px) + root.filter_bar_h);
                 // Transparent so the parent sunset sky wash (or ThemePalette.bg) shows through.
                 background: transparent;
                 opacity: root.nav_opacity;
@@ -6417,10 +6484,55 @@ export component MainWindow inherits Window {
                     Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
                 }
 
+                // Secondary folder filter — parity with the primary filter bar.
+                Rectangle {
+                    x: 0;
+                    y: 38px;
+                    width: parent.width;
+                    height: root.secondary_filter_h;
+                    background: ThemePalette.bg_soft;
+                    Text {
+                        x: 8px; y: 0; width: 40px; height: parent.height;
+                        text: @tr("Filter");
+                        color: ThemePalette.text_faint; font-size: 10.5px; font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    sec_filter_input := LineEdit {
+                        x: 50px;
+                        y: 3px;
+                        width: parent.width - 90px;
+                        height: 26px;
+                        text <=> root.secondary_filter_text;
+                        font-size: 11.5px;
+                        placeholder-text: @tr("Filter…");
+                        edited => { root.secondary_filter_changed(self.text); }
+                        accepted => { root.secondary_filter_changed(self.text); }
+                        key-pressed(e) => {
+                            if (e.text == Key.Escape) {
+                                root.secondary_filter_text = "";
+                                root.secondary_filter_changed("");
+                                return accept;
+                            }
+                            return reject;
+                        }
+                    }
+                    ToolButton {
+                        x: parent.width - 34px; y: 2px;
+                        button_width: 28px; button_height: 28px;
+                        icon_data: "M18 6L6 18 M6 6l12 12";
+                        tooltip: @tr("Clear filter");
+                        clicked => {
+                            root.secondary_filter_text = "";
+                            root.secondary_filter_changed("");
+                        }
+                    }
+                    Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
+                }
+
                 // Sort header (list mode only)
                 if root.view_mode == "list": ListHeader {
                     x: AppMetrics.pad;
-                    y: 38px;
+                    y: 38px + root.secondary_filter_h;
                     // Match the ListView width below (which reserves scroll_gutter
                     // for its scroll bar) so the column headers line up with rows.
                     width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
@@ -6437,9 +6549,9 @@ export component MainWindow inherits Window {
                 // so the controller knows it's an empty-space context (paste, new folder, etc.).
                 Rectangle {
                     x: 0;
-                    y: root.view_mode == "list" ? 70px : 38px;
+                    y: root.view_mode == "list" ? (70px + root.secondary_filter_h) : (38px + root.secondary_filter_h);
                     width: parent.width;
-                    height: parent.height - (root.view_mode == "list" ? 70px : 38px);
+                    height: parent.height - (root.view_mode == "list" ? (70px + root.secondary_filter_h) : (38px + root.secondary_filter_h));
                     background: transparent;
                     sec_empty_touch := TouchArea {
                         width: parent.width;
@@ -6464,12 +6576,12 @@ export component MainWindow inherits Window {
 
                 if root.view_mode == "list": ScrollView {
                     x: AppMetrics.pad;
-                    y: 38px + 32px;
+                    y: 38px + root.secondary_filter_h + 32px;
                     width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
-                    height: parent.height - 38px - 32px - AppMetrics.pad;
+                    height: parent.height - 38px - root.secondary_filter_h - 32px - AppMetrics.pad;
                     viewport-y <=> root.secondary_list_scroll_y;
                     viewport-width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
-                    viewport-height: Math.max(parent.height - 38px - 32px - AppMetrics.pad, root.secondary_list_content_h);
+                    viewport-height: Math.max(parent.height - 38px - root.secondary_filter_h - 32px - AppMetrics.pad, root.secondary_list_content_h);
                     changed height => {
                         root.secondary_list_viewport_h = self.height;
                         root.sync_grid_windows();
@@ -6512,12 +6624,12 @@ export component MainWindow inherits Window {
 
                 if root.view_mode != "list": ScrollView {
                     x: AppMetrics.pad;
-                    y: 38px + AppMetrics.pad;
+                    y: 38px + root.secondary_filter_h + AppMetrics.pad;
                     width: parent.width - AppMetrics.pad * 2;
-                    height: parent.height - 38px - AppMetrics.pad * 2;
+                    height: parent.height - 38px - root.secondary_filter_h - AppMetrics.pad * 2;
                     viewport-y <=> root.secondary_list_scroll_y;
                     viewport-width: parent.width - AppMetrics.pad * 2;
-                    viewport-height: Math.max(parent.height - 38px - AppMetrics.pad * 2, root.secondary_grid_rows * (root.secondary_grid_item_h + root.secondary_grid_gap));
+                    viewport-height: Math.max(parent.height - 38px - root.secondary_filter_h - AppMetrics.pad * 2, root.secondary_grid_rows * (root.secondary_grid_item_h + root.secondary_grid_gap));
                     changed height => {
                         root.secondary_grid_viewport_h = self.height;
                         root.sync_grid_windows();
@@ -6558,9 +6670,9 @@ export component MainWindow inherits Window {
                     spawn_from: 8px;
                     motion: 120ms;
                     x: 0;
-                    y: 38px + (root.view_mode == "list" ? 32px : 0px) + self.rise;
+                    y: 38px + root.secondary_filter_h + (root.view_mode == "list" ? 32px : 0px) + self.rise;
                     width: parent.width;
-                    height: parent.height - 38px - (root.view_mode == "list" ? 32px : 0px);
+                    height: parent.height - 38px - root.secondary_filter_h - (root.view_mode == "list" ? 32px : 0px);
                     property <bool> fantasy_on: ThemePalette.active_theme == "fantasy";
                     property <bool> retro_on: ThemePalette.active_theme == "retro";
                     property <bool> sunset_on: ThemePalette.active_theme == "sunset";
@@ -9062,7 +9174,7 @@ export component MainWindow inherits Window {
                     spacing: 10px;
                     Text { text: @tr("WINDOWS INTEGRATION"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
                     Text {
-                        text: @tr("Registers Pathfinder for your user account only (HKCU). Double-clicking a folder in Explorer opens it in Pathfinder. This does not replace every Explorer surface on Windows 11.");
+                        text: @tr("Registers Pathfinder for your user account only (HKCU). Folder/drive opens and bare explorer.exe launches (Show in folder) open Pathfinder. Never replaces C:\\Windows\\explorer.exe — shell restart, Control Panel, and shell: namespaces still use real Explorer.");
                         color: ThemePalette.text_muted;
                         font-size: 11.5px;
                         wrap: word-wrap;
@@ -9083,7 +9195,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     Text {
-                        text: @tr("Alternative: import extras/set-pathfinder-default-folder-handler.reg and replace CHANGEME_EXE with your pathfinder.exe path.");
+                        text: @tr("Safe by design: HKCU only, no admin, and unknown Explorer verbs are forwarded to the system binary. Alternative: import extras/set-pathfinder-default-folder-handler.reg with your pathfinder.exe path.");
                         color: ThemePalette.text_faint;
                         font-size: 11px;
                         wrap: word-wrap;
@@ -9138,7 +9250,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     Text {
-                        text: @tr("Optional. When on, Pathfinder pauses theme motion, skips fresh thumbnail encodes, slows idle polling, and holds background indexing — browsing and opens stay responsive.");
+                        text: @tr("Optional. When on, Pathfinder pauses theme motion, skips fresh thumbnail encodes, holds background indexing, and defers git status badges — browsing and opens stay responsive.");
                         color: ThemePalette.text_faint;
                         font-size: 11px;
                         wrap: word-wrap;
@@ -10046,6 +10158,21 @@ export component MainWindow inherits Window {
                             clicked => { root.tool_overlay_toggle(item.id); }
                         }
                     }
+                    if root.tool_overlay_kind == "smart-folders": Rectangle {
+                        x: parent.width - 108px; y: 14px; width: 52px; height: 24px;
+                        border-radius: 12px;
+                        background: item.enabled ? ThemePalette.accent : ThemePalette.border_strong;
+                        Text {
+                            width: parent.width; height: parent.height;
+                            text: item.enabled ? @tr("Home") : @tr("Pin");
+                            color: white; font-size: 10px; font-weight: 700;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.tool_overlay_toggle(item.id); }
+                        }
+                    }
                     if item.meta != "": Text {
                         x: parent.width - 90px; y: 0; width: 78px; height: parent.height;
                         text: item.meta;
@@ -10057,12 +10184,12 @@ export component MainWindow inherits Window {
                         button_width: 28px; button_height: 28px;
                         visible: item.meta == "" && root.tool_overlay_kind == "smart-folders";
                         text_label: "···";
-                        tooltip: @tr("More");
+                        tooltip: @tr("Rename");
                         clicked => { root.tool_overlay_secondary(item.id); }
                     }
                     tool_row_ta := TouchArea {
                         x: 0; y: 0;
-                        width: parent.width - (root.tool_overlay_kind == "rules" ? 112px : 40px);
+                        width: parent.width - (root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders" ? 112px : 40px);
                         height: parent.height;
                         mouse-cursor: pointer;
                         clicked => { root.tool_overlay_activate(item.id); }

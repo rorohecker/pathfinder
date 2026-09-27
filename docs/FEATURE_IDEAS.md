@@ -1,6 +1,6 @@
 # Pathfinder — feature ideas & known bugs
 
-Updated with Settings View label fix + auto-refresh on folder change (v1.0.21).
+Updated with dual-pane filter, low-power git deferral, Home smart pins, and safe Explorer bypass (v1.0.22).
 
 ## Known bugs (addressed this pass)
 
@@ -21,13 +21,16 @@ Updated with Settings View label fix + auto-refresh on folder change (v1.0.21).
 2. **In-app Properties sheet** — tool overlay with size, dates, tag, copy path (+ Windows Properties).
 3. **Open With → Set as default** — overlay offers choose-once vs register-as-default.
 4. **Session conflict policy** — “Remember for this session” on Skip/Replace/Keep Both.
+5. **Dual-pane folder filter** — secondary pane has its own filter row; primary filter bar wired from the toolbar.
 6. **Pause folder watchers while minimized** — drop notify watchers when occluded; re-arm on restore.
+7. **Defer git status on low power** — no porcelain spawn / badges while Saver is active; resumes on toggle off.
+8. **User-pinned smart folders on Home** — Pin/Home toggle in Smart Folders overlay; persisted in `home_smart_pins.json`.
 9. **Recents grouped by day** — Home + Recent Locations overlay use day buckets; visits store timestamps.
 10. **Auto-refresh on folder change** — watched-directory notify events soft-refresh the listing (debounced); banner only while inline rename is active.
+11. **Safe Explorer bypass** — HKCU folder/drive verbs + App Paths redirect; unhandled `shell:` / CLSID / unknown explorer verbs forward to `C:\Windows\explorer.exe` (never replaces the system binary).
 
 ## Still open / later
 
-5. Dual-pane parity extras (folder filter on secondary).
-7. Defer git status on battery / low power.
-8. User-pinned smart folders on Home.
-10. (Done via bugs 5–6) Stable Recycle Bin + undo by trash id.
+- Code-signing NSIS/MSI in CI (needs cert).
+- Skia renderer (ICU clash with windows-rs).
+- Optional Win+E hotkey (shell-level; separate from App Paths).

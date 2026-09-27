@@ -1,5 +1,13 @@
 //! Per-user (HKCU) overrides so Explorer opens folders with Pathfinder via `--path \"%1\"`.
 //! Does not touch `HKCU\\...\\file\\shell\\open` - that would hijack all file opens.
+//!
+//! Safety contract:
+//! - Only writes `HKEY_CURRENT_USER` (no admin, no HKLM, never replaces
+//!   `C:\\Windows\\explorer.exe`).
+//! - App Paths redirects bare `explorer.exe` name lookups to Pathfinder; full-path
+//!   shell restarts (`C:\\Windows\\explorer.exe`) still hit the real binary.
+//! - Unhandled Explorer verbs (`shell:`, CLSIDs, unknown switches) are forwarded
+//!   to the system explorer via [`spawn_system_explorer`] so the desktop never breaks.
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -117,8 +125,35 @@ const FOLDER_HANDLER_PATHS: [&str; 6] = [
 /// Per-user redirect so `explorer.exe` (taskbar/desktop shortcut, Chrome
 /// "Show in folder" via `/select`, etc.) launches Pathfinder with the same args.
 /// HKCU only - no admin rights. Removed by [`restore_windows_default_folder_handler`].
+///
+/// This does **not** replace the system binary. Processes that launch
+/// `C:\Windows\explorer.exe` by full path (including desktop shell restart)
+/// bypass App Paths and keep working.
 const EXPLORER_APP_PATH_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\App Paths\explorer.exe";
+
+/// Absolute path to the real Windows Explorer binary. Used when Pathfinder is
+/// invoked via App Paths with verbs it cannot host (CLSID, shell:, etc.).
+pub fn system_explorer_exe() -> std::path::PathBuf {
+    std::env::var_os("WINDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+        .join("explorer.exe")
+}
+
+/// Launch the real system Explorer with the given args and return. Never used
+/// for Pathfinder's own UI — only as a safe fallback for unhandled shell verbs.
+pub fn spawn_system_explorer(args: &[String]) -> Result<(), String> {
+    let exe = system_explorer_exe();
+    if !exe.is_file() {
+        return Err(format!("system explorer not found at {}", exe.display()));
+    }
+    std::process::Command::new(&exe)
+        .args(args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to spawn {}: {e}", exe.display()))
+}
 
 fn folder_open_command(exe: &str) -> String {
     format!("\"{exe}\" --path \"%1\"")
