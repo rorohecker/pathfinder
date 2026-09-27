@@ -19143,6 +19143,38 @@ impl NativeController {
         is_duplicate_open(&mut self.last_opened, path, Instant::now())
     }
 
+    /// Run a smart-folder query (sidebar, Home pin, or overlay). Handles
+    /// old-downloads navigation to the Downloads scope when needed.
+    fn activate_smart_folder(&mut self, ui: &MainWindow, smart_id: &str) {
+        let query = smart_folders_for_path(&self.current_path)
+            .into_iter()
+            .find(|f| f.id == smart_id)
+            .map(|f| f.query)
+            .unwrap_or_else(|| format!("smart:{smart_id}"));
+        if smart_id == "old-downloads" {
+            if let Some(downloads) = dirs::download_dir() {
+                let target = downloads.to_string_lossy().to_string();
+                self.search_query = query.clone();
+                ui.set_search_text(ss(&query));
+                if !same_path_string(&self.current_path, &target) {
+                    self.navigate(ui, target, true);
+                } else {
+                    self.apply_filter();
+                    self.selected_index = -1;
+                    self.update_models(ui);
+                }
+                self.search(ui, query);
+                return;
+            }
+        }
+        self.search_query = query.clone();
+        ui.set_search_text(ss(&query));
+        self.apply_filter();
+        self.selected_index = -1;
+        self.update_models(ui);
+        self.search(ui, query);
+    }
+
     fn open_index(&mut self, ui: &MainWindow, index: i32) {
         self.active_pane = ActivePane::Primary;
         if index < 0 {
@@ -19187,6 +19219,10 @@ impl NativeController {
                     self.search(ui, self.search_query.clone());
                 }
             }
+            return;
+        }
+        if let Some(smart) = entry.path.strip_prefix("smart:") {
+            self.activate_smart_folder(ui, smart);
             return;
         }
         if entry.path == "storage://" || entry.path == "recycle://" || entry.path == "home://" {
@@ -20792,6 +20828,31 @@ impl NativeController {
         self.active_pane = ActivePane::Secondary;
         if let Some(entry) = self.secondary_visible_files.get(index as usize).cloned() {
             if self.should_skip_duplicate_open(&entry.path) {
+                return;
+            }
+            // Smart folders / saved searches are primary-pane filter flows.
+            if let Some(smart) = entry.path.strip_prefix("smart:") {
+                self.active_pane = ActivePane::Primary;
+                self.sync_active_pane(ui);
+                self.activate_smart_folder(ui, smart);
+                return;
+            }
+            if let Some(name) = entry.path.strip_prefix("search:") {
+                self.active_pane = ActivePane::Primary;
+                self.sync_active_pane(ui);
+                let saved = read_native_json::<Vec<SavedSearch>>("searches.json", Vec::new());
+                if let Some(search) = saved.into_iter().find(|s| s.name == name) {
+                    self.search_query = search.query.clone();
+                    ui.set_search_text(ss(&search.query));
+                    if !search.scope.is_empty() {
+                        self.navigate(ui, search.scope, true);
+                    }
+                    self.search(ui, self.search_query.clone());
+                }
+                return;
+            }
+            if entry.path == "storage://" || entry.path == "recycle://" || entry.path == "home://" {
+                self.secondary_navigate(ui, entry.path);
                 return;
             }
             if entry.kind == FileKind::Directory {
@@ -25144,23 +25205,7 @@ impl NativeController {
         match kind.as_str() {
             "smart-folders" => {
                 ui.set_tool_overlay_visible(false);
-                let query = smart_folders_for_path(&self.current_path)
-                    .into_iter()
-                    .find(|f| f.id == id)
-                    .map(|f| f.query)
-                    .unwrap_or_else(|| format!("smart:{id}"));
-                if id == "old-downloads" {
-                    if let Some(downloads) = dirs::download_dir() {
-                        self.search_query = query;
-                        ui.set_search_text(ss(&self.search_query));
-                        self.navigate(ui, downloads.to_string_lossy().to_string(), true);
-                        self.search(ui, self.search_query.clone());
-                        return;
-                    }
-                }
-                self.search_query = query;
-                ui.set_search_text(ss(&self.search_query));
-                self.search(ui, self.search_query.clone());
+                self.activate_smart_folder(ui, &id);
             }
             "templates" => {
                 if let Some(template) = load_file_templates().into_iter().find(|t| t.name == id) {
