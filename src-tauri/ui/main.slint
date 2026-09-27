@@ -6552,9 +6552,10 @@ export component MainWindow inherits Window {
                 // so the controller knows it's an empty-space context (paste, new folder, etc.).
                 Rectangle {
                     x: 0;
-                    y: root.view_mode == "list" ? (70px + root.secondary_filter_h) : (38px + root.secondary_filter_h);
+                    // 38 addr + filter + (32 list header when in list mode)
+                    y: root.view_mode == "list" ? (38px + root.secondary_filter_h + 32px) : (38px + root.secondary_filter_h);
                     width: parent.width;
-                    height: parent.height - (root.view_mode == "list" ? (70px + root.secondary_filter_h) : (38px + root.secondary_filter_h));
+                    height: parent.height - (root.view_mode == "list" ? (38px + root.secondary_filter_h + 32px) : (38px + root.secondary_filter_h));
                     background: transparent;
                     sec_empty_touch := TouchArea {
                         width: parent.width;
