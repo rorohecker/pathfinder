@@ -31,10 +31,11 @@ Updated with dual-pane filter, low-power git deferral, Home smart pins, and safe
 
 ## Shipped in follow-up (v1.0.22+)
 
-- **Sticky selection** — soft refresh / F5 remaps selection by path.
-- **Workspace layouts** — save/restore dual pane, secondary path, splitter, active tab.
-- **Undo history overlay** — clickable stack + Clear (multi-step undo was already via operation_log).
-- **Flat view** — recursive listing under the current folder (capped at 8k), toolbar + Ctrl+Shift+L.
+- **Sticky selection** — soft refresh / F5 remaps selection by path (also remaps across folder-filter edits).
+- **Workspace layouts** — save/restore dual pane, secondary path, splitter, active tab (missing secondary falls back).
+- **Undo history overlay** — clickable stack undoes down to the chosen step + Clear.
+- **Flat view** — recursive listing under the current folder (capped at 8k), toolbar + Ctrl+Shift+L; async walk; F5/watch keep flat mode.
+- **Home smart pins** — open from Home navigates to a real scope (home/Downloads) before searching.
 
 ## Still open / later
 

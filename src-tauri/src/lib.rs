@@ -324,6 +324,8 @@ struct NativeDirectoryResult {
     partial: bool,
     skipped_entries: u32,
     error: Option<String>,
+    /// True when entries came from a recursive flat-view walk.
+    flat: bool,
 }
 
 enum SidebarActivateAction {
@@ -8546,6 +8548,9 @@ struct NativeController {
     folder_changed_pending: bool,
     /// Recursive flat listing of the current folder (capped).
     flat_view: bool,
+    /// Search query to apply once the next navigation listing lands
+    /// (Home smart pins / NavigateThenSearch-style flows).
+    pending_nav_search: Option<String>,
     /// Coalesces notify bursts so auto-refresh doesn't thrash the listing.
     last_folder_auto_refresh: Option<Instant>,
     git_status_ready: Arc<std::sync::atomic::AtomicBool>,
@@ -14817,6 +14822,7 @@ impl NativeController {
             thumb_size_scale: 1.0,
             folder_changed_pending: false,
             flat_view: false,
+            pending_nav_search: None,
             last_folder_auto_refresh: None,
             git_status_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_git_status: Arc::new(Mutex::new(None)),
@@ -17815,6 +17821,9 @@ impl NativeController {
 
         if partial {
             self.schedule_full_directory_load(path.clone());
+        } else if let Some(q) = self.pending_nav_search.take() {
+            ui.set_search_text(ss(&q));
+            self.search(ui, q);
         }
 
         let image_entries: Vec<(String, u64)> = self
@@ -17908,6 +17917,7 @@ impl NativeController {
                             generation: token,
                             partial: true,
                             skipped_entries: 0,
+                            flat: false,
                             error: None,
                         },
                     );
@@ -17936,6 +17946,7 @@ impl NativeController {
                                 generation: token,
                                 partial: false,
                                 skipped_entries: 0,
+                                flat: false,
                                 error: Some(err),
                             },
                         );
@@ -17959,6 +17970,7 @@ impl NativeController {
                     generation: token,
                     partial: page.partial,
                     skipped_entries: page.skipped_entries,
+                    flat: false,
                     error: None,
                 },
             );
@@ -18041,34 +18053,7 @@ impl NativeController {
             return SidebarActivateAction::None;
         }
         if let Some(smart) = path.strip_prefix("smart:") {
-            if smart == "old-downloads" {
-                if let Some(downloads) = dirs::download_dir() {
-                    let target = downloads.to_string_lossy().to_string();
-                    let query = smart_folders_for_path(&self.current_path)
-                        .into_iter()
-                        .find(|f| f.id == smart)
-                        .map(|f| f.query)
-                        .unwrap_or_else(|| format!("smart:{smart}"));
-                    if !same_path_string(&self.current_path, &target) {
-                        return SidebarActivateAction::NavigateThenSearch {
-                            path: target,
-                            query,
-                        };
-                    }
-                }
-            }
-            // Prefer the smart folder's explicit query when available.
-            let query = smart_folders_for_path(&self.current_path)
-                .into_iter()
-                .find(|f| f.id == smart)
-                .map(|f| f.query)
-                .unwrap_or_else(|| format!("smart:{smart}"));
-            self.search_query = query.clone();
-            ui.set_search_text(ss(&query));
-            self.apply_filter();
-            self.selected_index = -1;
-            self.update_models(ui);
-            self.search(ui, self.search_query.clone());
+            self.activate_smart_folder(ui, smart);
             return SidebarActivateAction::None;
         }
         if path.is_empty() {
@@ -18229,6 +18214,7 @@ impl NativeController {
                     generation,
                     partial: false,
                     skipped_entries: 0,
+                    flat: false,
                     error: None,
                 });
             }
@@ -18627,6 +18613,7 @@ impl NativeController {
                         generation,
                         partial: true,
                         skipped_entries: 0,
+                        flat: false,
                         error: None,
                     },
                 );
@@ -18643,6 +18630,7 @@ impl NativeController {
                     generation,
                     partial: false,
                     skipped_entries: 0,
+                    flat: false,
                     error: None,
                 },
             );
@@ -18686,6 +18674,10 @@ impl NativeController {
         // snappy even on large folders.
         let path = self.current_path.clone();
         if path.is_empty() || is_virtual_nav_path(&path) {
+            return;
+        }
+        if self.flat_view {
+            self.start_flat_listing(ui);
             return;
         }
         self.bump_nav_generation();
@@ -19215,32 +19207,43 @@ impl NativeController {
         is_duplicate_open(&mut self.last_opened, path, Instant::now())
     }
 
-    /// Run a smart-folder query (sidebar, Home pin, or overlay). Handles
-    /// old-downloads navigation to the Downloads scope when needed.
+    /// Run a smart-folder query (sidebar, Home pin, or overlay). Navigates off
+    /// virtual paths (Home) to a real scope before searching.
     fn activate_smart_folder(&mut self, ui: &MainWindow, smart_id: &str) {
-        let query = smart_folders_for_path(&self.current_path)
-            .into_iter()
-            .find(|f| f.id == smart_id)
-            .map(|f| f.query)
+        let folder = smart_folders_for_path(if is_virtual_nav_path(&self.current_path) {
+            ""
+        } else {
+            &self.current_path
+        })
+        .into_iter()
+        .find(|f| f.id == smart_id);
+        let query = folder
+            .as_ref()
+            .map(|f| f.query.clone())
             .unwrap_or_else(|| format!("smart:{smart_id}"));
-        if smart_id == "old-downloads" {
-            if let Some(downloads) = dirs::download_dir() {
-                let target = downloads.to_string_lossy().to_string();
-                self.search_query = query.clone();
-                ui.set_search_text(ss(&query));
-                if !same_path_string(&self.current_path, &target) {
-                    self.navigate(ui, target, true);
-                } else {
-                    self.apply_filter();
-                    self.selected_index = -1;
-                    self.update_models(ui);
-                }
-                self.search(ui, query);
+        let folder_scope = folder
+            .as_ref()
+            .map(|f| f.scope.clone())
+            .unwrap_or_default();
+        let target = if smart_id == "old-downloads" {
+            dirs::download_dir().map(|d| d.to_string_lossy().to_string())
+        } else if !folder_scope.is_empty() && !is_virtual_nav_path(&folder_scope) {
+            Some(folder_scope)
+        } else if is_virtual_nav_path(&self.current_path) || self.current_path.is_empty() {
+            dirs::home_dir().map(|d| d.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        ui.set_search_text(ss(&query));
+        if let Some(target) = target {
+            if !target.is_empty() && !same_path_string(&self.current_path, &target) {
+                self.pending_nav_search = Some(query);
+                self.navigate(ui, target, true);
                 return;
             }
         }
         self.search_query = query.clone();
-        ui.set_search_text(ss(&query));
         self.apply_filter();
         self.selected_index = -1;
         self.update_models(ui);
@@ -20535,6 +20538,7 @@ impl NativeController {
                     generation: token,
                     partial: false,
                     skipped_entries: 0,
+                    flat: false,
                     error: None,
                 },
             );
@@ -20676,6 +20680,7 @@ impl NativeController {
                             generation: token,
                             partial: false,
                             skipped_entries: 0,
+                            flat: false,
                             error: Some(err),
                         },
                     );
@@ -20698,6 +20703,7 @@ impl NativeController {
                     generation: token,
                     partial: page.partial,
                     skipped_entries: page.skipped_entries,
+                    flat: false,
                     error: None,
                 },
             );
@@ -20747,6 +20753,7 @@ impl NativeController {
                         generation,
                         partial: false,
                         skipped_entries: 0,
+                        flat: false,
                         error: None,
                     },
                 );
@@ -20836,16 +20843,37 @@ impl NativeController {
     }
 
     fn set_folder_filter(&mut self, ui: &MainWindow, text: String) {
+        let sticky = self.selected_paths_sticky();
         self.folder_filter = text;
         ui.set_filter_text(ss(&self.folder_filter));
         self.apply_filter();
+        self.restore_selection_from_paths(&sticky);
         self.update_models(ui);
     }
 
     fn set_secondary_folder_filter(&mut self, ui: &MainWindow, text: String) {
+        let sticky: Vec<String> = self
+            .secondary_selected_set
+            .iter()
+            .filter_map(|&i| self.secondary_visible_files.get(i).map(|e| e.path.clone()))
+            .collect();
         self.secondary_folder_filter = text;
         ui.set_secondary_filter_text(ss(&self.secondary_folder_filter));
         self.apply_secondary_filter();
+        if !sticky.is_empty() {
+            self.secondary_selected_set.clear();
+            self.secondary_selected_index = -1;
+            self.secondary_select_anchor = -1;
+            for (i, entry) in self.secondary_visible_files.iter().enumerate() {
+                if sticky.iter().any(|p| same_path_string(p, &entry.path)) {
+                    self.secondary_selected_set.insert(i);
+                    if self.secondary_selected_index < 0 {
+                        self.secondary_selected_index = i as i32;
+                        self.secondary_select_anchor = i as i32;
+                    }
+                }
+            }
+        }
         self.update_secondary_models(ui);
     }
 
@@ -24352,7 +24380,11 @@ impl NativeController {
             .map(|w| ToolListItem {
                 id: ss(&w.name),
                 title: ss(&w.name),
-                subtitle: ss(format!("{} tabs", w.tabs.len())),
+                subtitle: ss(format!(
+                    "{} tabs{}",
+                    w.tabs.len(),
+                    if w.dual_pane { " · dual pane" } else { "" }
+                )),
                 meta: ss(""),
                 enabled: true,
                 accent: color("#4f9cff"),
@@ -25356,7 +25388,18 @@ impl NativeController {
                         } else {
                             ws.secondary_path.clone()
                         };
-                        self.secondary_navigate(ui, sec);
+                        let sec_ok = is_virtual_nav_path(&sec) || Path::new(&sec).is_dir();
+                        if sec_ok {
+                            self.secondary_navigate(ui, sec);
+                        } else {
+                            let fallback = self.default_secondary_path();
+                            self.secondary_navigate(ui, fallback);
+                            self.show_toast_kind(
+                                ui,
+                                "Workspace secondary folder is missing; opened a fallback.",
+                                "warning",
+                            );
+                        }
                     }
                     self.update_models(ui);
                     self.show_toast_kind(
@@ -25459,6 +25502,24 @@ impl NativeController {
                         self.show_toast(ui, "Previous versions are only available on Windows.");
                     }
                 }
+            }
+            "undo-history" => {
+                let Ok(target) = id.parse::<usize>() else {
+                    return;
+                };
+                let steps = {
+                    let Ok(log) = self.app_state.operation_log.lock() else {
+                        return;
+                    };
+                    if target >= log.len() {
+                        return;
+                    }
+                    log.len() - target
+                };
+                for _ in 0..steps {
+                    self.undo(ui);
+                }
+                self.show_undo_history(ui);
             }
             _ => {}
         }
@@ -25773,13 +25834,41 @@ impl NativeController {
 
     fn start_flat_listing(&mut self, ui: &MainWindow) {
         let root = self.current_path.clone();
+        if root.is_empty() || is_virtual_nav_path(&root) {
+            return;
+        }
         let show_hidden = self.show_hidden;
-        let sticky = self.selected_paths_sticky();
         ui.set_status_right(ss("Flat view — scanning…"));
         self.show_toast(ui, "Building flat view…");
-        let mut entries = collect_flat_folder_entries(Path::new(&root), show_hidden, Self::FLAT_VIEW_CAP);
+        // Walk off the UI thread; keep the current list painted until results land.
+        let generation = self.bump_nav_generation();
+        let ready = self.directory_ready.clone();
+        let pending = self.pending_directory_result.clone();
+        let cap = Self::FLAT_VIEW_CAP;
+        std::thread::spawn(move || {
+            let entries = collect_flat_folder_entries(Path::new(&root), show_hidden, cap);
+            publish_directory_pending(
+                &pending,
+                &ready,
+                NativeDirectoryResult {
+                    path: root,
+                    entries,
+                    generation,
+                    partial: false,
+                    skipped_entries: 0,
+                    flat: true,
+                    error: None,
+                },
+            );
+        });
+    }
+
+    fn apply_flat_listing(&mut self, ui: &MainWindow, path: String, mut entries: Vec<FileEntry>) {
+        if !self.flat_view || !same_path_string(&self.current_path, &path) {
+            return;
+        }
         let capped = entries.len() >= Self::FLAT_VIEW_CAP;
-        // Prefer files; keep relative path as the display name.
+        let sticky = self.selected_paths_sticky();
         sort_entries_by(&mut entries, &self.sort_by, &self.sort_dir);
         self.files = entries;
         self.search_query.clear();
@@ -25796,11 +25885,14 @@ impl NativeController {
                 String::new()
             }
         )));
-        ui.set_status_right(ss(format!("Flat view · {root}")));
+        ui.set_status_right(ss(format!("Flat view · {path}")));
         self.show_toast_kind(
             ui,
             if capped {
-                format!("Flat view: first {} items under this folder", Self::FLAT_VIEW_CAP)
+                format!(
+                    "Flat view: first {} items under this folder",
+                    Self::FLAT_VIEW_CAP
+                )
             } else {
                 format!("Flat view: {n} items")
             },
@@ -26280,6 +26372,10 @@ impl NativeController {
         }
         let path = self.current_path.clone();
         if path.is_empty() || is_virtual_nav_path(&path) {
+            return;
+        }
+        if self.flat_view {
+            self.start_flat_listing(ui);
             return;
         }
         self.bump_nav_generation();
@@ -28461,6 +28557,18 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                         } else {
                                             ctrl.show_toast_kind(&ui, err, "error");
                                         }
+                                    } else if result.flat || ctrl.flat_view {
+                                        if result.flat && ctrl.flat_view {
+                                            ctrl.apply_flat_listing(
+                                                &ui,
+                                                result.path,
+                                                result.entries,
+                                            );
+                                        } else if ctrl.flat_view && !result.flat {
+                                            // A single-level load raced in while Flat
+                                            // is on — rebuild the recursive listing.
+                                            ctrl.start_flat_listing(&ui);
+                                        }
                                     } else if ctrl.files.is_empty() {
                                         if ctrl
                                             .bitlocker_retry_path
@@ -28507,6 +28615,12 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                         }
                                         ctrl.sync_fantasy_empty_kind(&ui);
                                         ctrl.update_status(&ui);
+                                        if !partial {
+                                            if let Some(q) = ctrl.pending_nav_search.take() {
+                                                ui.set_search_text(ss(&q));
+                                                ctrl.search(&ui, q);
+                                            }
+                                        }
                                     }
                                 }
                             }
