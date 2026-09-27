@@ -15735,6 +15735,11 @@ impl NativeController {
     }
 
     fn apply_sort(&mut self) {
+        // Home uses `modified` as a section id (Drives / Pins / Recent / …).
+        // Sorting would scramble the intentional group order.
+        if self.current_path == "home://" {
+            return;
+        }
         sort_entries_by(&mut self.visible_files, &self.sort_by, &self.sort_dir);
     }
 
@@ -20500,6 +20505,12 @@ impl NativeController {
             extension: None,
         });
         let path = "home://".to_string();
+        let soft = same_path_string(&self.secondary_path, &path) && !push_history;
+        let sticky = if soft {
+            self.secondary_selected_paths_sticky()
+        } else {
+            Vec::new()
+        };
         if push_history {
             self.push_secondary_history(&path);
         }
@@ -20509,10 +20520,15 @@ impl NativeController {
         }
         self.secondary_path = path;
         self.secondary_files = entries;
-        self.secondary_selected_index = -1;
-        self.secondary_selected_set.clear();
-        self.secondary_select_anchor = -1;
+        if !soft {
+            self.secondary_selected_index = -1;
+            self.secondary_selected_set.clear();
+            self.secondary_select_anchor = -1;
+        }
         self.apply_secondary_filter();
+        if soft {
+            self.restore_secondary_selection_from_paths(&sticky);
+        }
         self.update_secondary_models(ui);
         self.sync_selection_count_to_ui(ui);
     }
@@ -20521,6 +20537,7 @@ impl NativeController {
         self.active_pane = ActivePane::Secondary;
         self.sync_active_pane(ui);
         let path = "recycle://".to_string();
+        let soft = same_path_string(&self.secondary_path, &path) && !push_history;
         if push_history {
             self.push_secondary_history(&path);
         }
@@ -20529,13 +20546,16 @@ impl NativeController {
             self.remember_secondary_scroll(ui, &prev);
         }
         self.secondary_path = path.clone();
-        self.secondary_selected_index = -1;
-        self.secondary_selected_set.clear();
-        self.secondary_select_anchor = -1;
-        self.secondary_files.clear();
-        self.secondary_visible_files.clear();
-        self.secondary_files_model = None;
-        ui.set_secondary_files(model_from_vec(Vec::<FileItem>::new()));
+        // Soft refresh keeps selection until the async listing remaps by path.
+        if !soft {
+            self.secondary_selected_index = -1;
+            self.secondary_selected_set.clear();
+            self.secondary_select_anchor = -1;
+            self.secondary_files.clear();
+            self.secondary_visible_files.clear();
+            self.secondary_files_model = None;
+            ui.set_secondary_files(model_from_vec(Vec::<FileItem>::new()));
+        }
         ui.set_secondary_path(ss(&path));
         self.sync_selection_count_to_ui(ui);
 
@@ -20571,6 +20591,13 @@ impl NativeController {
         match list_archive_virtual_dir(&archive_path, &prefix) {
             Ok(files) => {
                 let virtual_path = archive_virtual_path(&archive_path, &prefix);
+                let soft =
+                    same_path_string(&self.secondary_path, &virtual_path) && !push_history;
+                let sticky = if soft {
+                    self.secondary_selected_paths_sticky()
+                } else {
+                    Vec::new()
+                };
                 if push_history {
                     self.push_secondary_history(&virtual_path);
                 }
@@ -20581,11 +20608,16 @@ impl NativeController {
                 self.active_pane = ActivePane::Secondary;
                 self.secondary_path = virtual_path;
                 self.secondary_files = files;
-                self.secondary_selected_index = -1;
-                self.secondary_selected_set.clear();
-                self.secondary_select_anchor = -1;
+                if !soft {
+                    self.secondary_selected_index = -1;
+                    self.secondary_selected_set.clear();
+                    self.secondary_select_anchor = -1;
+                }
                 self.sync_active_pane(ui);
                 self.apply_secondary_filter();
+                if soft {
+                    self.restore_secondary_selection_from_paths(&sticky);
+                }
                 self.update_secondary_models(ui);
                 self.sync_selection_count_to_ui(ui);
             }
