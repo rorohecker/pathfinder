@@ -17885,7 +17885,7 @@ impl NativeController {
 
         if !self.recent_locations.is_empty() {
             items.push(SideItem {
-                label: ss("RECENT"),
+                label: ss(&i18n::t("RECENT")),
                 path: ss(""),
                 icon: ss(""),
                 count: ss(""),
@@ -17987,7 +17987,7 @@ impl NativeController {
         }
 
         items.push(SideItem {
-            label: ss("TAGS"),
+            label: ss(&i18n::t("TAGS")),
             path: ss(""),
             icon: ss(""),
             count: ss(""),

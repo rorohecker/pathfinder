@@ -196,6 +196,8 @@ fn it(en: &str) -> Option<String> {
             }
             "QUICK ACCESS" => "ACCESSO RAPIDO",
             "SMART FOLDERS" => "CARTELLE SMART",
+            "RECENT" => "RECENTI",
+            "TAGS" => "TAG",
             "Large files" => "File grandi",
             "Recently modified" => "Modificati di recente",
             "Downloads over 30 days old" => "Download oltre 30 giorni",
