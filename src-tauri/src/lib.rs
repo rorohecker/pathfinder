@@ -10856,6 +10856,11 @@ mod cli_explorer_tests {
         let clsid = vec!["::{20D04FE0-3AEA-1069-A2D8-08002B30309D}".to_string()];
         assert!(explorer_args_need_system_forward(&clsid));
         assert!(!explorer_args_need_system_forward(&[]));
+        // Registry Explore verb with a PIDL — must not stay in Pathfinder.
+        let idlist = vec!["/e,/idlist,:{DEADBEEF-0000-0000-0000-000000000000}".to_string()];
+        assert!(explorer_args_need_system_forward(&idlist));
+        let root_idlist = vec!["/root,/idlist,:1234".to_string()];
+        assert!(explorer_args_need_system_forward(&root_idlist));
     }
 
     #[test]
@@ -14051,6 +14056,13 @@ fn explorer_args_need_system_forward(args: &[String]) -> bool {
     if args.is_empty() {
         return false;
     }
+    // PIDL / idlist Explore forms (`/e,/idlist,…`, `/root,/idlist,…`) have no
+    // filesystem path we can host — always hand them to real Explorer. Must
+    // check before `is_explorer_folder_switch`, which treats `/e,…` as known.
+    let joined = args.join(" ").to_ascii_lowercase();
+    if joined.contains("idlist") {
+        return true;
+    }
     for a in args {
         let lower = a.to_ascii_lowercase();
         if lower.starts_with("shell:")
@@ -14065,8 +14077,8 @@ fn explorer_args_need_system_forward(args: &[String]) -> bool {
             && !a.starts_with("--path")
             && !is_explorer_folder_switch(a)
         {
-            // Comma-combined Explorer forms like `/e,/idlist,...` — forward if
-            // no filesystem path token is present in the whole arg list.
+            // Comma-combined Explorer forms — forward if no filesystem path
+            // token is present in the whole arg list.
             let has_pathish = args.iter().any(|x| {
                 let s = strip_cli_quotes(x);
                 Path::new(s).exists()
@@ -15677,7 +15689,10 @@ impl NativeController {
             .filter(|e| name_filter.is_empty() || e.name_lower.contains(&name_filter))
             .cloned()
             .collect();
-        self.apply_secondary_sort();
+        // Home keeps its built section order (Drives / Pins / …).
+        if self.secondary_path != "home://" {
+            self.apply_secondary_sort();
+        }
     }
 
     fn apply_folder_filter(&mut self) {
@@ -20371,7 +20386,7 @@ impl NativeController {
         self.secondary_selected_index = -1;
         self.secondary_selected_set.clear();
         self.secondary_select_anchor = -1;
-        self.secondary_visible_files = self.secondary_files.clone();
+        self.apply_secondary_filter();
         self.update_secondary_models(ui);
         self.sync_selection_count_to_ui(ui);
     }
@@ -23163,13 +23178,15 @@ impl NativeController {
         } else {
             ""
         }));
-        // Keep list order as built (section groups); skip apply_filter sort.
+        // Keep list order as built (section groups); skip apply_filter sort,
+        // but still honor an active folder filter from the toolbar bar.
         self.visible_files = self.files.clone();
+        self.apply_folder_filter();
         self.update_models(ui);
         ui.set_side_items(model_from_vec(self.side_items()));
         ui.set_current_path(ss(&i18n::t("Home")));
         ui.set_address_text(ss(&i18n::t("Home")));
-        ui.set_status_left(ss(format!("{} shortcuts", self.files.len())));
+        ui.set_status_left(ss(format!("{} shortcuts", self.visible_files.len())));
     }
 
     fn show_libraries(&mut self, ui: &MainWindow) {
@@ -28126,7 +28143,12 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 }
                 if git_fired {
                     if let Ok(mut lock) = pending_git.lock() {
-                        if let Some(status) = lock.take() {
+                        if power_saver_active()
+                            || current_power_budget() == PowerBudget::Saver
+                        {
+                            // Drop late results from workers started before Saver.
+                            *lock = None;
+                        } else if let Some(status) = lock.take() {
                             if let Ok(mut ctrl) = c.try_borrow_mut() {
                                 ctrl.git_status = status;
                                 ctrl.rebuild_git_dir_status();
