@@ -4645,7 +4645,7 @@ export component MainWindow inherits Window {
             // cluster so wide windows don't leave a dead gap on the right.
             property <length> tb_gap: 8px;
             property <length> tb_ops_w: root.search_text != "" ? 64px : 32px;
-            property <length> tb_sort_w: 196px;
+            property <length> tb_sort_w: 168px;
             // View cluster: Icons→Dual (Filter folder removed — use command palette
             // "Filter Folder" or the filter bar via Ctrl+Shift+G).
             property <length> tb_view_cluster_w: 352px;
@@ -4654,24 +4654,25 @@ export component MainWindow inherits Window {
                 : 0px;
             property <length> tb_view_x: self.width - tb_view_cluster_w - tb_thumb_zoom_w;
             property <length> tb_addr_x: 167px;
-            property <length> tb_min_w_search: 167px + 80px + tb_gap + 220px + tb_ops_w + tb_gap + tb_view_cluster_w + tb_thumb_zoom_w;
-            property <length> tb_min_w_sort: tb_min_w_search + tb_gap + tb_sort_w;
+            // Prefer showing search earlier; sort only when there's real room left.
+            property <length> tb_min_w_search: 167px + 80px + tb_gap + 260px + tb_ops_w + tb_gap + tb_view_cluster_w + tb_thumb_zoom_w;
+            property <length> tb_min_w_sort: tb_min_w_search + tb_gap + tb_sort_w + 120px;
             property <bool> show_toolbar_search: !root.is_simple && self.width >= tb_min_w_search;
             property <bool> show_toolbar_sort: !root.is_simple && self.width >= tb_min_w_sort;
             property <length> tb_sort_x: tb_view_x - tb_gap - tb_sort_w;
             property <length> tb_flex_right: show_toolbar_sort ? tb_sort_x : tb_view_x;
             property <length> tb_flex_budget: max(0px, tb_flex_right - tb_addr_x - tb_gap);
-            // Idle: search takes ~42% of flex (min 220, max 480). Editing address:
+            // Idle: search takes ~55% of flex (min 260, max 560). Editing address:
             // address expands; search compresses to a compact chip.
             property <length> tb_search_w: !show_toolbar_search ? 0px
                 : (root.address_editing
                     ? 112px
-                    : max(220px, min(480px, tb_flex_budget * 0.42)));
+                    : max(260px, min(560px, tb_flex_budget * 0.55)));
             property <length> tb_search_x: show_toolbar_search
                 ? (tb_flex_right - tb_gap - tb_ops_w - tb_search_w)
                 : tb_flex_right;
             property <length> tb_addr_right: show_toolbar_search ? tb_search_x : tb_flex_right;
-            property <length> tb_addr_min_w: root.address_editing ? 280px : 140px;
+            property <length> tb_addr_min_w: root.address_editing ? 320px : 180px;
             property <length> tb_addr_w: max(tb_addr_min_w, tb_addr_right - tb_addr_x - tb_gap);
             animate tb_addr_w { duration: 160ms; easing: ease-out; }
             animate tb_search_w { duration: 160ms; easing: ease-out; }
