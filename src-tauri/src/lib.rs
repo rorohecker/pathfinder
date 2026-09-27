@@ -19263,6 +19263,9 @@ impl NativeController {
                 return;
             }
         }
+        // Immediate search path: drop any older deferred query so a late
+        // listing cannot re-apply a previous smart folder's search.
+        self.pending_nav_search = None;
         self.search_query = query.clone();
         self.apply_filter();
         self.selected_index = -1;
