@@ -5542,13 +5542,16 @@ export component MainWindow inherits Window {
             }
 
             // Primary folder filter — toggled from the toolbar Filter button.
-            if root.filter_bar_h > 0px: Rectangle {
+            // Gate on the bool (not animated filter_bar_h) so a fixed 36px bar
+            // never overlaps the list while filter_bar_h is mid-animation.
+            if root.filter_bar_visible || root.filter_text != "": Rectangle {
                 x: 0;
                 y: root.folder_changed_banner ? 28px : 0;
                 width: root.primary_pane_w;
-                height: 36px;
+                height: root.filter_bar_h;
                 background: ThemePalette.panel;
                 z: 7;
+                clip: true;
                 Text {
                     x: 12px; y: 0; width: 48px; height: parent.height;
                     text: @tr("Filter");
@@ -10135,12 +10138,14 @@ export component MainWindow inherits Window {
                         background: item.accent;
                     }
                     Text {
-                        x: 20px; y: 8px; width: parent.width - (root.tool_overlay_kind == "rules" ? 140px : 118px); height: 20px;
+                        // Rules + smart-folders reserve 140px for the right-side chip
+                        // (and ··· on smart-folders) so title/subtitle never paint under it.
+                        x: 20px; y: 8px; width: parent.width - (root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders" ? 140px : 118px); height: 20px;
                         text: item.title;
                         color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
                     }
                     Text {
-                        x: 20px; y: 28px; width: parent.width - (root.tool_overlay_kind == "rules" ? 140px : 118px); height: 16px;
+                        x: 20px; y: 28px; width: parent.width - (root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders" ? 140px : 118px); height: 16px;
                         text: item.subtitle;
                         color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
                     }
