@@ -6723,7 +6723,8 @@ export component MainWindow inherits Window {
                         }
                         Text {
                             width: parent.width;
-                            text: root.secondary_path == "" ? @tr("Enable dual pane to browse a second location") : @tr("Empty folder");
+                            text: root.secondary_path == "" ? @tr("Enable dual pane to browse a second location")
+                                : (root.secondary_filter_text != "" ? @tr("No files match the filter") : @tr("Empty folder"));
                             color: ThemePalette.text_faint;
                             font-size: 12px;
                             horizontal-alignment: center;
