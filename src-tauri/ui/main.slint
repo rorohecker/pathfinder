@@ -3586,6 +3586,7 @@ export component MainWindow inherits Window {
     in-out property <string> view_mode: "grid";
     in-out property <bool> preview_visible: true;
     in-out property <bool> dual_pane: false;
+    in-out property <bool> flat_view: false;
     // "primary" or "secondary" - which pane has focus (drives accent borders + paste target).
     in-out property <string> active_pane: "primary";
     // True when the active pane is showing the virtual `recycle://` bin -
@@ -4057,8 +4058,9 @@ export component MainWindow inherits Window {
         easing: cubic-bezier(0.22, 1, 0.36, 1);
     }
 
-    property <float> split_ratio_target: 0.5;
-    property <float> split_ratio: split_ratio_target;
+    // in-out so workspace save/restore can persist dual-pane splitter position.
+    in-out property <float> split_ratio_target: 0.5;
+    in-out property <float> split_ratio: split_ratio_target;
     animate split_ratio {
         duration: root.layout_dragging ? 0ms : 200ms;
         easing: cubic-bezier(0.22, 1, 0.36, 1);
@@ -4614,8 +4616,8 @@ export component MainWindow inherits Window {
             property <length> tb_ops_w: root.search_text != "" ? 64px : 32px;
             property <length> tb_search_w: 208px;
             property <length> tb_sort_w: 196px;
-            // View cluster includes Icons→Dual (+ Filter). Thumb −/+ sits to its left in grid/gallery.
-            property <length> tb_view_cluster_w: 352px;
+            // View cluster includes Icons→Dual (+ Filter + Flat). Thumb −/+ sits to its left in grid/gallery.
+            property <length> tb_view_cluster_w: 386px;
             property <length> tb_thumb_zoom_w: !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid")
                 ? 68px
                 : 0px;
@@ -5338,7 +5340,7 @@ export component MainWindow inherits Window {
             // View-mode cluster. 34px stride (31px button + 3px gap) so icons
             // stay centered in their hit boxes without overlapping neighbors.
             ToolButton {
-                x: root.is_simple ? 10px : parent.width - 352px;
+                x: root.is_simple ? 10px : parent.width - 386px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z";
@@ -5351,7 +5353,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("grid"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 318px;
+                x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 352px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12";
@@ -5364,7 +5366,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("compact"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 284px;
+                x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 318px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01";
@@ -5377,7 +5379,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("list"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 250px;
+                x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 284px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01";
@@ -5390,7 +5392,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("gallery"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 216px;
+                x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 250px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 4h18v16H3z M14 4v16";
@@ -5404,7 +5406,7 @@ export component MainWindow inherits Window {
             }
             ToolButton {
                 visible: !root.is_simple;
-                x: parent.width - 182px;
+                x: parent.width - 216px;
                 y: 6px;
                 icon_data: "M4 4h16v4H4z M4 10h10v2H4z M4 14h12v2H4z";
                 tooltip: @tr("Filter folder");
@@ -5416,6 +5418,15 @@ export component MainWindow inherits Window {
                         root.filter_changed("");
                     }
                 }
+            }
+            ToolButton {
+                visible: !root.is_simple;
+                x: parent.width - 182px;
+                y: 6px;
+                icon_data: "M4 6h16 M4 12h16 M4 18h10";
+                tooltip: @tr("Flat view (all files under this folder)");
+                active: root.flat_view;
+                clicked => { root.command("toggle-flat-view"); }
             }
             ToolButton { visible: !root.is_simple; x: parent.width - 148px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: @tr("Dual pane"); active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
             // Clear-sort button - appears in the gap between Dual Pane and Command Palette
@@ -10208,11 +10219,12 @@ export component MainWindow inherits Window {
                 label: @tr("Close");
                 clicked => { root.tool_overlay_close(); }
             }
-            if root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "shortcuts" || root.tool_overlay_kind == "privacy": DialogButton {
+            if root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "shortcuts" || root.tool_overlay_kind == "privacy" || root.tool_overlay_kind == "undo-history": DialogButton {
                 x: parent.width - self.preferred-width - 18px; y: parent.height - 48px;
                 label: root.tool_overlay_kind == "rules" ? @tr("Run enabled")
                     : (root.tool_overlay_kind == "shortcuts" ? @tr("Save")
-                    : @tr("Clear caches"));
+                    : (root.tool_overlay_kind == "undo-history" ? @tr("Clear history")
+                    : @tr("Clear caches")));
                 primary: true;
                 clicked => { root.tool_overlay_primary_action(); }
             }

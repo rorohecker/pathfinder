@@ -29,8 +29,18 @@ Updated with dual-pane filter, low-power git deferral, Home smart pins, and safe
 10. **Auto-refresh on folder change** — watched-directory notify events soft-refresh the listing (debounced); banner only while inline rename is active.
 11. **Safe Explorer bypass** — HKCU folder/drive verbs + App Paths redirect; unhandled `shell:` / CLSID / unknown explorer verbs forward to `C:\Windows\explorer.exe` (never replaces the system binary).
 
+## Shipped in follow-up (v1.0.22+)
+
+- **Sticky selection** — soft refresh / F5 remaps selection by path.
+- **Workspace layouts** — save/restore dual pane, secondary path, splitter, active tab.
+- **Undo history overlay** — clickable stack + Clear (multi-step undo was already via operation_log).
+- **Flat view** — recursive listing under the current folder (capped at 8k), toolbar + Ctrl+Shift+L.
+
 ## Still open / later
 
 - Code-signing NSIS/MSI in CI (needs cert).
 - Skia renderer (ICU clash with windows-rs).
 - Optional Win+E hotkey (shell-level; separate from App Paths).
+- Custom list columns (tags / notes / git).
+- Transfer manager polish beyond existing operation queue.
+- Multi-window shared session (new window already spawns a process).

@@ -1603,6 +1603,46 @@ fn path_to_entry(entry_path: &Path, metadata: &fs::Metadata) -> FileEntry {
     }
 }
 
+/// Recursive listing for Flat View. Display name is the path relative to `root`.
+/// Skips symlink cycles via walkdir defaults; caps at `cap` entries.
+fn collect_flat_folder_entries(root: &Path, show_hidden: bool, cap: usize) -> Vec<FileEntry> {
+    let mut out = Vec::new();
+    if !root.is_dir() || cap == 0 {
+        return out;
+    }
+    let walker = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            if show_hidden {
+                return true;
+            }
+            let name = e.file_name().to_string_lossy();
+            !name.starts_with('.') && !name.eq_ignore_ascii_case("desktop.ini")
+        });
+    for entry in walker.flatten() {
+        if entry.depth() == 0 {
+            continue; // skip the root itself
+        }
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let mut fe = path_to_entry(path, &metadata);
+        let rel = path
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| fe.name.clone());
+        fe.name = rel.clone();
+        fe.name_lower = rel.to_ascii_lowercase();
+        out.push(fe);
+        if out.len() >= cap {
+            break;
+        }
+    }
+    out
+}
+
 const OP_CANCELLED: &str = "Operation cancelled.";
 
 fn copy_dir_recursive(state: &AppState, from: &Path, to: &Path) -> Result<(), String> {
@@ -8504,6 +8544,8 @@ struct NativeController {
     search_source_pref: String,
     thumb_size_scale: f32,
     folder_changed_pending: bool,
+    /// Recursive flat listing of the current folder (capped).
+    flat_view: bool,
     /// Coalesces notify bursts so auto-refresh doesn't thrash the listing.
     last_folder_auto_refresh: Option<Instant>,
     git_status_ready: Arc<std::sync::atomic::AtomicBool>,
@@ -11246,6 +11288,18 @@ fn shortcut_hint_for(command: &str, default_hint: &str) -> String {
 struct WorkspaceSession {
     name: String,
     tabs: Vec<SessionTab>,
+    #[serde(default)]
+    active_tab: usize,
+    #[serde(default)]
+    dual_pane: bool,
+    #[serde(default)]
+    secondary_path: String,
+    #[serde(default = "default_workspace_split")]
+    split_ratio: f32,
+}
+
+fn default_workspace_split() -> f32 {
+    0.5
 }
 
 fn load_workspaces() -> Vec<WorkspaceSession> {
@@ -13880,6 +13934,8 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Settings", "Shortcut Editor", "", "shortcut-editor"),
     ("Tools", "Undo Last Operation", "Ctrl+Z", "undo"),
     ("Tools", "Redo Last Operation", "Ctrl+Y", "redo"),
+    ("Tools", "Undo History", "", "undo-history"),
+    ("Tools", "Clear Undo History", "", "clear-undo-history"),
     ("Tools", "New Window", "Ctrl+N", "new-window"),
     ("Tools", "Compare Two Files", "", "file-diff"),
     ("Tools", "Batch Tag Selection", "", "batch-tag"),
@@ -13888,6 +13944,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("View", "Compact View", "Ctrl+Shift+1", "view-compact"),
     ("View", "Details View", "Ctrl+2", "view-list"),
     ("View", "Gallery View", "Ctrl+3", "view-gallery"),
+    ("View", "Toggle Flat View", "Ctrl+Shift+L", "toggle-flat-view"),
     ("View", "Toggle Preview", "Ctrl+I", "toggle-preview"),
     ("View", "Toggle Dual Pane", "F3", "toggle-dual"),
     ("Settings", "Open Settings", "Ctrl+,", "settings"),
@@ -14759,6 +14816,7 @@ impl NativeController {
             search_source_pref: "auto".to_string(),
             thumb_size_scale: 1.0,
             folder_changed_pending: false,
+            flat_view: false,
             last_folder_auto_refresh: None,
             git_status_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_git_status: Arc::new(Mutex::new(None)),
@@ -17674,6 +17732,13 @@ impl NativeController {
             self.sort_dir = sd;
         }
 
+        // Soft re-list of the same folder: keep selection by path. Hard navigate
+        // (path changed / not yet committed) clears selection as before.
+        let sticky = if path_already_committed {
+            self.selected_paths_sticky()
+        } else {
+            Vec::new()
+        };
         self.files = files;
         self.search_query.clear();
         self.selected_index = -1;
@@ -17721,6 +17786,9 @@ impl NativeController {
         }));
 
         self.apply_filter();
+        if !sticky.is_empty() {
+            self.restore_selection_from_paths(&sticky);
+        }
         self.update_file_models_quick(ui);
         self.sync_sidebar_models(ui);
         self.enrich_visible_pending = true;
@@ -18026,6 +18094,10 @@ impl NativeController {
         } else {
             path
         };
+        if self.flat_view && !same_path_string(&self.current_path, &raw) {
+            self.flat_view = false;
+            ui.set_flat_view(false);
+        }
         // Virtual namespaces must be handled before path-query resolution.
         // `storage://` and `recycle://` contain `/` and would otherwise be
         // joined against the current folder as bogus relative paths.
@@ -21336,6 +21408,9 @@ impl NativeController {
             "shortcut-editor" => self.show_shortcuts(ui),
             "undo" => self.undo(ui),
             "redo" => self.redo(ui),
+            "undo-history" => self.show_undo_history(ui),
+            "clear-undo-history" => self.clear_undo_history(ui),
+            "toggle-flat-view" => self.toggle_flat_view(ui),
             "new-window" => self.open_new_window(ui),
             "file-diff" => self.file_diff_selected(ui),
             "batch-tag" => self.batch_tag_selected(ui),
@@ -22002,6 +22077,10 @@ impl NativeController {
                     WorkspaceSession {
                         name: name.to_string(),
                         tabs: self.tabs.clone(),
+                        active_tab: self.active_tab,
+                        dual_pane: ui.get_dual_pane(),
+                        secondary_path: self.secondary_path.clone(),
+                        split_ratio: ui.get_split_ratio_target().clamp(0.15, 0.85),
                     },
                 );
                 if list.len() > 30 {
@@ -23004,35 +23083,70 @@ impl NativeController {
     }
 
     fn show_operation_log(&mut self, ui: &MainWindow) {
+        // Prefer the clickable undo-history overlay; keep preview dump as fallback
+        // content when the overlay is unavailable.
+        self.show_undo_history(ui);
+    }
+
+    fn show_undo_history(&mut self, ui: &MainWindow) {
         let log = self
             .app_state
             .operation_log
             .lock()
             .map(|l| l.clone())
             .unwrap_or_default();
-        let body = log
+        let items: Vec<ToolListItem> = log
             .iter()
+            .enumerate()
             .rev()
-            .map(|op| {
-                format!(
-                    "{} | {}{}",
-                    op.kind,
-                    op.from,
-                    op.to
+            .map(|(i, op)| {
+                let title = match op.kind.as_str() {
+                    "batch_rename" => format!(
+                        "Batch rename ({} files)",
+                        op.batch.as_ref().map(|b| b.len()).unwrap_or(0)
+                    ),
+                    other => other.to_string(),
+                };
+                let subtitle = match (&op.to, op.batch.as_ref()) {
+                    (_, Some(_)) => op
+                        .batch
                         .as_ref()
-                        .map(|to| format!(" -> {to}"))
-                        .unwrap_or_default()
-                )
+                        .and_then(|b| b.first())
+                        .map(|r| format!("{} …", r.from))
+                        .unwrap_or_default(),
+                    (Some(to), _) => format!("{} → {}", op.from, to),
+                    (None, _) => op.from.clone(),
+                };
+                ToolListItem {
+                    id: ss(i.to_string()),
+                    title: ss(title),
+                    subtitle: ss(subtitle),
+                    meta: ss(format!("#{}", i + 1)),
+                    enabled: true,
+                    accent: color("#4f9cff"),
+                }
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        ui.set_preview_title(ss("Operation Log"));
-        ui.set_preview_body(ss(if body.is_empty() {
-            "No operations recorded yet.".to_string()
+            .collect();
+        ui.set_tool_overlay_kind(ss("undo-history"));
+        ui.set_tool_overlay_title(ss(&i18n::t("Undo History")));
+        ui.set_tool_overlay_subtitle(ss(if items.is_empty() {
+            "No undoable operations yet. Ctrl+Z undoes the latest step."
         } else {
-            body
+            "Newest first. Ctrl+Z undoes one step at a time. Clear removes the stack."
         }));
-        ui.set_preview_meta(ss(""));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
+    }
+
+    fn clear_undo_history(&mut self, ui: &MainWindow) {
+        if let Ok(mut log) = self.app_state.operation_log.lock() {
+            log.clear();
+        }
+        self.redo_stack.clear();
+        if ui.get_tool_overlay_kind().as_str() == "undo-history" {
+            self.show_undo_history(ui);
+        }
+        self.show_toast_kind(ui, "Undo history cleared", "success");
     }
 
     fn show_operation_queue(&mut self, ui: &MainWindow) {
@@ -24249,7 +24363,7 @@ impl NativeController {
         ui.set_tool_overlay_subtitle(ss(if items.is_empty() {
             "No saved workspaces yet. Use Save Workspace first."
         } else {
-            "Click a workspace to restore its tabs."
+            "Click a workspace to restore tabs, dual pane, and splitter."
         }));
         ui.set_tool_overlay_items(model_from_vec(items));
         ui.set_tool_overlay_visible(true);
@@ -25225,11 +25339,34 @@ impl NativeController {
                         return;
                     }
                     self.tabs = ws.tabs;
-                    self.active_tab = 0;
-                    let path = self.tabs[0].path.clone();
+                    self.active_tab = ws.active_tab.min(self.tabs.len().saturating_sub(1));
+                    let path = self.tabs[self.active_tab].path.clone();
                     self.navigate(ui, path, false);
+                    ui.set_dual_pane(ws.dual_pane);
+                    if ws.dual_pane {
+                        let ratio = if ws.split_ratio > 0.0 {
+                            ws.split_ratio.clamp(0.15, 0.85)
+                        } else {
+                            0.5
+                        };
+                        ui.set_split_ratio_target(ratio);
+                        ui.set_split_ratio(ratio);
+                        let sec = if ws.secondary_path.is_empty() {
+                            self.default_secondary_path()
+                        } else {
+                            ws.secondary_path.clone()
+                        };
+                        self.secondary_navigate(ui, sec);
+                    }
                     self.update_models(ui);
-                    self.show_toast_kind(ui, format!("Opened workspace '{id}'"), "success");
+                    self.show_toast_kind(
+                        ui,
+                        format!(
+                            "Opened workspace '{id}'{}",
+                            if ws.dual_pane { " (dual pane)" } else { "" }
+                        ),
+                        "success",
+                    );
                 }
             }
             "rules" => {
@@ -25416,6 +25553,9 @@ impl NativeController {
                 ui.set_tool_overlay_visible(false);
                 self.command(ui, "clear-local-caches");
             }
+            "undo-history" => {
+                self.clear_undo_history(ui);
+            }
             "versions" => self.show_toast(ui, "Click a version to restore it."),
             _ => ui.set_tool_overlay_visible(false),
         }
@@ -25577,6 +25717,95 @@ impl NativeController {
         } else {
             ui.set_queue_busy_text(ss(""));
         }
+    }
+
+    /// Paths currently selected in the primary pane (stable across refresh).
+    fn selected_paths_sticky(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self
+            .selected_set
+            .iter()
+            .filter_map(|&i| self.visible_files.get(i).map(|e| e.path.clone()))
+            .collect();
+        if paths.is_empty() {
+            if let Some(entry) = self.visible_files.get(self.selected_index.max(0) as usize) {
+                if self.selected_index >= 0 {
+                    paths.push(entry.path.clone());
+                }
+            }
+        }
+        paths
+    }
+
+    fn restore_selection_from_paths(&mut self, paths: &[String]) {
+        self.selected_set.clear();
+        self.selected_index = -1;
+        self.select_anchor = -1;
+        if paths.is_empty() {
+            return;
+        }
+        for (i, entry) in self.visible_files.iter().enumerate() {
+            if paths.iter().any(|p| same_path_string(p, &entry.path)) {
+                self.selected_set.insert(i);
+                if self.selected_index < 0 {
+                    self.selected_index = i as i32;
+                    self.select_anchor = i as i32;
+                }
+            }
+        }
+    }
+
+    const FLAT_VIEW_CAP: usize = 8_000;
+
+    fn toggle_flat_view(&mut self, ui: &MainWindow) {
+        if is_virtual_nav_path(&self.current_path) || self.current_path.is_empty() {
+            self.show_toast(ui, "Flat view works inside a real folder.");
+            return;
+        }
+        self.flat_view = !self.flat_view;
+        ui.set_flat_view(self.flat_view);
+        if self.flat_view {
+            self.start_flat_listing(ui);
+        } else {
+            self.refresh(ui);
+            self.show_toast(ui, "Flat view off.");
+        }
+    }
+
+    fn start_flat_listing(&mut self, ui: &MainWindow) {
+        let root = self.current_path.clone();
+        let show_hidden = self.show_hidden;
+        let sticky = self.selected_paths_sticky();
+        ui.set_status_right(ss("Flat view — scanning…"));
+        self.show_toast(ui, "Building flat view…");
+        let mut entries = collect_flat_folder_entries(Path::new(&root), show_hidden, Self::FLAT_VIEW_CAP);
+        let capped = entries.len() >= Self::FLAT_VIEW_CAP;
+        // Prefer files; keep relative path as the display name.
+        sort_entries_by(&mut entries, &self.sort_by, &self.sort_dir);
+        self.files = entries;
+        self.search_query.clear();
+        ui.set_search_text(ss(""));
+        self.apply_filter();
+        self.restore_selection_from_paths(&sticky);
+        self.update_models(ui);
+        let n = self.visible_files.len();
+        ui.set_status_left(ss(format!(
+            "{n} items{}",
+            if capped {
+                format!(" (capped at {})", Self::FLAT_VIEW_CAP)
+            } else {
+                String::new()
+            }
+        )));
+        ui.set_status_right(ss(format!("Flat view · {root}")));
+        self.show_toast_kind(
+            ui,
+            if capped {
+                format!("Flat view: first {} items under this folder", Self::FLAT_VIEW_CAP)
+            } else {
+                format!("Flat view: {n} items")
+            },
+            "success",
+        );
     }
 
     fn undo(&mut self, ui: &MainWindow) {
@@ -28256,11 +28485,15 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                     } else {
                                         // Soft refresh / progressive load: swap rows
                                         // without clearing the pane or re-running
-                                        // the heavy navigate chrome path.
+                                        // the heavy navigate chrome path. Keep
+                                        // selection by path so F5/watch updates
+                                        // don't drop multi-select.
+                                        let sticky = ctrl.selected_paths_sticky();
                                         let partial = result.partial;
                                         ctrl.files = result.entries;
                                         ctrl.files_model = None;
                                         ctrl.apply_filter();
+                                        ctrl.restore_selection_from_paths(&sticky);
                                         ctrl.update_file_models(&ui);
                                         if partial {
                                             ui.set_empty_state(ss(format!(
