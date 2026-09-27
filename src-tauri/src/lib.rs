@@ -13631,17 +13631,25 @@ fn home_smart_folder_entries() -> Vec<FileEntry> {
     if pins.is_empty() {
         return Vec::new();
     }
+    let custom = smart_folder_labels();
     let folders = smart_folders_for_path("");
     pins.into_iter()
         .filter_map(|id| folders.iter().find(|f| f.id == id).cloned())
-        .map(|sf| FileEntry {
-            path: format!("smart:{}", sf.id),
-            name: sf.name.clone(),
-            name_lower: sf.name.to_ascii_lowercase(),
-            kind: FileKind::Other,
-            size: 0,
-            modified: 6,
-            extension: None,
+        .map(|sf| {
+            let name = if custom.contains_key(&sf.id) {
+                sf.name.clone()
+            } else {
+                i18n::t(&sf.name)
+            };
+            FileEntry {
+                path: format!("smart:{}", sf.id),
+                name_lower: name.to_ascii_lowercase(),
+                name,
+                kind: FileKind::Other,
+                size: 0,
+                modified: 6,
+                extension: None,
+            }
         })
         .collect()
 }
@@ -17910,7 +17918,7 @@ impl NativeController {
 
         let smart = smart_folders_for_path(&self.current_path);
         items.push(SideItem {
-            label: ss("SMART FOLDERS"),
+            label: ss(&i18n::t("SMART FOLDERS")),
             path: ss(""),
             icon: ss(""),
             count: ss(""),
@@ -17923,8 +17931,14 @@ impl NativeController {
             expanded: false,
         });
         for folder in smart {
+            // Custom renames stay as typed; built-in English names follow UI language.
+            let label = if smart_folder_labels().contains_key(&folder.id) {
+                folder.name.clone()
+            } else {
+                i18n::t(&folder.name)
+            };
             items.push(SideItem {
-                label: ss(&folder.name),
+                label: ss(&label),
                 path: ss(format!("smart:{}", folder.id)),
                 icon: ss("folder"),
                 count: ss(""),

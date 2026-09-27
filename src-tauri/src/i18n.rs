@@ -195,6 +195,12 @@ fn it(en: &str) -> Option<String> {
                 "Prestazioni complete finché non lo cambi"
             }
             "QUICK ACCESS" => "ACCESSO RAPIDO",
+            "SMART FOLDERS" => "CARTELLE SMART",
+            "Large files" => "File grandi",
+            "Recently modified" => "Modificati di recente",
+            "Downloads over 30 days old" => "Download oltre 30 giorni",
+            "Screenshots" => "Screenshot",
+            "Untracked git files" => "File git non tracciati",
             "Home" => "Home",
             "Recycle Bin" => "Cestino",
             "Storage" => "Archiviazione",
@@ -449,6 +455,12 @@ fn es(en: &str) -> Option<String> {
                 "Rendimiento completo hasta que lo cambies"
             }
             "QUICK ACCESS" => "ACCESO RÁPIDO",
+            "SMART FOLDERS" => "CARPETAS INTELIGENTES",
+            "Large files" => "Archivos grandes",
+            "Recently modified" => "Modificados recientemente",
+            "Downloads over 30 days old" => "Descargas de más de 30 días",
+            "Screenshots" => "Capturas de pantalla",
+            "Untracked git files" => "Archivos git sin seguimiento",
             "Home" => "Inicio",
             "Recycle Bin" => "Papelera",
             "Storage" => "Almacenamiento",
