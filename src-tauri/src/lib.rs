@@ -8548,9 +8548,11 @@ struct NativeController {
     folder_changed_pending: bool,
     /// Recursive flat listing of the current folder (capped).
     flat_view: bool,
-    /// Search query to apply once the next navigation listing lands
+    /// Search query to apply once navigation to `path` finishes
     /// (Home smart pins / NavigateThenSearch-style flows).
-    pending_nav_search: Option<String>,
+    /// Bound to the destination path so a diverted navigation cannot
+    /// apply the query against the wrong folder.
+    pending_nav_search: Option<(String, String)>,
     /// Coalesces notify bursts so auto-refresh doesn't thrash the listing.
     last_folder_auto_refresh: Option<Instant>,
     git_status_ready: Arc<std::sync::atomic::AtomicBool>,
@@ -17625,6 +17627,12 @@ impl NativeController {
         self.active_archive = None;
         ui.set_in_recycle_bin(false);
         ui.set_is_home_view(false);
+        // Drop a deferred smart-pin search if the user diverted elsewhere.
+        if let Some((pending_path, _)) = &self.pending_nav_search {
+            if !same_path_string(pending_path, path) {
+                self.pending_nav_search = None;
+            }
+        }
         let prev_path = self.current_path.clone();
         if !prev_path.is_empty() {
             self.remember_primary_scroll(ui, &prev_path);
@@ -17821,7 +17829,7 @@ impl NativeController {
 
         if partial {
             self.schedule_full_directory_load(path.clone());
-        } else if let Some(q) = self.pending_nav_search.take() {
+        } else if let Some(q) = self.take_pending_nav_search_for(&path) {
             ui.set_search_text(ss(&q));
             self.search(ui, q);
         }
@@ -18079,6 +18087,15 @@ impl NativeController {
         } else {
             path
         };
+        // Drop deferred smart-pin search when navigating somewhere else.
+        // Path-query strings are resolved below; prepare_navigate_loading
+        // clears against the final path. activate_smart_folder sets pending
+        // then calls navigate with the same target, so that case is kept.
+        if let Some((pending_path, _)) = &self.pending_nav_search {
+            if !looks_like_path_query(&raw) && !same_path_string(pending_path, &raw) {
+                self.pending_nav_search = None;
+            }
+        }
         if self.flat_view && !same_path_string(&self.current_path, &raw) {
             self.flat_view = false;
             ui.set_flat_view(false);
@@ -19236,7 +19253,7 @@ impl NativeController {
         ui.set_search_text(ss(&query));
         if let Some(target) = target {
             if !target.is_empty() && !same_path_string(&self.current_path, &target) {
-                self.pending_nav_search = Some(query);
+                self.pending_nav_search = Some((target.clone(), query));
                 self.navigate(ui, target, true);
                 return;
             }
@@ -25926,6 +25943,16 @@ impl NativeController {
         }
     }
 
+    /// Consume a deferred smart-pin search only when `path` is its target.
+    fn take_pending_nav_search_for(&mut self, path: &str) -> Option<String> {
+        match self.pending_nav_search.as_ref() {
+            Some((pending_path, _)) if same_path_string(pending_path, path) => {
+                self.pending_nav_search.take().map(|(_, q)| q)
+            }
+            _ => None,
+        }
+    }
+
     /// Paths currently selected in the primary pane (stable across refresh).
     fn selected_paths_sticky(&self) -> Vec<String> {
         let mut paths: Vec<String> = self
@@ -26013,6 +26040,9 @@ impl NativeController {
         if !self.flat_view || !same_path_string(&self.current_path, &path) {
             return;
         }
+        // Flat walk is not a deferred smart-pin completion — drop any pending
+        // query so it cannot fire later against this (or another) folder.
+        self.pending_nav_search = None;
         let capped = entries.len() >= Self::FLAT_VIEW_CAP;
         let sticky = self.selected_paths_sticky();
         sort_entries_by(&mut entries, &self.sort_by, &self.sort_dir);
@@ -28757,7 +28787,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                         ctrl.sync_fantasy_empty_kind(&ui);
                                         ctrl.update_status(&ui);
                                         if !partial {
-                                            if let Some(q) = ctrl.pending_nav_search.take() {
+                                            if let Some(q) =
+                                                ctrl.take_pending_nav_search_for(&result.path)
+                                            {
                                                 ui.set_search_text(ss(&q));
                                                 ctrl.search(&ui, q);
                                             }
