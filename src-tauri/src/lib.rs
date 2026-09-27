@@ -786,6 +786,12 @@ fn profile_bucket_for_rest(rest: &[u8]) -> Option<&'static str> {
 }
 
 fn storage_is_app_path(path_bytes: &[u8]) -> bool {
+    // Accept `/` or `\` so Linux scans/tests and mixed slash paths classify.
+    let norm: Vec<u8> = path_bytes
+        .iter()
+        .map(|&b| if b == b'/' { b'\\' } else { b })
+        .collect();
+    let path_bytes = norm.as_slice();
     path_bytes_contains_ci(path_bytes, br"\program files\")
         || path_bytes_contains_ci(path_bytes, br"\program files (x86)\")
         || path_bytes_contains_ci(path_bytes, br"\programdata\")
@@ -6182,6 +6188,8 @@ fn storage_bucket_for(path: &Path, ctx: &StorageScanCtx) -> &'static str {
     }
     if path_bytes_contains_ci(path_bytes, br"\windows\")
         || path_bytes_contains_ci(path_bytes, br"\winsxs\")
+        || path_bytes_contains_ci(path_bytes, br"/windows/")
+        || path_bytes_contains_ci(path_bytes, br"/winsxs/")
     {
         return "system";
     }
@@ -6900,7 +6908,7 @@ fn storage_path_summary(path: &str) -> String {
 }
 
 fn storage_folder_display_title(path: &Path, fallback: &str) -> String {
-    let path_str = path.to_string_lossy();
+    let path_str = path.to_string_lossy().replace('/', "\\");
     let lower = path_str.to_ascii_lowercase();
     if let Some(idx) = lower.find("\\steamapps\\common\\") {
         let tail = &path_str[idx + "\\steamapps\\common\\".len()..];

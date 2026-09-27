@@ -10207,7 +10207,10 @@ export component MainWindow inherits Window {
                     }
                     tool_row_ta := TouchArea {
                         x: 0; y: 0;
-                        width: parent.width - (root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders" ? 112px : 40px);
+                        // Rules/smart-folders reserve the right chip; undo/queue
+                        // rows keep full-width hit targets so meta % / # still click.
+                        width: parent.width - (root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders" ? 112px
+                            : (root.tool_overlay_kind == "undo-history" || root.tool_overlay_kind == "operation-queue" ? 0px : 40px));
                         height: parent.height;
                         mouse-cursor: pointer;
                         clicked => { root.tool_overlay_activate(item.id); }
