@@ -20,9 +20,12 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/sunset_icons.slint");
     println!("cargo:rerun-if-changed=ui/fonts/PressStart2P-Regular.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/NotoSans-Regular.ttf");
+    println!("cargo:rerun-if-changed=ui/fonts/NotoSans-Bold.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/NotoSansMono-Regular.ttf");
+    println!("cargo:rerun-if-changed=ui/fonts/NotoSansMono-Bold.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/JetBrainsMono-Variable.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/Inter-Regular.ttf");
+    println!("cargo:rerun-if-changed=ui/fonts/Inter-Bold.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/Lora-Regular.ttf");
     println!("cargo:rerun-if-changed=ui/fonts/FiraCode-Regular.ttf");
     println!("cargo:rerun-if-changed=lang");

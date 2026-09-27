@@ -341,6 +341,7 @@ fn it(en: &str) -> Option<String> {
             "Up One Level" => "Cartella superiore",
             "Focus Address Bar" => "Focus sulla barra indirizzi",
             "Focus Search" => "Focus sulla ricerca",
+            "Filter Folder" => "Filtra cartella",
             "Command Palette" => "Tavolozza comandi",
             _ => return None,
         }
@@ -594,6 +595,7 @@ fn es(en: &str) -> Option<String> {
             "Up One Level" => "Subir un nivel",
             "Focus Address Bar" => "Enfocar barra de direcciones",
             "Focus Search" => "Enfocar búsqueda",
+            "Filter Folder" => "Filtrar carpeta",
             "Command Palette" => "Paleta de comandos",
             _ => return None,
         }
