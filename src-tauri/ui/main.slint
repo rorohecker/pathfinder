@@ -21,11 +21,15 @@ import {
 } from "sunset_icons.slint";
 
 // Bundled OFL fonts (embedded via build.rs). Family names come from font metadata.
+// Regular + Bold faces avoid synthetic bold (grainy / aliased UI text).
 import "fonts/PressStart2P-Regular.ttf";
 import "fonts/NotoSans-Regular.ttf";
+import "fonts/NotoSans-Bold.ttf";
 import "fonts/NotoSansMono-Regular.ttf";
+import "fonts/NotoSansMono-Bold.ttf";
 import "fonts/JetBrainsMono-Variable.ttf";
 import "fonts/Inter-Regular.ttf";
+import "fonts/Inter-Bold.ttf";
 import "fonts/Lora-Regular.ttf";
 import "fonts/FiraCode-Regular.ttf";
 
@@ -3526,6 +3530,8 @@ export component MainWindow inherits Window {
             : @linear-gradient(165deg, ThemePalette.bg_soft 0%, ThemePalette.bg 55%, ThemePalette.bg 100%))
         : ThemePalette.bg;
     default-font-family: AppMetrics.ui_font;
+    // Integer size + embedded Bold faces keep glyphs on pixel grid (less grain).
+    default-font-size: 13px;
     forward-focus: keys;
 
     in-out property <[FileItem]> files;
@@ -3936,6 +3942,7 @@ export component MainWindow inherits Window {
     callback windows_shell_menu();
     callback toggle_network_downloads();
     in-out property <int> toolbar_search_focus_nonce: 0;
+    in-out property <int> address_focus_nonce: 0;
     in-out property <int> filter_focus_nonce: 0;
     callback theme_selected(string);
     callback accent_selected(string);
@@ -4325,6 +4332,19 @@ export component MainWindow inherits Window {
             Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
         }
 
+        // Click-out dismiss for the expanded address field (below chrome z:50).
+        if root.address_editing: TouchArea {
+            z: 45;
+            x: 0;
+            y: root.title_h;
+            width: parent.width;
+            height: parent.height - root.title_h;
+            clicked => {
+                root.addr_suggestions = [];
+                root.address_editing = false;
+            }
+        }
+
         // Sidebar — above theme atmospheres (z:40) like titlebar/toolbar.
         Rectangle {
             x: 0;
@@ -4633,27 +4653,42 @@ export component MainWindow inherits Window {
             background: ThemePalette.panel;
             // Normal-mode toolbar layout is computed right-to-left so address,
             // search, sort, and view controls never overlap at narrow widths.
+            // Search + address share the flex budget between nav and the view
+            // cluster so wide windows don't leave a dead gap on the right.
             property <length> tb_gap: 8px;
             property <length> tb_ops_w: root.search_text != "" ? 64px : 32px;
-            property <length> tb_search_w: 208px;
-            property <length> tb_sort_w: 196px;
-            // View cluster includes Icons→Dual (+ Filter + Flat). Thumb −/+ sits to its left in grid/gallery.
-            property <length> tb_view_cluster_w: 386px;
+            property <length> tb_sort_w: 168px;
+            // View cluster: Icons→Dual (Filter folder removed — use command palette
+            // "Filter Folder" or the filter bar via Ctrl+Shift+G).
+            property <length> tb_view_cluster_w: 352px;
             property <length> tb_thumb_zoom_w: !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid")
                 ? 68px
                 : 0px;
             property <length> tb_view_x: self.width - tb_view_cluster_w - tb_thumb_zoom_w;
-            property <length> tb_min_w_search: 167px + 80px + tb_gap + tb_search_w + tb_ops_w + tb_gap + tb_view_cluster_w + tb_thumb_zoom_w;
-            property <length> tb_min_w_sort: tb_min_w_search + tb_gap + tb_sort_w;
+            property <length> tb_addr_x: 167px;
+            // Prefer showing search earlier; sort only when there's real room left.
+            property <length> tb_min_w_search: 167px + 80px + tb_gap + 260px + tb_ops_w + tb_gap + tb_view_cluster_w + tb_thumb_zoom_w;
+            property <length> tb_min_w_sort: tb_min_w_search + tb_gap + tb_sort_w + 120px;
             property <bool> show_toolbar_search: !root.is_simple && self.width >= tb_min_w_search;
             property <bool> show_toolbar_sort: !root.is_simple && self.width >= tb_min_w_sort;
             property <length> tb_sort_x: tb_view_x - tb_gap - tb_sort_w;
-            property <length> tb_search_x: (show_toolbar_sort ? tb_sort_x : tb_view_x) - tb_gap - tb_ops_w - tb_search_w;
-            property <length> tb_addr_x: 167px;
-            property <length> tb_addr_right: show_toolbar_search
-                ? tb_search_x
-                : (show_toolbar_sort ? tb_sort_x : tb_view_x);
-            property <length> tb_addr_w: max(80px, tb_addr_right - tb_addr_x - tb_gap);
+            property <length> tb_flex_right: show_toolbar_sort ? tb_sort_x : tb_view_x;
+            property <length> tb_flex_budget: max(0px, tb_flex_right - tb_addr_x - tb_gap);
+            // Idle: search takes ~55% of flex (min 260, max 560). Editing address:
+            // address expands; search compresses to a compact chip.
+            property <length> tb_search_w: !show_toolbar_search ? 0px
+                : (root.address_editing
+                    ? 112px
+                    : max(260px, min(560px, tb_flex_budget * 0.55)));
+            property <length> tb_search_x: show_toolbar_search
+                ? (tb_flex_right - tb_gap - tb_ops_w - tb_search_w)
+                : tb_flex_right;
+            property <length> tb_addr_right: show_toolbar_search ? tb_search_x : tb_flex_right;
+            property <length> tb_addr_min_w: root.address_editing ? 320px : 180px;
+            property <length> tb_addr_w: max(tb_addr_min_w, tb_addr_right - tb_addr_x - tb_gap);
+            animate tb_addr_w { duration: 160ms; easing: ease-out; }
+            animate tb_search_w { duration: 160ms; easing: ease-out; }
+            animate tb_search_x { duration: 160ms; easing: ease-out; }
             property <bool> tb_clear_sort: show_toolbar_sort && (root.sort_by != "name" || root.sort_dir != "asc");
             // Simple-mode layout math. Row 2 packs six equal slots (five view
             // modes + Actions). Slot width shrinks on narrow toolbars so the
@@ -4858,6 +4893,20 @@ export component MainWindow inherits Window {
                     text: root.address_text;
                     font-size: 12px;
                     font-family: AppMetrics.mono_font;
+                    property <int> focus_nonce: root.address_focus_nonce;
+                    changed focus_nonce => {
+                        if (self.focus_nonce > 0) {
+                            self.focus();
+                            self.select-all();
+                        }
+                    }
+                    // Click-out / tab-away restores the compact address width.
+                    // Keep editing while suggestions are open so dropdown clicks land.
+                    changed has-focus => {
+                        if (!self.has-focus && root.address_editing && root.addr_suggestions.length == 0) {
+                            root.address_editing = false;
+                        }
+                    }
                     edited(value) => {
                         root.address_text = value;
                         root.address_changed(value);
@@ -4929,6 +4978,7 @@ export component MainWindow inherits Window {
                     clicked => {
                         root.address_text = root.current_path;
                         root.address_editing = true;
+                        root.address_focus_nonce += 1;
                         addr.focus();
                         addr.select-all();
                     }
@@ -5013,7 +5063,7 @@ export component MainWindow inherits Window {
                 }
                 x: toolbar.tb_search_x;
                 y: 6px;
-                width: 208px;
+                width: toolbar.tb_search_w;
                 height: 31px;
                 border-width: 1px;
                 border-color: search_input.has-focus ? ThemePalette.accent : ThemePalette.border;
@@ -5226,7 +5276,7 @@ export component MainWindow inherits Window {
                 visible: toolbar.show_toolbar_sort;
                 x: toolbar.tb_sort_x;
                 y: 6px;
-                width: 196px;
+                width: toolbar.tb_sort_w;
                 height: 31px;
                 border-width: 1px;
                 border-color: ThemePalette.border;
@@ -5347,7 +5397,7 @@ export component MainWindow inherits Window {
             // View-mode cluster. 34px stride (31px button + 3px gap) so icons
             // stay centered in their hit boxes without overlapping neighbors.
             ToolButton {
-                x: root.is_simple ? 10px : parent.width - 386px;
+                x: root.is_simple ? 10px : parent.width - 352px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z";
@@ -5360,7 +5410,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("grid"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 352px;
+                x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 318px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12";
@@ -5373,7 +5423,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("compact"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 318px;
+                x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 284px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01";
@@ -5386,7 +5436,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("list"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 284px;
+                x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 250px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01";
@@ -5399,7 +5449,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("gallery"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 250px;
+                x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 216px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 4h18v16H3z M14 4v16";
@@ -5410,23 +5460,6 @@ export component MainWindow inherits Window {
                 tooltip: @tr("Preview pane");
                 active: root.preview_visible;
                 clicked => { root.toggle_preview(); }
-            }
-            ToolButton {
-                visible: !root.is_simple;
-                x: parent.width - 216px;
-                y: 6px;
-                icon_data: "M4 4h16v4H4z M4 10h10v2H4z M4 14h12v2H4z";
-                tooltip: @tr("Filter folder");
-                active: root.filter_bar_visible || root.filter_text != "";
-                clicked => {
-                    root.filter_bar_visible = !root.filter_bar_visible;
-                    if (!root.filter_bar_visible && root.filter_text != "") {
-                        root.filter_text = "";
-                        root.filter_changed("");
-                    } else if (root.filter_bar_visible) {
-                        root.filter_focus_nonce += 1;
-                    }
-                }
             }
             ToolButton {
                 visible: !root.is_simple;
@@ -7494,7 +7527,7 @@ export component MainWindow inherits Window {
         z: 100;
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - (root.is_simple ? 410px : 580px)) + self.rise;
-        width: 226px;
+        width: 248px;
         height: root.is_simple ? 390px : 560px;
         border-width: 1px;
         border-color: ThemePalette.border_strong;
@@ -7507,12 +7540,12 @@ export component MainWindow inherits Window {
         ScrollView {
             x: 0;
             y: 0;
-            width: 226px;
+            width: 248px;
             height: parent.height;
-            viewport-width: 216px;
+            viewport-width: 238px;
 
         VerticalLayout {
-            width: 216px;
+            width: 238px;
             padding: 5px;
             spacing: 2px;
             // -- Recycle-bin-only actions ------------------------------
@@ -7658,7 +7691,7 @@ export component MainWindow inherits Window {
         z: 100;
         x: root.context_x;
         y: root.context_y.clamp(0px, root.height - 278px) + self.rise;
-        width: 226px;
+        width: 248px;
         height: 266px;
         border-width: 1px;
         border-color: ThemePalette.border_strong;
@@ -7669,7 +7702,7 @@ export component MainWindow inherits Window {
         clip: true;
 
         VerticalLayout {
-            width: 216px;
+            width: 238px;
             x: 5px;
             y: 5px;
             spacing: 2px;
@@ -7768,16 +7801,17 @@ export component MainWindow inherits Window {
                 background: ThemePalette.panel;
                 property <string> resize_value: "";
                 Text {
-                    x: 9px; y: 0;
-                    width: 70px; height: parent.height;
+                    x: 8px; y: 0;
+                    width: 64px; height: parent.height;
                     text: @tr("Scale %:");
                     color: ThemePalette.text_muted;
                     font-size: 12px;
                     vertical-alignment: center;
+                    overflow: elide;
                 }
                 resize_input := TextInput {
-                    x: 76px; y: 1px;
-                    width: 80px; height: parent.height - 2px;
+                    x: 74px; y: 1px;
+                    width: 88px; height: parent.height - 2px;
                     font-size: 12.5px;
                     color: ThemePalette.text;
                     vertical-alignment: center;
@@ -7789,16 +7823,16 @@ export component MainWindow inherits Window {
                     }
                 }
                 if resize_input.text == "" && !resize_input.has-focus: Text {
-                    x: 76px; y: 0;
-                    width: 80px; height: parent.height;
+                    x: 74px; y: 0;
+                    width: 88px; height: parent.height;
                     text: "e.g. 75";
                     color: ThemePalette.text_faint;
                     font-size: 12px;
                     vertical-alignment: center;
                 }
                 Rectangle {
-                    x: parent.width - 55px; y: 3px;
-                    width: 50px; height: 24px;
+                    x: parent.width - 52px; y: 3px;
+                    width: 48px; height: 24px;
                     border-radius: 5px;
                     background: apply_touch.has-hover ? ThemePalette.accent : ThemePalette.accent_soft;
                     Text {
@@ -10010,15 +10044,20 @@ export component MainWindow inherits Window {
             Text { x: 18px; y: 40px; width: parent.width - 36px; height: 18px; text: @tr("Click a preset to apply to the selection"); color: ThemePalette.text_faint; font-size: 11px; }
             ScrollView {
                 x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 76px;
-                for preset[i] in root.rename_preset_names: Rectangle {
-                    width: parent.width - 8px;
-                    height: 36px;
-                    border-radius: AppMetrics.radius_small;
-                    background: preset_touch.has-hover ? ThemePalette.accent_soft : rgba(0,0,0,0);
-                    Text { x: 12px; width: parent.width - 24px; height: parent.height; text: preset; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
-                    preset_touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.rename_presets_visible = false; root.rename_preset_picked(preset); }
+                VerticalLayout {
+                    width: parent.width - AppMetrics.scroll_gutter;
+                    spacing: 2px;
+                    padding-bottom: 8px;
+                    for preset[i] in root.rename_preset_names: Rectangle {
+                        width: parent.width - 8px;
+                        height: 36px;
+                        border-radius: AppMetrics.radius_small;
+                        background: preset_touch.has-hover ? ThemePalette.accent_soft : rgba(0,0,0,0);
+                        Text { x: 12px; width: parent.width - 24px; height: parent.height; text: preset; color: ThemePalette.text; font-size: 13px; vertical-alignment: center; }
+                        preset_touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.rename_presets_visible = false; root.rename_preset_picked(preset); }
+                        }
                     }
                 }
             }
@@ -10087,23 +10126,26 @@ export component MainWindow inherits Window {
                         border-width: 1px;
                         border-color: ThemePalette.border;
                         background: priv_row_ta.has-hover ? ThemePalette.accent_soft : ThemePalette.panel;
+                        property <bool> row_has_meta: item.meta != "";
+                        property <length> meta_col_w: 96px;
+                        property <length> text_right_pad: row_has_meta ? meta_col_w + 28px : 20px;
                         Rectangle {
                             x: 8px; y: 16px; width: 4px; height: 24px;
                             border-radius: 2px;
                             background: item.accent;
                         }
                         Text {
-                            x: 20px; y: 6px; width: parent.width - 128px; height: 20px;
+                            x: 20px; y: 6px; width: parent.width - 20px - text_right_pad; height: 20px;
                             text: item.title;
                             color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
                         }
                         Text {
-                            x: 20px; y: 28px; width: parent.width - 128px; height: 22px;
+                            x: 20px; y: 28px; width: parent.width - 20px - text_right_pad; height: 22px;
                             text: item.subtitle;
                             color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
                         }
                         if item.meta != "": Text {
-                            x: parent.width - 100px; y: 0; width: 88px; height: parent.height;
+                            x: parent.width - meta_col_w - 12px; y: 0; width: meta_col_w; height: parent.height;
                             text: item.meta;
                             color: ThemePalette.text_faint; font-size: 11px;
                             horizontal-alignment: right; vertical-alignment: center; overflow: elide;
@@ -10117,117 +10159,141 @@ export component MainWindow inherits Window {
             }
             if root.tool_overlay_kind == "shortcuts": ScrollView {
                 x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 120px;
-                for sc[si] in root.shortcut_edit_items: Rectangle {
-                    width: parent.width - 8px - AppMetrics.scroll_gutter;
-                    height: 56px;
-                    border-radius: AppMetrics.radius_small;
-                    background: Math.mod(si, 2) == 0 ? ThemePalette.panel : rgba(0, 0, 0, 0);
-                    Text {
-                        x: 12px; y: 6px; width: parent.width - 24px; height: 18px;
-                        text: sc.label + (sc.group != "" ? (" · " + sc.group) : "");
-                        color: ThemePalette.text; font-size: 12.5px; font-weight: 600; overflow: elide;
-                    }
-                    LineEdit {
-                        x: 12px; y: 26px; width: parent.width - 24px; height: 24px;
-                        text: sc.hint;
-                        placeholder-text: root.shortcut_capture_active && root.shortcut_capture_command == sc.command
-                            ? @tr("Press a key combination…")
-                            : @tr("Click, then press a shortcut");
-                        font-size: 12px;
-                        font-family: AppMetrics.mono_font;
-                        key-pressed(event) => {
-                            if (event.text == Key.Escape) {
-                                if (root.shortcut_capture_active && root.shortcut_capture_command == sc.command) {
-                                    root.shortcut_key(event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.text);
-                                    return accept;
+                VerticalLayout {
+                    width: parent.width - AppMetrics.scroll_gutter;
+                    spacing: 0px;
+                    padding-bottom: 8px;
+                    for sc[si] in root.shortcut_edit_items: Rectangle {
+                        width: parent.width - 8px;
+                        height: 56px;
+                        border-radius: AppMetrics.radius_small;
+                        background: Math.mod(si, 2) == 0 ? ThemePalette.panel : rgba(0, 0, 0, 0);
+                        Text {
+                            x: 12px; y: 6px; width: parent.width - 24px; height: 18px;
+                            text: sc.label + (sc.group != "" ? (" · " + sc.group) : "");
+                            color: ThemePalette.text; font-size: 12.5px; font-weight: 600; overflow: elide;
+                        }
+                        LineEdit {
+                            x: 12px; y: 26px; width: parent.width - 24px; height: 24px;
+                            text: sc.hint;
+                            placeholder-text: root.shortcut_capture_active && root.shortcut_capture_command == sc.command
+                                ? @tr("Press a key combination…")
+                                : @tr("Click, then press a shortcut");
+                            font-size: 12px;
+                            font-family: AppMetrics.mono_font;
+                            key-pressed(event) => {
+                                if (event.text == Key.Escape) {
+                                    if (root.shortcut_capture_active && root.shortcut_capture_command == sc.command) {
+                                        root.shortcut_key(event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.text);
+                                        return accept;
+                                    }
+                                    return reject;
                                 }
-                                return reject;
+                                root.shortcut_capture_command = sc.command;
+                                root.shortcut_capture_active = true;
+                                root.shortcut_key(event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.text);
+                                return accept;
                             }
-                            root.shortcut_capture_command = sc.command;
-                            root.shortcut_capture_active = true;
-                            root.shortcut_key(event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.text);
-                            return accept;
                         }
                     }
                 }
             }
             if root.tool_overlay_kind != "shortcuts" && root.tool_overlay_kind != "privacy": ScrollView {
                 x: 12px; y: 64px; width: parent.width - 24px; height: parent.height - 120px;
-                for item[ti] in root.tool_overlay_items: Rectangle {
-                    width: parent.width - 8px - AppMetrics.scroll_gutter;
-                    height: 52px;
-                    border-radius: AppMetrics.radius_small;
-                    background: tool_row_ta.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
-                    Rectangle {
-                        x: 8px; y: 16px; width: 4px; height: 20px;
-                        border-radius: 2px;
-                        background: item.accent;
-                    }
-                    Text {
-                        // Rules + smart-folders reserve 140px for the right-side chip
-                        // (and ··· on smart-folders) so title/subtitle never paint under it.
-                        x: 20px; y: 8px; width: parent.width - (root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders" ? 140px : 118px); height: 20px;
-                        text: item.title;
-                        color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
-                    }
-                    Text {
-                        x: 20px; y: 28px; width: parent.width - (root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders" ? 140px : 118px); height: 16px;
-                        text: item.subtitle;
-                        color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
-                    }
-                    if root.tool_overlay_kind == "rules": Rectangle {
-                        x: parent.width - 108px; y: 14px; width: 52px; height: 24px;
-                        border-radius: 12px;
-                        background: item.enabled ? ThemePalette.success : ThemePalette.border_strong;
+                // VerticalLayout is required — bare for-children of ScrollView all
+                // sit at (0,0) and paint over each other (Properties / Open With /
+                // undo / queue rows looked like overlapping soup).
+                VerticalLayout {
+                    width: parent.width - AppMetrics.scroll_gutter;
+                    spacing: 2px;
+                    padding-bottom: 8px;
+                    for item[ti] in root.tool_overlay_items: Rectangle {
+                        width: parent.width - 8px;
+                        height: 52px;
+                        border-radius: AppMetrics.radius_small;
+                        background: tool_row_ta.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+                        // Right-side reservation so title/subtitle never paint under
+                        // chips or the meta value column (was a fixed 118px that
+                        // still overlapped meta at parent.width-90).
+                        property <bool> row_has_chip: root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders";
+                        property <bool> row_has_meta: item.meta != "";
+                        property <length> meta_col_w: root.tool_overlay_kind == "properties" ? 200px : 72px;
+                        property <length> text_right_pad: row_has_chip ? 140px
+                            : (row_has_meta ? meta_col_w + 28px : 16px);
+                        property <bool> value_only: row_has_meta && item.subtitle == "";
+                        Rectangle {
+                            x: 8px; y: 16px; width: 4px; height: 20px;
+                            border-radius: 2px;
+                            background: item.accent;
+                        }
                         Text {
-                            width: parent.width; height: parent.height;
-                            text: item.enabled ? @tr("On") : @tr("Off");
-                            color: white; font-size: 10px; font-weight: 700;
-                            horizontal-alignment: center; vertical-alignment: center;
+                            x: 20px;
+                            y: value_only ? 0 : 8px;
+                            width: parent.width - 20px - text_right_pad;
+                            height: value_only ? parent.height : 20px;
+                            text: item.title;
+                            color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
+                            vertical-alignment: value_only ? center : top;
                         }
-                        TouchArea {
+                        if item.subtitle != "": Text {
+                            x: 20px; y: 28px; width: parent.width - 20px - text_right_pad; height: 16px;
+                            text: item.subtitle;
+                            color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
+                        }
+                        if root.tool_overlay_kind == "rules": Rectangle {
+                            x: parent.width - 108px; y: 14px; width: 52px; height: 24px;
+                            border-radius: 12px;
+                            background: item.enabled ? ThemePalette.success : ThemePalette.border_strong;
+                            Text {
+                                width: parent.width; height: parent.height;
+                                text: item.enabled ? @tr("On") : @tr("Off");
+                                color: white; font-size: 10px; font-weight: 700;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.tool_overlay_toggle(item.id); }
+                            }
+                        }
+                        if root.tool_overlay_kind == "smart-folders": Rectangle {
+                            x: parent.width - 108px; y: 14px; width: 52px; height: 24px;
+                            border-radius: 12px;
+                            background: item.enabled ? ThemePalette.accent : ThemePalette.border_strong;
+                            Text {
+                                width: parent.width; height: parent.height;
+                                text: item.enabled ? @tr("Home") : @tr("Pin");
+                                color: white; font-size: 10px; font-weight: 700;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.tool_overlay_toggle(item.id); }
+                            }
+                        }
+                        if item.meta != "": Text {
+                            x: parent.width - meta_col_w - 12px; y: 0; width: meta_col_w; height: parent.height;
+                            text: item.meta;
+                            color: ThemePalette.text_faint; font-size: 11px;
+                            horizontal-alignment: right; vertical-alignment: center; overflow: elide;
+                        }
+                        ToolButton {
+                            x: parent.width - 36px; y: 10px;
+                            button_width: 28px; button_height: 28px;
+                            visible: item.meta == "" && root.tool_overlay_kind == "smart-folders";
+                            text_label: "···";
+                            tooltip: @tr("Rename");
+                            clicked => { root.tool_overlay_secondary(item.id); }
+                        }
+                        tool_row_ta := TouchArea {
+                            x: 0; y: 0;
+                            // Rules/smart-folders reserve the right chip; undo/queue
+                            // rows keep full-width hit targets so meta % / # still click.
+                            width: parent.width - (root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders" ? 112px
+                                : (root.tool_overlay_kind == "undo-history" || root.tool_overlay_kind == "operation-queue" ? 0px : 40px));
+                            height: parent.height;
                             mouse-cursor: pointer;
-                            clicked => { root.tool_overlay_toggle(item.id); }
+                            clicked => { root.tool_overlay_activate(item.id); }
                         }
-                    }
-                    if root.tool_overlay_kind == "smart-folders": Rectangle {
-                        x: parent.width - 108px; y: 14px; width: 52px; height: 24px;
-                        border-radius: 12px;
-                        background: item.enabled ? ThemePalette.accent : ThemePalette.border_strong;
-                        Text {
-                            width: parent.width; height: parent.height;
-                            text: item.enabled ? @tr("Home") : @tr("Pin");
-                            color: white; font-size: 10px; font-weight: 700;
-                            horizontal-alignment: center; vertical-alignment: center;
-                        }
-                        TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.tool_overlay_toggle(item.id); }
-                        }
-                    }
-                    if item.meta != "": Text {
-                        x: parent.width - 90px; y: 0; width: 78px; height: parent.height;
-                        text: item.meta;
-                        color: ThemePalette.text_faint; font-size: 11px;
-                        horizontal-alignment: right; vertical-alignment: center; overflow: elide;
-                    }
-                    ToolButton {
-                        x: parent.width - 36px; y: 10px;
-                        button_width: 28px; button_height: 28px;
-                        visible: item.meta == "" && root.tool_overlay_kind == "smart-folders";
-                        text_label: "···";
-                        tooltip: @tr("Rename");
-                        clicked => { root.tool_overlay_secondary(item.id); }
-                    }
-                    tool_row_ta := TouchArea {
-                        x: 0; y: 0;
-                        // Rules/smart-folders reserve the right chip; undo/queue
-                        // rows keep full-width hit targets so meta % / # still click.
-                        width: parent.width - (root.tool_overlay_kind == "rules" || root.tool_overlay_kind == "smart-folders" ? 112px
-                            : (root.tool_overlay_kind == "undo-history" || root.tool_overlay_kind == "operation-queue" ? 0px : 40px));
-                        height: parent.height;
-                        mouse-cursor: pointer;
-                        clicked => { root.tool_overlay_activate(item.id); }
                     }
                 }
             }
@@ -10351,43 +10417,49 @@ export component MainWindow inherits Window {
                 x: 12px; y: root.compare_sync_mode ? 208px : 96px;
                 width: parent.width - 24px;
                 height: parent.height - (root.compare_sync_mode ? 308px : 152px);
-                for row[ri] in root.compare_rows: Rectangle {
-                    width: parent.width - 8px - AppMetrics.scroll_gutter;
-                    height: 40px;
-                    border-radius: AppMetrics.radius_small;
-                    background: !root.compare_sync_mode && cmp_ta.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
-                    property <color> status_color:
-                        row.result_state == "done" ? ThemePalette.success :
-                        row.result_state == "cancelled" ? ThemePalette.text_muted :
-                        row.result_state == "skipped" ? ThemePalette.warning :
-                        row.status == "same" ? ThemePalette.success :
-                        (row.status == "copy" || row.status == "create folder" ? ThemePalette.accent :
-                        (row.status == "update" ? ThemePalette.warning :
-                        (row.status == "extra — kept" ? ThemePalette.text_muted :
-                        (row.status == "left-only" || row.status == "newer-left" ? ThemePalette.accent :
-                        (row.status == "right-only" || row.status == "newer-right" ? ThemePalette.warning : ThemePalette.danger)))));
-                    Rectangle {
-                        x: 8px; y: 12px; width: 8px; height: 8px;
-                        border-radius: 4px;
-                        background: parent.status_color;
-                    }
-                    Text {
-                        x: 24px; y: 4px; width: parent.width - 160px; height: 18px;
-                        text: row.path;
-                        color: ThemePalette.text; font-size: 12.5px; overflow: elide;
-                    }
-                    Text {
-                        x: 24px; y: 22px; width: parent.width - 160px; height: 14px;
-                        text: root.compare_sync_mode && row.detail != ""
-                            ? row.status + " · " + row.detail
-                            : root.compare_sync_mode && row.left_size == ""
-                            ? (row.right_size == "" ? row.status : row.status + " · " + row.right_size)
-                            : row.status + " · L " + row.left_size + " · R " + row.right_size;
-                        color: ThemePalette.text_faint; font-size: 10.5px; overflow: elide;
-                    }
-                    cmp_ta := TouchArea {
-                        mouse-cursor: root.compare_sync_mode ? default : pointer;
-                        clicked => { if (!root.compare_sync_mode) { root.compare_row_activate(row.path); } }
+                // Bare for-children of ScrollView stack at (0,0) — wrap so rows don't overlap.
+                VerticalLayout {
+                    width: parent.width - AppMetrics.scroll_gutter;
+                    spacing: 2px;
+                    padding-bottom: 8px;
+                    for row[ri] in root.compare_rows: Rectangle {
+                        width: parent.width - 8px;
+                        height: 40px;
+                        border-radius: AppMetrics.radius_small;
+                        background: !root.compare_sync_mode && cmp_ta.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+                        property <color> status_color:
+                            row.result_state == "done" ? ThemePalette.success :
+                            row.result_state == "cancelled" ? ThemePalette.text_muted :
+                            row.result_state == "skipped" ? ThemePalette.warning :
+                            row.status == "same" ? ThemePalette.success :
+                            (row.status == "copy" || row.status == "create folder" ? ThemePalette.accent :
+                            (row.status == "update" ? ThemePalette.warning :
+                            (row.status == "extra — kept" ? ThemePalette.text_muted :
+                            (row.status == "left-only" || row.status == "newer-left" ? ThemePalette.accent :
+                            (row.status == "right-only" || row.status == "newer-right" ? ThemePalette.warning : ThemePalette.danger)))));
+                        Rectangle {
+                            x: 8px; y: 12px; width: 8px; height: 8px;
+                            border-radius: 4px;
+                            background: parent.status_color;
+                        }
+                        Text {
+                            x: 24px; y: 4px; width: parent.width - 160px; height: 18px;
+                            text: row.path;
+                            color: ThemePalette.text; font-size: 12.5px; overflow: elide;
+                        }
+                        Text {
+                            x: 24px; y: 22px; width: parent.width - 160px; height: 14px;
+                            text: root.compare_sync_mode && row.detail != ""
+                                ? row.status + " · " + row.detail
+                                : root.compare_sync_mode && row.left_size == ""
+                                ? (row.right_size == "" ? row.status : row.status + " · " + row.right_size)
+                                : row.status + " · L " + row.left_size + " · R " + row.right_size;
+                            color: ThemePalette.text_faint; font-size: 10.5px; overflow: elide;
+                        }
+                        cmp_ta := TouchArea {
+                            mouse-cursor: root.compare_sync_mode ? default : pointer;
+                            clicked => { if (!root.compare_sync_mode) { root.compare_row_activate(row.path); } }
+                        }
                     }
                 }
             }
@@ -10459,48 +10531,53 @@ export component MainWindow inherits Window {
             }
             ScrollView {
                 x: 12px; y: 90px; width: parent.width - 24px; height: parent.height - 146px;
-                for grp[gi] in root.dupe_groups: Rectangle {
-                    width: parent.width - 8px - AppMetrics.scroll_gutter;
-                    height: 118px;
-                    border-radius: AppMetrics.radius_small;
-                    border-width: 1px;
-                    border-color: ThemePalette.border;
-                    background: ThemePalette.panel;
-                    Rectangle {
-                        x: 12px; y: 12px; width: 4px; height: 40px;
-                        border-radius: 2px;
-                        background: ThemePalette.accent;
-                    }
-                    Text {
-                        x: 24px; y: 10px; width: parent.width - 36px; height: 18px;
-                        text: grp.title;
-                        color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
-                    }
-                    Text {
-                        x: 24px; y: 30px; width: parent.width - 36px; height: 14px;
-                        text: grp.detail + " · keep " + grp.keep_size + " · reclaim " + grp.reclaimable;
-                        color: ThemePalette.text_muted; font-size: 11px; overflow: elide;
-                    }
-                    Text {
-                        x: 24px; y: 48px; width: parent.width - 36px; height: 14px;
-                        text: "Keep: " + grp.keep_path;
-                        color: ThemePalette.text_faint; font-size: 10.5px; font-family: AppMetrics.mono_font; overflow: elide;
-                    }
-                    Text {
-                        x: 24px; y: 64px; width: parent.width - 36px; height: 14px;
-                        text: grp.paths_preview;
-                        color: ThemePalette.text_faint; font-size: 10.5px; font-family: AppMetrics.mono_font; overflow: elide;
-                    }
-                    DialogButton {
-                        x: 12px; y: parent.height - 38px;
-                        label: @tr("Keep first");
-                        clicked => { root.dupe_group_keep(grp.id); }
-                    }
-                    DialogButton {
-                        x: 118px; y: parent.height - 38px;
-                        label: @tr("Delete others");
-                        danger: true;
-                        clicked => { root.dupe_group_delete_others(grp.id); }
+                VerticalLayout {
+                    width: parent.width - AppMetrics.scroll_gutter;
+                    spacing: 6px;
+                    padding-bottom: 8px;
+                    for grp[gi] in root.dupe_groups: Rectangle {
+                        width: parent.width - 8px;
+                        height: 118px;
+                        border-radius: AppMetrics.radius_small;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        Rectangle {
+                            x: 12px; y: 12px; width: 4px; height: 40px;
+                            border-radius: 2px;
+                            background: ThemePalette.accent;
+                        }
+                        Text {
+                            x: 24px; y: 10px; width: parent.width - 36px; height: 18px;
+                            text: grp.title;
+                            color: ThemePalette.text; font-size: 13px; font-weight: 600; overflow: elide;
+                        }
+                        Text {
+                            x: 24px; y: 30px; width: parent.width - 36px; height: 14px;
+                            text: grp.detail + " · keep " + grp.keep_size + " · reclaim " + grp.reclaimable;
+                            color: ThemePalette.text_muted; font-size: 11px; overflow: elide;
+                        }
+                        Text {
+                            x: 24px; y: 48px; width: parent.width - 36px; height: 14px;
+                            text: "Keep: " + grp.keep_path;
+                            color: ThemePalette.text_faint; font-size: 10.5px; font-family: AppMetrics.mono_font; overflow: elide;
+                        }
+                        Text {
+                            x: 24px; y: 64px; width: parent.width - 36px; height: 14px;
+                            text: grp.paths_preview;
+                            color: ThemePalette.text_faint; font-size: 10.5px; font-family: AppMetrics.mono_font; overflow: elide;
+                        }
+                        DialogButton {
+                            x: 12px; y: parent.height - 38px;
+                            label: @tr("Keep first");
+                            clicked => { root.dupe_group_keep(grp.id); }
+                        }
+                        DialogButton {
+                            x: 118px; y: parent.height - 38px;
+                            label: @tr("Delete others");
+                            danger: true;
+                            clicked => { root.dupe_group_delete_others(grp.id); }
+                        }
                     }
                 }
             }

@@ -7,12 +7,18 @@ depends on a font being installed on the user's system.
 | File | Family | Source |
 | --- | --- | --- |
 | NotoSans-Regular.ttf | Noto Sans | https://github.com/notofonts/notofonts.github.io |
+| NotoSans-Bold.ttf | Noto Sans | https://github.com/notofonts/notofonts.github.io |
 | NotoSansMono-Regular.ttf | Noto Sans Mono | https://github.com/notofonts/notofonts.github.io |
+| NotoSansMono-Bold.ttf | Noto Sans Mono | https://github.com/notofonts/notofonts.github.io |
 | JetBrainsMono-Variable.ttf | JetBrains Mono | https://github.com/JetBrains/JetBrainsMono |
 | Inter-Regular.ttf | Inter | https://github.com/google/fonts/tree/main/ofl/inter |
+| Inter-Bold.ttf | Inter | https://github.com/google/fonts/tree/main/ofl/inter |
 | Lora-Regular.ttf | Lora | https://github.com/google/fonts/tree/main/ofl/lora |
 | FiraCode-Regular.ttf | Fira Code | https://github.com/tonsky/FiraCode |
 | PressStart2P-Regular.ttf | Press Start 2P | https://github.com/google/fonts/tree/main/ofl/pressstart2p |
+
+Bold faces are bundled alongside Regular so `font-weight: 600/700` uses real outlines
+instead of synthetic emboldening (which looks grainy under femtovg).
 
 Note: Press Start 2P is a pixel display font with limited glyph coverage. It is no
 longer applied as a global UI/monospace font because the femtovg renderer has no
