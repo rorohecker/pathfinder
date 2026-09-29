@@ -31,6 +31,7 @@ import "fonts/FiraCode-Regular.ttf";
 
 export struct FileItem {
     name: string,
+    match_snippet: string,
     file_path: string,
     is_dir: bool,
     size_text: string,
@@ -1576,12 +1577,23 @@ component FileRow inherits Rectangle {
         y: root.group_header_h;
         // Name always gets at least 80px; right column slides in when the row gets wider.
         width: max(80px, parent.width - 44px - root.list_right_zone - 16px);
-        height: parent.height - root.group_header_h;
+        height: root.item.match_snippet == "" ? parent.height - root.group_header_h : 19px;
         text: root.item.name;
         color: root.item.is_selected ? ThemePalette.text : ThemePalette.text_muted;
         font-size: root.list_name_font;
         overflow: elide;
         vertical-alignment: center;
+    }
+
+    if root.view_mode == "list" && root.item.match_snippet != "" && !root.is_renaming: Text {
+        x: 44px;
+        y: root.group_header_h + 19px;
+        width: max(80px, parent.width - 44px - root.list_right_zone - 16px);
+        height: 16px;
+        text: root.item.match_snippet;
+        color: ThemePalette.accent_strong;
+        font-size: 10px;
+        overflow: elide;
     }
 
     // SIZE column - right-aligned, monospaced

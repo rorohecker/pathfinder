@@ -1,6 +1,12 @@
 # Audit implementation status — 2026-09-28
 
-This tracks `AUDIT_2026-09-28.md` against the current working tree. "Addressed" means the identified defect has a targeted code change; it does not imply the full validation matrix in the audit has run. "Partial" identifies a meaningful fix with remaining requirements. The first proposed feature now has a reviewed one-way implementation; the other two remain plans.
+This records the 2026-09-28 baseline for `AUDIT_2026-09-28.md`. "Addressed" means the identified defect had a targeted code change; it does not imply the full validation matrix in the audit ran. "Partial" identifies a meaningful fix with remaining requirements. See the dated follow-up before interpreting the table as the current implementation state.
+
+## Follow-up on 2026-09-29
+
+The table below records the 2026-09-28 baseline. New work adds an opt-in document-content index with snippets and optional local OCR; resumable, staged single-file copies; a recovery queue for interrupted file transfers; and verified cross-volume file moves. Name/path substring queries now use SQLite trigram candidates before applying the complete predicate. Shell registry changes preserve prior values and restore only Pathfinder-owned registrations. The updater now requires the expected product/version/architecture asset and SHA-256 digest and stages in per-user app data. See [search performance](SEARCH_PERFORMANCE_2026-09-29.md) and [security review](SECURITY_REVIEW_2026-09-29.md).
+
+The content-search and transfer proposals are **partial implementations**, not complete closure of the audit. In particular, recursive folder transfers, transactional replacement/restore, publisher signing, installer outcome receipts, a shared query planner across providers, and extensive UI/accessibility and fault-injection tests remain. Other Open/Partial rows below are still outstanding unless explicitly discussed in this follow-up.
 
 | Finding | Status | Remaining work |
 | --- | --- | --- |

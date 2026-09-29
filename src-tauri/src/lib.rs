@@ -8,7 +8,7 @@
 use base64::{Engine as _, engine::general_purpose};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use rayon::prelude::*;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
@@ -75,6 +75,8 @@ pub fn __test_detect_gpus() -> Vec<(String, u32, u64, bool, bool)> {
         .collect()
 }
 mod cloud_files;
+mod content_index;
+mod durable_transfer;
 mod fantasy_icons;
 mod folder_sync;
 mod imagenet_labels;
@@ -360,6 +362,7 @@ struct NativeSearchResult {
     entries: Vec<FileEntry>,
     source: String,
     partial: bool,
+    snippets: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -639,6 +642,7 @@ struct AppState {
     next_operation_id: Arc<AtomicU64>,
     queue_paused: Arc<Mutex<bool>>,
     queue_cancel: Arc<std::sync::atomic::AtomicBool>,
+    content_scan_cancel: Arc<AtomicBool>,
     git_cache: Arc<Mutex<GitCacheMap>>,
     // Debounce map for file watcher indexing: tracks last index time per path
     // to avoid excessive indexing when rapid file system events occur.
@@ -653,6 +657,71 @@ struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
+        let recovered = durable_transfer::list(&native_data_file("transfers"));
+        let stored: Vec<OperationQueueItem> = read_native_json("operation_queue.json", Vec::new());
+        let mut by_id: HashMap<u64, OperationQueueItem> = stored
+            .into_iter()
+            .map(|mut item| {
+                if matches!(item.status.as_str(), "running" | "queued") {
+                    item.status = "interrupted".to_string();
+                    item.detail = "Interrupted by restart; review before retrying".to_string();
+                }
+                (item.id, item)
+            })
+            .collect();
+        let recent_done: HashSet<u64> = recovered
+            .iter()
+            .rev()
+            .filter(|plan| plan.status == "done")
+            .take(24)
+            .map(|plan| plan.id)
+            .collect();
+        for plan in recovered
+            .into_iter()
+            .filter(|plan| {
+                plan.status != "done"
+                    || (plan.kind == "move" && plan.source.exists())
+                    || recent_done.contains(&plan.id)
+            })
+            .map(|plan| {
+                let status = if plan.status == "running"
+                    || (plan.kind == "move" && plan.status == "done" && plan.source.exists())
+                {
+                    "interrupted".to_string()
+                } else {
+                    plan.status.clone()
+                };
+                OperationQueueItem {
+                    id: plan.id,
+                    kind: plan.kind.clone(),
+                    source: plan.source.to_string_lossy().into_owned(),
+                    destination: Some(plan.destination.to_string_lossy().into_owned()),
+                    status,
+                    detail: if plan.error.is_empty() {
+                        if plan.kind == "move" && plan.status == "done" && plan.source.exists() {
+                            "Copy complete; source remains until move is resumed".to_string()
+                        } else {
+                            "Recoverable transfer".to_string()
+                        }
+                    } else {
+                        plan.error
+                    },
+                    bytes_total: plan.source_len,
+                    bytes_done: plan.bytes_done,
+                    speed_bps: 0,
+                    eta_secs: None,
+                    conflict: None,
+                    started_at: 0,
+                    finished_at: None,
+                }
+            })
+        {
+            by_id.insert(plan.id, plan);
+        }
+        let next_id = by_id.keys().copied().max().unwrap_or(0).saturating_add(1);
+        let mut ordered: Vec<_> = by_id.into_values().collect();
+        ordered.sort_by_key(|item| item.id);
+        let queue: VecDeque<_> = ordered.into();
         Self {
             directory_cache: Arc::new(Mutex::new(HashMap::new())),
             preview_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -661,10 +730,11 @@ impl Default for AppState {
             ai_capabilities: Arc::new(Mutex::new(None)),
             operation_log: Arc::new(Mutex::new(Vec::new())),
             operation_log_generation: Arc::new(AtomicU64::new(0)),
-            operation_queue: Arc::new(Mutex::new(VecDeque::new())),
-            next_operation_id: Arc::new(AtomicU64::new(1)),
+            operation_queue: Arc::new(Mutex::new(queue)),
+            next_operation_id: Arc::new(AtomicU64::new(next_id)),
             queue_paused: Arc::new(Mutex::new(false)),
             queue_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            content_scan_cancel: Arc::new(AtomicBool::new(false)),
             git_cache: Arc::new(Mutex::new(HashMap::new())),
             index_debounce: Arc::new(Mutex::new(HashMap::new())),
             pdf_page_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -2195,7 +2265,10 @@ fn replace_preserving_destination<T>(
     if !dest.exists() {
         return action();
     }
-    let name = dest.file_name().ok_or("Destination has no file name")?.to_string_lossy();
+    let name = dest
+        .file_name()
+        .ok_or("Destination has no file name")?
+        .to_string_lossy();
     let backup = keep_both_destination(&dest.with_file_name(format!(".{name}.pathfinder-backup")));
     fs::rename(dest, &backup).map_err(|e| format!("Could not stage old destination: {e}"))?;
     match action() {
@@ -2203,7 +2276,10 @@ fn replace_preserving_destination<T>(
             // Keep the previous version in the OS Recycle Bin where possible.
             // If recycling fails, the backup remains beside the destination.
             if let Err(error) = trash::delete(&backup) {
-                eprintln!("Could not recycle replaced version at {}: {error}", backup.display());
+                eprintln!(
+                    "Could not recycle replaced version at {}: {error}",
+                    backup.display()
+                );
             }
             Ok(value)
         }
@@ -2218,10 +2294,17 @@ fn replace_preserving_destination<T>(
             } else {
                 None
             };
-            fs::rename(&backup, dest)
-                .map_err(|e| format!("{error}; old version remains at {} because restoration failed: {e}", backup.display()))?;
+            fs::rename(&backup, dest).map_err(|e| {
+                format!(
+                    "{error}; old version remains at {} because restoration failed: {e}",
+                    backup.display()
+                )
+            })?;
             if let Some(partial) = partial {
-                Err(format!("{error}; partial result kept at {}", partial.display()))
+                Err(format!(
+                    "{error}; partial result kept at {}",
+                    partial.display()
+                ))
             } else {
                 Err(error)
             }
@@ -2489,6 +2572,12 @@ fn trim_preview_cache(cache: &mut HashMap<String, CachedPreview>, max_entries: u
 }
 
 impl AppState {
+    fn persist_queue_snapshot(&self) {
+        if let Ok(queue) = self.operation_queue.lock() {
+            let snapshot: Vec<_> = queue.iter().cloned().collect();
+            write_native_json_async("operation_queue.json", &snapshot);
+        }
+    }
     fn cached_directory(&self, path: &str) -> Option<Vec<FileEntry>> {
         let key = cache_key_str(path);
         let mut cache = self.directory_cache.lock().ok()?;
@@ -2578,9 +2667,17 @@ impl AppState {
         if let Ok(mut queue) = self.operation_queue.lock() {
             queue.push_back(item);
             while queue.len() > MAX_OPERATION_QUEUE_ITEMS {
-                queue.pop_front();
+                if let Some(position) = queue
+                    .iter()
+                    .position(|item| matches!(item.status.as_str(), "done" | "completed"))
+                {
+                    queue.remove(position);
+                } else {
+                    break;
+                }
             }
         }
+        self.persist_queue_snapshot();
         id
     }
 
@@ -2631,7 +2728,7 @@ impl AppState {
             const KEEP_FINISHED: usize = 24;
             let finished = queue
                 .iter()
-                .filter(|i| i.status != "running" && i.status != "queued")
+                .filter(|i| matches!(i.status.as_str(), "done" | "completed"))
                 .count();
             if finished > KEEP_FINISHED {
                 let drop_n = finished - KEEP_FINISHED;
@@ -2640,7 +2737,7 @@ impl AppState {
                     if dropped >= drop_n {
                         return true;
                     }
-                    if i.status != "running" && i.status != "queued" {
+                    if matches!(i.status.as_str(), "done" | "completed") {
                         dropped += 1;
                         false
                     } else {
@@ -2649,6 +2746,7 @@ impl AppState {
                 });
             }
         }
+        self.persist_queue_snapshot();
     }
 
     fn queue_conflict(&self, id: u64, conflict: ConflictInfo) {
@@ -2660,6 +2758,68 @@ impl AppState {
                 item.finished_at = Some(now_unix_secs());
             }
         }
+        self.persist_queue_snapshot();
+    }
+
+    fn queue_retry_item(&self, id: u64) -> Result<(), String> {
+        let plan = durable_transfer::load(&native_data_file("transfers"), id)?;
+        if plan.status == "done" && plan.kind != "move" {
+            return Ok(());
+        }
+        if let Ok(mut queue) = self.operation_queue.lock()
+            && let Some(item) = queue.iter_mut().find(|item| item.id == id)
+        {
+            if item.status == "running" {
+                return Err("Transfer is already running".into());
+            }
+            item.status = "running".to_string();
+            item.detail = "Validating staged copy".to_string();
+        }
+        self.clear_queue_cancel();
+        self.persist_queue_snapshot();
+        let started = Instant::now();
+        let result = durable_transfer::run(
+            &native_data_file("transfers"),
+            id,
+            self.queue_cancel.as_ref(),
+            |done| self.queue_progress(id, done, started),
+        )
+        .and_then(|()| {
+            if plan.kind == "move" {
+                durable_transfer::finish_move(&native_data_file("transfers"), id)
+            } else {
+                Ok(())
+            }
+        });
+        match &result {
+            Ok(()) => {
+                self.invalidate_path(&plan.destination);
+                self.log_op(
+                    &plan.kind,
+                    &plan.source.to_string_lossy(),
+                    Some(&plan.destination.to_string_lossy()),
+                );
+                self.queue_finish(
+                    id,
+                    "done",
+                    if plan.kind == "move" {
+                        "Moved"
+                    } else {
+                        "Copied"
+                    },
+                    plan.source_len,
+                    started.elapsed(),
+                );
+            }
+            Err(error) => self.queue_finish(
+                id,
+                "failed",
+                error.clone(),
+                plan.bytes_done,
+                started.elapsed(),
+            ),
+        }
+        result
     }
 
     fn queue_is_paused(&self) -> bool {
@@ -2723,8 +2883,6 @@ impl AppState {
         }
     }
 }
-
-
 
 fn push_known(list: &mut Vec<KnownFolder>, id: &str, name: &str, path: Option<PathBuf>) {
     if let Some(path) = path {
@@ -2900,7 +3058,10 @@ fn parse_size_filter(raw: &str) -> Option<SizeFilter> {
     if !bytes.is_finite() || bytes < 0.0 || bytes >= u64::MAX as f64 {
         return None;
     }
-    Some(SizeFilter { op, value: bytes as u64 })
+    Some(SizeFilter {
+        op,
+        value: bytes as u64,
+    })
 }
 
 fn matches_size(size: u64, filter: SizeFilter) -> bool {
@@ -2980,7 +3141,7 @@ fn query_filter_warnings(query: &str) -> Vec<String> {
     let mut warnings = parsed.ignored_filters;
     if parsed.content.is_some() {
         warnings.push(
-            "content: searches text <=1MB plus PDF/DOCX/PPTX (no OCR); plain terms match name/path only"
+            "content: searches opted-in local text/OCR; uncovered folders use a live text scan. Plain terms match name/path"
                 .to_string(),
         );
     }
@@ -3016,7 +3177,11 @@ fn extract_office_openxml_text(path: &Path, inner_prefix: &str) -> Option<String
             continue;
         }
         let mut buf = String::new();
-        if entry.take(2 * 1024 * 1024).read_to_string(&mut buf).is_err() {
+        if entry
+            .take(2 * 1024 * 1024)
+            .read_to_string(&mut buf)
+            .is_err()
+        {
             continue;
         }
         combined.push(' ');
@@ -3174,8 +3339,7 @@ fn matches_query(path: &Path, metadata: &fs::Metadata, parsed: &ParsedQuery) -> 
         if name.contains(term.as_str()) {
             continue;
         }
-        let path_lower = path_lower
-            .get_or_insert_with(|| path.to_string_lossy().to_lowercase());
+        let path_lower = path_lower.get_or_insert_with(|| path.to_string_lossy().to_lowercase());
         if !path_lower.contains(term.as_str()) {
             return false;
         }
@@ -3341,7 +3505,6 @@ fn invalidate_local_ai_ready_cache() {
 fn local_ai_image_search_ready_cached() -> bool {
     local_ai_semantic_ready_cached() && crate::inference::image_classifier_available()
 }
-
 
 fn get_file_info(path: String) -> Result<FileInfo, String> {
     let path_buf = PathBuf::from(&path);
@@ -3577,10 +3740,7 @@ fn enumerate_windows_drive_letters() -> Vec<DriveInfo> {
             Err(_) if dtype == DRIVE_FIXED || dtype == DRIVE_REMOVABLE => {
                 // Present letter but no volume info — typically BitLocker locked
                 // or media not ready. Keep the letter visible so the user can click.
-                (
-                    format!("{default_label} (Locked)"),
-                    kind.to_string(),
-                )
+                (format!("{default_label} (Locked)"), kind.to_string())
             }
             Err(_) => (default_label.to_string(), kind.to_string()),
         };
@@ -4501,12 +4661,6 @@ fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
-
-
-
-
-
-
 #[cfg(target_os = "windows")]
 fn windows_index_search_impl(
     query: &str,
@@ -4922,11 +5076,49 @@ fn publish_search_result(
             entries,
             source,
             partial,
+            snippets: HashMap::new(),
         });
     }
     ready.store(true, Ordering::Release);
 }
 
+fn indexed_content_matches(
+    db: &Path,
+    root: &str,
+    query: &str,
+    max: usize,
+) -> (Vec<FileEntry>, HashMap<String, String>) {
+    let mut parsed = parse_query(query);
+    let Some(needle) = parsed.content.take() else {
+        return (Vec::new(), HashMap::new());
+    };
+    let hits =
+        content_index::search_with_filter(db, Path::new(root), &needle, max, |path, metadata| {
+            matches_query(path, metadata, &parsed)
+        })
+        .unwrap_or_default();
+    let mut entries = Vec::new();
+    let mut snippets = HashMap::new();
+    for hit in hits {
+        let path = Path::new(&hit.path);
+        if let Ok(metadata) = fs::metadata(path) {
+            snippets.insert(hit.path.clone(), hit.snippet);
+            entries.push(path_to_entry(path, &metadata));
+        }
+    }
+    (entries, snippets)
+}
+
+fn publish_content_result(
+    pending: &Arc<Mutex<Option<NativeSearchResult>>>,
+    ready: &Arc<AtomicBool>,
+    result: NativeSearchResult,
+) {
+    if let Ok(mut lock) = pending.lock() {
+        *lock = Some(result);
+    }
+    ready.store(true, Ordering::Release);
+}
 
 fn find_7z() -> Option<PathBuf> {
     if ProcessCommand::new("7z")
@@ -5426,15 +5618,18 @@ fn read_preview_uncached(
     })
 }
 
-
-
-fn ensure_watched_paths(app_state: &AppState, paths: &[String], pinned: &[String]) -> Result<(), String> {
+fn ensure_watched_paths(
+    app_state: &AppState,
+    paths: &[String],
+    pinned: &[String],
+) -> Result<(), String> {
     let mut watchers = app_state
         .watchers
         .lock()
         .map_err(|_| "Could not lock watcher registry")?;
 
-    let pinned_keys: HashSet<String> = pinned.iter()
+    let pinned_keys: HashSet<String> = pinned
+        .iter()
         .filter(|path| Path::new(path).is_dir())
         .map(|path| cache_key_str(path))
         .collect();
@@ -5486,7 +5681,8 @@ fn ensure_watched_paths(app_state: &AppState, paths: &[String], pinned: &[String
 
     const MAX_WATCHERS: usize = 8;
     while watchers.len() > MAX_WATCHERS {
-        let victim = watchers.iter()
+        let victim = watchers
+            .iter()
             .filter(|(key, _)| !pinned_keys.contains(*key))
             .min_by_key(|(_, (_, last_used))| *last_used)
             .map(|(key, _)| key.clone());
@@ -5496,7 +5692,6 @@ fn ensure_watched_paths(app_state: &AppState, paths: &[String], pinned: &[String
 
     Ok(())
 }
-
 
 fn detect_npu_names() -> Vec<String> {
     // SetupDi class enumeration is roughly 1000x faster than spawning PowerShell
@@ -5664,20 +5859,7 @@ fn ai_status_label(capabilities: &AiCapabilities) -> &'static str {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
 // ----- helpers -----
-
 
 fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path, fallback: T) -> T {
     fs::read_to_string(path)
@@ -5749,10 +5931,7 @@ fn open_terminal(path: String) -> Result<(), String> {
 
 // ----- file notes -----
 
-
-
 // ----- batch rename -----
-
 
 // ----- git status -----
 
@@ -5788,7 +5967,6 @@ fn parse_git_porcelain(stdout: &[u8], base_path: &str) -> GitStatusMap {
     }
     statuses
 }
-
 
 // ----- image info -----
 
@@ -7227,12 +7405,16 @@ mod search_query_tests {
 
     #[test]
     fn volume_lock_errors_are_detected() {
-        assert!(looks_like_volume_lock_error("Access is denied. (os error 5)"));
+        assert!(looks_like_volume_lock_error(
+            "Access is denied. (os error 5)"
+        ));
         assert!(looks_like_volume_lock_error("The device is not ready."));
         assert!(looks_like_volume_lock_error(
             "This drive is locked with BitLocker"
         ));
-        assert!(!looks_like_volume_lock_error("Path does not exist: Z:\\missing"));
+        assert!(!looks_like_volume_lock_error(
+            "Path does not exist: Z:\\missing"
+        ));
     }
 }
 
@@ -7491,9 +7673,13 @@ fn extract_zip_archive(
     for i in 0..archive.len() {
         if let Ok(entry) = archive.by_index(i) {
             let normalized_name = normalize_archive_prefix(entry.name());
-            let included = selected.map(|items| items.iter().any(|item| {
-                normalized_name == *item || normalized_name.starts_with(&format!("{item}/"))
-            })).unwrap_or(true);
+            let included = selected
+                .map(|items| {
+                    items.iter().any(|item| {
+                        normalized_name == *item || normalized_name.starts_with(&format!("{item}/"))
+                    })
+                })
+                .unwrap_or(true);
             if included {
                 total = total.saturating_add(entry.size());
             }
@@ -7509,66 +7695,66 @@ fn extract_zip_archive(
     let mut bytes_done: u64 = 0;
 
     let result = (|| -> Result<(), String> {
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        let name = entry.name().to_string();
-        if let Some(items) = selected {
-            let normalized_name = normalize_archive_prefix(&name);
-            let matched = items.iter().any(|item| {
-                normalized_name == *item || normalized_name.starts_with(&format!("{item}/"))
-            });
-            if !matched {
-                continue;
-            }
-        }
-        let Some(mut out) = safe_archive_out_path(dest, &name) else {
-            continue;
-        };
-        if state.queue_cancel_requested() {
-            return Err(OP_CANCELLED.to_string());
-        }
-        let replace_existing = out.exists() && conflict == "replace" && !entry.is_dir();
-        if out.exists() && !entry.is_dir() {
-            match conflict {
-                "replace" => {}
-                "skip" => continue,
-                _ => out = keep_both_destination(&out),
-            }
-        }
-        if entry.is_dir() {
-            // Preserve existing children; removing the directory here would
-            // destroy data before the archive's contents were extracted.
-            fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-        } else {
-            if let Some(parent) = out.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            let mut write_entry = || -> Result<(), String> {
-                let mut outfile = File::create(&out).map_err(|e| e.to_string())?;
-                let mut buf = [0u8; 64 * 1024];
-                loop {
-                    if state.queue_cancel_requested() {
-                        return Err(OP_CANCELLED.to_string());
-                    }
-                    let n = entry.read(&mut buf).map_err(|e| e.to_string())?;
-                    if n == 0 {
-                        break;
-                    }
-                    outfile.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-                    bytes_done = bytes_done.saturating_add(n as u64);
-                    state.queue_progress(op_id, bytes_done, started);
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            let name = entry.name().to_string();
+            if let Some(items) = selected {
+                let normalized_name = normalize_archive_prefix(&name);
+                let matched = items.iter().any(|item| {
+                    normalized_name == *item || normalized_name.starts_with(&format!("{item}/"))
+                });
+                if !matched {
+                    continue;
                 }
-                Ok(())
+            }
+            let Some(mut out) = safe_archive_out_path(dest, &name) else {
+                continue;
             };
-            if replace_existing {
-                replace_preserving_destination(&out, write_entry)?;
+            if state.queue_cancel_requested() {
+                return Err(OP_CANCELLED.to_string());
+            }
+            let replace_existing = out.exists() && conflict == "replace" && !entry.is_dir();
+            if out.exists() && !entry.is_dir() {
+                match conflict {
+                    "replace" => {}
+                    "skip" => continue,
+                    _ => out = keep_both_destination(&out),
+                }
+            }
+            if entry.is_dir() {
+                // Preserve existing children; removing the directory here would
+                // destroy data before the archive's contents were extracted.
+                fs::create_dir_all(&out).map_err(|e| e.to_string())?;
             } else {
-                write_entry()?;
+                if let Some(parent) = out.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                let mut write_entry = || -> Result<(), String> {
+                    let mut outfile = File::create(&out).map_err(|e| e.to_string())?;
+                    let mut buf = [0u8; 64 * 1024];
+                    loop {
+                        if state.queue_cancel_requested() {
+                            return Err(OP_CANCELLED.to_string());
+                        }
+                        let n = entry.read(&mut buf).map_err(|e| e.to_string())?;
+                        if n == 0 {
+                            break;
+                        }
+                        outfile.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+                        bytes_done = bytes_done.saturating_add(n as u64);
+                        state.queue_progress(op_id, bytes_done, started);
+                    }
+                    Ok(())
+                };
+                if replace_existing {
+                    replace_preserving_destination(&out, write_entry)?;
+                } else {
+                    write_entry()?;
+                }
             }
         }
-    }
 
-    Ok(())
+        Ok(())
     })();
     match result {
         Ok(()) => {
@@ -7577,7 +7763,11 @@ fn extract_zip_archive(
             Ok(())
         }
         Err(error) => {
-            let status = if error == OP_CANCELLED { "cancelled" } else { "failed" };
+            let status = if error == OP_CANCELLED {
+                "cancelled"
+            } else {
+                "failed"
+            };
             state.queue_finish(op_id, status, error.clone(), bytes_done, started.elapsed());
             Err(error)
         }
@@ -7855,25 +8045,15 @@ fn archive_format_from_path(path: &Path) -> String {
     }
 }
 
-
 fn list_archive(path: String, max_items: Option<usize>) -> Result<Vec<ArchiveEntry>, String> {
     list_archive_entries(Path::new(&path), max_items.unwrap_or(500).min(5_000))
 }
 
-
-
 // ----- saved searches -----
-
-
-
 
 // ----- session -----
 
-
-
 // ----- operation log / undo -----
-
-
 
 fn is_image_ext(ext: &str) -> bool {
     matches!(
@@ -8260,7 +8440,6 @@ fn clear_thumbnail_cache() -> Result<u64, String> {
     Ok(before)
 }
 
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
 struct NativeSettings {
@@ -8616,6 +8795,7 @@ struct NativeController {
     files: Vec<FileEntry>,
     visible_files: Vec<FileEntry>,
     search_results: Vec<FileEntry>,
+    search_snippets: HashMap<String, String>,
     active_archive: Option<ArchiveView>,
     selected_index: i32,
     selected_set: std::collections::HashSet<usize>,
@@ -8904,6 +9084,13 @@ fn native_data_dir() -> PathBuf {
 
 fn native_data_file(name: &str) -> PathBuf {
     native_data_dir().join(name)
+}
+
+fn content_index_file() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(native_data_dir)
+        .join("Pathfinder")
+        .join("content-index.sqlite3")
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -9229,7 +9416,7 @@ fn open_index_connection() -> Result<Connection, String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+    let mut conn = Connection::open(&path).map_err(|e| e.to_string())?;
     // WAL lets concurrent readers proceed while the indexer writes.
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| e.to_string())?;
@@ -9267,13 +9454,22 @@ fn open_index_connection() -> Result<Connection, String> {
         CREATE INDEX IF NOT EXISTS idx_files_name ON files(name COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_files_extension ON files(extension);
 
-        CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
-            path UNINDEXED,
-            parent UNINDEXED,
-            name,
-            extension,
-            tokenize = 'unicode61'
+        CREATE VIRTUAL TABLE IF NOT EXISTS files_trigram USING fts5(
+            name, path, content='files', content_rowid='rowid', tokenize='trigram'
         );
+        CREATE TRIGGER IF NOT EXISTS files_trigram_insert AFTER INSERT ON files BEGIN
+            INSERT INTO files_trigram(rowid, name, path) VALUES(new.rowid, new.name, new.path);
+        END;
+        CREATE TRIGGER IF NOT EXISTS files_trigram_delete AFTER DELETE ON files BEGIN
+            INSERT INTO files_trigram(files_trigram, rowid, name, path)
+                VALUES('delete', old.rowid, old.name, old.path);
+        END;
+        CREATE TRIGGER IF NOT EXISTS files_trigram_update AFTER UPDATE ON files
+        WHEN old.name<>new.name OR old.path<>new.path BEGIN
+            INSERT INTO files_trigram(files_trigram, rowid, name, path)
+                VALUES('delete', old.rowid, old.name, old.path);
+            INSERT INTO files_trigram(rowid, name, path) VALUES(new.rowid, new.name, new.path);
+        END;
 
         CREATE TABLE IF NOT EXISTS thumbnail_cache (
             cache_key TEXT PRIMARY KEY,
@@ -9313,6 +9509,45 @@ fn open_index_connection() -> Result<Connection, String> {
         ",
     )
     .map_err(|e| e.to_string())?;
+    // Backfill once under a writer transaction. The query planner can then use
+    // trigram postings for literal contains searches instead of scanning files.
+    let ready: Option<String> = conn
+        .query_row(
+            "SELECT value FROM ai_index_meta WHERE key='search_trigram_v1'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if ready.as_deref() != Some("ready") {
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let still_needed: Option<String> = tx
+            .query_row(
+                "SELECT value FROM ai_index_meta WHERE key='search_trigram_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if still_needed.as_deref() != Some("ready") {
+            tx.execute(
+                "INSERT INTO files_trigram(files_trigram) VALUES('rebuild')",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute("DROP TABLE IF EXISTS files_fts", [])
+                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO ai_index_meta(key,value) VALUES('search_trigram_v1','ready')
+                ON CONFLICT(key) DO UPDATE SET value='ready'",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+    }
     // Best-effort column migration for embedding model versioning.
     let _ = conn.execute(
         "ALTER TABLE path_embeddings ADD COLUMN model_id TEXT NOT NULL DEFAULT ''",
@@ -9452,18 +9687,6 @@ fn index_entries(parent: &str, entries: &[FileEntry], complete_scan: bool) -> Re
                 ",
             )
             .map_err(|e| e.to_string())?;
-        let mut delete_fts = tx
-            .prepare("DELETE FROM files_fts WHERE path = ?1")
-            .map_err(|e| e.to_string())?;
-        let mut insert_fts = tx
-            .prepare(
-                "
-                INSERT INTO files_fts(path, parent, name, extension)
-                VALUES(?1, ?2, ?3, ?4)
-                ",
-            )
-            .map_err(|e| e.to_string())?;
-
         for entry in entries {
             let extension = entry.extension.as_deref().unwrap_or("").to_lowercase();
             upsert
@@ -9477,12 +9700,6 @@ fn index_entries(parent: &str, entries: &[FileEntry], complete_scan: bool) -> Re
                     entry.modified as i64,
                     now
                 ])
-                .map_err(|e| e.to_string())?;
-            delete_fts
-                .execute(params![entry.path])
-                .map_err(|e| e.to_string())?;
-            insert_fts
-                .execute(params![entry.path, parent, entry.name, extension])
                 .map_err(|e| e.to_string())?;
         }
     }
@@ -9505,8 +9722,6 @@ fn index_entries(parent: &str, entries: &[FileEntry], complete_scan: bool) -> Re
 
     for path in stale_paths {
         tx.execute("DELETE FROM files WHERE path = ?1", params![path])
-            .map_err(|e| e.to_string())?;
-        tx.execute("DELETE FROM files_fts WHERE path = ?1", params![path])
             .map_err(|e| e.to_string())?;
         let _ = tx.execute("DELETE FROM path_embeddings WHERE path = ?1", params![path]);
         let _ = tx.execute("DELETE FROM image_dhash WHERE path = ?1", params![path]);
@@ -9645,7 +9860,11 @@ fn like_escape(value: &str) -> String {
 
 fn index_scope_like(root: &str) -> String {
     let trimmed = root.trim_end_matches(['\\', '/']);
-    let separator = if root.contains('\\') || root.ends_with(':') { '\\' } else { '/' };
+    let separator = if root.contains('\\') || root.ends_with(':') {
+        '\\'
+    } else {
+        '/'
+    };
     format!("{}%", like_escape(&format!("{trimmed}{separator}")))
 }
 
@@ -9669,8 +9888,14 @@ mod index_scope_tests {
         assert!(!matches(r"C:\Data", r"C:\Other\child.txt"));
         assert!(matches(r"C:\Data_%", r"C:\Data_%\child.txt"));
         assert!(!matches(r"C:\Data_%", r"C:\Data_X\child.txt"));
-        assert!(matches(r"\\server\share\Docs", r"\\server\share\Docs\child.txt"));
-        assert!(!matches(r"\\server\share\Docs", r"\\server\share\DocsOld\child.txt"));
+        assert!(matches(
+            r"\\server\share\Docs",
+            r"\\server\share\Docs\child.txt"
+        ));
+        assert!(!matches(
+            r"\\server\share\Docs",
+            r"\\server\share\DocsOld\child.txt"
+        ));
     }
 }
 
@@ -9896,13 +10121,6 @@ fn upsert_index_entries(entries: &[FileEntry]) -> Result<(), String> {
                 ",
             )
             .map_err(|e| e.to_string())?;
-        let mut delete_fts = tx
-            .prepare("DELETE FROM files_fts WHERE path = ?1")
-            .map_err(|e| e.to_string())?;
-        let mut insert_fts = tx
-            .prepare("INSERT INTO files_fts(path, parent, name, extension) VALUES(?1, ?2, ?3, ?4)")
-            .map_err(|e| e.to_string())?;
-
         for entry in entries {
             let parent = Path::new(&entry.path)
                 .parent()
@@ -9921,38 +10139,10 @@ fn upsert_index_entries(entries: &[FileEntry]) -> Result<(), String> {
                     now
                 ])
                 .map_err(|e| e.to_string())?;
-            delete_fts
-                .execute(params![entry.path])
-                .map_err(|e| e.to_string())?;
-            insert_fts
-                .execute(params![entry.path, parent, entry.name, extension])
-                .map_err(|e| e.to_string())?;
         }
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
-}
-
-fn fts_query_for(query: &str) -> Option<String> {
-    let parsed = parse_query(query);
-    let mut terms = parsed.terms;
-    terms.extend(parsed.name);
-    terms.extend(parsed.ext);
-    terms.extend(parsed.kind);
-    let cleaned: Vec<String> = terms
-        .into_iter()
-        .flat_map(|term| {
-            term.split(|c: char| !c.is_alphanumeric())
-                .filter(|part| part.len() >= 2)
-                .map(|part| format!("{}*", part.to_lowercase()))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned.join(" AND "))
-    }
 }
 
 fn filter_search_entries(entries: Vec<FileEntry>, query: &str) -> Vec<FileEntry> {
@@ -9975,15 +10165,18 @@ mod provider_predicate_tests {
 
     #[test]
     fn compound_filters_have_the_same_result_for_any_provider_candidates() {
-        let nonce = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap().as_nanos();
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let root = std::env::temp_dir().join(format!("pathfinder-search-test-{nonce}"));
         fs::create_dir_all(&root).unwrap();
         let pdf = root.join("report.pdf");
         let txt = root.join("report.txt");
         fs::write(&pdf, b"a sufficiently long report").unwrap();
         fs::write(&txt, b"a sufficiently long report").unwrap();
-        let candidates = [&pdf, &txt].into_iter()
+        let candidates = [&pdf, &txt]
+            .into_iter()
             .map(|path| path_to_entry(path, &fs::metadata(path).unwrap()))
             .collect();
         let results = filter_search_entries(candidates, "name:report ext:pdf size:>10b");
@@ -9993,106 +10186,75 @@ mod provider_predicate_tests {
     }
 }
 
-fn index_search_fts(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, String> {
-    let Some(fts_query) = fts_query_for(query) else {
-        return Ok(Vec::new());
-    };
+fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, String> {
     let conn = open_index_connection()?;
-    let root_prefix = index_scope_like(root);
-    let mut stmt = conn
-        .prepare(
-            "
-            SELECT f.path, f.name, f.is_dir, f.size, f.modified, f.extension
-            FROM files f
-            JOIN files_fts ON files_fts.path = f.path
-            WHERE LOWER(f.path) LIKE LOWER(?1) ESCAPE '\\'
-              AND files_fts MATCH ?2
-            ORDER BY rank, f.is_dir DESC, f.name COLLATE NOCASE ASC
-            LIMIT ?3
-            ",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map(params![root_prefix, fts_query, sqlite_limit(max)], |row| {
-            let is_dir = row.get::<_, i64>(2)? == 1;
-            let ext = row.get::<_, String>(5)?;
-            let name: String = row.get(1)?;
-            Ok(FileEntry {
-                path: row.get(0)?,
-                name_lower: name.to_lowercase(),
-                name,
-                kind: if is_dir {
-                    FileKind::Directory
-                } else {
-                    FileKind::File
-                },
-                size: row.get::<_, i64>(3)?.max(0) as u64,
-                modified: row.get::<_, i64>(4)?.max(0) as u64,
-                extension: (!ext.is_empty()).then_some(ext),
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(filter_search_entries(rows.filter_map(Result::ok).collect(), query))
+    index_search_in_connection(&conn, root, query, max)
 }
 
-fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, String> {
+fn index_search_in_connection(
+    conn: &Connection,
+    root: &str,
+    query: &str,
+    max: usize,
+) -> Result<Vec<FileEntry>, String> {
     let query = query.trim();
-    if query.len() < 2 {
+    if query.len() < 2 || max == 0 {
         return Ok(Vec::new());
     }
-
-    if let Ok(results) = index_search_fts(root, query, max) {
-        if !results.is_empty() {
-            return Ok(results);
-        }
+    let parsed = parse_query(query);
+    if parsed.content.is_some() {
+        return Ok(Vec::new());
     }
-
-    let conn = open_index_connection()?;
-    let root_prefix = index_scope_like(root);
-    let (name_like, path_like, ext_exact) = if let Some(ext) = query.strip_prefix("ext:") {
-        (
-            String::new(),
-            String::new(),
-            ext.trim_start_matches('.').to_lowercase(),
-        )
-    } else if let Some(name) = query.strip_prefix("name:") {
-        (
-            format!("%{}%", like_escape(name)),
-            String::new(),
-            String::new(),
-        )
+    // A single selective literal is only a candidate generator. The shared
+    // predicate below checks the entire query before counting a result.
+    let (candidate, name_only) = if let Some(name) = parsed.name.as_deref() {
+        (Some(name), true)
     } else {
-        let escaped = format!("%{}%", like_escape(query));
-        (escaped.clone(), escaped, query.to_lowercase())
-    };
-
-    // COLLATE NOCASE on name/path LIKE clauses; LOWER() on the path prefix
-    // filter so drive-wide searches match regardless of index path casing.
-    let mut stmt = conn
-        .prepare(
-            "
-            SELECT path, name, is_dir, size, modified, extension
-            FROM files
-            WHERE LOWER(path) LIKE LOWER(?1) ESCAPE '\\'
-              AND (
-                name LIKE ?2 ESCAPE '\\' COLLATE NOCASE
-                OR path LIKE ?3 ESCAPE '\\' COLLATE NOCASE
-                OR extension = ?4
-              )
-            ORDER BY is_dir DESC, name COLLATE NOCASE ASC
-            LIMIT ?5
-            ",
+        (
+            parsed
+                .terms
+                .iter()
+                .max_by_key(|term| term.len())
+                .map(String::as_str),
+            false,
         )
-        .map_err(|e| e.to_string())?;
-
+    };
+    let use_trigram = candidate
+        .is_some_and(|term| term.is_ascii() && term.len() >= 3 && !term.contains(['%', '_', '\\']));
+    let pattern = candidate
+        .map(|term| {
+            if use_trigram {
+                format!("%{term}%")
+            } else {
+                format!("%{}%", like_escape(term))
+            }
+        })
+        .unwrap_or_default();
+    let root_prefix = index_scope_like(root);
+    let sql = if use_trigram {
+        "SELECT f.path, f.name, f.is_dir, f.size, f.modified, f.extension
+         FROM files_trigram t JOIN files f ON f.rowid=t.rowid
+         WHERE LOWER(f.path) LIKE LOWER(?1) ESCAPE '\\'
+           AND (t.name LIKE ?2 OR (?3=1 AND t.path LIKE ?2))
+           AND (?4='' OR f.extension=?4)
+         ORDER BY f.is_dir DESC, f.name COLLATE NOCASE ASC"
+    } else {
+        "SELECT f.path, f.name, f.is_dir, f.size, f.modified, f.extension
+         FROM files f
+         WHERE LOWER(f.path) LIKE LOWER(?1) ESCAPE '\\'
+           AND (?2='' OR f.name LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+                        OR (?3=1 AND f.path LIKE ?2 ESCAPE '\\' COLLATE NOCASE))
+           AND (?4='' OR f.extension=?4)
+         ORDER BY f.is_dir DESC, f.name COLLATE NOCASE ASC"
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(
             params![
                 root_prefix,
-                name_like,
-                path_like,
-                ext_exact,
-                sqlite_limit(max)
+                pattern,
+                i64::from(!name_only),
+                parsed.ext.as_deref().unwrap_or("")
             ],
             |row| {
                 let is_dir = row.get::<_, i64>(2)? == 1;
@@ -10114,8 +10276,97 @@ fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, S
             },
         )
         .map_err(|e| e.to_string())?;
+    let mut matched = Vec::new();
+    for row in rows {
+        let entry = row.map_err(|e| e.to_string())?;
+        let path = Path::new(&entry.path);
+        if let Ok(metadata) = fs::metadata(path)
+            && matches_query(path, &metadata, &parsed)
+        {
+            matched.push(path_to_entry(path, &metadata));
+            if matched.len() >= max {
+                break;
+            }
+        }
+    }
+    Ok(matched)
+}
 
-    Ok(filter_search_entries(rows.filter_map(Result::ok).collect(), query))
+#[cfg(test)]
+mod indexed_query_tests {
+    use super::index_search_in_connection;
+    use rusqlite::{Connection, params};
+    use std::{fs, time::SystemTime};
+
+    #[test]
+    fn compound_filter_applies_before_limit_and_path_terms_remain_searchable() {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pathfinder-index-query-{nonce}"));
+        let nested = root.join("needle_folder");
+        fs::create_dir_all(&nested).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files(path TEXT PRIMARY KEY, name TEXT NOT NULL,
+            is_dir INTEGER NOT NULL, size INTEGER NOT NULL, modified INTEGER NOT NULL,
+            extension TEXT NOT NULL);
+            CREATE VIRTUAL TABLE files_trigram USING fts5(name,path,content='files',
+                content_rowid='rowid',tokenize='trigram');",
+        )
+        .unwrap();
+        for i in 0..60 {
+            let path = root.join(format!("a_needle_{i:03}.txt"));
+            fs::write(&path, "decoy").unwrap();
+            conn.execute(
+                "INSERT INTO files(path,name,is_dir,size,modified,extension)
+                VALUES(?1,?2,0,5,0,'txt')",
+                params![
+                    path.to_string_lossy(),
+                    path.file_name().unwrap().to_string_lossy()
+                ],
+            )
+            .unwrap();
+        }
+        let wanted = root.join("z_needle.pdf");
+        fs::write(&wanted, "real report").unwrap();
+        conn.execute(
+            "INSERT INTO files(path,name,is_dir,size,modified,extension)
+            VALUES(?1,'z_needle.pdf',0,11,0,'pdf')",
+            params![wanted.to_string_lossy()],
+        )
+        .unwrap();
+        let nested_file = nested.join("plain.txt");
+        fs::write(&nested_file, "nested").unwrap();
+        conn.execute(
+            "INSERT INTO files(path,name,is_dir,size,modified,extension)
+            VALUES(?1,'plain.txt',0,6,0,'txt')",
+            params![nested_file.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files_trigram(files_trigram) VALUES('rebuild')",
+            [],
+        )
+        .unwrap();
+        let result =
+            index_search_in_connection(&conn, &root.to_string_lossy(), "name:needle ext:pdf", 1)
+                .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, wanted.to_string_lossy());
+        let result =
+            index_search_in_connection(&conn, &root.to_string_lossy(), "needle", 100).unwrap();
+        assert!(
+            result
+                .iter()
+                .any(|entry| entry.path == nested_file.to_string_lossy())
+        );
+        let result =
+            index_search_in_connection(&conn, &root.to_string_lossy(), "ext:pdf", 1).unwrap();
+        assert_eq!(result[0].path, wanted.to_string_lossy());
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 fn suggest_paths(prefix: &str, max: usize) -> Vec<String> {
@@ -10325,12 +10576,16 @@ fn privacy_storage_info_for_state(
             stored_data_item("Saved Searches", "searches.json", "Named search queries and scopes."),
             stored_data_item("Session", "session.json", "Open tabs, paths, and view preferences."),
             stored_data_item("Recent Locations", "recent_locations.json", "Condensed local navigation history."),
+            StoredDataItem {
+                label: "Document Content Index".to_string(),
+                path: content_index_file().to_string_lossy().into_owned(),
+                bytes: file_size_or_zero(&content_index_file()),
+                description: "Opt-in local extracted text and OCR; remove folders from Content Search Index to purge it.".to_string(),
+            },
         ],
-        policy: "Pathfinder stores local metadata, thumbnails, and an optional SQLite search index only on this PC. It does not upload files. Update checks are off unless enabled, and update downloads require an explicit user action.".to_string(),
+        policy: "Pathfinder stores metadata, thumbnails, and opt-in extracted document text in this Windows profile. It does not upload files. It checks GitHub for updates automatically; update downloads require an explicit user action.".to_string(),
     }
 }
-
-
 
 fn clear_search_index() -> Result<u64, String> {
     let path = native_index_file();
@@ -10370,7 +10625,6 @@ fn reset_search_index_data() -> Result<Vec<String>, String> {
     conn.execute_batch(
         "
         DELETE FROM files;
-        DELETE FROM files_fts;
         DELETE FROM path_embeddings;
         DELETE FROM image_dhash;
         DELETE FROM image_desc_embeddings;
@@ -10448,7 +10702,7 @@ fn update_disabled_result() -> UpdateCheckResult {
         download_sha256: String::new(),
         download_size: 0,
         notes: String::new(),
-        message: "Update checks are off. Pathfinder will not contact GitHub until you enable or manually run update checks.".to_string(),
+        message: "Update checks are unavailable.".to_string(),
     }
 }
 
@@ -10531,30 +10785,59 @@ fn parse_github_asset_digest(raw: &str) -> Option<String> {
     }
 }
 
-/// Prefer a Windows `.exe` NSIS/setup asset, else `.msi`; skip `.zip` / `.7z` so
-/// in-app Install always launches a real installer. Returns (url, sha256, size).
-fn pick_release_installer(assets: &[serde_json::Value]) -> (String, String, u64) {
-    for ext in [".exe", ".msi"] {
+fn trusted_installer_url(url: &str) -> bool {
+    let Some(rest) =
+        url.strip_prefix("https://github.com/rorohecker/pathfinder/releases/download/v")
+    else {
+        return false;
+    };
+    let Some((version, name)) = rest.split_once('/') else {
+        return false;
+    };
+    if version.split('.').count() != 3 || !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return false;
+    }
+    name == format!("Pathfinder_{version}_x64-setup.exe")
+        || name == format!("Pathfinder_{version}_x64_en-US.msi")
+}
+
+/// Accept only the expected Pathfinder x64 installer for this exact release.
+/// The API digest is mandatory before the app offers in-app installation.
+fn pick_release_installer(assets: &[serde_json::Value], version: &str) -> (String, String, u64) {
+    if version.split('.').count() != 3 || !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return (String::new(), String::new(), 0);
+    }
+    for suffix in ["-setup.exe", "_en-US.msi"] {
+        let expected_name = format!("Pathfinder_{version}_x64{suffix}");
+        let expected_url = format!(
+            "https://github.com/rorohecker/pathfinder/releases/download/v{version}/{expected_name}"
+        );
         for a in assets {
             let Some(name) = a.get("name").and_then(|v| v.as_str()) else {
                 continue;
             };
-            if !name.to_ascii_lowercase().ends_with(ext) {
+            if name != expected_name || a.get("state").and_then(|v| v.as_str()) != Some("uploaded")
+            {
                 continue;
             }
             let Some(url) = a
                 .get("browser_download_url")
                 .and_then(|v| v.as_str())
-                .filter(|u| !u.is_empty())
+                .filter(|url| *url == expected_url)
             else {
                 continue;
             };
-            let sha = a
+            let Some(sha) = a
                 .get("digest")
                 .and_then(|v| v.as_str())
                 .and_then(parse_github_asset_digest)
-                .unwrap_or_default();
+            else {
+                continue;
+            };
             let size = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+            if size < 1_000_000 {
+                continue;
+            }
             return (url.to_string(), sha, size);
         }
     }
@@ -10632,7 +10915,7 @@ fn update_result_from_release(
     let (download_url, download_sha256, download_size) = value
         .get("assets")
         .and_then(|a| a.as_array())
-        .map(|assets| pick_release_installer(assets))
+        .map(|assets| pick_release_installer(assets, &latest_version))
         .unwrap_or_default();
     let newer = !latest_version.is_empty() && version_is_newer(&latest_version, current_version);
     let available = newer && !download_url.is_empty();
@@ -10740,6 +11023,20 @@ fn installer_suffix_from_url(url: &str) -> &'static str {
     } else {
         ".exe"
     }
+}
+
+#[cfg(windows)]
+fn batch_safe_path(path: &Path) -> Result<String, String> {
+    let value = path.to_string_lossy().into_owned();
+    if value.chars().any(|ch| {
+        matches!(
+            ch,
+            '%' | '!' | '^' | '"' | '&' | '|' | '<' | '>' | '(' | ')' | '\r' | '\n'
+        )
+    }) {
+        return Err("Update path contains characters unsafe for the installer helper".into());
+    }
+    Ok(value)
 }
 
 /// Prevents overlapping Install clicks from racing on the same temp path and
@@ -11017,7 +11314,18 @@ fn download_release_installer(url: &str, dest: &Path) -> Result<u64, String> {
     download_release_installer_ureq(url, dest, expected)
 }
 
-fn download_and_install_update(url: &str) -> Result<(), String> {
+fn download_and_install_update(
+    url: &str,
+    expected_sha: &str,
+    expected_size: u64,
+) -> Result<(), String> {
+    let expected = parse_github_asset_digest(expected_sha)
+        .ok_or("Update install requires a valid release SHA-256 digest")?;
+    if !trusted_installer_url(url) || expected_size < 1_000_000 {
+        return Err(
+            "Update installer URL or size does not match the Pathfinder release contract".into(),
+        );
+    }
     if UPDATE_INSTALL_IN_PROGRESS
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -11027,8 +11335,13 @@ fn download_and_install_update(url: &str) -> Result<(), String> {
     let result = (|| {
         updater_log(&format!("install requested: {url}"));
         let suffix = installer_suffix_from_url(url);
+        let update_dir = dirs::data_local_dir()
+            .unwrap_or_else(native_data_dir)
+            .join("Pathfinder")
+            .join("updates");
+        fs::create_dir_all(&update_dir).map_err(|error| error.to_string())?;
         let installer =
-            std::env::temp_dir().join(format!("pathfinder_update_{}{suffix}", std::process::id()));
+            update_dir.join(format!("pathfinder_update_{}{suffix}", std::process::id()));
 
         let mut last_err = String::new();
         for attempt in 1..=3 {
@@ -11051,21 +11364,23 @@ fn download_and_install_update(url: &str) -> Result<(), String> {
         if !last_err.is_empty() {
             return Err(last_err);
         }
-        let expected = UPDATE_EXPECTED_SHA256
-            .lock()
-            .ok()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        if !expected.is_empty() {
-            let actual = sha256_file_hex(&installer)?;
-            if !actual.eq_ignore_ascii_case(&expected) {
-                let _ = fs::remove_file(&installer);
-                return Err(format!(
-                    "Installer hash mismatch (got {actual}, expected {expected})"
-                ));
-            }
-            updater_log("installer SHA-256 verified");
+        let actual_size = fs::metadata(&installer)
+            .map_err(|error| error.to_string())?
+            .len();
+        if actual_size != expected_size {
+            let _ = fs::remove_file(&installer);
+            return Err(format!(
+                "Installer size mismatch (got {actual_size}, expected {expected_size})"
+            ));
         }
+        let actual = sha256_file_hex(&installer)?;
+        if !actual.eq_ignore_ascii_case(&expected) {
+            let _ = fs::remove_file(&installer);
+            return Err(format!(
+                "Installer hash mismatch (got {actual}, expected {expected})"
+            ));
+        }
+        updater_log("installer SHA-256 verified");
 
         #[cfg(windows)]
         {
@@ -11076,10 +11391,10 @@ fn download_and_install_update(url: &str) -> Result<(), String> {
             let app_exe = std::env::current_exe()
                 .map_err(|e| format!("Could not resolve current executable: {e}"))?;
             let pid = std::process::id();
-            let installer_str = installer.to_string_lossy().replace('"', "");
-            let app_exe_str = app_exe.to_string_lossy().replace('"', "");
+            let installer_str = batch_safe_path(&installer)?;
+            let app_exe_str = batch_safe_path(&app_exe)?;
             let log_path = native_data_file("updater.log");
-            let log_str = log_path.to_string_lossy().replace('"', "");
+            let log_str = batch_safe_path(&log_path)?;
             let install_cmd = if suffix == ".msi" {
                 // MSI upgrades in place when the UpgradeCode matches; /qn is silent.
                 format!("msiexec.exe /i \"{installer_str}\" /qn /norestart")
@@ -11111,8 +11426,16 @@ start \"\" \"{app_exe_str}\"\r\n\
 del \"{installer_str}\" >nul 2>&1\r\n\
 del \"%~f0\"\r\n"
             );
-            let script_path = std::env::temp_dir().join(format!("pathfinder_update_{pid}.cmd"));
-            fs::write(&script_path, script)
+            let nonce = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos();
+            let script_path = update_dir.join(format!("pathfinder_update_{pid}_{nonce}.cmd"));
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&script_path)
+                .and_then(|mut file| file.write_all(script.as_bytes()))
                 .map_err(|e| format!("Could not stage update helper: {e}"))?;
             ProcessCommand::new("cmd.exe")
                 .arg("/c")
@@ -11235,10 +11558,7 @@ mod cli_explorer_tests {
     fn strip_quotes_and_resolve_token() {
         assert_eq!(strip_cli_quotes("\"C:\\\\Foo\""), "C:\\\\Foo");
         let tmp = std::env::temp_dir();
-        assert_eq!(
-            resolve_cli_path_token(&tmp.to_string_lossy()),
-            Some(tmp)
-        );
+        assert_eq!(resolve_cli_path_token(&tmp.to_string_lossy()), Some(tmp));
     }
 }
 
@@ -11286,11 +11606,13 @@ mod power_budget_tests {
         #[derive(Deserialize, Default)]
         #[serde(default)]
         struct Probe {
-            #[serde(alias = "low_power_mode", deserialize_with = "deserialize_low_power_enabled")]
+            #[serde(
+                alias = "low_power_mode",
+                deserialize_with = "deserialize_low_power_enabled"
+            )]
             low_power_enabled: bool,
         }
-        let legacy: Probe =
-            serde_json::from_str(r#"{"low_power_mode":"on"}"#).unwrap();
+        let legacy: Probe = serde_json::from_str(r#"{"low_power_mode":"on"}"#).unwrap();
         assert!(legacy.low_power_enabled);
         let off: Probe = serde_json::from_str(r#"{"low_power_mode":"off"}"#).unwrap();
         assert!(!off.low_power_enabled);
@@ -11401,12 +11723,16 @@ fn replace_file_atomically(source: &Path, destination: &Path) -> Result<(), Stri
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
-        use windows::core::PCWSTR;
         use windows::Win32::Storage::FileSystem::{
-            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
         };
+        use windows::core::PCWSTR;
         let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-        let destination_wide: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination_wide: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
         unsafe {
             MoveFileExW(
                 PCWSTR(source_wide.as_ptr()),
@@ -11421,24 +11747,61 @@ fn replace_file_atomically(source: &Path, destination: &Path) -> Result<(), Stri
         fs::rename(source, destination).map_err(|e| e.to_string())
     }
 }
+
+fn rename_file_noreplace(source: &Path, destination: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+        use windows::core::PCWSTR;
+        let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination_wide: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        unsafe {
+            MoveFileExW(
+                PCWSTR(source_wide.as_ptr()),
+                PCWSTR(destination_wide.as_ptr()),
+                MOVEFILE_WRITE_THROUGH,
+            )
+            .map_err(|error| error.to_string())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        fs::hard_link(source, destination).map_err(|error| error.to_string())?;
+        fs::remove_file(source).map_err(|error| error.to_string())
+    }
+}
 fn atomic_json_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let name = path.file_name().ok_or("JSON file has no name")?.to_string_lossy();
+    let name = path
+        .file_name()
+        .ok_or("JSON file has no name")?
+        .to_string_lossy();
     let sequence = JSON_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temp = path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), sequence));
     let result = (|| -> Result<(), String> {
-        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temp)
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
             .map_err(|e| e.to_string())?;
         file.write_all(bytes).map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
         if path.exists() {
             let backup = path.with_file_name(format!("{name}.bak"));
-            let backup_temp = path.with_file_name(format!(".{name}.{}.{sequence}.bak.tmp", std::process::id()));
+            let backup_temp =
+                path.with_file_name(format!(".{name}.{}.{sequence}.bak.tmp", std::process::id()));
             fs::copy(path, &backup_temp).map_err(|e| e.to_string())?;
-            fs::OpenOptions::new().write(true).open(&backup_temp)
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&backup_temp)
                 .and_then(|file| file.sync_all())
                 .map_err(|e| format!("backup sync: {e}"))?;
             if let Err(error) = replace_file_atomically(&backup_temp, &backup) {
@@ -11471,10 +11834,16 @@ mod atomic_json_tests {
         atomic_json_file(&path, br#"{"revision":1}"#).unwrap();
         atomic_json_file(&path, br#"{"revision":2}"#).unwrap();
         assert_eq!(fs::read(&path).unwrap(), br#"{"revision":2}"#);
-        assert_eq!(fs::read(root.join("settings.json.bak")).unwrap(), br#"{"revision":1}"#);
+        assert_eq!(
+            fs::read(root.join("settings.json.bak")).unwrap(),
+            br#"{"revision":1}"#
+        );
         atomic_json_file(&path, br#"{"revision":3}"#).unwrap();
         assert_eq!(fs::read(&path).unwrap(), br#"{"revision":3}"#);
-        assert_eq!(fs::read(root.join("settings.json.bak")).unwrap(), br#"{"revision":2}"#);
+        assert_eq!(
+            fs::read(root.join("settings.json.bak")).unwrap(),
+            br#"{"revision":2}"#
+        );
         let _ = fs::remove_dir_all(root);
     }
 }
@@ -11511,7 +11880,9 @@ static JSON_WRITER_THREAD: LazyLock<std::thread::JoinHandle<()>> = LazyLock::new
     std::thread::spawn(|| {
         loop {
             std::thread::sleep(Duration::from_millis(250));
-            let Ok(_serial) = JSON_DISK_LOCK.lock() else { continue };
+            let Ok(_serial) = JSON_DISK_LOCK.lock() else {
+                continue;
+            };
             let drained: Vec<(String, Vec<u8>)> = match JSON_WRITE_QUEUE.lock() {
                 Ok(mut queue) => queue.drain().collect(),
                 Err(_) => continue,
@@ -11848,7 +12219,8 @@ fn near_duplicate_hash_groups(hashes: &[u64]) -> Vec<Vec<usize>> {
         candidates.sort_unstable();
         let mut group = vec![index];
         for other in candidates {
-            if other > index && !assigned[other]
+            if other > index
+                && !assigned[other]
                 && crate::inference::is_near_duplicate_dhash(hash, hashes[other])
             {
                 group.push(other);
@@ -11907,7 +12279,10 @@ fn collect_image_duplicate_groups(folder: &str) -> Vec<(String, Vec<String>)> {
     near_duplicate_hash_groups(&hashes)
         .into_iter()
         .map(|indices| {
-            let paths: Vec<String> = indices.iter().map(|&index| entries[index].0.clone()).collect();
+            let paths: Vec<String> = indices
+                .iter()
+                .map(|&index| entries[index].0.clone())
+                .collect();
             let title = Path::new(&paths[0])
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
@@ -12047,11 +12422,7 @@ fn double_click_interval() -> Duration {
 /// True when this click should open (same row, no modifiers, within the OS
 /// double-click interval). Survives FileRow rebuilds that drop Slint's own
 /// `double-clicked` event.
-fn is_duplicate_open(
-    last: &mut Option<(String, Instant)>,
-    path: &str,
-    now: Instant,
-) -> bool {
+fn is_duplicate_open(last: &mut Option<(String, Instant)>, path: &str, now: Instant) -> bool {
     if last
         .as_ref()
         .is_some_and(|(_, at)| now.saturating_duration_since(*at) < Duration::from_millis(450))
@@ -12236,6 +12607,19 @@ mod open_file_routing_tests {
 mod updater_asset_tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn updater_helper_rejects_batch_metacharacters_in_paths() {
+        assert!(batch_safe_path(Path::new(r"C:\Users\name\Pathfinder\update.exe")).is_ok());
+        for unsafe_name in [
+            r"C:\Users\a%b\update.exe",
+            r"C:\Users\a&b\update.exe",
+            r"C:\Users\a(b)\update.exe",
+        ] {
+            assert!(batch_safe_path(Path::new(unsafe_name)).is_err());
+        }
+    }
+
     #[test]
     fn update_available_requires_installer_url() {
         let bare = serde_json::json!({
@@ -12245,7 +12629,10 @@ mod updater_asset_tests {
             "assets": []
         });
         let r = update_result_from_release(&bare, "1.0.0");
-        assert!(!r.available, "empty assets must not advertise an installable update");
+        assert!(
+            !r.available,
+            "empty assets must not advertise an installable update"
+        );
         assert!(r.download_url.is_empty());
         assert!(r.message.contains("publishing") || r.message.contains("not ready"));
 
@@ -12255,13 +12642,18 @@ mod updater_asset_tests {
             "body": "notes",
             "assets": [{
                 "name": "Pathfinder_9.9.9_x64-setup.exe",
+                "state": "uploaded",
                 "size": 12_000_000,
-                "browser_download_url": "https://example.com/setup.exe"
+                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "browser_download_url": "https://github.com/rorohecker/pathfinder/releases/download/v9.9.9/Pathfinder_9.9.9_x64-setup.exe"
             }]
         });
         let r2 = update_result_from_release(&with_exe, "1.0.0");
         assert!(r2.available);
-        assert_eq!(r2.download_url, "https://example.com/setup.exe");
+        assert_eq!(
+            r2.download_url,
+            "https://github.com/rorohecker/pathfinder/releases/download/v9.9.9/Pathfinder_9.9.9_x64-setup.exe"
+        );
         assert_eq!(r2.download_size, 12_000_000);
         assert!(
             r2.message.contains("11.4") || r2.message.contains("12") || r2.message.contains("MB"),
@@ -12292,21 +12684,44 @@ mod updater_asset_tests {
             },
             {
                 "name": "Pathfinder_1.0.10_x64-setup.exe",
+                "state": "uploaded",
                 "size": 12580410,
                 "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "browser_download_url": "https://example.com/setup.exe"
+                "browser_download_url": "https://github.com/rorohecker/pathfinder/releases/download/v1.0.10/Pathfinder_1.0.10_x64-setup.exe"
             },
             {
                 "name": "Pathfinder_1.0.10_x64_en-US.msi",
                 "size": 17911808,
-                "browser_download_url": "https://example.com/setup.msi"
+                "browser_download_url": "https://github.com/rorohecker/pathfinder/releases/download/v1.0.10/Pathfinder_1.0.10_x64_en-US.msi"
             }
         ]);
         let arr = assets.as_array().unwrap();
-        let (url, sha, size) = pick_release_installer(arr);
-        assert_eq!(url, "https://example.com/setup.exe");
+        let (url, sha, size) = pick_release_installer(arr, "1.0.10");
+        assert_eq!(
+            url,
+            "https://github.com/rorohecker/pathfinder/releases/download/v1.0.10/Pathfinder_1.0.10_x64-setup.exe"
+        );
         assert_eq!(size, 12_580_410);
         assert_eq!(sha.len(), 64);
+    }
+
+    #[test]
+    fn updater_rejects_missing_digest_wrong_arch_and_external_url() {
+        let candidates = serde_json::json!([
+            { "name": "Pathfinder_1.0.24_arm64-setup.exe", "state": "uploaded",
+              "size": 12000000, "digest": format!("sha256:{}", "a".repeat(64)),
+              "browser_download_url": "https://github.com/rorohecker/pathfinder/releases/download/v1.0.24/Pathfinder_1.0.24_arm64-setup.exe" },
+            { "name": "Pathfinder_1.0.24_x64-setup.exe", "state": "uploaded",
+              "size": 12000000,
+              "browser_download_url": "https://github.com/rorohecker/pathfinder/releases/download/v1.0.24/Pathfinder_1.0.24_x64-setup.exe" },
+            { "name": "Pathfinder_1.0.24_x64_en-US.msi", "state": "uploaded",
+              "size": 18000000, "digest": format!("sha256:{}", "b".repeat(64)),
+              "browser_download_url": "https://example.com/fake.msi" }
+        ]);
+        let (url, sha, size) = pick_release_installer(candidates.as_array().unwrap(), "1.0.24");
+        assert!(url.is_empty());
+        assert!(sha.is_empty());
+        assert_eq!(size, 0);
     }
 
     #[test]
@@ -12451,7 +12866,8 @@ fn user_facing_error(message: String) -> String {
         || lower.contains("device is not ready")
         || lower.contains("the device is not ready")
     {
-        "This drive is not ready. If it is BitLocker-protected, unlock it and try again.".to_string()
+        "This drive is not ready. If it is BitLocker-protected, unlock it and try again."
+            .to_string()
     } else {
         message
     }
@@ -12505,10 +12921,7 @@ fn prompt_bitlocker_unlock(path: &str) -> bool {
         if open_with_shell_execute(&root).is_ok() {
             return true;
         }
-        ProcessCommand::new("explorer")
-            .arg(&root)
-            .spawn()
-            .is_ok()
+        ProcessCommand::new("explorer").arg(&root).spawn().is_ok()
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -13057,7 +13470,12 @@ fn native_rename_replay(state: &AppState, path: &str, new_name: &str) -> Result<
     native_rename_inner(state, path, new_name, false)
 }
 
-fn native_rename_inner(state: &AppState, path: &str, new_name: &str, record: bool) -> Result<String, String> {
+fn native_rename_inner(
+    state: &AppState,
+    path: &str,
+    new_name: &str,
+    record: bool,
+) -> Result<String, String> {
     if state.queue_is_paused() {
         return Err("Operation queue is paused.".to_string());
     }
@@ -13238,16 +13656,22 @@ fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
         state.queue_conflict(op_id, conflict_info(&src, &dst));
         dst = keep_both_destination(&dst);
     }
-    let total = folder_size_quick(&src, 25_000);
+    let total = if src.is_file() {
+        src.metadata().map(|meta| meta.len()).unwrap_or(0)
+    } else {
+        folder_size_quick(&src, 25_000)
+    };
     let op_id = state.queue_start("copy", from, Some(&dst.to_string_lossy()), total);
     let started = Instant::now();
     let result = if src.is_dir() {
         copy_dir_recursive(state, &src, &dst)
     } else {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        fs::copy(&src, &dst).map(|_| ()).map_err(|e| e.to_string())
+        let journal_dir = native_data_file("transfers");
+        durable_transfer::start(&journal_dir, op_id, &src, &dst).and_then(|_| {
+            durable_transfer::run(&journal_dir, op_id, state.queue_cancel.as_ref(), |done| {
+                state.queue_progress(op_id, done, started);
+            })
+        })
     };
     if result.is_ok() {
         state.invalidate_path(&dst);
@@ -13299,11 +13723,14 @@ fn native_move_inner(state: &AppState, from: &str, to: &str, record: bool) -> Re
                 copy_dir_recursive(state, &src, &dst)?;
                 fs::remove_dir_all(&src).map_err(|e| e.to_string())?;
             } else {
-                if let Some(parent) = dst.parent() {
-                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                }
-                fs::copy(&src, &dst).map_err(|e| e.to_string())?;
-                fs::remove_file(&src).map_err(|e| e.to_string())?;
+                let journal_dir = native_data_file("transfers");
+                durable_transfer::start_move(&journal_dir, op_id, &src, &dst)?;
+                durable_transfer::run(&journal_dir, op_id, state.queue_cancel.as_ref(), |done| {
+                    state.queue_progress(op_id, done, started);
+                })?;
+                // The source is removed only after a complete, verified copy
+                // has been published. A crash here leaves both copies intact.
+                durable_transfer::finish_move(&journal_dir, op_id)?;
             }
         }
         Ok(())
@@ -14389,6 +14816,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Find Duplicates on Drive", "", "duplicates-drive"),
     ("Tools", "Operation Log", "", "operation-log"),
     ("Tools", "Operation Queue", "", "operation-queue"),
+    ("Tools", "Content Search Index", "", "content-index"),
     ("Tools", "Pause Operation Queue", "", "queue-pause"),
     ("Tools", "Resume Operation Queue", "", "queue-resume"),
     ("Tools", "Cancel Queued Operations", "", "queue-cancel"),
@@ -14474,7 +14902,12 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("View", "Compact View", "Ctrl+Shift+1", "view-compact"),
     ("View", "Details View", "Ctrl+2", "view-list"),
     ("View", "Gallery View", "Ctrl+3", "view-gallery"),
-    ("View", "Toggle Flat View", "Ctrl+Shift+L", "toggle-flat-view"),
+    (
+        "View",
+        "Toggle Flat View",
+        "Ctrl+Shift+L",
+        "toggle-flat-view",
+    ),
     ("View", "Toggle Preview", "Ctrl+I", "toggle-preview"),
     ("View", "Toggle Dual Pane", "F3", "toggle-dual"),
     ("Settings", "Open Settings", "Ctrl+,", "settings"),
@@ -14766,7 +15199,8 @@ fn parse_cli_startup_folder_from(args: &[String]) -> Option<PathBuf> {
                 for part in body.split(',') {
                     let part = part.trim();
                     let pl = part.to_ascii_lowercase();
-                    if pl.is_empty() || matches!(pl.as_str(), "e" | "n" | "select" | "root" | "separate")
+                    if pl.is_empty()
+                        || matches!(pl.as_str(), "e" | "n" | "select" | "root" | "separate")
                     {
                         continue;
                     }
@@ -14911,7 +15345,9 @@ fn trash_ids_for_originals(originals: &[String]) -> HashMap<String, String> {
 
 /// Flush coalesced settings/session writes so quit does not drop the last edits.
 fn flush_native_json_queue() {
-    let Ok(_serial) = JSON_DISK_LOCK.lock() else { return };
+    let Ok(_serial) = JSON_DISK_LOCK.lock() else {
+        return;
+    };
     let drained: Vec<(String, Vec<u8>)> = match JSON_WRITE_QUEUE.lock() {
         Ok(mut queue) => queue.drain().collect(),
         Err(_) => return,
@@ -15212,6 +15648,7 @@ impl NativeController {
             files: Vec::new(),
             visible_files: Vec::new(),
             search_results: Vec::new(),
+            search_snippets: HashMap::new(),
             active_archive: None,
             selected_index: -1,
             selected_set: std::collections::HashSet::new(),
@@ -16353,7 +16790,8 @@ impl NativeController {
         self.visible_files.clear();
         if !query.is_empty() && !query.starts_with("tag:") && !query.starts_with("smart:") {
             self.visible_files.extend(
-                self.search_results.iter()
+                self.search_results
+                    .iter()
                     .filter(|entry| self.show_hidden || !Self::is_hidden_entry(entry))
                     .cloned(),
             );
@@ -17052,8 +17490,7 @@ impl NativeController {
             .unwrap_or_default();
         let n = batch.len();
         for (path, raw, w, h) in batch {
-            let buf =
-                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
+            let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&raw, w, h);
             self.thumbnail_memory
                 .insert(path, slint::Image::from_rgba8(buf));
         }
@@ -17255,6 +17692,11 @@ impl NativeController {
         };
         FileItem {
             name: ss(&entry.name),
+            match_snippet: ss(self
+                .search_snippets
+                .get(&entry.path)
+                .map(String::as_str)
+                .unwrap_or("")),
             file_path: ss(&entry.path),
             is_dir: entry.kind == FileKind::Directory,
             size_text: ss(if entry.kind == FileKind::Directory {
@@ -18244,7 +18686,11 @@ impl NativeController {
     ) {
         self.active_archive = None;
         ui.set_in_recycle_bin(false);
-        let _ = ensure_watched_paths(&self.app_state, std::slice::from_ref(&path), &[path.clone(), self.secondary_path.clone()]);
+        let _ = ensure_watched_paths(
+            &self.app_state,
+            std::slice::from_ref(&path),
+            &[path.clone(), self.secondary_path.clone()],
+        );
         let partial = page.partial;
         let skipped_entries = page.skipped_entries;
         let files = page.entries;
@@ -19523,14 +19969,7 @@ impl NativeController {
     }
 
     /// Apply marquee hit-test without restarting auto-scroll bookkeeping.
-    fn marquee_select_apply_only(
-        &mut self,
-        ui: &MainWindow,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-    ) {
+    fn marquee_select_apply_only(&mut self, ui: &MainWindow, x: f32, y: f32, w: f32, h: f32) {
         if w < 2.0 && h < 2.0 {
             return;
         }
@@ -19802,10 +20241,7 @@ impl NativeController {
             .as_ref()
             .map(|f| f.query.clone())
             .unwrap_or_else(|| format!("smart:{smart_id}"));
-        let folder_scope = folder
-            .as_ref()
-            .map(|f| f.scope.clone())
-            .unwrap_or_default();
+        let folder_scope = folder.as_ref().map(|f| f.scope.clone()).unwrap_or_default();
         let target = if smart_id == "old-downloads" {
             dirs::download_dir().map(|d| d.to_string_lossy().to_string())
         } else if !folder_scope.is_empty() && !is_virtual_nav_path(&folder_scope) {
@@ -20446,6 +20882,7 @@ impl NativeController {
     fn search(&mut self, ui: &MainWindow, query: String) {
         self.search_query = query;
         self.search_results.clear();
+        self.search_snippets.clear();
         self.selected_index = -1;
         self.selected_set.clear();
         self.select_anchor = -1;
@@ -20539,6 +20976,85 @@ impl NativeController {
         } else {
             format!("{path} | searching...")
         }));
+        if parse_query(&query).content.is_some() {
+            let db = content_index_file();
+            state.content_scan_cancel.store(false, Ordering::Release);
+            std::thread::spawn(move || {
+                let limit = SEARCH_LIVE_SCAN_LIMIT;
+                let (initial, initial_snippets) =
+                    indexed_content_matches(&db, &path, &query, limit);
+                if !initial.is_empty() && state.search_generation.load(Ordering::Acquire) == token {
+                    publish_content_result(
+                        &pending,
+                        &ready,
+                        NativeSearchResult {
+                            path: path.clone(),
+                            query: query.clone(),
+                            entries: initial,
+                            snippets: initial_snippets,
+                            source: "Local content index · refreshing".to_string(),
+                            partial: true,
+                        },
+                    );
+                }
+                let configured = content_index::roots(&db).unwrap_or_default();
+                let mut fully_covered = false;
+                let mut indexed_roots = 0usize;
+                let mut skipped = 0u64;
+                for root in configured {
+                    let scope = Path::new(&path);
+                    let indexed_root = Path::new(&root.path);
+                    if !content_index::path_within(scope, indexed_root)
+                        && !content_index::path_within(indexed_root, scope)
+                    {
+                        continue;
+                    }
+                    if state.search_generation.load(Ordering::Acquire) != token {
+                        return;
+                    }
+                    if let Ok(status) = content_index::scan_with_cancel(&db, indexed_root, || {
+                        state.search_generation.load(Ordering::Relaxed) != token
+                            || state.content_scan_cancel.load(Ordering::Relaxed)
+                    }) {
+                        indexed_roots += 1;
+                        skipped += status.skipped;
+                        if content_index::path_within(scope, indexed_root) && status.complete {
+                            fully_covered = true;
+                        }
+                    }
+                }
+                if state.search_generation.load(Ordering::Acquire) != token {
+                    return;
+                }
+                let (mut entries, snippets) = indexed_content_matches(&db, &path, &query, limit);
+                let source = if fully_covered {
+                    format!("Local content index · {indexed_roots} root(s), {skipped} skipped")
+                } else {
+                    let live = live_search_scan(&state, &path, &query, limit, token);
+                    merge_search_entries(&mut entries, live, limit);
+                    format!(
+                        "Local content index + live scan · {indexed_roots} root(s), {skipped} skipped"
+                    )
+                };
+                if state.search_generation.load(Ordering::Acquire) != token {
+                    return;
+                }
+                sort_entries(&mut entries);
+                publish_content_result(
+                    &pending,
+                    &ready,
+                    NativeSearchResult {
+                        path,
+                        query,
+                        entries,
+                        snippets,
+                        source,
+                        partial: false,
+                    },
+                );
+            });
+            return;
+        }
         let semantic = self.settings.search_semantic_mode && local_ai_semantic_ready();
         let clip = self.settings.clip_search_enabled && local_ai_image_search_ready();
         // Searching from a drive root (or with the search-all-scope toggle on)
@@ -20583,13 +21099,9 @@ impl NativeController {
                 let query = query.clone();
                 let generation = state.search_generation.clone();
                 std::thread::spawn(move || {
-                    let windows = windows_index_search_impl(
-                        &query,
-                        &path,
-                        limit,
-                        Some(&(generation, token)),
-                    )
-                    .unwrap_or_default();
+                    let windows =
+                        windows_index_search_impl(&query, &path, limit, Some(&(generation, token)))
+                            .unwrap_or_default();
                     let _ = tx.send(Part::Windows(windows));
                 });
             }
@@ -21165,8 +21677,7 @@ impl NativeController {
         match list_archive_virtual_dir(&archive_path, &prefix) {
             Ok(files) => {
                 let virtual_path = archive_virtual_path(&archive_path, &prefix);
-                let soft =
-                    same_path_string(&self.secondary_path, &virtual_path) && !push_history;
+                let soft = same_path_string(&self.secondary_path, &virtual_path) && !push_history;
                 let sticky = if soft {
                     self.secondary_selected_paths_sticky()
                 } else {
@@ -21228,7 +21739,11 @@ impl NativeController {
         if !Path::new(&path).is_dir() {
             return;
         }
-        let _ = ensure_watched_paths(&self.app_state, std::slice::from_ref(&path), &[self.current_path.clone(), path.clone()]);
+        let _ = ensure_watched_paths(
+            &self.app_state,
+            std::slice::from_ref(&path),
+            &[self.current_path.clone(), path.clone()],
+        );
         if push_history {
             self.secondary_history
                 .truncate(self.secondary_history_pos + 1);
@@ -21782,6 +22297,7 @@ impl NativeController {
             "duplicates-drive" => self.show_duplicates_drive(ui),
             "operation-log" => self.show_operation_log(ui),
             "operation-queue" => self.show_operation_queue(ui),
+            "content-index" => self.show_content_index(ui),
             "queue-pause" => {
                 if let Ok(mut paused) = self.app_state.queue_paused.lock() {
                     *paused = true;
@@ -22413,8 +22929,11 @@ impl NativeController {
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
-                        let _ =
-                            native_rename_replay(&self.app_state, &current.to_string_lossy(), &old_name);
+                        let _ = native_rename_replay(
+                            &self.app_state,
+                            &current.to_string_lossy(),
+                            &old_name,
+                        );
                     }
                     return Err(error);
                 }
@@ -22766,7 +23285,10 @@ impl NativeController {
             }
             Some(PendingPrompt::CompareFolder(left)) => {
                 if self.sync_running {
-                    self.show_toast(ui, "Wait for the current sync task to finish before comparing folders.");
+                    self.show_toast(
+                        ui,
+                        "Wait for the current sync task to finish before comparing folders.",
+                    );
                     return;
                 }
                 let right = value.trim();
@@ -23533,12 +24055,17 @@ impl NativeController {
                         .unwrap_or_else(|| "not calculated".to_string())
                 )));
                 ui.set_preview_meta(ss("Conflict resolver"));
-                let remaining = clipboard.paths.iter()
+                let remaining = clipboard
+                    .paths
+                    .iter()
                     .filter(|path| !same_path_string(path, src))
                     .cloned()
                     .collect();
                 self.pending_paste_resume = Some((
-                    NativeClipboard { paths: remaining, cut },
+                    NativeClipboard {
+                        paths: remaining,
+                        cut,
+                    },
                     dest_dir.clone(),
                 ));
                 self.pending_prompt = Some(PendingPrompt::ConflictPaste {
@@ -23727,8 +24254,15 @@ impl NativeController {
     }
 
     fn start_duplicate_scan(&mut self, ui: &MainWindow, root: String, min_size: u64, drive: bool) {
-        let generation = self.duplicate_scan_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        ui.set_dupe_overlay_title(ss(if drive { "Drive duplicates" } else { "Duplicate files" }));
+        let generation = self
+            .duplicate_scan_generation
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        ui.set_dupe_overlay_title(ss(if drive {
+            "Drive duplicates"
+        } else {
+            "Duplicate files"
+        }));
         ui.set_dupe_overlay_subtitle(ss("Scanning for exact duplicates..."));
         ui.set_dupe_groups(model_from_vec(Vec::<DupeGroupItem>::new()));
         ui.set_dupe_overlay_visible(true);
@@ -23739,7 +24273,11 @@ impl NativeController {
             let groups = find_duplicates(root, Some(min_size));
             if current.load(Ordering::Acquire) == generation {
                 if let Ok(mut slot) = pending.lock() {
-                    *slot = Some(DuplicateScanResult { generation, drive, groups });
+                    *slot = Some(DuplicateScanResult {
+                        generation,
+                        drive,
+                        groups,
+                    });
                     ready.store(true, Ordering::Release);
                 }
             }
@@ -23759,30 +24297,47 @@ impl NativeController {
             }
         };
         let (_, duplicate_count, reclaimable_bytes) = duplicate_reclaimable_bytes(&groups);
-        self.dupe_groups_cache = groups.iter().enumerate()
+        self.dupe_groups_cache = groups
+            .iter()
+            .enumerate()
             .take(if result.drive { 200 } else { usize::MAX })
             .map(|(index, group)| {
-                let title = group.first().map(|entry| entry.name.clone())
+                let title = group
+                    .first()
+                    .map(|entry| entry.name.clone())
                     .unwrap_or_else(|| format!("Group {}", index + 1));
-                (format!("{}-{index}::{title}", if result.drive { "drive" } else { "exact" }),
-                 group.iter().map(|entry| entry.path.clone()).collect())
+                (
+                    format!(
+                        "{}-{index}::{title}",
+                        if result.drive { "drive" } else { "exact" }
+                    ),
+                    group.iter().map(|entry| entry.path.clone()).collect(),
+                )
             })
             .collect();
-        let items: Vec<DupeGroupItem> = self.dupe_groups_cache.iter()
-            .map(|(id, paths)| dupe_group_ui_item(
-                id, paths, &format!("{} identical files", paths.len())))
+        let items: Vec<DupeGroupItem> = self
+            .dupe_groups_cache
+            .iter()
+            .map(|(id, paths)| {
+                dupe_group_ui_item(id, paths, &format!("{} identical files", paths.len()))
+            })
             .collect();
         let subtitle = if items.is_empty() {
-            if result.drive { "No large duplicates found on this drive." }
-            else { "No duplicate files found in this folder." }
+            if result.drive {
+                "No large duplicates found on this drive."
+            } else {
+                "No duplicate files found in this folder."
+            }
         } else {
             "Review each group before deleting extras to the Recycle Bin."
         };
         let subtitle = if items.is_empty() {
             subtitle.to_string()
         } else {
-            format!("{subtitle} {duplicate_count} extra copies; up to {} reclaimable.",
-                format_size_short(reclaimable_bytes))
+            format!(
+                "{subtitle} {duplicate_count} extra copies; up to {} reclaimable.",
+                format_size_short(reclaimable_bytes)
+            )
         };
         ui.set_dupe_overlay_subtitle(ss(subtitle));
         ui.set_dupe_groups(model_from_vec(items));
@@ -23794,7 +24349,9 @@ impl NativeController {
 
     fn show_duplicates_drive(&mut self, ui: &MainWindow) {
         let path = self.active_directory().to_string();
-        let root = Path::new(&path).components().next()
+        let root = Path::new(&path)
+            .components()
+            .next()
             .map(|component| {
                 let mut root = PathBuf::new();
                 root.push(component);
@@ -23901,6 +24458,90 @@ impl NativeController {
         self.show_toast_kind(ui, "Undo history cleared", "success");
     }
 
+    fn show_content_index(&mut self, ui: &MainWindow) {
+        let roots = content_index::roots(&content_index_file()).unwrap_or_default();
+        let mut items = vec![ToolListItem {
+            id: ss("content:add"),
+            title: ss("Index the current folder"),
+            subtitle: ss("Opt in to local document text indexing; subfolders are included"),
+            meta: ss("Add"),
+            enabled: true,
+            accent: color("#4f9cff"),
+        }];
+        if !roots.is_empty() {
+            items.push(ToolListItem {
+                id: ss("content:refresh"),
+                title: ss("Refresh indexed folders"),
+                subtitle: ss("Recheck files; unchanged documents are not extracted again"),
+                meta: ss("Scan"),
+                enabled: true,
+                accent: color("#4f9cff"),
+            });
+            items.push(ToolListItem {
+                id: ss("content:cancel"),
+                title: ss("Cancel content scan"),
+                subtitle: ss("Stop after the current document; completed entries remain indexed"),
+                meta: ss("Cancel"),
+                enabled: true,
+                accent: color("#e25555"),
+            });
+        }
+        for root in roots {
+            let status = if root.complete {
+                "Complete"
+            } else {
+                "Pending or interrupted"
+            };
+            items.push(ToolListItem {
+                id: ss(format!("content:root:{}", root.path)),
+                title: ss(&root.path),
+                subtitle: ss(format!(
+                    "{status} · {} indexed · {} skipped · last scan {}",
+                    root.indexed,
+                    root.skipped,
+                    if root.scanned_at == 0 {
+                        "never".to_string()
+                    } else {
+                        let age = format_relative_time(root.scanned_at);
+                        if age == "just now" {
+                            age
+                        } else {
+                            format!("{age} ago")
+                        }
+                    }
+                )),
+                meta: ss(if root.ocr { "OCR on" } else { "OCR off" }),
+                enabled: true,
+                accent: color(if root.complete { "#3cb371" } else { "#f0a030" }),
+            });
+            items.push(ToolListItem {
+                id: ss(format!("content:ocr:{}", root.path)),
+                title: ss(if root.ocr {
+                    "Disable local OCR"
+                } else {
+                    "Enable local OCR for images and scanned PDFs"
+                }),
+                subtitle: ss(&root.path),
+                meta: ss("Toggle"),
+                enabled: true,
+                accent: color("#8a93a6"),
+            });
+            items.push(ToolListItem {
+                id: ss(format!("content:remove:{}", root.path)),
+                title: ss("Remove folder and indexed text"),
+                subtitle: ss(&root.path),
+                meta: ss("Remove"),
+                enabled: true,
+                accent: color("#e25555"),
+            });
+        }
+        ui.set_tool_overlay_kind(ss("content-index"));
+        ui.set_tool_overlay_title(ss("Content Search Index"));
+        ui.set_tool_overlay_subtitle(ss("Only opted-in folders are stored. Search with content:term; results show matching text in List view. OCR uses installed Windows languages."));
+        ui.set_tool_overlay_items(model_from_vec(items));
+        ui.set_tool_overlay_visible(true);
+    }
+
     fn show_operation_queue(&mut self, ui: &MainWindow) {
         let queue = self
             .app_state
@@ -23912,11 +24553,15 @@ impl NativeController {
         let mut items: Vec<ToolListItem> = Vec::new();
         if !queue.is_empty() {
             items.push(ToolListItem {
-                id: ss(if paused {
-                    "ctrl:resume"
-                } else {
-                    "ctrl:pause"
-                }),
+                id: ss("ctrl:refresh"),
+                title: ss("Refresh transfer status"),
+                subtitle: ss("Show the latest progress and recovery results"),
+                meta: ss("Refresh"),
+                enabled: true,
+                accent: color("#4f9cff"),
+            });
+            items.push(ToolListItem {
+                id: ss(if paused { "ctrl:resume" } else { "ctrl:pause" }),
                 title: ss(if paused {
                     "Resume queue"
                 } else {
@@ -23933,6 +24578,19 @@ impl NativeController {
             });
         }
         for item in queue.iter().rev() {
+            if matches!(item.kind.as_str(), "copy" | "move")
+                && matches!(item.status.as_str(), "failed" | "cancelled" | "interrupted")
+                && durable_transfer::load(&native_data_file("transfers"), item.id).is_ok()
+            {
+                items.push(ToolListItem {
+                    id: ss(format!("retry:{}", item.id)),
+                    title: ss(format!("Retry {} #{}", item.kind, item.id)),
+                    subtitle: ss("Validate source, staged bytes, and destination before resuming"),
+                    meta: ss("Retry"),
+                    enabled: true,
+                    accent: color("#f0a030"),
+                });
+            }
             let pct = if item.bytes_total > 0 {
                 ((item.bytes_done as f64 / item.bytes_total as f64) * 100.0).round() as u64
             } else {
@@ -24233,10 +24891,7 @@ impl NativeController {
         let meta = fs::metadata(&path).ok();
         let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
         let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-        let modified = meta
-            .as_ref()
-            .map(|m| unix_secs(m.modified()))
-            .unwrap_or(0);
+        let modified = meta.as_ref().map(|m| unix_secs(m.modified())).unwrap_or(0);
         let name = Path::new(&path)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -25072,7 +25727,9 @@ impl NativeController {
     }
 
     fn prompt_sync_folder(&mut self, ui: &MainWindow) {
-        self.pending_prompt = Some(PendingPrompt::SyncFolder(self.active_directory().to_string()));
+        self.pending_prompt = Some(PendingPrompt::SyncFolder(
+            self.active_directory().to_string(),
+        ));
         ui.set_prompt_title(ss("Sync this folder to destination (one way)"));
         ui.set_prompt_value(ss(if ui.get_dual_pane() {
             if self.active_pane == ActivePane::Secondary {
@@ -25109,7 +25766,11 @@ impl NativeController {
         ui.set_compare_sync_summary(ss("Scanning both folders and checking changed files…"));
         std::thread::spawn(move || {
             let result = folder_sync::plan(
-                Path::new(&source), Path::new(&destination), &exclusions, delete_extras, &cancel,
+                Path::new(&source),
+                Path::new(&destination),
+                &exclusions,
+                delete_extras,
+                &cancel,
             );
             if let Ok(mut slot) = pending.lock() {
                 *slot = Some(SyncWorkResult::Preview { generation, result });
@@ -25154,7 +25815,9 @@ impl NativeController {
         self.sync_applying = true;
         ui.set_compare_sync_running(true);
         ui.set_compare_sync_ready(false);
-        ui.set_compare_sync_summary(ss("Applying the reviewed plan. Previous versions are kept beside the destination…"));
+        ui.set_compare_sync_summary(ss(
+            "Applying the reviewed plan. Previous versions are kept beside the destination…",
+        ));
         std::thread::spawn(move || {
             let started = Instant::now();
             let result = folder_sync::execute_with_progress(plan, &cancel, |done, _| {
@@ -25165,11 +25828,21 @@ impl NativeController {
                     state.invalidate_path(Path::new(&destination));
                     state.queue_finish(
                         op_id,
-                        if report.failed > 0 { "failed" } else if report.cancelled { "cancelled" } else { "done" },
-                        report.summary(), bytes, started.elapsed(),
+                        if report.failed > 0 {
+                            "failed"
+                        } else if report.cancelled {
+                            "cancelled"
+                        } else {
+                            "done"
+                        },
+                        report.summary(),
+                        bytes,
+                        started.elapsed(),
                     );
                 }
-                Err(error) => state.queue_finish(op_id, "failed", error.clone(), 0, started.elapsed()),
+                Err(error) => {
+                    state.queue_finish(op_id, "failed", error.clone(), 0, started.elapsed())
+                }
             }
             if let Ok(mut slot) = pending.lock() {
                 *slot = Some(SyncWorkResult::Apply { generation, result });
@@ -25179,9 +25852,11 @@ impl NativeController {
     }
 
     fn render_sync_preview(ui: &MainWindow, plan: &folder_sync::SyncPlan, hide_same: bool) {
-        let visible_count = plan.items.iter().filter(|item| {
-            !hide_same || item.action != folder_sync::SyncAction::Same
-        }).count();
+        let visible_count = plan
+            .items
+            .iter()
+            .filter(|item| !hide_same || item.action != folder_sync::SyncAction::Same)
+            .count();
         let priority = [
             folder_sync::SyncAction::Conflict,
             folder_sync::SyncAction::Update,
@@ -25192,18 +25867,24 @@ impl NativeController {
             folder_sync::SyncAction::KeepExtra,
             folder_sync::SyncAction::Same,
         ];
-        let shown = priority.iter().flat_map(|action| plan.items.iter().filter(move |item| item.action == *action))
+        let shown = priority
+            .iter()
+            .flat_map(|action| plan.items.iter().filter(move |item| item.action == *action))
             .filter(|item| !hide_same || item.action != folder_sync::SyncAction::Same)
-            .take(500).map(|item| CompareRowItem {
-            path: ss(item.relative.to_string_lossy()),
-            status: ss(item.action.label()),
-            result_state: ss(""),
-            detail: ss(item.conflict_reason.as_deref().unwrap_or("")),
-            left_size: ss(format_size_short(item.source_size)),
-            right_size: ss(format_size_short(item.destination_size)),
-        }).collect();
+            .take(500)
+            .map(|item| CompareRowItem {
+                path: ss(item.relative.to_string_lossy()),
+                status: ss(item.action.label()),
+                result_state: ss(""),
+                detail: ss(item.conflict_reason.as_deref().unwrap_or("")),
+                left_size: ss(format_size_short(item.source_size)),
+                right_size: ss(format_size_short(item.destination_size)),
+            })
+            .collect();
         let mut summary = plan.summary();
-        if visible_count > 500 { summary.push_str(" · showing 500 rows, conflicts and changes first"); }
+        if visible_count > 500 {
+            summary.push_str(" · showing 500 rows, conflicts and changes first");
+        }
         ui.set_compare_rows(model_from_vec(shown));
         ui.set_compare_sync_summary(ss(summary));
         ui.set_compare_sync_ready(true);
@@ -25211,7 +25892,8 @@ impl NativeController {
 
     fn apply_sync_work_result(&mut self, ui: &MainWindow, work: SyncWorkResult) {
         let generation = match &work {
-            SyncWorkResult::Preview { generation, .. } | SyncWorkResult::Apply { generation, .. } => *generation,
+            SyncWorkResult::Preview { generation, .. }
+            | SyncWorkResult::Apply { generation, .. } => *generation,
         };
         if self.sync_generation.load(Ordering::Acquire) != generation {
             return;
@@ -25225,7 +25907,9 @@ impl NativeController {
                     if plan.exclusions != ui.get_compare_sync_exclusions().as_str()
                         || plan.delete_extras != ui.get_compare_sync_delete_extra()
                     {
-                        ui.set_compare_sync_summary(ss("Options changed while scanning. Preview again."));
+                        ui.set_compare_sync_summary(ss(
+                            "Options changed while scanning. Preview again.",
+                        ));
                         ui.set_compare_sync_ready(false);
                         self.sync_plan = None;
                         return;
@@ -25246,36 +25930,73 @@ impl NativeController {
                 ui.set_compare_sync_ready(false);
                 match result {
                     Ok(report) => {
-                        let ordered = report.outcomes.iter().filter(|outcome| outcome.status == "failed")
-                            .chain(report.outcomes.iter().filter(|outcome| outcome.status == "cancelled"))
-                            .chain(report.outcomes.iter().filter(|outcome| outcome.status == "skipped" && outcome.action.starts_with("conflict")))
-                            .chain(report.outcomes.iter().filter(|outcome| outcome.status == "skipped" && !outcome.action.starts_with("conflict")))
-                            .chain(report.outcomes.iter().filter(|outcome| outcome.status == "done"));
-                        let shown = ordered.take(500).map(|outcome| CompareRowItem {
-                            path: ss(&outcome.relative),
-                            status: ss(format!("{}: {}", outcome.action, outcome.status)),
-                            result_state: ss(&outcome.status),
-                            detail: ss(&outcome.detail),
-                            left_size: ss(""),
-                            right_size: ss(""),
-                        }).collect();
+                        let ordered = report
+                            .outcomes
+                            .iter()
+                            .filter(|outcome| outcome.status == "failed")
+                            .chain(
+                                report
+                                    .outcomes
+                                    .iter()
+                                    .filter(|outcome| outcome.status == "cancelled"),
+                            )
+                            .chain(report.outcomes.iter().filter(|outcome| {
+                                outcome.status == "skipped"
+                                    && outcome.action.starts_with("conflict")
+                            }))
+                            .chain(report.outcomes.iter().filter(|outcome| {
+                                outcome.status == "skipped"
+                                    && !outcome.action.starts_with("conflict")
+                            }))
+                            .chain(
+                                report
+                                    .outcomes
+                                    .iter()
+                                    .filter(|outcome| outcome.status == "done"),
+                            );
+                        let shown = ordered
+                            .take(500)
+                            .map(|outcome| CompareRowItem {
+                                path: ss(&outcome.relative),
+                                status: ss(format!("{}: {}", outcome.action, outcome.status)),
+                                result_state: ss(&outcome.status),
+                                detail: ss(&outcome.detail),
+                                left_size: ss(""),
+                                right_size: ss(""),
+                            })
+                            .collect();
                         ui.set_compare_rows(model_from_vec(shown));
                         ui.set_compare_sync_summary(ss(format!(
                             "Sync: {} completed, {} skipped, {} failed{}. Open the recovery folder for the full report.",
                             report.completed, report.skipped, report.failed,
                             if report.cancelled { ", stopped" } else { "" }
                         )));
-                        self.sync_last_run_dir = Path::new(&report.versions_dir).parent().map(Path::to_path_buf);
+                        self.sync_last_run_dir = Path::new(&report.versions_dir)
+                            .parent()
+                            .map(Path::to_path_buf);
                         ui.set_compare_sync_has_versions(self.sync_last_run_dir.is_some());
                         self.invalidate_and_refresh_both_panes(ui);
-                        self.show_toast_kind(ui,
-                            format!("Sync: {} completed, {} failed, {} skipped", report.completed, report.failed, report.skipped),
-                            if report.failed > 0 { "error" } else if report.cancelled || report.skipped > 0 { "info" } else { "success" });
+                        self.show_toast_kind(
+                            ui,
+                            format!(
+                                "Sync: {} completed, {} failed, {} skipped",
+                                report.completed, report.failed, report.skipped
+                            ),
+                            if report.failed > 0 {
+                                "error"
+                            } else if report.cancelled || report.skipped > 0 {
+                                "info"
+                            } else {
+                                "success"
+                            },
+                        );
                     }
                     Err(error) => {
                         ui.set_compare_sync_summary(ss(&error));
-                        self.sync_last_run_dir = folder_sync::history_dir(Path::new(&self.compare_right))
-                            .ok().filter(|path| path.is_dir());
+                        self.sync_last_run_dir =
+                            folder_sync::history_dir(Path::new(&self.compare_right))
+                                .ok()
+                                .filter(|path| path.is_dir());
                         ui.set_compare_sync_has_versions(self.sync_last_run_dir.is_some());
                         self.show_toast_kind(ui, error, "error");
                     }
@@ -25285,7 +26006,10 @@ impl NativeController {
     }
 
     fn open_sync_versions(&mut self, ui: &MainWindow) {
-        let path = self.sync_last_run_dir.clone().or_else(|| folder_sync::history_dir(Path::new(&self.compare_right)).ok());
+        let path = self
+            .sync_last_run_dir
+            .clone()
+            .or_else(|| folder_sync::history_dir(Path::new(&self.compare_right)).ok());
         match path {
             Some(path) if path.is_dir() => {
                 if let Err(error) = open::that(&path) {
@@ -26423,27 +27147,25 @@ impl NativeController {
                 ui.set_tool_overlay_visible(false);
                 self.navigate(ui, id, true);
             }
-            "properties" => {
-                match id.as_str() {
-                    "copy-path" => {
-                        let path = ui.get_tool_overlay_subtitle().to_string();
-                        if !path.is_empty() {
-                            match copy_text_to_clipboard(&path) {
-                                Ok(()) => self.show_toast_kind(ui, "Path copied", "success"),
-                                Err(e) => self.show_toast_kind(ui, e, "error"),
-                            }
+            "properties" => match id.as_str() {
+                "copy-path" => {
+                    let path = ui.get_tool_overlay_subtitle().to_string();
+                    if !path.is_empty() {
+                        match copy_text_to_clipboard(&path) {
+                            Ok(()) => self.show_toast_kind(ui, "Path copied", "success"),
+                            Err(e) => self.show_toast_kind(ui, e, "error"),
                         }
                     }
-                    "windows-properties" => {
-                        let path = ui.get_tool_overlay_subtitle().to_string();
-                        ui.set_tool_overlay_visible(false);
-                        if let Err(e) = open_windows_properties(&path) {
-                            self.show_toast(ui, e);
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                "windows-properties" => {
+                    let path = ui.get_tool_overlay_subtitle().to_string();
+                    ui.set_tool_overlay_visible(false);
+                    if let Err(e) = open_windows_properties(&path) {
+                        self.show_toast(ui, e);
+                    }
+                }
+                _ => {}
+            },
             "open-with" => {
                 ui.set_tool_overlay_visible(false);
                 if let Some(path) = id.strip_prefix("choose:") {
@@ -26521,7 +27243,75 @@ impl NativeController {
                 self.undo(ui);
                 self.show_undo_history(ui);
             }
+            "content-index" => {
+                let db = content_index_file();
+                if id == "content:add" {
+                    let root = PathBuf::from(self.active_directory());
+                    match content_index::add_root(&db, &root) {
+                        Ok(()) => {
+                            self.app_state
+                                .content_scan_cancel
+                                .store(false, Ordering::Release);
+                            let cancelled = self.app_state.content_scan_cancel.clone();
+                            std::thread::spawn(move || {
+                                let _ = content_index::scan(&db, &root, &cancelled);
+                            });
+                            self.show_toast(ui, "Indexing current folder in the background.");
+                        }
+                        Err(error) => self.show_toast_kind(ui, error, "error"),
+                    }
+                } else if id == "content:refresh" {
+                    self.app_state
+                        .content_scan_cancel
+                        .store(false, Ordering::Release);
+                    let cancelled = self.app_state.content_scan_cancel.clone();
+                    std::thread::spawn(move || {
+                        if let Ok(roots) = content_index::roots(&db) {
+                            for root in roots {
+                                if cancelled.load(Ordering::Acquire) {
+                                    break;
+                                }
+                                let _ = content_index::scan(&db, Path::new(&root.path), &cancelled);
+                            }
+                        }
+                    });
+                    self.show_toast(ui, "Refreshing content index in the background.");
+                } else if id == "content:cancel" {
+                    self.app_state
+                        .content_scan_cancel
+                        .store(true, Ordering::Release);
+                    self.show_toast(ui, "Content scan cancellation requested.");
+                } else if let Some(path) = id.strip_prefix("content:ocr:") {
+                    let enabled = content_index::roots(&db)
+                        .unwrap_or_default()
+                        .iter()
+                        .find(|root| root.path == path)
+                        .is_some_and(|root| !root.ocr);
+                    if let Err(error) = content_index::set_ocr(&db, Path::new(path), enabled) {
+                        self.show_toast_kind(ui, error, "error");
+                    } else {
+                        self.show_toast(
+                            ui,
+                            if enabled {
+                                "Local OCR enabled. Refresh to index images."
+                            } else {
+                                "Local OCR disabled."
+                            },
+                        );
+                    }
+                } else if let Some(path) = id.strip_prefix("content:remove:") {
+                    if let Err(error) = content_index::remove_root(&db, Path::new(path)) {
+                        self.show_toast_kind(ui, error, "error");
+                    } else {
+                        self.show_toast(ui, "Indexed content removed.");
+                    }
+                } else if let Some(path) = id.strip_prefix("content:root:") {
+                    let _ = reveal_in_folder(path.to_string());
+                }
+                self.show_content_index(ui);
+            }
             "operation-queue" => match id.as_str() {
+                "ctrl:refresh" => self.show_operation_queue(ui),
                 "ctrl:pause" => {
                     self.command(ui, "queue-pause");
                     self.show_operation_queue(ui);
@@ -26535,17 +27325,23 @@ impl NativeController {
                     self.show_operation_queue(ui);
                 }
                 other => {
+                    if let Some(op_id) = other
+                        .strip_prefix("retry:")
+                        .and_then(|text| text.parse::<u64>().ok())
+                    {
+                        let state = self.app_state.clone();
+                        std::thread::spawn(move || {
+                            let _ = state.queue_retry_item(op_id);
+                        });
+                        self.show_operation_queue(ui);
+                        return;
+                    }
                     if let Some(op_id) = other.strip_prefix("op:") {
-                        let source = self
-                            .app_state
-                            .operation_queue
-                            .lock()
-                            .ok()
-                            .and_then(|q| {
-                                q.iter()
-                                    .find(|i| i.id.to_string() == op_id)
-                                    .map(|i| i.source.clone())
-                            });
+                        let source = self.app_state.operation_queue.lock().ok().and_then(|q| {
+                            q.iter()
+                                .find(|i| i.id.to_string() == op_id)
+                                .map(|i| i.source.clone())
+                        });
                         if let Some(source) = source {
                             ui.set_tool_overlay_visible(false);
                             if let Err(e) = reveal_in_folder(source) {
@@ -26948,7 +27744,9 @@ impl NativeController {
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| item.from.clone());
-                        if let Err(error) = native_rename_replay(&self.app_state, &item.to, &old_name) {
+                        if let Err(error) =
+                            native_rename_replay(&self.app_state, &item.to, &old_name)
+                        {
                             outcome = Err(error);
                             break;
                         }
@@ -27012,7 +27810,10 @@ impl NativeController {
                     other => format!("Undone: {other}"),
                 };
                 self.redo_stack.push(redo_op);
-                self.redo_generation = self.app_state.operation_log_generation.load(Ordering::SeqCst);
+                self.redo_generation = self
+                    .app_state
+                    .operation_log_generation
+                    .load(Ordering::SeqCst);
                 if self.redo_stack.len() > 50 {
                     self.redo_stack.remove(0);
                 }
@@ -27028,7 +27829,12 @@ impl NativeController {
     }
 
     fn redo(&mut self, ui: &MainWindow) {
-        if self.redo_generation != self.app_state.operation_log_generation.load(Ordering::SeqCst) {
+        if self.redo_generation
+            != self
+                .app_state
+                .operation_log_generation
+                .load(Ordering::SeqCst)
+        {
             self.redo_stack.clear();
         }
         let Some(mut op) = self.redo_stack.pop() else {
@@ -27051,17 +27857,18 @@ impl NativeController {
                 } else if source.is_dir() {
                     copy_dir_recursive(&self.app_state, source, dest)
                 } else {
-                    fs::copy(source, dest).map(|_| ()).map_err(|e| e.to_string())
+                    fs::copy(source, dest)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
                 }
             }
-            "delete" => {
-                trash::delete(&from).map_err(|e| e.to_string()).map(|()| {
-                    let ids = trash_ids_for_originals(std::slice::from_ref(&from));
-                    op.trash_id = ids.into_iter()
-                        .find(|(path, _)| same_path_string(path, &from))
-                        .map(|(_, id)| id);
-                })
-            },
+            "delete" => trash::delete(&from).map_err(|e| e.to_string()).map(|()| {
+                let ids = trash_ids_for_originals(std::slice::from_ref(&from));
+                op.trash_id = ids
+                    .into_iter()
+                    .find(|(path, _)| same_path_string(path, &from))
+                    .map(|(_, id)| id);
+            }),
             "batch_rename" => match &op.batch {
                 None => Err("Missing batch rename metadata".to_string()),
                 Some(ops) => {
@@ -27071,7 +27878,9 @@ impl NativeController {
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| item.to.clone());
-                        if let Err(error) = native_rename_replay(&self.app_state, &item.from, &new_name) {
+                        if let Err(error) =
+                            native_rename_replay(&self.app_state, &item.from, &new_name)
+                        {
                             outcome = Err(error);
                             break;
                         }
@@ -27086,7 +27895,10 @@ impl NativeController {
                 if let Ok(mut log) = self.app_state.operation_log.lock() {
                     log.push(op);
                 }
-                self.redo_generation = self.app_state.operation_log_generation.load(Ordering::SeqCst);
+                self.redo_generation = self
+                    .app_state
+                    .operation_log_generation
+                    .load(Ordering::SeqCst);
                 self.refresh(ui);
                 self.show_toast_kind(ui, format!("Redone: {kind}"), "success");
             }
@@ -28511,9 +29323,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c_cols = controller.clone();
     ui.on_toggle_list_column(move |which| {
         if let Some(ui) = weak.upgrade() {
-            c_cols
-                .borrow_mut()
-                .toggle_list_column(&ui, which.as_str());
+            c_cols.borrow_mut().toggle_list_column(&ui, which.as_str());
         }
     });
 
@@ -28658,13 +29468,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 let b = c_ai.borrow();
                 if !b.settings.network_downloads_enabled {
                     drop(b);
-                    c_ai.borrow_mut().show_toast(&ui,
-                        "Turn on App and model downloads in Settings first.");
+                    c_ai.borrow_mut()
+                        .show_toast(&ui, "Turn on App and model downloads in Settings first.");
                     return;
                 }
                 if b.ai_progress.busy.load(Ordering::Acquire) {
                     drop(b);
-                    c_ai.borrow_mut().show_toast(&ui, "A Local AI install is already running.");
+                    c_ai.borrow_mut()
+                        .show_toast(&ui, "A Local AI install is already running.");
                     return;
                 }
             }
@@ -29046,6 +29857,16 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 );
                 return;
             }
+            let digest = UPDATE_EXPECTED_SHA256.lock().map(|value| value.clone()).unwrap_or_default();
+            let known_size = UPDATE_KNOWN_SIZE.load(Ordering::Relaxed);
+            if parse_github_asset_digest(&digest).is_none() || known_size < 1_000_000
+                || !trusted_installer_url(&url)
+            {
+                c.borrow_mut().show_toast_kind(&ui,
+                    "This release has no verified Pathfinder installer yet. Open the release page instead.",
+                    "warning");
+                return;
+            }
             UPDATE_BYTES_COPIED.store(0, Ordering::Relaxed);
             let known = UPDATE_KNOWN_SIZE.load(Ordering::Relaxed);
             if known > 0 {
@@ -29073,7 +29894,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             }
             let weak2 = weak.clone();
             std::thread::spawn(move || {
-                match download_and_install_update(&url) {
+                match download_and_install_update(&url, &digest, known_size) {
                     Ok(()) => {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak2.upgrade() {
@@ -29786,6 +30607,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                 {
                                     let partial = result.partial;
                                     ctrl.search_results = result.entries;
+                                    ctrl.search_snippets = result.snippets;
                                     ctrl.visible_files = ctrl.search_results.iter()
                                         .filter(|entry| ctrl.show_hidden || !NativeController::is_hidden_entry(entry))
                                         .cloned()
@@ -29811,9 +30633,11 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                     }
                                     ctrl.update_status(&ui);
                                     if count == 0 && !partial {
-                                        ui.set_empty_state(ss(
-                                            "No matches. Try ext:pdf, kind:image, size:>10mb, or modified:week",
-                                        ));
+                                        ui.set_empty_state(ss(if parse_query(&result.query).content.is_some() {
+                                            "No text matches. Use Tools → Content Search Index to add this folder or refresh coverage."
+                                        } else {
+                                            "No matches. Try ext:pdf, kind:image, size:>10mb, or modified:week"
+                                        }));
                                     } else {
                                         ui.set_empty_state(ss(""));
                                     }
@@ -29824,7 +30648,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                         if partial { " — still searching" } else { "" },
                                         count,
                                         if count == 1 { "match" } else { "matches" },
-                                        if !partial && count >= SEARCH_DRIVE_SCAN_LIMIT {
+                                        if !partial && parse_query(&result.query).content.is_some()
+                                            && count >= SEARCH_LIVE_SCAN_LIMIT {
+                                            " · first 5,000 matches"
+                                        } else if !partial && count >= SEARCH_DRIVE_SCAN_LIMIT {
                                             " · first 25,000 matches"
                                         } else if !partial
                                             && count >= SEARCH_LIVE_SCAN_LIMIT
@@ -30574,11 +31401,9 @@ fn apply_window_icon(ui: &MainWindow) {
         }
     };
     let (width, height) = rgba.dimensions();
-    let Ok(icon) = i_slint_backend_winit::winit::window::Icon::from_rgba(
-        rgba.into_raw(),
-        width,
-        height,
-    ) else {
+    let Ok(icon) =
+        i_slint_backend_winit::winit::window::Icon::from_rgba(rgba.into_raw(), width, height)
+    else {
         eprintln!("[icon] failed to build winit Icon from RGBA");
         return;
     };
@@ -30589,8 +31414,8 @@ fn apply_window_icon(ui: &MainWindow) {
 
 #[cfg(target_os = "windows")]
 fn set_app_user_model_id() {
-    use windows::core::w;
     use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+    use windows::core::w;
     // Stable id matching the former Tauri bundle identifier so pinned
     // shortcuts and running windows group under the same taskbar button.
     unsafe {
@@ -32010,7 +32835,10 @@ pub fn run() {
 
     let mut initial_settings: NativeSettings =
         read_native_json("settings.json", NativeSettings::default());
-    if matches!(local_ai::read_manifest().state, local_ai::InstallState::Installed) {
+    if matches!(
+        local_ai::read_manifest().state,
+        local_ai::InstallState::Installed
+    ) {
         initial_settings.ai_ever_installed = true;
     }
     let restore_maximized = initial_settings.window_maximized;
@@ -32103,15 +32931,11 @@ pub fn run() {
                     Duration::from_millis(0)
                 };
                 let finish_timer = Box::new(slint::Timer::default());
-                finish_timer.start(
-                    slint::TimerMode::SingleShot,
-                    delay,
-                    move || {
-                        if let Some(ui) = weak_finish.upgrade() {
-                            c_finish.borrow_mut().finish_startup(&ui);
-                        }
-                    },
-                );
+                finish_timer.start(slint::TimerMode::SingleShot, delay, move || {
+                    if let Some(ui) = weak_finish.upgrade() {
+                        c_finish.borrow_mut().finish_startup(&ui);
+                    }
+                });
                 Box::leak(finish_timer);
             },
         );

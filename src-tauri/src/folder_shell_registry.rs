@@ -9,19 +9,22 @@
 //! - Unhandled Explorer verbs (`shell:`, CLSIDs, unknown switches) are forwarded
 //!   to the system explorer via [`spawn_system_explorer`] so the desktop never breaks.
 
+use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW,
-    RegSetValueExW, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
-    REG_SZ, HKEY,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
+    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows::core::PCWSTR;
 
 fn to_wide_nul(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// Opens or creates `HKCU\\<relative>` one segment at a time. Returns a handle to the leaf key
@@ -59,10 +62,7 @@ fn hkcu_open_create_leaf(relative_path: &str) -> Result<HKEY, String> {
                     let _ = RegCloseKey(parent);
                 }
             }
-            return Err(format!(
-                "RegCreateKeyExW failed for {:?}: {:?}",
-                seg, err
-            ));
+            return Err(format!("RegCreateKeyExW failed for {:?}: {:?}", seg, err));
         }
         if parent != HKEY_CURRENT_USER {
             unsafe {
@@ -72,10 +72,6 @@ fn hkcu_open_create_leaf(relative_path: &str) -> Result<HKEY, String> {
         parent = sub;
     }
     Ok(parent)
-}
-
-fn set_key_default_string(key: HKEY, value: &str) -> Result<(), String> {
-    set_key_string(key, None, value)
 }
 
 fn set_key_string(key: HKEY, name: Option<&str>, value: &str) -> Result<(), String> {
@@ -92,6 +88,198 @@ fn set_key_string(key: HKEY, name: Option<&str>, value: &str) -> Result<(), Stri
         return Err(format!("RegSetValueExW failed: {:?}", err));
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct RegistryValueBackup {
+    kind: u32,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct OwnedValueBackup {
+    path: String,
+    name: Option<String>,
+    owned: String,
+    previous: Option<RegistryValueBackup>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct ShellRegistryBackup {
+    values: Vec<OwnedValueBackup>,
+}
+
+const SHELL_BACKUP_FILE: &str = "shell_registry_backup.json";
+
+fn read_registry_value(
+    path: &str,
+    name: Option<&str>,
+) -> Result<Option<RegistryValueBackup>, String> {
+    let wide_path = to_wide_nul(path);
+    let mut key = HKEY::default();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(wide_path.as_ptr()),
+            None,
+            KEY_READ,
+            &mut key,
+        )
+    };
+    if opened == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if opened != ERROR_SUCCESS {
+        return Err(format!("RegOpenKeyExW({path}) failed: {opened:?}"));
+    }
+    let name_wide = name.map(to_wide_nul);
+    let name_ptr = name_wide
+        .as_ref()
+        .map(|wide| PCWSTR(wide.as_ptr()))
+        .unwrap_or(PCWSTR::null());
+    let result = (|| {
+        let mut kind = REG_VALUE_TYPE(0);
+        let mut size = 0u32;
+        let queried = unsafe {
+            RegQueryValueExW(key, name_ptr, None, Some(&mut kind), None, Some(&mut size))
+        };
+        if queried == ERROR_FILE_NOT_FOUND {
+            return Ok(None);
+        }
+        if queried != ERROR_SUCCESS {
+            return Err(format!("RegQueryValueExW({path}) failed: {queried:?}"));
+        }
+        let mut bytes = vec![0u8; size as usize];
+        let data = if bytes.is_empty() {
+            None
+        } else {
+            Some(bytes.as_mut_ptr())
+        };
+        let read = unsafe {
+            RegQueryValueExW(key, name_ptr, None, Some(&mut kind), data, Some(&mut size))
+        };
+        if read != ERROR_SUCCESS {
+            return Err(format!("RegQueryValueExW({path}) read failed: {read:?}"));
+        }
+        bytes.truncate(size as usize);
+        Ok(Some(RegistryValueBackup {
+            kind: kind.0,
+            bytes,
+        }))
+    })();
+    unsafe {
+        let _ = RegCloseKey(key);
+    }
+    result
+}
+
+fn string_value(value: &RegistryValueBackup) -> Option<String> {
+    if value.kind != REG_SZ.0 || !value.bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let units: Vec<u16> = value
+        .bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| u16::from_le_bytes(*chunk))
+        .collect();
+    Some(
+        String::from_utf16_lossy(&units)
+            .trim_end_matches('\0')
+            .to_string(),
+    )
+}
+
+/// `None` means someone else owns the current value; `Some(None)` means
+/// delete only this value; `Some(Some(..))` restores the saved raw value.
+fn restore_decision(
+    current: Option<&RegistryValueBackup>,
+    expected: &str,
+    previous: Option<&RegistryValueBackup>,
+) -> Option<Option<RegistryValueBackup>> {
+    (current.and_then(string_value).as_deref() == Some(expected)).then(|| previous.cloned())
+}
+
+fn write_registry_value(
+    path: &str,
+    name: Option<&str>,
+    value: &RegistryValueBackup,
+) -> Result<(), String> {
+    let key = hkcu_open_create_leaf(path)?;
+    let name_wide = name.map(to_wide_nul);
+    let name_ptr = name_wide
+        .as_ref()
+        .map(|wide| PCWSTR(wide.as_ptr()))
+        .unwrap_or(PCWSTR::null());
+    let err = unsafe {
+        RegSetValueExW(
+            key,
+            name_ptr,
+            None,
+            REG_VALUE_TYPE(value.kind),
+            Some(&value.bytes),
+        )
+    };
+    unsafe {
+        let _ = RegCloseKey(key);
+    }
+    if err != ERROR_SUCCESS {
+        return Err(format!("RegSetValueExW({path}) failed: {err:?}"));
+    }
+    Ok(())
+}
+
+fn delete_registry_value(path: &str, name: Option<&str>) -> Result<(), String> {
+    let wide_path = to_wide_nul(path);
+    let mut key = HKEY::default();
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(wide_path.as_ptr()),
+            None,
+            KEY_WRITE,
+            &mut key,
+        )
+    };
+    if opened == ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    if opened != ERROR_SUCCESS {
+        return Err(format!("RegOpenKeyExW({path}) failed: {opened:?}"));
+    }
+    let name_wide = name.map(to_wide_nul);
+    let name_ptr = name_wide
+        .as_ref()
+        .map(|wide| PCWSTR(wide.as_ptr()))
+        .unwrap_or(PCWSTR::null());
+    let err = unsafe { RegDeleteValueW(key, name_ptr) };
+    unsafe {
+        let _ = RegCloseKey(key);
+    }
+    if err != ERROR_SUCCESS && err != ERROR_FILE_NOT_FOUND {
+        return Err(format!("RegDeleteValueW({path}) failed: {err:?}"));
+    }
+    Ok(())
+}
+
+fn desired_values(exe: &str) -> Result<Vec<(String, Option<String>, String)>, String> {
+    let mut values: Vec<_> = FOLDER_HANDLER_PATHS
+        .iter()
+        .map(|path| (path.to_string(), None, folder_open_command(exe)))
+        .collect();
+    let install_dir = std::path::Path::new(exe)
+        .parent()
+        .ok_or("Could not resolve Pathfinder install directory")?
+        .to_string_lossy()
+        .into_owned();
+    values.push((EXPLORER_APP_PATH_KEY.to_string(), None, exe.to_string()));
+    values.push((
+        EXPLORER_APP_PATH_KEY.to_string(),
+        Some("Path".to_string()),
+        install_dir,
+    ));
+    Ok(values)
 }
 
 /// Registry paths that drive folder navigation in Windows. Setting all of
@@ -159,34 +347,6 @@ fn folder_open_command(exe: &str) -> String {
     format!("\"{exe}\" --path \"%1\"")
 }
 
-fn set_explorer_app_path_redirect(exe: &str) -> Result<(), String> {
-    let install_dir = std::path::Path::new(exe)
-        .parent()
-        .ok_or_else(|| "could not resolve Pathfinder install directory".to_string())?;
-    let install_dir = install_dir.to_string_lossy().into_owned();
-
-    let key = hkcu_open_create_leaf(EXPLORER_APP_PATH_KEY)?;
-    let r = set_key_default_string(key, exe);
-    let r2 = set_key_string(key, Some("Path"), &install_dir);
-    unsafe {
-        let _ = RegCloseKey(key);
-    }
-    r?;
-    r2
-}
-
-fn clear_explorer_app_path_redirect() -> Result<(), String> {
-    let wide = to_wide_nul(EXPLORER_APP_PATH_KEY);
-    let err = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(wide.as_ptr())) };
-    if err != ERROR_SUCCESS && err != ERROR_FILE_NOT_FOUND {
-        return Err(format!(
-            "RegDeleteTreeW({EXPLORER_APP_PATH_KEY}) failed: {:?}",
-            err
-        ));
-    }
-    Ok(())
-}
-
 fn explorer_redirect_points_at_current_exe() -> bool {
     let exe = match std::env::current_exe() {
         Ok(p) => p.to_string_lossy().to_ascii_lowercase(),
@@ -234,17 +394,44 @@ fn explorer_redirect_points_at_current_exe() -> bool {
 pub fn set_pathfinder_as_default_folder_handler() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let exe = exe.to_string_lossy().into_owned();
-    let cmd = folder_open_command(&exe);
-
-    for rel in FOLDER_HANDLER_PATHS {
-        let key = hkcu_open_create_leaf(rel)?;
-        let r = set_key_default_string(key, &cmd);
+    let desired = desired_values(&exe)?;
+    let old_backup: ShellRegistryBackup =
+        crate::read_native_json(SHELL_BACKUP_FILE, ShellRegistryBackup::default());
+    let mut backup = ShellRegistryBackup::default();
+    for (path, name, owned) in &desired {
+        let current = read_registry_value(path, name.as_deref())?;
+        let prior = old_backup.values.iter().find(|item| {
+            item.path == *path
+                && item.name == *name
+                && current.as_ref().and_then(string_value).as_deref() == Some(item.owned.as_str())
+        });
+        let previous = if let Some(prior) = prior {
+            prior.previous.clone()
+        } else if current.as_ref().and_then(string_value).as_deref() == Some(owned.as_str()) {
+            // Older Pathfinder builds did not save the overwritten value.
+            // Never record our own registration as the value to restore.
+            None
+        } else {
+            current
+        };
+        backup.values.push(OwnedValueBackup {
+            path: path.clone(),
+            name: name.clone(),
+            owned: owned.clone(),
+            previous,
+        });
+    }
+    // Save all old values before changing any registration. A partial failure
+    // can then be restored without deleting another application's subkeys.
+    crate::write_native_json(SHELL_BACKUP_FILE, &backup)?;
+    for (path, name, value) in desired {
+        let key = hkcu_open_create_leaf(&path)?;
+        let result = set_key_string(key, name.as_deref(), &value);
         unsafe {
             let _ = RegCloseKey(key);
         }
-        r?;
+        result?;
     }
-    set_explorer_app_path_redirect(&exe)?;
     Ok(())
 }
 
@@ -298,14 +485,53 @@ pub fn pathfinder_is_default_folder_handler() -> bool {
 /// Removes HKCU overrides created by [`set_pathfinder_as_default_folder_handler`].
 /// Mirrors FOLDER_HANDLER_PATHS so a Restore goes back to Explorer defaults.
 pub fn restore_windows_default_folder_handler() -> Result<(), String> {
-    for rel in FOLDER_HANDLER_PATHS {
-        let wide = to_wide_nul(rel);
-        let err = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(wide.as_ptr())) };
-        if err != ERROR_SUCCESS && err != ERROR_FILE_NOT_FOUND {
-            return Err(format!("RegDeleteTreeW({rel}) failed: {:?}", err));
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("current_exe: {e}"))?
+        .to_string_lossy()
+        .into_owned();
+    let desired = desired_values(&exe)?;
+    let backup: ShellRegistryBackup =
+        crate::read_native_json(SHELL_BACKUP_FILE, ShellRegistryBackup::default());
+    let app_path_owned = {
+        let saved = backup
+            .values
+            .iter()
+            .find(|item| item.path == EXPLORER_APP_PATH_KEY && item.name.is_none());
+        let expected = saved
+            .map(|item| item.owned.as_str())
+            .unwrap_or(exe.as_str());
+        read_registry_value(EXPLORER_APP_PATH_KEY, None)?
+            .as_ref()
+            .and_then(string_value)
+            .as_deref()
+            == Some(expected)
+    };
+    for (path, name, owned) in desired {
+        if path == EXPLORER_APP_PATH_KEY && name.as_deref() == Some("Path") && !app_path_owned {
+            continue;
+        }
+        let saved = backup
+            .values
+            .iter()
+            .find(|item| item.path == path && item.name == name);
+        let expected = saved
+            .map(|item| item.owned.as_str())
+            .unwrap_or(owned.as_str());
+        let current = read_registry_value(&path, name.as_deref())?;
+        match restore_decision(
+            current.as_ref(),
+            expected,
+            saved.and_then(|item| item.previous.as_ref()),
+        ) {
+            None => continue,
+            Some(Some(previous)) => write_registry_value(&path, name.as_deref(), &previous)?,
+            Some(None) => delete_registry_value(&path, name.as_deref())?,
         }
     }
-    clear_explorer_app_path_redirect()
+    let path = crate::native_data_file(SHELL_BACKUP_FILE);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_file_name(format!("{SHELL_BACKUP_FILE}.bak")));
+    Ok(())
 }
 
 /// Verifies all shell handler registry entries are properly configured.
@@ -427,4 +653,39 @@ pub fn generate_registry_file_content() -> Result<String, String> {
     );
 
     Ok(content)
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    fn string_raw(text: &str) -> RegistryValueBackup {
+        RegistryValueBackup {
+            kind: REG_SZ.0,
+            bytes: text
+                .encode_utf16()
+                .chain(Some(0))
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn restore_never_overwrites_a_new_owner() {
+        let ours = string_raw("Pathfinder command");
+        let new_owner = string_raw("Another manager command");
+        let previous = string_raw("Original command");
+        assert_eq!(
+            restore_decision(Some(&new_owner), "Pathfinder command", Some(&previous)),
+            None
+        );
+        assert_eq!(
+            restore_decision(Some(&ours), "Pathfinder command", Some(&previous)),
+            Some(Some(previous))
+        );
+        assert_eq!(
+            restore_decision(Some(&ours), "Pathfinder command", None),
+            Some(None)
+        );
+    }
 }

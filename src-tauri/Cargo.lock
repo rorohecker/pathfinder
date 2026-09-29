@@ -4311,10 +4311,11 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pathfinder"
-version = "1.0.23"
+version = "1.0.24"
 dependencies = [
  "base64 0.22.1",
  "dirs",
+ "futures",
  "hex",
  "i-slint-backend-winit",
  "image",
