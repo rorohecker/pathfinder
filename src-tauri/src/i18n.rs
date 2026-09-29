@@ -195,6 +195,14 @@ fn it(en: &str) -> Option<String> {
                 "Prestazioni complete finché non lo cambi"
             }
             "QUICK ACCESS" => "ACCESSO RAPIDO",
+            "SMART FOLDERS" => "CARTELLE SMART",
+            "RECENT" => "RECENTI",
+            "TAGS" => "TAG",
+            "Large files" => "File grandi",
+            "Recently modified" => "Modificati di recente",
+            "Downloads over 30 days old" => "Download oltre 30 giorni",
+            "Screenshots" => "Screenshot",
+            "Untracked git files" => "File git non tracciati",
             "Home" => "Home",
             "Recycle Bin" => "Cestino",
             "Storage" => "Archiviazione",
@@ -341,6 +349,7 @@ fn it(en: &str) -> Option<String> {
             "Up One Level" => "Cartella superiore",
             "Focus Address Bar" => "Focus sulla barra indirizzi",
             "Focus Search" => "Focus sulla ricerca",
+            "Filter Folder" => "Filtra cartella",
             "Command Palette" => "Tavolozza comandi",
             _ => return None,
         }
@@ -448,6 +457,14 @@ fn es(en: &str) -> Option<String> {
                 "Rendimiento completo hasta que lo cambies"
             }
             "QUICK ACCESS" => "ACCESO RÁPIDO",
+            "SMART FOLDERS" => "CARPETAS INTELIGENTES",
+            "RECENT" => "RECIENTES",
+            "TAGS" => "ETIQUETAS",
+            "Large files" => "Archivos grandes",
+            "Recently modified" => "Modificados recientemente",
+            "Downloads over 30 days old" => "Descargas de más de 30 días",
+            "Screenshots" => "Capturas de pantalla",
+            "Untracked git files" => "Archivos git sin seguimiento",
             "Home" => "Inicio",
             "Recycle Bin" => "Papelera",
             "Storage" => "Almacenamiento",
@@ -594,6 +611,7 @@ fn es(en: &str) -> Option<String> {
             "Up One Level" => "Subir un nivel",
             "Focus Address Bar" => "Enfocar barra de direcciones",
             "Focus Search" => "Enfocar búsqueda",
+            "Filter Folder" => "Filtrar carpeta",
             "Command Palette" => "Paleta de comandos",
             _ => return None,
         }

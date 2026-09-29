@@ -3290,7 +3290,10 @@ fn list_directory_from_index(parent: &str) -> Option<Vec<FileEntry>> {
             .map_err(|e| e.to_string())?;
         let mut entries = Vec::new();
         for row in rows.flatten() {
-            let (path, name, ext, is_dir, size, modified) = row;
+            let (path, indexed_name, ext, is_dir, size, modified) = row;
+            // Index stores on-disk names ("Documentos"); remap known folders to
+            // the active UI language so English never shows Spanish leaves, etc.
+            let name = known_folder_ui_name(Path::new(&path)).unwrap_or(indexed_name);
             let name_lower = name.to_lowercase();
             entries.push(FileEntry {
                 path,
@@ -3421,9 +3424,69 @@ fn parent_dir_path(path: &str) -> Option<String> {
     Some(parent)
 }
 
+/// Canonical English key for a well-known user-profile folder basename.
+/// Covers localized on-disk names (Documentos, Documenti, Descargas, …) so the
+/// active UI language owns the label — English never shows "Documentos", etc.
+fn known_folder_key_from_basename(base: &str) -> Option<&'static str> {
+    let lower = base.to_lowercase();
+    match lower.as_str() {
+        "documents" | "documentos" | "documenti" | "dokumente" => Some("Documents"),
+        "downloads" | "descargas" | "download" | "téléchargements" | "telechargements" => {
+            Some("Downloads")
+        }
+        "desktop" | "escritorio" | "scrivania" | "bureau" => Some("Desktop"),
+        "pictures" | "imagenes" | "imágenes" | "immagini" | "bilder" | "images" => {
+            Some("Pictures")
+        }
+        "music" | "musica" | "música" | "musik" | "musique" => Some("Music"),
+        "videos" | "video" | "vídeos" | "vidéos" => Some("Videos"),
+        _ => None,
+    }
+}
+
+fn path_parent_is_home(path: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    path.parent()
+        .map(|p| same_path_string(&p.to_string_lossy(), &home.to_string_lossy()))
+        .unwrap_or(false)
+}
+
+fn path_parent_is_onedrive_home(path: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Some(leaf) = parent.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if !leaf.eq_ignore_ascii_case("OneDrive")
+        && !leaf.to_ascii_lowercase().starts_with("onedrive")
+    {
+        return false;
+    }
+    parent
+        .parent()
+        .map(|p| same_path_string(&p.to_string_lossy(), &home.to_string_lossy()))
+        .unwrap_or(false)
+}
+
+/// Display label for a filesystem path: known folders follow the active UI
+/// language; everything else keeps the on-disk basename.
+fn path_ui_label(path: &Path) -> String {
+    known_folder_ui_name(path).unwrap_or_else(|| {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned())
+    })
+}
+
 /// UI label for a known-folder path, using the active language.
 /// On localized Windows the on-disk name may be "Documentos" while English UI
-/// should still show "Documents".
+/// should still show "Documents" (and the reverse for es/it).
 fn known_folder_ui_name(path: &Path) -> Option<String> {
     let candidates: &[(&str, Option<std::path::PathBuf>)] = &[
         ("Home", dirs::home_dir()),
@@ -3440,6 +3503,13 @@ fn known_folder_ui_name(path: &Path) -> Option<String> {
                 return Some(i18n::t(name));
             }
         }
+    }
+    // Fallback: localized basename directly under the user profile or OneDrive
+    // (junctions / redirected folders where GUID path compare missed).
+    let base = path.file_name()?.to_str()?;
+    let key = known_folder_key_from_basename(base)?;
+    if path_parent_is_home(path) || path_parent_is_onedrive_home(path) {
+        return Some(i18n::t(key));
     }
     None
 }
@@ -7188,6 +7258,49 @@ fn scan_storage_root(root: String, top_n: Option<usize>) -> Result<StorageScanRe
         return Err(format!("Not a directory: {root}"));
     }
     Ok(scan_storage(&dir, top_n.unwrap_or(200)))
+}
+
+#[cfg(test)]
+mod known_folder_label_tests {
+    use super::*;
+
+    #[test]
+    fn localized_basenames_map_to_english_keys() {
+        assert_eq!(
+            known_folder_key_from_basename("Documentos"),
+            Some("Documents")
+        );
+        assert_eq!(
+            known_folder_key_from_basename("documenti"),
+            Some("Documents")
+        );
+        assert_eq!(
+            known_folder_key_from_basename("Descargas"),
+            Some("Downloads")
+        );
+        assert_eq!(
+            known_folder_key_from_basename("Escritorio"),
+            Some("Desktop")
+        );
+        assert_eq!(known_folder_key_from_basename("Imágenes"), Some("Pictures"));
+        assert_eq!(known_folder_key_from_basename("Immagini"), Some("Pictures"));
+        assert_eq!(known_folder_key_from_basename("Música"), Some("Music"));
+        assert_eq!(known_folder_key_from_basename("Vídeos"), Some("Videos"));
+        assert_eq!(known_folder_key_from_basename("RandomFolder"), None);
+    }
+
+    #[test]
+    fn english_ui_translates_keys_to_english() {
+        i18n::set_language("en");
+        assert_eq!(i18n::t("Documents"), "Documents");
+        assert_eq!(i18n::t("Downloads"), "Downloads");
+        i18n::set_language("es");
+        assert_eq!(i18n::t("Documents"), "Documentos");
+        assert_eq!(i18n::t("Downloads"), "Descargas");
+        i18n::set_language("it");
+        assert_eq!(i18n::t("Documents"), "Documenti");
+        i18n::set_language("en");
+    }
 }
 
 #[cfg(test)]
@@ -13518,17 +13631,25 @@ fn home_smart_folder_entries() -> Vec<FileEntry> {
     if pins.is_empty() {
         return Vec::new();
     }
+    let custom = smart_folder_labels();
     let folders = smart_folders_for_path("");
     pins.into_iter()
         .filter_map(|id| folders.iter().find(|f| f.id == id).cloned())
-        .map(|sf| FileEntry {
-            path: format!("smart:{}", sf.id),
-            name: sf.name.clone(),
-            name_lower: sf.name.to_ascii_lowercase(),
-            kind: FileKind::Other,
-            size: 0,
-            modified: 6,
-            extension: None,
+        .map(|sf| {
+            let name = if custom.contains_key(&sf.id) {
+                sf.name.clone()
+            } else {
+                i18n::t(&sf.name)
+            };
+            FileEntry {
+                path: format!("smart:{}", sf.id),
+                name_lower: name.to_ascii_lowercase(),
+                name,
+                kind: FileKind::Other,
+                size: 0,
+                modified: 6,
+                extension: None,
+            }
         })
         .collect()
 }
@@ -14371,6 +14492,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Navigation", "Up One Level", "Alt+Up", "go-up"),
     ("Navigation", "Focus Address Bar", "Ctrl+L", "focus-address"),
     ("Navigation", "Focus Search", "Ctrl+Shift+F", "focus-search"),
+    ("Navigation", "Filter Folder", "Ctrl+Shift+G", "filter-folder"),
     ("Navigation", "Command Palette", "Ctrl+P", "command-palette"),
     ("Navigation", "Refresh", "F5", "refresh"),
     ("Files", "New Folder", "Ctrl+Shift+N", "new-folder"),
@@ -15585,8 +15707,9 @@ impl NativeController {
         ui.set_tabs(model_from_vec(tabs));
         match self.current_path.as_str() {
             "home://" => {
-                ui.set_current_path(ss(&i18n::t("Home")));
-                ui.set_address_text(ss(&i18n::t("Home")));
+                // Rebuild so Places / Recents / known-folder tiles pick up the
+                // new language (Documentos ↔ Documents, etc.).
+                self.open_home_view(ui, false);
             }
             "recycle://" => {
                 ui.set_current_path(ss(&i18n::t("Recycle Bin")));
@@ -15596,10 +15719,31 @@ impl NativeController {
                 ui.set_current_path(ss(&i18n::t("Storage")));
                 ui.set_address_text(ss(&i18n::t("Storage")));
             }
-            _ => {}
+            _ => {
+                // Remap known-folder basenames already loaded into the list so
+                // a language switch doesn't leave Documentos visible in English.
+                let mut changed = false;
+                for entry in &mut self.files {
+                    if let Some(label) = known_folder_ui_name(Path::new(&entry.path)) {
+                        if entry.name != label {
+                            entry.name_lower = label.to_lowercase();
+                            entry.name = label;
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    self.apply_filter();
+                    self.update_models(ui);
+                }
+            }
         }
         ui.set_breadcrumbs(model_from_vec(build_breadcrumbs(&self.current_path)));
         self.sync_ai_settings_ui(ui);
+        if ui.get_dual_pane() && !self.secondary_path.is_empty() {
+            // Secondary pane entries were listed under the previous language.
+            self.refresh_secondary_listing(ui);
+        }
     }
 
     fn sync_ai_settings_ui(&self, ui: &MainWindow) {
@@ -17240,8 +17384,15 @@ impl NativeController {
         };
         #[cfg(not(target_os = "windows"))]
         let (has_system_icon, system_icon) = (false, slint::Image::default());
-        let rename_label = if entry.kind == FileKind::Directory {
+        let display_name = if entry.kind == FileKind::Directory {
+            // Re-resolve at paint time so language switches never leave
+            // OS-localized leaves like "Documentos" under English UI (and vice versa).
+            path_ui_label(Path::new(&entry.path))
+        } else {
             entry.name.clone()
+        };
+        let rename_label = if entry.kind == FileKind::Directory {
+            display_name.clone()
         } else {
             let p = std::path::Path::new(&entry.name);
             if entry.name.starts_with('.') && entry.name.matches('.').count() <= 1 {
@@ -17254,7 +17405,7 @@ impl NativeController {
             }
         };
         FileItem {
-            name: ss(&entry.name),
+            name: ss(&display_name),
             file_path: ss(&entry.path),
             is_dir: entry.kind == FileKind::Directory,
             size_text: ss(if entry.kind == FileKind::Directory {
@@ -17516,7 +17667,7 @@ impl NativeController {
                 if !path.is_dir() {
                     return None;
                 }
-                let name = e.file_name().to_string_lossy().to_string();
+                let name = path_ui_label(&path);
                 if name.starts_with('.') {
                     return None;
                 }
@@ -17666,8 +17817,13 @@ impl NativeController {
                 expanded: false,
             });
             for pin in self.user_pins.iter().take(12) {
+                let pin_label = if pin.kind == "file" {
+                    pin.name.clone()
+                } else {
+                    path_ui_label(Path::new(&pin.path))
+                };
                 items.push(SideItem {
-                    label: ss(&pin.name),
+                    label: ss(&pin_label),
                     path: ss(&pin.path),
                     icon: ss(if pin.kind == "file" {
                         self.icon_for_path(&pin.path, &pin.name)
@@ -17729,7 +17885,7 @@ impl NativeController {
 
         if !self.recent_locations.is_empty() {
             items.push(SideItem {
-                label: ss("RECENT"),
+                label: ss(&i18n::t("RECENT")),
                 path: ss(""),
                 icon: ss(""),
                 count: ss(""),
@@ -17743,10 +17899,7 @@ impl NativeController {
             });
             for entry in self.recent_locations.iter().take(5) {
                 let path = entry.path.as_str();
-                let label_str = Path::new(path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.to_string());
+                let label_str = path_ui_label(Path::new(path));
                 items.push(SideItem {
                     label: ss(&label_str),
                     path: ss(path),
@@ -17765,7 +17918,7 @@ impl NativeController {
 
         let smart = smart_folders_for_path(&self.current_path);
         items.push(SideItem {
-            label: ss("SMART FOLDERS"),
+            label: ss(&i18n::t("SMART FOLDERS")),
             path: ss(""),
             icon: ss(""),
             count: ss(""),
@@ -17778,8 +17931,14 @@ impl NativeController {
             expanded: false,
         });
         for folder in smart {
+            // Custom renames stay as typed; built-in English names follow UI language.
+            let label = if smart_folder_labels().contains_key(&folder.id) {
+                folder.name.clone()
+            } else {
+                i18n::t(&folder.name)
+            };
             items.push(SideItem {
-                label: ss(&folder.name),
+                label: ss(&label),
                 path: ss(format!("smart:{}", folder.id)),
                 icon: ss("folder"),
                 count: ss(""),
@@ -17828,7 +17987,7 @@ impl NativeController {
         }
 
         items.push(SideItem {
-            label: ss("TAGS"),
+            label: ss(&i18n::t("TAGS")),
             path: ss(""),
             icon: ss(""),
             count: ss(""),
@@ -17943,8 +18102,13 @@ impl NativeController {
                 expanded: false,
             });
             for pin in self.user_pins.iter().take(6) {
+                let pin_label = if pin.kind == "file" {
+                    pin.name.clone()
+                } else {
+                    path_ui_label(Path::new(&pin.path))
+                };
                 items.push(SideItem {
-                    label: ss(&pin.name),
+                    label: ss(&pin_label),
                     path: ss(&pin.path),
                     icon: ss(if pin.kind == "file" {
                         self.icon_for_path(&pin.path, &pin.name)
@@ -21058,10 +21222,7 @@ impl NativeController {
             if path == "home://" || path == "storage://" || path == "recycle://" {
                 continue;
             }
-            let label = Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.to_string());
+            let label = path_ui_label(Path::new(path));
             let section = if entry.visited_at > 1_000_000 {
                 entry.visited_at
             } else {
@@ -21071,8 +21232,8 @@ impl NativeController {
         }
         entries.push(FileEntry {
             path: "recycle://".to_string(),
-            name: "Recycle Bin".to_string(),
-            name_lower: "recycle bin".to_string(),
+            name: i18n::t("Recycle Bin"),
+            name_lower: i18n::t("Recycle Bin").to_ascii_lowercase(),
             kind: FileKind::Directory,
             size: 0,
             modified: 5,
@@ -22136,6 +22297,16 @@ impl NativeController {
                 let n = ui.get_toolbar_search_focus_nonce();
                 ui.set_toolbar_search_focus_nonce(n.wrapping_add(1));
             }
+            "filter-folder" => {
+                let open = !ui.get_filter_bar_visible();
+                ui.set_filter_bar_visible(open);
+                if open {
+                    let n = ui.get_filter_focus_nonce();
+                    ui.set_filter_focus_nonce(n.wrapping_add(1));
+                } else if !ui.get_filter_text().is_empty() {
+                    self.set_folder_filter(ui, String::new());
+                }
+            }
             "restore" => self.restore_from_recycle_bin(ui),
             "restore-all" => self.restore_all_from_recycle_bin(ui),
             "purge" => {
@@ -22152,6 +22323,8 @@ impl NativeController {
             "focus-address" => {
                 ui.set_address_text(ss(&self.current_path));
                 ui.set_address_editing(true);
+                let n = ui.get_address_focus_nonce();
+                ui.set_address_focus_nonce(n.wrapping_add(1));
             }
             "view-compact" => self.set_view(ui, "compact"),
             "share" => self.share_selected(ui),
@@ -24069,10 +24242,7 @@ impl NativeController {
             if path == "home://" || path == "storage://" || path == "recycle://" {
                 continue;
             }
-            let label = Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.to_string());
+            let label = path_ui_label(Path::new(path));
             let section = if entry.visited_at > 1_000_000 {
                 entry.visited_at
             } else {
@@ -24095,12 +24265,17 @@ impl NativeController {
             });
         }
         if let Some(downloads) = dirs::download_dir() {
-            push_dir(&mut entries, "Downloads", &downloads.to_string_lossy(), 5);
+            push_dir(
+                &mut entries,
+                &i18n::t("Downloads"),
+                &downloads.to_string_lossy(),
+                5,
+            );
         }
         entries.push(FileEntry {
             path: "storage://".to_string(),
-            name: "Storage analyzer".to_string(),
-            name_lower: "storage analyzer".to_string(),
+            name: i18n::t("Storage"),
+            name_lower: i18n::t("Storage").to_ascii_lowercase(),
             kind: FileKind::Directory,
             size: 0,
             modified: 5,
@@ -24108,8 +24283,8 @@ impl NativeController {
         });
         entries.push(FileEntry {
             path: "recycle://".to_string(),
-            name: "Recycle Bin".to_string(),
-            name_lower: "recycle bin".to_string(),
+            name: i18n::t("Recycle Bin"),
+            name_lower: i18n::t("Recycle Bin").to_ascii_lowercase(),
             kind: FileKind::Directory,
             size: 0,
             modified: 5,
@@ -24255,6 +24430,9 @@ impl NativeController {
         } else {
             format!(".{ext} file")
         };
+        // Info rows use title (label) + meta (value) so the overlay can lay
+        // them out as two columns. Never put a sentinel like "info" in meta —
+        // that string was painted on the right and overlapped the label.
         let mut items = vec![
             ToolListItem {
                 id: ss("copy-path"),
@@ -24267,28 +24445,28 @@ impl NativeController {
             ToolListItem {
                 id: ss(""),
                 title: ss(&i18n::t("Type")),
-                subtitle: ss(&kind),
-                meta: ss("info"),
+                subtitle: ss(""),
+                meta: ss(&kind),
                 enabled: false,
                 accent: color("#7f8b9d"),
             },
             ToolListItem {
                 id: ss(""),
                 title: ss(&i18n::t("Size")),
-                subtitle: ss(if is_dir {
+                subtitle: ss(""),
+                meta: ss(if is_dir {
                     "—".to_string()
                 } else {
                     format_size_short(size)
                 }),
-                meta: ss("info"),
                 enabled: false,
                 accent: color("#7f8b9d"),
             },
             ToolListItem {
                 id: ss(""),
                 title: ss(&i18n::t("Modified")),
-                subtitle: ss(format_modified(modified)),
-                meta: ss("info"),
+                subtitle: ss(""),
+                meta: ss(format_modified(modified)),
                 enabled: false,
                 accent: color("#7f8b9d"),
             },
@@ -24297,8 +24475,8 @@ impl NativeController {
             items.push(ToolListItem {
                 id: ss(""),
                 title: ss(&i18n::t("Tag")),
-                subtitle: ss(&tag),
-                meta: ss("info"),
+                subtitle: ss(""),
+                meta: ss(&tag),
                 enabled: false,
                 accent: color("#7f8b9d"),
             });
@@ -24307,8 +24485,8 @@ impl NativeController {
             items.push(ToolListItem {
                 id: ss(""),
                 title: ss(&i18n::t("Selection")),
-                subtitle: ss(format!("{} items selected — showing first", paths.len())),
-                meta: ss("info"),
+                subtitle: ss(""),
+                meta: ss(format!("{} selected", paths.len())),
                 enabled: false,
                 accent: color("#7f8b9d"),
             });
@@ -24474,11 +24652,13 @@ impl NativeController {
                 "Recent".to_string()
             };
             if group != last_group {
+                // Empty meta — a "header" sentinel used to paint literally and
+                // collide with the section title in the overlay list row.
                 items.push(ToolListItem {
                     id: ss(""),
                     title: ss(&i18n::t(&group)),
                     subtitle: ss(""),
-                    meta: ss("header"),
+                    meta: ss(""),
                     enabled: false,
                     accent: color("#7f8b9d"),
                 });
@@ -24486,10 +24666,7 @@ impl NativeController {
             }
             items.push(ToolListItem {
                 id: ss(path),
-                title: ss(Path::new(path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.to_string())),
+                title: ss(path_ui_label(Path::new(path))),
                 subtitle: ss(path),
                 meta: ss(""),
                 enabled: true,
@@ -24523,7 +24700,7 @@ impl NativeController {
                         let p = e.path();
                         ToolListItem {
                             id: ss(p.to_string_lossy().to_string()),
-                            title: ss(e.file_name().to_string_lossy().to_string()),
+                            title: ss(path_ui_label(&p)),
                             subtitle: ss(p.to_string_lossy().to_string()),
                             meta: ss(""),
                             enabled: true,
@@ -27163,10 +27340,9 @@ impl NativeController {
                 if !p.is_dir() {
                     return None;
                 }
-                let name = e.file_name().to_string_lossy().to_string();
                 Some(ChoiceItem {
                     id: ss(p.to_string_lossy().to_string()),
-                    label: ss(name),
+                    label: ss(path_ui_label(&p)),
                     description: ss(""),
                     color: slint::Color::from_argb_u8(0, 0, 0, 0),
                 })
