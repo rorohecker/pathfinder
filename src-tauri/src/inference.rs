@@ -66,6 +66,7 @@ struct ClassifierSession {
     session: Session,
     input_name: String,
     input_size: u32,
+    model_id: String,
 }
 
 /// Drop cached sessions (e.g. after Local AI uninstall / model update).
@@ -563,11 +564,16 @@ fn try_classifier_session() -> ort::Result<ClassifierSession> {
         .as_ref()
         .map(|i| i.classifier_input_size)
         .unwrap_or(224);
+    let model_id = info
+        .as_ref()
+        .map(|i| i.classifier_id.clone())
+        .unwrap_or_default();
     let (session, _) = open_session_preferring_hardware(&path)?;
     Ok(ClassifierSession {
         session,
         input_name,
         input_size,
+        model_id,
     })
 }
 
@@ -585,37 +591,82 @@ pub fn image_classifier_available() -> bool {
     model_dir().join("image-classifier.onnx").is_file()
 }
 
-fn classifier_logits(path: &Path) -> Option<Vec<f32>> {
+fn classifier_input(img: &DynamicImage, size: u32, efficientnet: bool) -> Array4<f32> {
+    let resized = if efficientnet {
+        img.resize_to_fill(size, size, FilterType::Triangle)
+    } else {
+        img.resize_exact(size, size, FilterType::Triangle)
+    };
+    let rgb = resized.into_rgb8();
+    let bytes = rgb.as_raw();
+    let plane = (size * size) as usize;
+    if efficientnet {
+        // EfficientNet-Lite4's ONNX contract is NHWC with pixels in [-1, 1].
+        let mut input = Array4::<f32>::zeros((1, size as usize, size as usize, 3));
+        for (out, pixel) in input.as_slice_mut().expect("contiguous").iter_mut().zip(bytes) {
+            *out = (*pixel as f32 - 127.0) / 128.0;
+        }
+        input
+    } else {
+        let mut input = Array4::<f32>::zeros((1, 3, size as usize, size as usize));
+        let input_slice = input.as_slice_mut().expect("contiguous");
+        const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+        const STD: [f32; 3] = [0.229, 0.224, 0.225];
+        let scale = [
+            1.0 / (255.0 * STD[0]),
+            1.0 / (255.0 * STD[1]),
+            1.0 / (255.0 * STD[2]),
+        ];
+        let mean_scaled = [MEAN[0] / STD[0], MEAN[1] / STD[1], MEAN[2] / STD[2]];
+        for px in 0..plane {
+            let r = bytes[px * 3] as f32;
+            let g = bytes[px * 3 + 1] as f32;
+            let b = bytes[px * 3 + 2] as f32;
+            input_slice[px] = r * scale[0] - mean_scaled[0];
+            input_slice[plane + px] = g * scale[1] - mean_scaled[1];
+            input_slice[2 * plane + px] = b * scale[2] - mean_scaled[2];
+        }
+        input
+    }
+}
+
+#[cfg(test)]
+mod classifier_contract_tests {
+    use super::classifier_input;
+
+    #[test]
+    fn efficientnet_uses_nhwc_and_its_documented_pixel_range() {
+        let image = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_pixel(
+            2,
+            2,
+            image::Rgb([127, 255, 0]),
+        ));
+        let input = classifier_input(&image, 224, true);
+        assert_eq!(input.shape(), &[1, 224, 224, 3]);
+        assert_eq!(input[[0, 0, 0, 0]], 0.0);
+        assert_eq!(input[[0, 0, 0, 1]], 1.0);
+        assert_eq!(input[[0, 0, 0, 2]], -127.0 / 128.0);
+    }
+}
+
+fn classifier_logits(path: &Path) -> Option<(Vec<f32>, bool)> {
     if crate::cloud_files::hydration_risk(path) {
         return None;
     }
-    let img = image::open(path).ok()?.into_rgb8();
-    let dyn_img = DynamicImage::ImageRgb8(img);
+    let (width, height) = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    if u64::from(width) * u64::from(height) > 60_000_000 {
+        return None;
+    }
+    let img = image::open(path).ok()?;
     let mut guard = classifier_session().ok()?;
     let clf = guard.as_mut()?;
-    let size = clf.input_size;
-    let resized = dyn_img.resize_exact(size, size, FilterType::Triangle);
-    let resized_rgb = resized.into_rgb8();
-    let bytes = resized_rgb.as_raw();
-    let plane = (size * size) as usize;
-    let mut input = Array4::<f32>::zeros((1, 3, size as usize, size as usize));
-    let input_slice = input.as_slice_mut().expect("contiguous");
-    const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-    const STD: [f32; 3] = [0.229, 0.224, 0.225];
-    let scale = [
-        1.0 / (255.0 * STD[0]),
-        1.0 / (255.0 * STD[1]),
-        1.0 / (255.0 * STD[2]),
-    ];
-    let mean_scaled = [MEAN[0] / STD[0], MEAN[1] / STD[1], MEAN[2] / STD[2]];
-    for px in 0..plane {
-        let r = bytes[px * 3] as f32;
-        let g = bytes[px * 3 + 1] as f32;
-        let b = bytes[px * 3 + 2] as f32;
-        input_slice[px] = r * scale[0] - mean_scaled[0];
-        input_slice[plane + px] = g * scale[1] - mean_scaled[1];
-        input_slice[2 * plane + px] = b * scale[2] - mean_scaled[2];
-    }
+    let efficientnet = clf.model_id == "efficientnet-lite4";
+    let input = classifier_input(&img, clf.input_size, efficientnet);
     let names = [
         clf.input_name.clone(),
         "data".into(),
@@ -630,7 +681,7 @@ fn classifier_logits(path: &Path) -> Option<Vec<f32>> {
         if let Ok(out) = clf.session.run(ort::inputs![name.as_str() => input_ref]) {
             if let Some((_, tensor)) = out.iter().next() {
                 if let Ok((_shape, data)) = tensor.try_extract_tensor::<f32>() {
-                    return Some(data.to_vec());
+                    return Some((data.to_vec(), efficientnet));
                 }
             }
         }
@@ -653,11 +704,13 @@ fn softmax_inplace(logits: &mut [f32]) {
 }
 
 pub fn image_search_label_text(path: &Path) -> Option<String> {
-    let mut flat = classifier_logits(path)?;
+    let (mut flat, already_probabilities) = classifier_logits(path)?;
     if flat.is_empty() {
         return None;
     }
-    softmax_inplace(&mut flat);
+    if !already_probabilities {
+        softmax_inplace(&mut flat);
+    }
     let mut ranked: Vec<(usize, f32)> = flat.iter().copied().enumerate().collect();
     ranked.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
@@ -689,8 +742,10 @@ pub fn image_search_label_text(path: &Path) -> Option<String> {
 }
 
 pub fn suggest_image_tag(path: &Path) -> Option<String> {
-    let mut flat = classifier_logits(path)?;
-    softmax_inplace(&mut flat);
+    let (mut flat, already_probabilities) = classifier_logits(path)?;
+    if !already_probabilities {
+        softmax_inplace(&mut flat);
+    }
     let (idx, conf) = flat
         .iter()
         .enumerate()

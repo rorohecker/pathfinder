@@ -76,6 +76,7 @@ pub fn __test_detect_gpus() -> Vec<(String, u32, u64, bool, bool)> {
 }
 mod cloud_files;
 mod fantasy_icons;
+mod folder_sync;
 mod imagenet_labels;
 mod inference;
 mod local_ai;
@@ -336,6 +337,23 @@ enum SidebarActivateAction {
 }
 
 #[derive(Clone)]
+struct DuplicateScanResult {
+    generation: u64,
+    drive: bool,
+    groups: Result<Vec<Vec<FileEntry>>, String>,
+}
+
+enum SyncWorkResult {
+    Preview {
+        generation: u64,
+        result: Result<folder_sync::SyncPlan, String>,
+    },
+    Apply {
+        generation: u64,
+        result: Result<folder_sync::SyncReport, String>,
+    },
+}
+
 struct NativeSearchResult {
     path: String,
     query: String,
@@ -612,10 +630,11 @@ type GitCacheMap = HashMap<String, (Arc<GitStatusMap>, Instant)>;
 struct AppState {
     directory_cache: Arc<Mutex<HashMap<String, CachedDirectory>>>,
     preview_cache: Arc<Mutex<HashMap<String, CachedPreview>>>,
-    watchers: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
+    watchers: Arc<Mutex<HashMap<String, (RecommendedWatcher, Instant)>>>,
     search_generation: Arc<AtomicU64>,
     ai_capabilities: Arc<Mutex<Option<AiCapabilities>>>,
     operation_log: Arc<Mutex<Vec<FileOp>>>,
+    operation_log_generation: Arc<AtomicU64>,
     operation_queue: Arc<Mutex<VecDeque<OperationQueueItem>>>,
     next_operation_id: Arc<AtomicU64>,
     queue_paused: Arc<Mutex<bool>>,
@@ -641,6 +660,7 @@ impl Default for AppState {
             search_generation: Arc::new(AtomicU64::new(0)),
             ai_capabilities: Arc::new(Mutex::new(None)),
             operation_log: Arc::new(Mutex::new(Vec::new())),
+            operation_log_generation: Arc::new(AtomicU64::new(0)),
             operation_queue: Arc::new(Mutex::new(VecDeque::new())),
             next_operation_id: Arc::new(AtomicU64::new(1)),
             queue_paused: Arc::new(Mutex::new(false)),
@@ -1653,12 +1673,52 @@ fn collect_flat_folder_entries(root: &Path, show_hidden: bool, cap: usize) -> Ve
 
 const OP_CANCELLED: &str = "Operation cancelled.";
 
+// Resolve the nearest existing destination ancestor before creating anything.
+// This catches aliases and junctions that a lexical prefix check misses.
+fn destination_within_source(from: &Path, to: &Path) -> Result<bool, String> {
+    let source = fs::canonicalize(from).map_err(|e| e.to_string())?;
+    let mut ancestor = to.to_path_buf();
+    let mut missing = Vec::new();
+    while !ancestor.exists() {
+        let name = ancestor
+            .file_name()
+            .ok_or_else(|| "Destination has no existing ancestor".to_string())?;
+        missing.push(name.to_os_string());
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| "Destination has no parent".to_string())?
+            .to_path_buf();
+    }
+    let mut destination = fs::canonicalize(&ancestor).map_err(|e| e.to_string())?;
+    for name in missing.iter().rev() {
+        destination.push(name);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let source = source.to_string_lossy().to_lowercase();
+        let destination = destination.to_string_lossy().to_lowercase();
+        let prefix = if source.ends_with(std::path::MAIN_SEPARATOR) {
+            source.clone()
+        } else {
+            format!("{source}{}", std::path::MAIN_SEPARATOR)
+        };
+        Ok(destination == source || destination.starts_with(&prefix))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(destination.starts_with(source))
+    }
+}
+
 fn copy_dir_recursive(state: &AppState, from: &Path, to: &Path) -> Result<(), String> {
     if state.queue_cancel_requested() {
         return Err(OP_CANCELLED.to_string());
     }
     if to.exists() {
         return Err(format!("Destination already exists: {}", to.display()));
+    }
+    if destination_within_source(from, to)? {
+        return Err("Cannot copy a folder into itself or a descendant.".to_string());
     }
     fs::create_dir_all(to).map_err(|e| e.to_string())?;
     let mut stack: Vec<(PathBuf, PathBuf)> = vec![(from.to_path_buf(), to.to_path_buf())];
@@ -2128,24 +2188,98 @@ fn batch_rename_preview_lines(
     lines.join("\n")
 }
 
+fn replace_preserving_destination<T>(
+    dest: &Path,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if !dest.exists() {
+        return action();
+    }
+    let name = dest.file_name().ok_or("Destination has no file name")?.to_string_lossy();
+    let backup = keep_both_destination(&dest.with_file_name(format!(".{name}.pathfinder-backup")));
+    fs::rename(dest, &backup).map_err(|e| format!("Could not stage old destination: {e}"))?;
+    match action() {
+        Ok(value) => {
+            // Keep the previous version in the OS Recycle Bin where possible.
+            // If recycling fails, the backup remains beside the destination.
+            if let Err(error) = trash::delete(&backup) {
+                eprintln!("Could not recycle replaced version at {}: {error}", backup.display());
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            let partial = if dest.exists() {
+                let partial = keep_both_destination(
+                    &dest.with_file_name(format!(".{name}.pathfinder-partial")),
+                );
+                fs::rename(dest, &partial)
+                    .map_err(|e| format!("{error}; old version remains at {} because the partial result could not be moved: {e}", backup.display()))?;
+                Some(partial)
+            } else {
+                None
+            };
+            fs::rename(&backup, dest)
+                .map_err(|e| format!("{error}; old version remains at {} because restoration failed: {e}", backup.display()))?;
+            if let Some(partial) = partial {
+                Err(format!("{error}; partial result kept at {}", partial.display()))
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod replacement_safety_tests {
+    use super::replace_preserving_destination;
+    use std::{fs, time::SystemTime};
+
+    #[test]
+    fn failed_replacement_restores_previous_contents() {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pathfinder-replace-test-{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("target.txt");
+        fs::write(&target, b"previous").unwrap();
+        let result = replace_preserving_destination(&target, || {
+            fs::write(&target, b"partial").map_err(|e| e.to_string())?;
+            Err::<(), String>("injected failure".to_string())
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"previous");
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
 fn native_rename_replace(state: &AppState, path: &str, new_name: &str) -> Result<String, String> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() || new_name.contains(['/', '\\']) {
+        return Err("Invalid replacement name".to_string());
+    }
     let src = PathBuf::from(path);
+    if !src.exists() {
+        return Err(format!("Source does not exist: {}", src.display()));
+    }
     let parent = src.parent().ok_or("No parent directory")?;
-    let dst = parent.join(new_name.trim());
+    let dst = parent.join(new_name);
     if dst.exists() && !same_destination(&src, &dst) {
         if dst.is_dir() {
             return Err("Cannot replace a folder with a file rename".to_string());
         }
-        fs::remove_file(&dst).map_err(|e| e.to_string())?;
+        replace_preserving_destination(&dst, || native_rename(state, path, new_name))
+    } else {
+        native_rename(state, path, new_name)
     }
-    native_rename(state, path, new_name)
 }
 
 fn pdf_first_page_preview(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    if bytes.len() > 12 * 1024 * 1024 {
+    if path.metadata().ok()?.len() > 12 * 1024 * 1024 {
         return None;
     }
+    let bytes = fs::read(path).ok()?;
     let text = pdf_extract::extract_text_from_mem(&bytes).ok()?;
     let preview: String = text
         .lines()
@@ -2398,6 +2532,7 @@ impl AppState {
             if log.len() > 50 {
                 log.remove(0);
             }
+            self.operation_log_generation.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -2413,6 +2548,7 @@ impl AppState {
             if log.len() > 50 {
                 log.remove(0);
             }
+            self.operation_log_generation.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -2760,10 +2896,11 @@ fn parse_size_filter(raw: &str) -> Option<SizeFilter> {
         _ => return None,
     };
 
-    Some(SizeFilter {
-        op,
-        value: (number * multiplier) as u64,
-    })
+    let bytes = number * multiplier;
+    if !bytes.is_finite() || bytes < 0.0 || bytes >= u64::MAX as f64 {
+        return None;
+    }
+    Some(SizeFilter { op, value: bytes as u64 })
 }
 
 fn matches_size(size: u64, filter: SizeFilter) -> bool {
@@ -2778,24 +2915,25 @@ fn matches_size(size: u64, filter: SizeFilter) -> bool {
 
 fn parse_modified_filter(raw: &str) -> Option<SystemTime> {
     let raw = raw.trim().to_lowercase();
+    let now = SystemTime::now();
     match raw.as_str() {
-        "today" => return Some(SystemTime::now() - Duration::from_secs(24 * 60 * 60)),
-        "week" => return Some(SystemTime::now() - Duration::from_secs(7 * 24 * 60 * 60)),
-        "month" => return Some(SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60)),
+        "today" => return now.checked_sub(Duration::from_secs(24 * 60 * 60)),
+        "week" => return now.checked_sub(Duration::from_secs(7 * 24 * 60 * 60)),
+        "month" => return now.checked_sub(Duration::from_secs(30 * 24 * 60 * 60)),
         _ => {}
     }
     let split_at = raw.find(|c: char| !c.is_ascii_digit())?;
     let (number, unit) = raw.split_at(split_at);
     let number = number.parse::<u64>().ok()?;
     let days = match unit {
-        "h" => return Some(SystemTime::now() - Duration::from_secs(number * 60 * 60)),
+        "h" => return now.checked_sub(Duration::from_secs(number.checked_mul(60 * 60)?)),
         "d" => number,
-        "w" => number * 7,
-        "m" => number * 30,
-        "y" => number * 365,
+        "w" => number.checked_mul(7)?,
+        "m" => number.checked_mul(30)?,
+        "y" => number.checked_mul(365)?,
         _ => return None,
     };
-    Some(SystemTime::now() - Duration::from_secs(days * 24 * 60 * 60))
+    now.checked_sub(Duration::from_secs(days.checked_mul(24 * 60 * 60)?))
 }
 
 fn parse_query(query: &str) -> ParsedQuery {
@@ -2868,13 +3006,17 @@ fn extract_office_openxml_text(path: &Path, inner_prefix: &str) -> Option<String
     let mut archive = zip::ZipArchive::new(file).ok()?;
     let mut combined = String::new();
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).ok()?;
+        let entry = archive.by_index(i).ok()?;
         let name = entry.name().to_string();
         if !name.starts_with(inner_prefix) || !name.ends_with(".xml") {
             continue;
         }
+        // Bound expanded XML as well as the compressed archive size.
+        if entry.size() > 2 * 1024 * 1024 {
+            continue;
+        }
         let mut buf = String::new();
-        if entry.read_to_string(&mut buf).is_err() {
+        if entry.take(2 * 1024 * 1024).read_to_string(&mut buf).is_err() {
             continue;
         }
         combined.push(' ');
@@ -4455,13 +4597,14 @@ ConvertTo-Json -InputObject @($paths) -Compress
     }
 
     let paths: Vec<String> = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    let parsed = parse_query(query);
     let entries = paths
         .into_iter()
         .filter_map(|path| {
             let path_buf = PathBuf::from(path);
-            fs::metadata(&path_buf)
-                .ok()
-                .map(|metadata| path_to_entry(&path_buf, &metadata))
+            let metadata = fs::metadata(&path_buf).ok()?;
+            matches_query(&path_buf, &metadata, &parsed)
+                .then(|| path_to_entry(&path_buf, &metadata))
         })
         .collect();
     Ok(entries)
@@ -5285,15 +5428,24 @@ fn read_preview_uncached(
 
 
 
-fn ensure_watched_paths(app_state: &AppState, paths: &[String]) -> Result<(), String> {
+fn ensure_watched_paths(app_state: &AppState, paths: &[String], pinned: &[String]) -> Result<(), String> {
     let mut watchers = app_state
         .watchers
         .lock()
         .map_err(|_| "Could not lock watcher registry")?;
 
-    for path in paths {
+    let pinned_keys: HashSet<String> = pinned.iter()
+        .filter(|path| Path::new(path).is_dir())
+        .map(|path| cache_key_str(path))
+        .collect();
+    for path in paths.iter().chain(pinned) {
         let path_buf = PathBuf::from(path);
-        if !path_buf.is_dir() || watchers.contains_key(&cache_key(&path_buf)) {
+        if !path_buf.is_dir() {
+            continue;
+        }
+        let key = cache_key(&path_buf);
+        if let Some((_, last_used)) = watchers.get_mut(&key) {
+            *last_used = Instant::now();
             continue;
         }
 
@@ -5329,17 +5481,17 @@ fn ensure_watched_paths(app_state: &AppState, paths: &[String]) -> Result<(), St
         watcher
             .watch(&path_buf, RecursiveMode::NonRecursive)
             .map_err(|e| e.to_string())?;
-        watchers.insert(cache_key(&path_buf), watcher);
+        watchers.insert(key, (watcher, Instant::now()));
+    }
 
-        // LRU pruning: keep at most 8 active watchers to avoid handle leaks
-        const MAX_WATCHERS: usize = 8;
-        if watchers.len() > MAX_WATCHERS {
-            let evict_count = watchers.len() - MAX_WATCHERS;
-            let keys_to_evict: Vec<String> = watchers.keys().take(evict_count).cloned().collect();
-            for key in keys_to_evict {
-                watchers.remove(&key);
-            }
-        }
+    const MAX_WATCHERS: usize = 8;
+    while watchers.len() > MAX_WATCHERS {
+        let victim = watchers.iter()
+            .filter(|(key, _)| !pinned_keys.contains(*key))
+            .min_by_key(|(_, (_, last_used))| *last_used)
+            .map(|(key, _)| key.clone());
+        let Some(victim) = victim else { break };
+        watchers.remove(&victim);
     }
 
     Ok(())
@@ -6721,17 +6873,9 @@ fn scan_storage_with_progress(
     }
 
     let root_signature = capture_storage_root_signature(root);
-    let (duplicate_groups, duplicate_count, duplicate_reclaimable_bytes) = if progress
-        .as_ref()
-        .map(|p| p.cancelled.load(Ordering::Relaxed))
-        .unwrap_or(false)
-    {
-        (0, 0, 0)
-    } else {
-        find_duplicates_impl(root, STORAGE_DUPLICATE_MIN_SIZE)
-            .map(|groups| duplicate_reclaimable_bytes(&groups))
-            .unwrap_or((0, 0, 0))
-    };
+    // Exact duplicate hashing is an explicit Duplicate Finder action. Storage
+    // totals should complete without another full traversal and content hash.
+    let (duplicate_groups, duplicate_count, duplicate_reclaimable_bytes) = (0, 0, 0);
 
     StorageScanResult {
         root: root.to_string_lossy().into_owned(),
@@ -7065,6 +7209,14 @@ mod search_query_tests {
     }
 
     #[test]
+    fn oversized_numeric_filters_are_rejected_without_overflow() {
+        assert!(parse_modified_filter("18446744073709551615y").is_none());
+        assert!(parse_modified_filter("18446744073709551615h").is_none());
+        assert!(parse_size_filter("999999999999999999999999999999tb").is_none());
+        assert!(!query_filter_warnings("modified:18446744073709551615y").is_empty());
+    }
+
+    #[test]
     fn drive_wide_skips_windows_and_node_modules() {
         assert!(should_skip_search_walk_dir("Windows", true));
         assert!(should_skip_search_walk_dir("node_modules", true));
@@ -7285,15 +7437,45 @@ mod storage_tests {
 // ----- archives -----
 
 fn safe_archive_out_path(dest: &Path, entry_name: &str) -> Option<PathBuf> {
+    use std::path::Component;
     let relative = Path::new(entry_name);
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
+    let mut seen_name = false;
+    for component in relative.components() {
+        match component {
+            Component::Normal(name) if !name.to_string_lossy().contains(':') => {
+                seen_name = true;
+            }
+            _ => return None,
+        }
+    }
+    if !seen_name {
         return None;
     }
-    Some(dest.join(relative))
+    let out = dest.join(relative);
+    // Existing junctions and symlinks must not redirect extraction outside dest.
+    if dest.exists() && !destination_within_source(dest, &out).ok()? {
+        return None;
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod archive_path_tests {
+    use super::safe_archive_out_path;
+    use std::path::Path;
+
+    #[test]
+    fn rejects_escape_and_windows_special_paths() {
+        let root = Path::new("archive-output");
+        assert!(safe_archive_out_path(root, "nested/file.txt").is_some());
+        assert!(safe_archive_out_path(root, "../outside.txt").is_none());
+        assert!(safe_archive_out_path(root, "file.txt:stream").is_none());
+        #[cfg(target_os = "windows")]
+        {
+            assert!(safe_archive_out_path(root, r"C:\outside.txt").is_none());
+            assert!(safe_archive_out_path(root, r"\outside.txt").is_none());
+        }
+    }
 }
 
 fn extract_zip_archive(
@@ -7305,7 +7487,18 @@ fn extract_zip_archive(
 ) -> Result<(), String> {
     let file = File::open(src).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    let total = src.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut total = 0u64;
+    for i in 0..archive.len() {
+        if let Ok(entry) = archive.by_index(i) {
+            let normalized_name = normalize_archive_prefix(entry.name());
+            let included = selected.map(|items| items.iter().any(|item| {
+                normalized_name == *item || normalized_name.starts_with(&format!("{item}/"))
+            })).unwrap_or(true);
+            if included {
+                total = total.saturating_add(entry.size());
+            }
+        }
+    }
     let op_id = state.queue_start(
         "extract",
         &src.to_string_lossy(),
@@ -7315,6 +7508,7 @@ fn extract_zip_archive(
     let started = Instant::now();
     let mut bytes_done: u64 = 0;
 
+    let result = (|| -> Result<(), String> {
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         let name = entry.name().to_string();
@@ -7330,44 +7524,64 @@ fn extract_zip_archive(
         let Some(mut out) = safe_archive_out_path(dest, &name) else {
             continue;
         };
-        if out.exists() {
+        if state.queue_cancel_requested() {
+            return Err(OP_CANCELLED.to_string());
+        }
+        let replace_existing = out.exists() && conflict == "replace" && !entry.is_dir();
+        if out.exists() && !entry.is_dir() {
             match conflict {
-                "replace" => {
-                    if out.is_dir() {
-                        fs::remove_dir_all(&out).map_err(|e| e.to_string())?;
-                    } else {
-                        fs::remove_file(&out).map_err(|e| e.to_string())?;
-                    }
-                }
+                "replace" => {}
                 "skip" => continue,
                 _ => out = keep_both_destination(&out),
             }
         }
         if entry.is_dir() {
+            // Preserve existing children; removing the directory here would
+            // destroy data before the archive's contents were extracted.
             fs::create_dir_all(&out).map_err(|e| e.to_string())?;
         } else {
             if let Some(parent) = out.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            let mut outfile = File::create(&out).map_err(|e| e.to_string())?;
-            // Stream so the queue progress reflects extraction throughput.
-            let mut buf = [0u8; 64 * 1024];
-            loop {
-                let n = match entry.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(e) => return Err(e.to_string()),
-                };
-                outfile.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-                bytes_done = bytes_done.saturating_add(n as u64);
-                state.queue_progress(op_id, bytes_done, started);
+            let mut write_entry = || -> Result<(), String> {
+                let mut outfile = File::create(&out).map_err(|e| e.to_string())?;
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    if state.queue_cancel_requested() {
+                        return Err(OP_CANCELLED.to_string());
+                    }
+                    let n = entry.read(&mut buf).map_err(|e| e.to_string())?;
+                    if n == 0 {
+                        break;
+                    }
+                    outfile.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+                    bytes_done = bytes_done.saturating_add(n as u64);
+                    state.queue_progress(op_id, bytes_done, started);
+                }
+                Ok(())
+            };
+            if replace_existing {
+                replace_preserving_destination(&out, write_entry)?;
+            } else {
+                write_entry()?;
             }
         }
     }
 
-    state.invalidate_path(dest);
-    state.queue_finish(op_id, "done", "Extracted", total, started.elapsed());
     Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            state.invalidate_path(dest);
+            state.queue_finish(op_id, "done", "Extracted", bytes_done, started.elapsed());
+            Ok(())
+        }
+        Err(error) => {
+            let status = if error == OP_CANCELLED { "cancelled" } else { "failed" };
+            state.queue_finish(op_id, status, error.clone(), bytes_done, started.elapsed());
+            Err(error)
+        }
+    }
 }
 
 fn extract_with_7z(
@@ -8076,6 +8290,8 @@ struct NativeSettings {
     /// Keep Local AI models up to date automatically.
     #[serde(default = "default_true")]
     ai_auto_update_models: bool,
+    #[serde(default)]
+    ai_ever_installed: bool,
     /// Suppress the first-run welcome dialog after the user dismisses it once.
     #[serde(default)]
     first_run_welcome_dismissed: bool,
@@ -8182,6 +8398,7 @@ impl Default for NativeSettings {
             clip_search_enabled: false,
             ai_profile: default_ai_profile(),
             ai_auto_update_models: true,
+            ai_ever_installed: false,
             first_run_welcome_dismissed: false,
             palette_tip_shown: false,
             folder_color: None,
@@ -8360,6 +8577,7 @@ enum PendingPrompt {
     },
     NewTemplate(FileTemplate),
     CompareFolder(String),
+    SyncFolder(String),
     SaveWorkspace,
     BatchRename(Vec<String>),
     RenamePreset(Vec<String>),
@@ -8397,6 +8615,7 @@ struct NativeController {
     current_path: String,
     files: Vec<FileEntry>,
     visible_files: Vec<FileEntry>,
+    search_results: Vec<FileEntry>,
     active_archive: Option<ArchiveView>,
     selected_index: i32,
     selected_set: std::collections::HashSet<usize>,
@@ -8535,6 +8754,7 @@ struct NativeController {
     ai: AiCapabilities,
     clipboard: Option<NativeClipboard>,
     pending_prompt: Option<PendingPrompt>,
+    pending_paste_resume: Option<(NativeClipboard, String)>,
     sort_by: String,
     sort_dir: String,
     thumbnail_memory: HashMap<String, slint::Image>,
@@ -8551,7 +8771,7 @@ struct NativeController {
     expanded_tree_paths: std::collections::HashSet<String>,
     /// Redo stack populated when undoing.
     redo_stack: Vec<FileOp>,
-    search_source_pref: String,
+    redo_generation: u64,
     thumb_size_scale: f32,
     folder_changed_pending: bool,
     /// Recursive flat listing of the current folder (capped).
@@ -8587,7 +8807,21 @@ struct NativeController {
     compare_left: String,
     compare_right: String,
     compare_all_rows: Vec<FolderCompareEntry>,
+    sync_plan: Option<folder_sync::SyncPlan>,
+    sync_generation: Arc<AtomicU64>,
+    sync_ready: Arc<AtomicBool>,
+    pending_sync_result: Arc<Mutex<Option<SyncWorkResult>>>,
+    sync_cancel: Arc<AtomicBool>,
+    sync_running: bool,
+    sync_applying: bool,
+    sync_progress: Arc<AtomicUsize>,
+    sync_progress_total: usize,
+    sync_progress_last: usize,
+    sync_last_run_dir: Option<PathBuf>,
     dupe_groups_cache: Vec<(String, Vec<String>)>,
+    duplicate_scan_generation: Arc<AtomicU64>,
+    duplicate_scan_ready: Arc<AtomicBool>,
+    pending_duplicate_scan: Arc<Mutex<Option<DuplicateScanResult>>>,
     shortcut_draft: HashMap<String, String>,
     recent_commands: std::collections::VecDeque<String>,
     // Async file preview. Reading a file body (PDF text extraction, archive
@@ -9183,6 +9417,14 @@ fn schedule_index_directory_debounced(state: &AppState, parent: String, entries:
 }
 
 fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), String> {
+    index_entries(parent, entries, true)
+}
+
+fn index_upsert_entries(parent: &str, entries: &[FileEntry]) -> Result<(), String> {
+    index_entries(parent, entries, false)
+}
+
+fn index_entries(parent: &str, entries: &[FileEntry], complete_scan: bool) -> Result<(), String> {
     let parent = cache_key_str(parent);
     let mut conn = open_index_connection()?;
     let _ = ensure_embedding_model_compatible(&conn);
@@ -9254,7 +9496,7 @@ fn index_directory_entries(parent: &str, entries: &[FileEntry]) -> Result<(), St
             .map_err(|e| e.to_string())?;
         let mut stale = Vec::new();
         for path in rows.flatten() {
-            if !paths.contains(path.as_str()) {
+            if complete_scan && !paths.contains(path.as_str()) {
                 stale.push(path);
             }
         }
@@ -9401,6 +9643,37 @@ fn like_escape(value: &str) -> String {
         .replace('_', "\\_")
 }
 
+fn index_scope_like(root: &str) -> String {
+    let trimmed = root.trim_end_matches(['\\', '/']);
+    let separator = if root.contains('\\') || root.ends_with(':') { '\\' } else { '/' };
+    format!("{}%", like_escape(&format!("{trimmed}{separator}")))
+}
+
+#[cfg(test)]
+mod index_scope_tests {
+    use super::index_scope_like;
+
+    #[test]
+    fn scoped_like_matches_children_but_not_siblings() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let matches = |root: &str, path: &str| -> bool {
+            conn.query_row(
+                "SELECT ?1 LIKE ?2 ESCAPE '\\'",
+                rusqlite::params![path, index_scope_like(root)],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert!(matches(r"C:\Data", r"C:\Data\child.txt"));
+        assert!(!matches(r"C:\Data", r"C:\DataOld\child.txt"));
+        assert!(!matches(r"C:\Data", r"C:\Other\child.txt"));
+        assert!(matches(r"C:\Data_%", r"C:\Data_%\child.txt"));
+        assert!(!matches(r"C:\Data_%", r"C:\Data_X\child.txt"));
+        assert!(matches(r"\\server\share\Docs", r"\\server\share\Docs\child.txt"));
+        assert!(!matches(r"\\server\share\Docs", r"\\server\share\DocsOld\child.txt"));
+    }
+}
+
 fn sqlite_limit(max: usize) -> i64 {
     i64::try_from(max).unwrap_or(i64::MAX)
 }
@@ -9420,7 +9693,7 @@ fn semantic_scores_under_root(root: &str, query_emb: &[f32]) -> HashMap<String, 
     let Ok(conn) = open_index_connection() else {
         return HashMap::new();
     };
-    let root_prefix = format!("{}%", root.trim_end_matches(['\\', '/']));
+    let root_prefix = index_scope_like(root);
     let sql = "SELECT f.path, e.emb FROM files f \
          INNER JOIN path_embeddings e ON e.path = f.path \
          WHERE f.path LIKE ?1 ESCAPE '\\' AND f.is_dir = 0 LIMIT 8000";
@@ -9454,7 +9727,7 @@ fn image_desc_scores_under_root(root: &str, query_emb: &[f32]) -> HashMap<String
     let Ok(conn) = open_index_connection() else {
         return HashMap::new();
     };
-    let root_prefix = format!("{}%", root.trim_end_matches(['\\', '/']));
+    let root_prefix = index_scope_like(root);
     let sql = "SELECT f.path, e.emb FROM files f \
          INNER JOIN image_desc_embeddings e ON e.path = f.path \
          WHERE f.path LIKE ?1 ESCAPE '\\' AND f.is_dir = 0 LIMIT 8000";
@@ -9682,12 +9955,50 @@ fn fts_query_for(query: &str) -> Option<String> {
     }
 }
 
+fn filter_search_entries(entries: Vec<FileEntry>, query: &str) -> Vec<FileEntry> {
+    let parsed = parse_query(query);
+    entries
+        .into_iter()
+        .filter(|entry| {
+            let path = Path::new(&entry.path);
+            fs::metadata(path)
+                .map(|metadata| matches_query(path, &metadata, &parsed))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod provider_predicate_tests {
+    use super::{filter_search_entries, path_to_entry};
+    use std::{fs, time::SystemTime};
+
+    #[test]
+    fn compound_filters_have_the_same_result_for_any_provider_candidates() {
+        let nonce = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("pathfinder-search-test-{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        let pdf = root.join("report.pdf");
+        let txt = root.join("report.txt");
+        fs::write(&pdf, b"a sufficiently long report").unwrap();
+        fs::write(&txt, b"a sufficiently long report").unwrap();
+        let candidates = [&pdf, &txt].into_iter()
+            .map(|path| path_to_entry(path, &fs::metadata(path).unwrap()))
+            .collect();
+        let results = filter_search_entries(candidates, "name:report ext:pdf size:>10b");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, pdf.to_string_lossy());
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
 fn index_search_fts(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, String> {
     let Some(fts_query) = fts_query_for(query) else {
         return Ok(Vec::new());
     };
     let conn = open_index_connection()?;
-    let root_prefix = format!("{}%", like_escape(root.trim_end_matches(['\\', '/'])));
+    let root_prefix = index_scope_like(root);
     let mut stmt = conn
         .prepare(
             "
@@ -9721,7 +10032,7 @@ fn index_search_fts(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry
             })
         })
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(Result::ok).collect())
+    Ok(filter_search_entries(rows.filter_map(Result::ok).collect(), query))
 }
 
 fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, String> {
@@ -9737,17 +10048,17 @@ fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, S
     }
 
     let conn = open_index_connection()?;
-    let root_prefix = format!("{}%", root.trim_end_matches(['\\', '/']));
+    let root_prefix = index_scope_like(root);
     let (name_like, path_like, ext_exact) = if let Some(ext) = query.strip_prefix("ext:") {
         (
-            "%".to_string(),
-            "%".to_string(),
+            String::new(),
+            String::new(),
             ext.trim_start_matches('.').to_lowercase(),
         )
     } else if let Some(name) = query.strip_prefix("name:") {
         (
             format!("%{}%", like_escape(name)),
-            "%".to_string(),
+            String::new(),
             String::new(),
         )
     } else {
@@ -9804,7 +10115,7 @@ fn index_search(root: &str, query: &str, max: usize) -> Result<Vec<FileEntry>, S
         )
         .map_err(|e| e.to_string())?;
 
-    Ok(rows.filter_map(Result::ok).collect())
+    Ok(filter_search_entries(rows.filter_map(Result::ok).collect(), query))
 }
 
 fn suggest_paths(prefix: &str, max: usize) -> Vec<String> {
@@ -11050,7 +11361,7 @@ fn schedule_index_roots_with_refresh(
                 if by_parent.len() > 128 {
                     let batch = std::mem::take(&mut by_parent);
                     for (parent, entries) in batch {
-                        let _ = index_directory_entries(&parent, &entries);
+                        let _ = index_upsert_entries(&parent, &entries);
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 } else if processed.is_multiple_of(1000) {
@@ -11058,7 +11369,8 @@ fn schedule_index_roots_with_refresh(
                 }
             }
             for (parent, entries) in by_parent {
-                let _ = index_directory_entries(&parent, &entries);
+                // These are traversal batches, not verified complete directories.
+                let _ = index_upsert_entries(&parent, &entries);
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
@@ -11082,30 +11394,116 @@ fn schedule_index_roots_with_refresh(
     });
 }
 
-fn read_native_json<T: serde::de::DeserializeOwned>(name: &str, fallback: T) -> T {
-    fs::read_to_string(native_data_file(name))
-        .ok()
-        .and_then(|data| serde_json::from_str(&data).ok())
-        .unwrap_or(fallback)
-}
+static JSON_DISK_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static JSON_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-fn write_native_json<T: Serialize>(name: &str, value: &T) -> Result<(), String> {
-    let path = native_data_file(name);
+fn replace_file_atomically(source: &Path, destination: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+        let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination_wide: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe {
+            MoveFileExW(
+                PCWSTR(source_wide.as_ptr()),
+                PCWSTR(destination_wide.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+            .map_err(|e| e.to_string())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(source, destination).map_err(|e| e.to_string())
+    }
+}
+fn atomic_json_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let data = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    fs::write(path, data).map_err(|e| e.to_string())
+    let name = path.file_name().ok_or("JSON file has no name")?.to_string_lossy();
+    let sequence = JSON_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temp = path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), sequence));
+    let result = (|| -> Result<(), String> {
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&temp)
+            .map_err(|e| e.to_string())?;
+        file.write_all(bytes).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
+        if path.exists() {
+            let backup = path.with_file_name(format!("{name}.bak"));
+            let backup_temp = path.with_file_name(format!(".{name}.{}.{sequence}.bak.tmp", std::process::id()));
+            fs::copy(path, &backup_temp).map_err(|e| e.to_string())?;
+            fs::OpenOptions::new().write(true).open(&backup_temp)
+                .and_then(|file| file.sync_all())
+                .map_err(|e| format!("backup sync: {e}"))?;
+            if let Err(error) = replace_file_atomically(&backup_temp, &backup) {
+                let _ = fs::remove_file(&backup_temp);
+                return Err(error.to_string());
+            }
+        }
+        replace_file_atomically(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
-/// Background JSON writer queue. Lets navigate(), tag-edit, and other hot
-/// paths return immediately instead of blocking on disk I/O for files like
-/// recent_locations.json that are rewritten on every folder change.
-///
-/// Implementation: a HashMap keyed by file name holds the latest serialised
-/// bytes for each file. A single background thread drains the map every
-/// 250 ms and writes the bytes to disk. Repeated writes to the same file in
-/// the same window coalesce - only the most recent payload hits disk.
+#[cfg(test)]
+mod atomic_json_tests {
+    use super::atomic_json_file;
+    use std::{fs, time::SystemTime};
+
+    #[test]
+    fn replacing_json_keeps_a_complete_previous_version() {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pathfinder-json-test-{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        atomic_json_file(&path, br#"{"revision":1}"#).unwrap();
+        atomic_json_file(&path, br#"{"revision":2}"#).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), br#"{"revision":2}"#);
+        assert_eq!(fs::read(root.join("settings.json.bak")).unwrap(), br#"{"revision":1}"#);
+        atomic_json_file(&path, br#"{"revision":3}"#).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), br#"{"revision":3}"#);
+        assert_eq!(fs::read(root.join("settings.json.bak")).unwrap(), br#"{"revision":2}"#);
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+fn read_native_json<T: serde::de::DeserializeOwned>(name: &str, fallback: T) -> T {
+    let path = native_data_file(name);
+    let backup = path.with_file_name(format!("{name}.bak"));
+    for candidate in [&path, &backup] {
+        if let Ok(data) = fs::read_to_string(candidate)
+            && let Ok(value) = serde_json::from_str(&data)
+        {
+            return value;
+        }
+    }
+    fallback
+}
+
+fn write_native_json<T: Serialize>(name: &str, value: &T) -> Result<(), String> {
+    let data = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+    let _serial = JSON_DISK_LOCK.lock().map_err(|e| e.to_string())?;
+    if let Ok(mut queue) = JSON_WRITE_QUEUE.lock() {
+        queue.remove(name);
+    }
+    atomic_json_file(&native_data_file(name), &data)
+}
+
+/// Coalesce asynchronous writes while serializing all disk commits. The disk
+/// lock is acquired before draining, so a shutdown flush cannot miss a batch
+/// already removed from the queue by the background writer.
 static JSON_WRITE_QUEUE: LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -11113,16 +11511,15 @@ static JSON_WRITER_THREAD: LazyLock<std::thread::JoinHandle<()>> = LazyLock::new
     std::thread::spawn(|| {
         loop {
             std::thread::sleep(Duration::from_millis(250));
+            let Ok(_serial) = JSON_DISK_LOCK.lock() else { continue };
             let drained: Vec<(String, Vec<u8>)> = match JSON_WRITE_QUEUE.lock() {
-                Ok(mut q) => q.drain().collect(),
+                Ok(mut queue) => queue.drain().collect(),
                 Err(_) => continue,
             };
             for (name, bytes) in drained {
-                let path = native_data_file(&name);
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                if let Err(error) = atomic_json_file(&native_data_file(&name), &bytes) {
+                    eprintln!("Could not save {name}: {error}");
                 }
-                let _ = std::fs::write(&path, &bytes);
             }
         }
     })
@@ -11389,11 +11786,100 @@ fn run_automation_rules_once(
     Ok((tagged, moved))
 }
 
+struct DhashTreeNode {
+    hash: u64,
+    indices: Vec<usize>,
+    children: HashMap<u32, usize>,
+}
+
+fn near_duplicate_hash_groups(hashes: &[u64]) -> Vec<Vec<usize>> {
+    if hashes.len() < 2 {
+        return Vec::new();
+    }
+    let mut tree = vec![DhashTreeNode {
+        hash: hashes[0],
+        indices: vec![0],
+        children: HashMap::new(),
+    }];
+    for (index, &hash) in hashes.iter().enumerate().skip(1) {
+        let mut node = 0usize;
+        loop {
+            let distance = (hash ^ tree[node].hash).count_ones();
+            if distance == 0 {
+                tree[node].indices.push(index);
+                break;
+            }
+            if let Some(&child) = tree[node].children.get(&distance) {
+                node = child;
+            } else {
+                let child = tree.len();
+                tree.push(DhashTreeNode {
+                    hash,
+                    indices: vec![index],
+                    children: HashMap::new(),
+                });
+                tree[node].children.insert(distance, child);
+                break;
+            }
+        }
+    }
+    let mut assigned = vec![false; hashes.len()];
+    let mut groups = Vec::new();
+    let radius = crate::inference::DHASH_NEAR_DUP_THRESHOLD;
+    for (index, &hash) in hashes.iter().enumerate() {
+        if assigned[index] {
+            continue;
+        }
+        let mut candidates = Vec::new();
+        let mut stack = vec![0usize];
+        while let Some(node) = stack.pop() {
+            let distance = (hash ^ tree[node].hash).count_ones();
+            if distance <= radius {
+                candidates.extend(tree[node].indices.iter().copied());
+            }
+            let low = distance.saturating_sub(radius);
+            let high = distance.saturating_add(radius);
+            for (&edge, &child) in &tree[node].children {
+                if (low..=high).contains(&edge) {
+                    stack.push(child);
+                }
+            }
+        }
+        candidates.sort_unstable();
+        let mut group = vec![index];
+        for other in candidates {
+            if other > index && !assigned[other]
+                && crate::inference::is_near_duplicate_dhash(hash, hashes[other])
+            {
+                group.push(other);
+            }
+        }
+        if group.len() > 1 {
+            for &member in &group {
+                assigned[member] = true;
+            }
+            groups.push(group);
+        }
+    }
+    groups
+}
+
+#[cfg(test)]
+mod dhash_group_tests {
+    use super::near_duplicate_hash_groups;
+
+    #[test]
+    fn groups_by_representative_without_transitive_merging() {
+        let hashes = [0, (1u64 << 10) - 1, (1u64 << 20) - 1];
+        assert_eq!(near_duplicate_hash_groups(&hashes), vec![vec![0, 1]]);
+    }
+}
+
 fn collect_image_duplicate_groups(folder: &str) -> Vec<(String, Vec<String>)> {
     let Ok(conn) = open_index_connection() else {
         return Vec::new();
     };
-    let prefix = format!("{}%", folder.trim_end_matches(['\\', '/']));
+    let prefix = index_scope_like(folder);
     let sql = "SELECT path, dhash FROM image_dhash WHERE path LIKE ?1 ESCAPE '\\'";
     let Ok(mut stmt) = conn.prepare(sql) else {
         return Vec::new();
@@ -11416,34 +11902,19 @@ fn collect_image_duplicate_groups(folder: &str) -> Vec<(String, Vec<String>)> {
         arr.copy_from_slice(&blob);
         entries.push((path, u64::from_le_bytes(arr)));
     }
-    let mut groups = Vec::new();
-    let mut seen: HashSet<usize> = HashSet::new();
-    for i in 0..entries.len() {
-        if seen.contains(&i) {
-            continue;
-        }
-        let mut group = vec![i];
-        for j in (i + 1)..entries.len() {
-            if seen.contains(&j) {
-                continue;
-            }
-            if crate::inference::is_near_duplicate_dhash(entries[i].1, entries[j].1) {
-                group.push(j);
-            }
-        }
-        if group.len() > 1 {
-            for &idx in &group {
-                seen.insert(idx);
-            }
-            let paths: Vec<String> = group.iter().map(|&idx| entries[idx].0.clone()).collect();
+    entries.sort_by_key(|entry| entry.0.to_lowercase());
+    let hashes: Vec<u64> = entries.iter().map(|entry| entry.1).collect();
+    near_duplicate_hash_groups(&hashes)
+        .into_iter()
+        .map(|indices| {
+            let paths: Vec<String> = indices.iter().map(|&index| entries[index].0.clone()).collect();
             let title = Path::new(&paths[0])
                 .file_name()
-                .map(|n| n.to_string_lossy().to_string())
+                .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| paths[0].clone());
-            groups.push((title, paths));
-        }
-    }
-    groups
+            (title, paths)
+        })
+        .collect()
 }
 
 fn default_automation_rules() -> Vec<AutomationRule> {
@@ -12579,6 +13050,14 @@ fn is_inside_git_worktree(path: &Path) -> bool {
 }
 
 fn native_rename(state: &AppState, path: &str, new_name: &str) -> Result<String, String> {
+    native_rename_inner(state, path, new_name, true)
+}
+
+fn native_rename_replay(state: &AppState, path: &str, new_name: &str) -> Result<String, String> {
+    native_rename_inner(state, path, new_name, false)
+}
+
+fn native_rename_inner(state: &AppState, path: &str, new_name: &str, record: bool) -> Result<String, String> {
     if state.queue_is_paused() {
         return Err("Operation queue is paused.".to_string());
     }
@@ -12599,10 +13078,15 @@ fn native_rename(state: &AppState, path: &str, new_name: &str) -> Result<String,
 
     let op_id = state.queue_start("rename", path, Some(&dst.to_string_lossy()), 0);
     let started = Instant::now();
-    fs::rename(&src, &dst).map_err(|e| e.to_string())?;
+    if let Err(error) = fs::rename(&src, &dst) {
+        state.queue_finish(op_id, "failed", error.to_string(), 0, started.elapsed());
+        return Err(error.to_string());
+    }
     state.invalidate_path(&src);
     state.invalidate_path(&dst);
-    state.log_op("rename", path, Some(&dst.to_string_lossy()));
+    if record {
+        state.log_op("rename", path, Some(&dst.to_string_lossy()));
+    }
     state.queue_finish(op_id, "done", "Renamed", 0, started.elapsed());
     Ok(dst.to_string_lossy().to_string())
 }
@@ -12647,7 +13131,11 @@ fn native_delete_inner(
     let total = folder_size_quick(&path_buf, 25_000);
     let op_id = state.queue_start("delete", path, None, total);
     let started = Instant::now();
-    trash::delete(&path_buf).map_err(|e| e.to_string())?;
+    if let Err(error) = trash::delete(&path_buf) {
+        let message = error.to_string();
+        state.queue_finish(op_id, "failed", message.clone(), 0, started.elapsed());
+        return Err(message);
+    }
     state.invalidate_path(&path_buf);
     let ids = trash_ids_for_originals(&[path.to_string()]);
     let trash_id = ids
@@ -12772,6 +13260,14 @@ fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
 }
 
 fn native_move(state: &AppState, from: &str, to: &str) -> Result<(), String> {
+    native_move_inner(state, from, to, true)
+}
+
+fn native_move_replay(state: &AppState, from: &str, to: &str) -> Result<(), String> {
+    native_move_inner(state, from, to, false)
+}
+
+fn native_move_inner(state: &AppState, from: &str, to: &str, record: bool) -> Result<(), String> {
     if state.queue_cancel_requested() {
         return Err(OP_CANCELLED.to_string());
     }
@@ -12781,28 +13277,46 @@ fn native_move(state: &AppState, from: &str, to: &str) -> Result<(), String> {
     let src = PathBuf::from(from);
     let mut dst = PathBuf::from(to);
     if dst.exists() {
+        if !record {
+            return Err(format!("Destination already exists: {}", dst.display()));
+        }
         let op_id = state.queue_start("move", from, Some(&dst.to_string_lossy()), 0);
         state.queue_conflict(op_id, conflict_info(&src, &dst));
         dst = keep_both_destination(&dst);
     }
-    let total = folder_size_quick(&src, 25_000);
+    // Same-volume moves are metadata-only. Do not prewalk a directory before
+    // attempting the rename; a cross-volume fallback has an unknown total.
+    let total = if src.is_file() {
+        src.metadata().map(|m| m.len()).unwrap_or(0)
+    } else {
+        0
+    };
     let op_id = state.queue_start("move", from, Some(&dst.to_string_lossy()), total);
     let started = Instant::now();
-    if fs::rename(&src, &dst).is_err() {
-        if src.is_dir() {
-            copy_dir_recursive(state, &src, &dst)?;
-            fs::remove_dir_all(&src).map_err(|e| e.to_string())?;
-        } else {
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let result = (|| -> Result<(), String> {
+        if fs::rename(&src, &dst).is_err() {
+            if src.is_dir() {
+                copy_dir_recursive(state, &src, &dst)?;
+                fs::remove_dir_all(&src).map_err(|e| e.to_string())?;
+            } else {
+                if let Some(parent) = dst.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+                fs::remove_file(&src).map_err(|e| e.to_string())?;
             }
-            fs::copy(&src, &dst).map_err(|e| e.to_string())?;
-            fs::remove_file(&src).map_err(|e| e.to_string())?;
         }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        state.queue_finish(op_id, "failed", error.clone(), 0, started.elapsed());
+        return Err(error);
     }
     state.invalidate_path(&src);
     state.invalidate_path(&dst);
-    state.log_op("move", from, Some(&dst.to_string_lossy()));
+    if record {
+        state.log_op("move", from, Some(&dst.to_string_lossy()));
+    }
     state.queue_finish(op_id, "done", "Moved", total, started.elapsed());
     Ok(())
 }
@@ -13905,6 +14419,7 @@ const ALL_COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("Tools", "Create 7z Archive", "", "create-7z"),
     ("Tools", "Create tar.gz Archive", "", "create-tar-gz"),
     ("Tools", "Compare Folder", "", "compare-folder"),
+    ("Tools", "Sync Folder", "", "sync-folder"),
     ("Tools", "Rules and Automation", "", "rules"),
     ("Tools", "Smart Folders", "", "smart-folders"),
     ("Tools", "Home Page", "", "home-page"),
@@ -14396,16 +14911,15 @@ fn trash_ids_for_originals(originals: &[String]) -> HashMap<String, String> {
 
 /// Flush coalesced settings/session writes so quit does not drop the last edits.
 fn flush_native_json_queue() {
+    let Ok(_serial) = JSON_DISK_LOCK.lock() else { return };
     let drained: Vec<(String, Vec<u8>)> = match JSON_WRITE_QUEUE.lock() {
-        Ok(mut q) => q.drain().collect(),
+        Ok(mut queue) => queue.drain().collect(),
         Err(_) => return,
     };
     for (name, bytes) in drained {
-        let path = native_data_file(&name);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = atomic_json_file(&native_data_file(&name), &bytes) {
+            eprintln!("Could not flush {name}: {error}");
         }
-        let _ = std::fs::write(&path, &bytes);
     }
 }
 
@@ -14509,7 +15023,7 @@ fn index_search_paths(root: &str, pattern: &str, max: usize) -> Result<Vec<FileE
         return Ok(Vec::new());
     }
     let conn = open_index_connection()?;
-    let root_prefix = format!("{}%", root.trim_end_matches(['\\', '/']));
+    let root_prefix = index_scope_like(root);
     let path_like = format!("%{}%", like_escape(pattern));
     let mut stmt = conn
         .prepare(
@@ -14697,6 +15211,7 @@ impl NativeController {
             current_path: current_path.clone(),
             files: Vec::new(),
             visible_files: Vec::new(),
+            search_results: Vec::new(),
             active_archive: None,
             selected_index: -1,
             selected_set: std::collections::HashSet::new(),
@@ -14811,6 +15326,7 @@ impl NativeController {
             },
             clipboard: None,
             pending_prompt: None,
+            pending_paste_resume: None,
             // Default sort: most recently modified first. Matches what most
             // people actually want when they open a folder - see the newest
             // download / latest screenshot / freshly built artifact.
@@ -14828,7 +15344,7 @@ impl NativeController {
             toast_timer: None,
             expanded_tree_paths: std::collections::HashSet::new(),
             redo_stack: Vec::new(),
-            search_source_pref: "auto".to_string(),
+            redo_generation: 0,
             thumb_size_scale: 1.0,
             folder_changed_pending: false,
             flat_view: false,
@@ -14855,7 +15371,21 @@ impl NativeController {
             compare_left: String::new(),
             compare_right: String::new(),
             compare_all_rows: Vec::new(),
+            sync_plan: None,
+            sync_generation: Arc::new(AtomicU64::new(0)),
+            sync_ready: Arc::new(AtomicBool::new(false)),
+            pending_sync_result: Arc::new(Mutex::new(None)),
+            sync_cancel: Arc::new(AtomicBool::new(false)),
+            sync_running: false,
+            sync_applying: false,
+            sync_progress: Arc::new(AtomicUsize::new(0)),
+            sync_progress_total: 0,
+            sync_progress_last: 0,
+            sync_last_run_dir: None,
             dupe_groups_cache: Vec::new(),
+            duplicate_scan_generation: Arc::new(AtomicU64::new(0)),
+            duplicate_scan_ready: Arc::new(AtomicBool::new(false)),
+            pending_duplicate_scan: Arc::new(Mutex::new(None)),
             shortcut_draft: HashMap::new(),
             recent_commands: std::collections::VecDeque::new(),
             preview_generation: Arc::new(AtomicU64::new(0)),
@@ -14913,9 +15443,7 @@ impl NativeController {
         ui.set_list_col_modified(self.settings.list_col_modified);
         ui.set_list_col_type(self.settings.list_col_type);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
-        ui.set_search_source_pref(ss(&self.search_source_pref));
         ui.set_thumb_size_scale(self.thumb_size_scale);
-        self.sync_tag_chips(ui);
         self.apply_power_budget(ui);
     }
 
@@ -15743,20 +16271,22 @@ impl NativeController {
     }
 
     fn apply_sort(&mut self) {
-        // Home uses `modified` as a section id (Drives / Pins / Recent / …).
-        // Sorting would scramble the intentional group order.
         if self.current_path == "home://" {
             return;
         }
+        let selected = self.selected_paths_sticky();
         sort_entries_by(&mut self.visible_files, &self.sort_by, &self.sort_dir);
+        self.restore_selection_from_paths(&selected);
     }
 
     fn apply_secondary_sort(&mut self) {
+        let selected = self.secondary_selected_paths_sticky();
         sort_entries_by(
             &mut self.secondary_visible_files,
             &self.secondary_sort_by,
             &self.secondary_sort_dir,
         );
+        self.restore_secondary_selection_from_paths(&selected);
     }
 
     fn apply_secondary_filter(&mut self) {
@@ -15821,6 +16351,16 @@ impl NativeController {
     fn apply_filter(&mut self) {
         let query = self.search_query.trim().to_lowercase();
         self.visible_files.clear();
+        if !query.is_empty() && !query.starts_with("tag:") && !query.starts_with("smart:") {
+            self.visible_files.extend(
+                self.search_results.iter()
+                    .filter(|entry| self.show_hidden || !Self::is_hidden_entry(entry))
+                    .cloned(),
+            );
+            self.apply_folder_filter();
+            self.apply_sort();
+            return;
+        }
         if query.is_empty() {
             if self.show_hidden {
                 self.visible_files.extend_from_slice(&self.files);
@@ -17704,7 +18244,7 @@ impl NativeController {
     ) {
         self.active_archive = None;
         ui.set_in_recycle_bin(false);
-        let _ = ensure_watched_paths(&self.app_state, std::slice::from_ref(&path));
+        let _ = ensure_watched_paths(&self.app_state, std::slice::from_ref(&path), &[path.clone(), self.secondary_path.clone()]);
         let partial = page.partial;
         let skipped_entries = page.skipped_entries;
         let files = page.entries;
@@ -18685,6 +19225,11 @@ impl NativeController {
         self.sync_active_pane(ui);
         if self.active_pane == ActivePane::Secondary {
             self.refresh_secondary_listing(ui);
+            return;
+        }
+        if !self.search_query.trim().is_empty() && !is_virtual_nav_path(&self.current_path) {
+            let query = self.search_query.clone();
+            self.search(ui, query);
             return;
         }
         if self.current_path == "storage://" && ui.get_is_storage_view() {
@@ -19815,6 +20360,7 @@ impl NativeController {
     /// Path search: expand env vars, navigate to folders, or match paths in
     /// the index / current listing (not file names).
     fn search_by_path(&mut self, ui: &MainWindow, query: &str, navigate_if_dir: bool) -> bool {
+        self.search_query = query.to_string();
         let resolved = resolve_path_query(query, &self.current_path);
         let resolved_str = resolved.to_string_lossy().into_owned();
 
@@ -19885,8 +20431,8 @@ impl NativeController {
         }
 
         sort_entries(&mut matches);
-        self.visible_files = matches;
-        self.apply_sort();
+        self.search_results = matches;
+        self.apply_filter();
         ui.set_empty_state(ss(""));
         self.update_models(ui);
         self.update_status(ui);
@@ -19899,6 +20445,7 @@ impl NativeController {
 
     fn search(&mut self, ui: &MainWindow, query: String) {
         self.search_query = query;
+        self.search_results.clear();
         self.selected_index = -1;
         self.selected_set.clear();
         self.select_anchor = -1;
@@ -20175,10 +20722,19 @@ impl NativeController {
             index as usize
         };
         if idx < self.tabs.len() {
+            let removed_active = idx == self.active_tab;
             self.tabs.remove(idx);
-            self.active_tab = self.active_tab.min(self.tabs.len() - 1);
-            if let Some(tab) = self.tabs.get(self.active_tab).cloned() {
-                self.navigate(ui, tab.path, false);
+            if idx < self.active_tab {
+                self.active_tab -= 1;
+            } else if removed_active {
+                self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+            }
+            if removed_active {
+                if let Some(tab) = self.tabs.get(self.active_tab).cloned() {
+                    self.navigate(ui, tab.path, false);
+                }
+            } else {
+                self.sync_nav_chrome(ui);
             }
         }
     }
@@ -20229,15 +20785,14 @@ impl NativeController {
             .insert(format!("{path}:sort_by"), self.sort_by.clone());
         self.folder_views
             .insert(format!("{path}:sort_dir"), self.sort_dir.clone());
-        // While a search is active, deep-search results live only in
-        // visible_files (not in self.files), so calling apply_filter() would
-        // wipe them and replace with the current folder's local-name matches.
-        // Just re-sort the existing visible_files instead.
+        // Keep the selected paths even when apply_filter rebuilds the list.
+        let selected = self.selected_paths_sticky();
         if self.search_query.trim().is_empty() {
             self.apply_filter();
         } else {
             self.apply_sort();
         }
+        self.restore_selection_from_paths(&selected);
         self.update_models(ui);
         self.apply_secondary_sort();
         self.update_secondary_models(ui);
@@ -20673,7 +21228,7 @@ impl NativeController {
         if !Path::new(&path).is_dir() {
             return;
         }
-        let _ = ensure_watched_paths(&self.app_state, std::slice::from_ref(&path));
+        let _ = ensure_watched_paths(&self.app_state, std::slice::from_ref(&path), &[self.current_path.clone(), path.clone()]);
         if push_history {
             self.secondary_history
                 .truncate(self.secondary_history_pos + 1);
@@ -21377,6 +21932,7 @@ impl NativeController {
             "create-7z" => self.create_archive_from_selection(ui, "7z"),
             "create-tar-gz" => self.create_archive_from_selection(ui, "tar.gz"),
             "compare-folder" => self.prompt_compare_folder(ui),
+            "sync-folder" => self.prompt_sync_folder(ui),
             "rules" => self.show_rules(ui),
             "smart-folders" => self.show_smart_folders(ui),
             "home-page" => self.show_home_page(ui),
@@ -21844,7 +22400,7 @@ impl NativeController {
 
         let mut applied: Vec<(String, String)> = Vec::with_capacity(plan.len());
         for (from, new_name) in &plan {
-            match native_rename(&self.app_state, from, new_name) {
+            match native_rename_replay(&self.app_state, from, new_name) {
                 Ok(_) => applied.push((from.clone(), new_name.clone())),
                 Err(error) => {
                     for (original_from, renamed) in applied.iter().rev() {
@@ -21858,7 +22414,7 @@ impl NativeController {
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
                         let _ =
-                            native_rename(&self.app_state, &current.to_string_lossy(), &old_name);
+                            native_rename_replay(&self.app_state, &current.to_string_lossy(), &old_name);
                     }
                     return Err(error);
                 }
@@ -22209,6 +22765,10 @@ impl NativeController {
                 }
             }
             Some(PendingPrompt::CompareFolder(left)) => {
+                if self.sync_running {
+                    self.show_toast(ui, "Wait for the current sync task to finish before comparing folders.");
+                    return;
+                }
                 let right = value.trim();
                 if right.is_empty() {
                     self.show_toast(ui, "Pick a folder path to compare.");
@@ -22216,6 +22776,7 @@ impl NativeController {
                 }
                 match compare_folders(Path::new(&left), Path::new(right), 2000) {
                     Ok(rows) => {
+                        ui.set_compare_sync_mode(false);
                         self.compare_left = left;
                         self.compare_right = right.to_string();
                         self.compare_all_rows = rows;
@@ -22224,6 +22785,35 @@ impl NativeController {
                     }
                     Err(error) => self.show_toast_kind(ui, error, "error"),
                 }
+            }
+            Some(PendingPrompt::SyncFolder(left)) => {
+                if self.sync_running {
+                    self.show_toast(ui, "Wait for the current sync task or cancel it first.");
+                    return;
+                }
+                let right = value.trim();
+                if right.is_empty() {
+                    self.show_toast(ui, "Pick a destination folder for one-way sync.");
+                    return;
+                }
+                self.compare_left = left;
+                self.compare_right = right.to_string();
+                self.sync_plan = None;
+                self.sync_last_run_dir = None;
+                self.compare_hide_same = true;
+                ui.set_compare_sync_mode(true);
+                ui.set_compare_sync_ready(false);
+                ui.set_compare_sync_running(false);
+                ui.set_compare_sync_delete_extra(false);
+                ui.set_compare_sync_has_versions(false);
+                ui.set_compare_sync_exclusions(ss(""));
+                ui.set_compare_sync_summary(ss("Preview a one-way sync from source to destination. No files change during preview."));
+                ui.set_compare_overlay_left(ss(&self.compare_left));
+                ui.set_compare_overlay_right(ss(&self.compare_right));
+                ui.set_compare_overlay_title(ss("One-way folder sync"));
+                ui.set_compare_rows(model_from_vec(Vec::<CompareRowItem>::new()));
+                ui.set_compare_overlay_visible(true);
+                self.start_sync_preview(ui);
             }
             Some(PendingPrompt::SaveWorkspace) => {
                 let name = value.trim();
@@ -22266,7 +22856,13 @@ impl NativeController {
                     };
                     self.session_conflict_action = Some(stored);
                 }
-                let _ = self.apply_conflict_resolution(ui, &src, &dest, cut, &action);
+                if self.apply_conflict_resolution(ui, &src, &dest, cut, &action) {
+                    if let Some((remaining, destination)) = self.pending_paste_resume.take() {
+                        self.paste_async_paths(ui, remaining, destination);
+                    }
+                } else {
+                    self.pending_paste_resume = None;
+                }
             }
             Some(PendingPrompt::RenameTag(tag_id)) => {
                 let new_label = value.trim().to_string();
@@ -22301,7 +22897,6 @@ impl NativeController {
                 }
                 let _ = write_native_json("tags.json", &self.tags);
                 self.sync_tag_names(ui);
-                self.sync_tag_chips(ui);
                 self.update_models(ui);
                 self.show_toast_kind(ui, "Tag saved", "success");
             }
@@ -22318,7 +22913,6 @@ impl NativeController {
                 }
                 let _ = write_native_json("tags.json", &self.tags);
                 self.sync_tag_names(ui);
-                self.sync_tag_chips(ui);
                 self.update_models(ui);
                 self.show_toast_kind(ui, "Batch tag applied", "success");
             }
@@ -22863,13 +23457,12 @@ impl NativeController {
         let weak = ui.as_weak();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
-                // refresh() routes by active_pane internally; we need both. We
-                // dispatch secondary first, then primary, and let the callback
-                // handlers borrow_mut the controller in turn.
+                // Refresh the actual primary pane even when the right pane is
+                // active, then refresh the secondary listing independently.
+                ui.invoke_primary_refresh();
                 if ui.get_dual_pane() {
                     ui.invoke_secondary_refresh();
                 }
-                ui.invoke_refresh();
             }
         });
         self.active_pane = saved_active;
@@ -22887,6 +23480,13 @@ impl NativeController {
         };
 
         let dest_dir = self.active_directory().to_string();
+        self.paste_async_paths(ui, clipboard, dest_dir);
+    }
+
+    fn paste_async_paths(&mut self, ui: &MainWindow, clipboard: NativeClipboard, dest_dir: String) {
+        if clipboard.paths.is_empty() {
+            return;
+        }
         if is_virtual_nav_path(&dest_dir) {
             self.show_toast(ui, "Paste is not available here.");
             return;
@@ -22909,10 +23509,7 @@ impl NativeController {
             if self.paste_has_real_conflict(src, &dest) {
                 match self.session_conflict_action.as_deref() {
                     Some("skip") => continue,
-                    Some("replace") => {
-                        let _ = native_delete_path(&dest.to_string_lossy());
-                        continue;
-                    }
+                    Some("replace") => continue,
                     Some("keep") | Some("") => continue,
                     Some(_) | None => {}
                 }
@@ -22936,6 +23533,14 @@ impl NativeController {
                         .unwrap_or_else(|| "not calculated".to_string())
                 )));
                 ui.set_preview_meta(ss("Conflict resolver"));
+                let remaining = clipboard.paths.iter()
+                    .filter(|path| !same_path_string(path, src))
+                    .cloned()
+                    .collect();
+                self.pending_paste_resume = Some((
+                    NativeClipboard { paths: remaining, cut },
+                    dest_dir.clone(),
+                ));
                 self.pending_prompt = Some(PendingPrompt::ConflictPaste {
                     src: src.clone(),
                     dest: dest.to_string_lossy().to_string(),
@@ -22995,6 +23600,7 @@ impl NativeController {
         let app_state = self.app_state.clone();
         let operation_ready = self.operation_ready.clone();
         let pending_result = self.pending_operation_result.clone();
+        let conflict_action = self.session_conflict_action.clone();
         let invalidate_dirs_on_success =
             Self::paste_invalidate_dirs(&dest_dir, &paths_to_paste, cut);
         std::thread::spawn(move || {
@@ -23011,10 +23617,17 @@ impl NativeController {
                 };
                 let dest = PathBuf::from(&dest_dir).join(name);
                 let dest_string = dest.to_string_lossy().to_string();
-                let result = if cut {
-                    native_move(&app_state, src, &dest_string)
+                let transfer = || {
+                    if cut {
+                        native_move(&app_state, src, &dest_string)
+                    } else {
+                        native_copy(&app_state, src, &dest_string)
+                    }
+                };
+                let result = if conflict_action.as_deref() == Some("replace") && dest.exists() {
+                    replace_preserving_destination(&dest, transfer)
                 } else {
-                    native_copy(&app_state, src, &dest_string)
+                    transfer()
                 };
 
                 match result {
@@ -23113,110 +23726,88 @@ impl NativeController {
         }
     }
 
-    fn show_duplicates(&mut self, ui: &MainWindow) {
-        match find_duplicates(self.active_directory().to_string(), Some(1024)) {
-            Ok(groups) => {
-                self.dupe_groups_cache = groups
-                    .iter()
-                    .enumerate()
-                    .map(|(i, group)| {
-                        let title = group
-                            .first()
-                            .map(|f| f.name.clone())
-                            .unwrap_or_else(|| format!("Group {}", i + 1));
-                        (
-                            format!("exact-{i}::{title}"),
-                            group.iter().map(|f| f.path.clone()).collect(),
-                        )
-                    })
-                    .collect();
-                let items: Vec<DupeGroupItem> = self
-                    .dupe_groups_cache
-                    .iter()
-                    .map(|(id_title, paths)| {
-                        dupe_group_ui_item(
-                            id_title,
-                            paths,
-                            &format!("{} identical files", paths.len()),
-                        )
-                    })
-                    .collect();
-                ui.set_dupe_overlay_title(ss("Duplicate files"));
-                ui.set_dupe_overlay_subtitle(ss(if items.is_empty() {
-                    "No duplicate files found in this folder."
-                } else {
-                    "Review paths below. Keep the first file, or delete the extras to Recycle Bin."
-                }));
-                ui.set_dupe_groups(model_from_vec(items));
-                ui.set_dupe_overlay_visible(true);
+    fn start_duplicate_scan(&mut self, ui: &MainWindow, root: String, min_size: u64, drive: bool) {
+        let generation = self.duplicate_scan_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        ui.set_dupe_overlay_title(ss(if drive { "Drive duplicates" } else { "Duplicate files" }));
+        ui.set_dupe_overlay_subtitle(ss("Scanning for exact duplicates..."));
+        ui.set_dupe_groups(model_from_vec(Vec::<DupeGroupItem>::new()));
+        ui.set_dupe_overlay_visible(true);
+        let ready = self.duplicate_scan_ready.clone();
+        let pending = self.pending_duplicate_scan.clone();
+        let current = self.duplicate_scan_generation.clone();
+        std::thread::spawn(move || {
+            let groups = find_duplicates(root, Some(min_size));
+            if current.load(Ordering::Acquire) == generation {
+                if let Ok(mut slot) = pending.lock() {
+                    *slot = Some(DuplicateScanResult { generation, drive, groups });
+                    ready.store(true, Ordering::Release);
+                }
             }
-            Err(error) => self.show_toast(ui, error),
+        });
+    }
+
+    fn apply_duplicate_scan_result(&mut self, ui: &MainWindow, result: DuplicateScanResult) {
+        if self.duplicate_scan_generation.load(Ordering::Acquire) != result.generation {
+            return;
         }
+        let groups = match result.groups {
+            Ok(groups) => groups,
+            Err(error) => {
+                ui.set_dupe_overlay_subtitle(ss(&error));
+                self.show_toast(ui, error);
+                return;
+            }
+        };
+        let (_, duplicate_count, reclaimable_bytes) = duplicate_reclaimable_bytes(&groups);
+        self.dupe_groups_cache = groups.iter().enumerate()
+            .take(if result.drive { 200 } else { usize::MAX })
+            .map(|(index, group)| {
+                let title = group.first().map(|entry| entry.name.clone())
+                    .unwrap_or_else(|| format!("Group {}", index + 1));
+                (format!("{}-{index}::{title}", if result.drive { "drive" } else { "exact" }),
+                 group.iter().map(|entry| entry.path.clone()).collect())
+            })
+            .collect();
+        let items: Vec<DupeGroupItem> = self.dupe_groups_cache.iter()
+            .map(|(id, paths)| dupe_group_ui_item(
+                id, paths, &format!("{} identical files", paths.len())))
+            .collect();
+        let subtitle = if items.is_empty() {
+            if result.drive { "No large duplicates found on this drive." }
+            else { "No duplicate files found in this folder." }
+        } else {
+            "Review each group before deleting extras to the Recycle Bin."
+        };
+        let subtitle = if items.is_empty() {
+            subtitle.to_string()
+        } else {
+            format!("{subtitle} {duplicate_count} extra copies; up to {} reclaimable.",
+                format_size_short(reclaimable_bytes))
+        };
+        ui.set_dupe_overlay_subtitle(ss(subtitle));
+        ui.set_dupe_groups(model_from_vec(items));
+    }
+
+    fn show_duplicates(&mut self, ui: &MainWindow) {
+        self.start_duplicate_scan(ui, self.active_directory().to_string(), 1024, false);
     }
 
     fn show_duplicates_drive(&mut self, ui: &MainWindow) {
         let path = self.active_directory().to_string();
-        let root = Path::new(&path)
-            .components()
-            .next()
-            .map(|c| {
-                let mut p = PathBuf::new();
-                p.push(c);
-                // On Windows, push root so "C:" becomes "C:\"
+        let root = Path::new(&path).components().next()
+            .map(|component| {
+                let mut root = PathBuf::new();
+                root.push(component);
                 #[cfg(target_os = "windows")]
-                {
-                    p.push("\\");
-                }
-                p
+                root.push("\\");
+                root
             })
             .unwrap_or_else(|| PathBuf::from(&path));
-        self.show_toast(
-            ui,
-            format!("Scanning drive {} for duplicates…", root.display()),
-        );
-        match find_duplicates(root.to_string_lossy().to_string(), Some(64 * 1024)) {
-            Ok(groups) => {
-                self.dupe_groups_cache = groups
-                    .iter()
-                    .enumerate()
-                    .take(200)
-                    .map(|(i, group)| {
-                        let title = group
-                            .first()
-                            .map(|f| f.name.clone())
-                            .unwrap_or_else(|| format!("Group {}", i + 1));
-                        (
-                            format!("drive-{i}::{title}"),
-                            group.iter().map(|f| f.path.clone()).collect(),
-                        )
-                    })
-                    .collect();
-                let items: Vec<DupeGroupItem> = self
-                    .dupe_groups_cache
-                    .iter()
-                    .map(|(id_title, paths)| {
-                        dupe_group_ui_item(
-                            id_title,
-                            paths,
-                            &format!("{} identical files", paths.len()),
-                        )
-                    })
-                    .collect();
-                ui.set_dupe_overlay_title(ss("Drive duplicates"));
-                ui.set_dupe_overlay_subtitle(ss(if items.is_empty() {
-                    "No large duplicates found on this drive."
-                } else {
-                    "Top groups on this drive (min 64 KB). Keep newest/largest, then delete extras."
-                }));
-                ui.set_dupe_groups(model_from_vec(items));
-                ui.set_dupe_overlay_visible(true);
-            }
-            Err(error) => self.show_toast(ui, error),
-        }
+        self.start_duplicate_scan(ui, root.to_string_lossy().to_string(), 64 * 1024, true);
     }
 
     fn show_image_duplicates(&mut self, ui: &MainWindow) {
-        let groups = collect_image_duplicate_groups(&self.current_path);
+        let groups = collect_image_duplicate_groups(self.active_directory());
         self.dupe_groups_cache = groups
             .into_iter()
             .enumerate()
@@ -23802,14 +24393,7 @@ impl NativeController {
                 self.show_toast(ui, "Skipped");
                 return true;
             }
-            "replace" => {
-                if dest_path.exists() {
-                    if let Err(error) = native_delete_path(dest) {
-                        self.show_toast_kind(ui, error, "error");
-                        return false;
-                    }
-                }
-            }
+            "replace" => {}
             "keep" | "" => {
                 dest_path = keep_both_destination(&dest_path);
             }
@@ -23818,10 +24402,17 @@ impl NativeController {
                 return false;
             }
         }
-        let result = if cut {
-            native_move(&self.app_state, src, &dest_path.to_string_lossy())
+        let transfer = || {
+            if cut {
+                native_move(&self.app_state, src, &dest_path.to_string_lossy())
+            } else {
+                native_copy(&self.app_state, src, &dest_path.to_string_lossy())
+            }
+        };
+        let result = if action == "replace" {
+            replace_preserving_destination(&dest_path, transfer)
         } else {
-            native_copy(&self.app_state, src, &dest_path.to_string_lossy())
+            transfer()
         };
         match result {
             Ok(()) => {
@@ -23867,7 +24458,8 @@ impl NativeController {
         }
         paths.sort();
         paths.dedup();
-        let _ = ensure_watched_paths(&self.app_state, &paths);
+        let pinned = [self.current_path.clone(), self.secondary_path.clone()];
+        let _ = ensure_watched_paths(&self.app_state, &paths, &pinned);
         self.watchers_paused = false;
     }
 
@@ -24479,6 +25071,231 @@ impl NativeController {
         ui.set_prompt_visible(true);
     }
 
+    fn prompt_sync_folder(&mut self, ui: &MainWindow) {
+        self.pending_prompt = Some(PendingPrompt::SyncFolder(self.active_directory().to_string()));
+        ui.set_prompt_title(ss("Sync this folder to destination (one way)"));
+        ui.set_prompt_value(ss(if ui.get_dual_pane() {
+            if self.active_pane == ActivePane::Secondary {
+                &self.current_path
+            } else {
+                &self.secondary_path
+            }
+        } else {
+            ""
+        }));
+        ui.set_prompt_visible(true);
+    }
+
+    fn start_sync_preview(&mut self, ui: &MainWindow) {
+        if self.sync_running {
+            self.show_toast(ui, "Wait for the current sync task or cancel it first.");
+            return;
+        }
+        self.sync_cancel.store(true, Ordering::Release);
+        self.sync_cancel = Arc::new(AtomicBool::new(false));
+        let cancel = self.sync_cancel.clone();
+        let generation = self.sync_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let source = self.compare_left.clone();
+        let destination = self.compare_right.clone();
+        let exclusions = ui.get_compare_sync_exclusions().to_string();
+        let delete_extras = ui.get_compare_sync_delete_extra();
+        let pending = self.pending_sync_result.clone();
+        let ready = self.sync_ready.clone();
+        self.sync_plan = None;
+        self.sync_running = true;
+        self.sync_applying = false;
+        ui.set_compare_sync_ready(false);
+        ui.set_compare_sync_running(true);
+        ui.set_compare_sync_summary(ss("Scanning both folders and checking changed files…"));
+        std::thread::spawn(move || {
+            let result = folder_sync::plan(
+                Path::new(&source), Path::new(&destination), &exclusions, delete_extras, &cancel,
+            );
+            if let Ok(mut slot) = pending.lock() {
+                *slot = Some(SyncWorkResult::Preview { generation, result });
+                ready.store(true, Ordering::Release);
+            }
+        });
+    }
+
+    fn start_sync_apply(&mut self, ui: &MainWindow) {
+        if self.sync_running {
+            self.show_toast(ui, "A folder sync task is already running.");
+            return;
+        }
+        let Some(plan) = self.sync_plan.as_ref() else {
+            self.show_toast(ui, "Preview the sync first.");
+            return;
+        };
+        if plan.exclusions != ui.get_compare_sync_exclusions().as_str()
+            || plan.delete_extras != ui.get_compare_sync_delete_extra()
+        {
+            ui.set_compare_sync_ready(false);
+            self.show_toast(ui, "Options changed. Preview again before applying.");
+            return;
+        }
+        let plan = self.sync_plan.take().expect("sync plan checked above");
+        self.sync_cancel.store(true, Ordering::Release);
+        self.sync_cancel = Arc::new(AtomicBool::new(false));
+        let cancel = self.sync_cancel.clone();
+        let generation = self.sync_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let pending = self.pending_sync_result.clone();
+        let ready = self.sync_ready.clone();
+        let state = self.app_state.clone();
+        let progress = self.sync_progress.clone();
+        progress.store(0, Ordering::Release);
+        self.sync_progress_total = plan.items.len();
+        self.sync_progress_last = 0;
+        let source = plan.source.to_string_lossy().into_owned();
+        let destination = plan.destination.to_string_lossy().into_owned();
+        let bytes = plan.bytes_to_copy;
+        let op_id = state.queue_start("sync", &source, Some(&destination), bytes);
+        self.sync_running = true;
+        self.sync_applying = true;
+        ui.set_compare_sync_running(true);
+        ui.set_compare_sync_ready(false);
+        ui.set_compare_sync_summary(ss("Applying the reviewed plan. Previous versions are kept beside the destination…"));
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = folder_sync::execute_with_progress(plan, &cancel, |done, _| {
+                progress.store(done, Ordering::Release);
+            });
+            match &result {
+                Ok(report) => {
+                    state.invalidate_path(Path::new(&destination));
+                    state.queue_finish(
+                        op_id,
+                        if report.failed > 0 { "failed" } else if report.cancelled { "cancelled" } else { "done" },
+                        report.summary(), bytes, started.elapsed(),
+                    );
+                }
+                Err(error) => state.queue_finish(op_id, "failed", error.clone(), 0, started.elapsed()),
+            }
+            if let Ok(mut slot) = pending.lock() {
+                *slot = Some(SyncWorkResult::Apply { generation, result });
+                ready.store(true, Ordering::Release);
+            }
+        });
+    }
+
+    fn render_sync_preview(ui: &MainWindow, plan: &folder_sync::SyncPlan, hide_same: bool) {
+        let visible_count = plan.items.iter().filter(|item| {
+            !hide_same || item.action != folder_sync::SyncAction::Same
+        }).count();
+        let priority = [
+            folder_sync::SyncAction::Conflict,
+            folder_sync::SyncAction::Update,
+            folder_sync::SyncAction::DeleteFile,
+            folder_sync::SyncAction::DeleteDir,
+            folder_sync::SyncAction::Copy,
+            folder_sync::SyncAction::CreateDir,
+            folder_sync::SyncAction::KeepExtra,
+            folder_sync::SyncAction::Same,
+        ];
+        let shown = priority.iter().flat_map(|action| plan.items.iter().filter(move |item| item.action == *action))
+            .filter(|item| !hide_same || item.action != folder_sync::SyncAction::Same)
+            .take(500).map(|item| CompareRowItem {
+            path: ss(item.relative.to_string_lossy()),
+            status: ss(item.action.label()),
+            result_state: ss(""),
+            detail: ss(item.conflict_reason.as_deref().unwrap_or("")),
+            left_size: ss(format_size_short(item.source_size)),
+            right_size: ss(format_size_short(item.destination_size)),
+        }).collect();
+        let mut summary = plan.summary();
+        if visible_count > 500 { summary.push_str(" · showing 500 rows, conflicts and changes first"); }
+        ui.set_compare_rows(model_from_vec(shown));
+        ui.set_compare_sync_summary(ss(summary));
+        ui.set_compare_sync_ready(true);
+    }
+
+    fn apply_sync_work_result(&mut self, ui: &MainWindow, work: SyncWorkResult) {
+        let generation = match &work {
+            SyncWorkResult::Preview { generation, .. } | SyncWorkResult::Apply { generation, .. } => *generation,
+        };
+        if self.sync_generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        self.sync_running = false;
+        self.sync_applying = false;
+        ui.set_compare_sync_running(false);
+        match work {
+            SyncWorkResult::Preview { result, .. } => match result {
+                Ok(plan) => {
+                    if plan.exclusions != ui.get_compare_sync_exclusions().as_str()
+                        || plan.delete_extras != ui.get_compare_sync_delete_extra()
+                    {
+                        ui.set_compare_sync_summary(ss("Options changed while scanning. Preview again."));
+                        ui.set_compare_sync_ready(false);
+                        self.sync_plan = None;
+                        return;
+                    }
+                    Self::render_sync_preview(ui, &plan, self.compare_hide_same);
+                    self.sync_plan = Some(plan);
+                }
+                Err(error) => {
+                    ui.set_compare_sync_summary(ss(&error));
+                    ui.set_compare_sync_ready(false);
+                    if !error.contains("cancelled") {
+                        self.show_toast_kind(ui, error, "error");
+                    }
+                }
+            },
+            SyncWorkResult::Apply { result, .. } => {
+                self.sync_plan = None;
+                ui.set_compare_sync_ready(false);
+                match result {
+                    Ok(report) => {
+                        let ordered = report.outcomes.iter().filter(|outcome| outcome.status == "failed")
+                            .chain(report.outcomes.iter().filter(|outcome| outcome.status == "cancelled"))
+                            .chain(report.outcomes.iter().filter(|outcome| outcome.status == "skipped" && outcome.action.starts_with("conflict")))
+                            .chain(report.outcomes.iter().filter(|outcome| outcome.status == "skipped" && !outcome.action.starts_with("conflict")))
+                            .chain(report.outcomes.iter().filter(|outcome| outcome.status == "done"));
+                        let shown = ordered.take(500).map(|outcome| CompareRowItem {
+                            path: ss(&outcome.relative),
+                            status: ss(format!("{}: {}", outcome.action, outcome.status)),
+                            result_state: ss(&outcome.status),
+                            detail: ss(&outcome.detail),
+                            left_size: ss(""),
+                            right_size: ss(""),
+                        }).collect();
+                        ui.set_compare_rows(model_from_vec(shown));
+                        ui.set_compare_sync_summary(ss(format!(
+                            "Sync: {} completed, {} skipped, {} failed{}. Open the recovery folder for the full report.",
+                            report.completed, report.skipped, report.failed,
+                            if report.cancelled { ", stopped" } else { "" }
+                        )));
+                        self.sync_last_run_dir = Path::new(&report.versions_dir).parent().map(Path::to_path_buf);
+                        ui.set_compare_sync_has_versions(self.sync_last_run_dir.is_some());
+                        self.invalidate_and_refresh_both_panes(ui);
+                        self.show_toast_kind(ui,
+                            format!("Sync: {} completed, {} failed, {} skipped", report.completed, report.failed, report.skipped),
+                            if report.failed > 0 { "error" } else if report.cancelled || report.skipped > 0 { "info" } else { "success" });
+                    }
+                    Err(error) => {
+                        ui.set_compare_sync_summary(ss(&error));
+                        self.sync_last_run_dir = folder_sync::history_dir(Path::new(&self.compare_right))
+                            .ok().filter(|path| path.is_dir());
+                        ui.set_compare_sync_has_versions(self.sync_last_run_dir.is_some());
+                        self.show_toast_kind(ui, error, "error");
+                    }
+                }
+            }
+        }
+    }
+
+    fn open_sync_versions(&mut self, ui: &MainWindow) {
+        let path = self.sync_last_run_dir.clone().or_else(|| folder_sync::history_dir(Path::new(&self.compare_right)).ok());
+        match path {
+            Some(path) if path.is_dir() => {
+                if let Err(error) = open::that(&path) {
+                    self.show_toast_kind(ui, error.to_string(), "error");
+                }
+            }
+            _ => self.show_toast(ui, "No previous sync versions yet."),
+        }
+    }
+
     fn show_rules(&mut self, ui: &MainWindow) {
         let rules = load_automation_rules();
         let items: Vec<ToolListItem> = rules
@@ -24580,6 +25397,8 @@ impl NativeController {
             .map(|r| CompareRowItem {
                 path: ss(&r.path),
                 status: ss(&r.status),
+                result_state: ss(""),
+                detail: ss(""),
                 left_size: ss(format_size_short(r.left_size)),
                 right_size: ss(format_size_short(r.right_size)),
             })
@@ -25925,35 +26744,6 @@ impl NativeController {
         });
     }
 
-    fn search_chip_insert(&mut self, ui: &MainWindow, op: String) {
-        let mut text = ui.get_search_text().to_string();
-        let token = match op.as_str() {
-            "ext" => "ext:",
-            "kind" => "kind:",
-            "size" => "size:>",
-            "modified" => "modified:",
-            "tag" => "tag:",
-            "content" => "content:",
-            _ => return,
-        };
-        if !text.is_empty() && !text.ends_with(' ') {
-            text.push(' ');
-        }
-        text.push_str(token);
-        ui.set_search_text(ss(&text));
-        self.search_query = text;
-        ui.set_search_help_visible(true);
-        ui.set_search_chip_hint(ss(match op.as_str() {
-            "ext" => "Example: ext:pdf",
-            "kind" => "Example: kind:image",
-            "size" => "Example: size:>100mb",
-            "modified" => "Example: modified:week",
-            "tag" => "Example: tag:yellow",
-            "content" => "Example: content:TODO",
-            _ => "",
-        }));
-    }
-
     fn search_save_current(&mut self, ui: &MainWindow) {
         let query = ui.get_search_text().to_string();
         if query.trim().is_empty() {
@@ -26158,7 +26948,7 @@ impl NativeController {
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| item.from.clone());
-                        if let Err(error) = native_rename(&self.app_state, &item.to, &old_name) {
+                        if let Err(error) = native_rename_replay(&self.app_state, &item.to, &old_name) {
                             outcome = Err(error);
                             break;
                         }
@@ -26168,7 +26958,7 @@ impl NativeController {
             },
             "rename" | "move" => {
                 let from_path = to.as_deref().unwrap_or("");
-                native_move(&self.app_state, from_path, &from)
+                native_move_replay(&self.app_state, from_path, &from)
             }
             "copy" => to
                 .as_deref()
@@ -26222,17 +27012,26 @@ impl NativeController {
                     other => format!("Undone: {other}"),
                 };
                 self.redo_stack.push(redo_op);
+                self.redo_generation = self.app_state.operation_log_generation.load(Ordering::SeqCst);
                 if self.redo_stack.len() > 50 {
                     self.redo_stack.remove(0);
                 }
                 self.show_toast_kind(ui, detail, "success");
             }
-            Err(error) => self.show_toast(ui, error),
+            Err(error) => {
+                if let Ok(mut log) = self.app_state.operation_log.lock() {
+                    log.push(redo_op);
+                }
+                self.show_toast(ui, error);
+            }
         }
     }
 
     fn redo(&mut self, ui: &MainWindow) {
-        let Some(op) = self.redo_stack.pop() else {
+        if self.redo_generation != self.app_state.operation_log_generation.load(Ordering::SeqCst) {
+            self.redo_stack.clear();
+        }
+        let Some(mut op) = self.redo_stack.pop() else {
             self.show_toast(ui, "Nothing to redo.");
             return;
         };
@@ -26242,14 +27041,27 @@ impl NativeController {
         let result = match kind.as_str() {
             "rename" | "move" => {
                 let dest = to.as_deref().unwrap_or("");
-                native_move(&self.app_state, &from, dest)
+                native_move_replay(&self.app_state, &from, dest)
             }
             "copy" => {
-                let dest = to.as_deref().unwrap_or("");
-                fs::copy(&from, dest).map(|_| ()).map_err(|e| e.to_string())
+                let source = Path::new(&from);
+                let dest = Path::new(to.as_deref().unwrap_or(""));
+                if dest.exists() {
+                    Err(format!("Destination already exists: {}", dest.display()))
+                } else if source.is_dir() {
+                    copy_dir_recursive(&self.app_state, source, dest)
+                } else {
+                    fs::copy(source, dest).map(|_| ()).map_err(|e| e.to_string())
+                }
             }
-            "delete" => native_delete_path(&from)
-                .or_else(|_| trash::delete(&from).map_err(|e| e.to_string())),
+            "delete" => {
+                trash::delete(&from).map_err(|e| e.to_string()).map(|()| {
+                    let ids = trash_ids_for_originals(std::slice::from_ref(&from));
+                    op.trash_id = ids.into_iter()
+                        .find(|(path, _)| same_path_string(path, &from))
+                        .map(|(_, id)| id);
+                })
+            },
             "batch_rename" => match &op.batch {
                 None => Err("Missing batch rename metadata".to_string()),
                 Some(ops) => {
@@ -26259,7 +27071,7 @@ impl NativeController {
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| item.to.clone());
-                        if let Err(error) = native_rename(&self.app_state, &item.from, &new_name) {
+                        if let Err(error) = native_rename_replay(&self.app_state, &item.from, &new_name) {
                             outcome = Err(error);
                             break;
                         }
@@ -26274,10 +27086,14 @@ impl NativeController {
                 if let Ok(mut log) = self.app_state.operation_log.lock() {
                     log.push(op);
                 }
+                self.redo_generation = self.app_state.operation_log_generation.load(Ordering::SeqCst);
                 self.refresh(ui);
                 self.show_toast_kind(ui, format!("Redone: {kind}"), "success");
             }
-            Err(error) => self.show_toast(ui, error),
+            Err(error) => {
+                self.redo_stack.push(op);
+                self.show_toast(ui, error);
+            }
         }
     }
 
@@ -26323,42 +27139,6 @@ impl NativeController {
             },
             "success",
         );
-    }
-
-    fn sync_tag_chips(&self, ui: &MainWindow) {
-        let mut chips = Vec::new();
-        for (id, default_label) in [
-            ("red", "Urgent"),
-            ("orange", "Important"),
-            ("yellow", "Review"),
-            ("green", "Done"),
-            ("blue", "Personal"),
-            ("violet", "Code"),
-        ] {
-            let label = self
-                .tag_labels
-                .get(id)
-                .map(|s| s.as_str())
-                .unwrap_or(default_label);
-            chips.push(ChoiceItem {
-                id: ss(format!("tag:{id}")),
-                label: ss(label),
-                description: ss(id),
-                color: tag_color(id),
-            });
-        }
-        ui.set_tag_chips(model_from_vec(chips));
-    }
-
-    fn apply_tag_chip_filter(&mut self, ui: &MainWindow, chip: &str) {
-        let query = if chip.starts_with("tag:") {
-            chip.to_string()
-        } else {
-            format!("tag:{chip}")
-        };
-        ui.set_search_text(ss(&query));
-        self.search_query = query.clone();
-        self.search(ui, query);
     }
 
     fn show_crumb_siblings(&mut self, ui: &MainWindow, index: i32) {
@@ -26442,11 +27222,7 @@ impl NativeController {
     }
 
     fn file_diff_selected(&mut self, ui: &MainWindow) {
-        let paths: Vec<String> = self
-            .active_selected_indices()
-            .into_iter()
-            .filter_map(|i| self.visible_files.get(i).map(|e| e.path.clone()))
-            .collect();
+        let paths = self.selected_paths();
         if paths.len() != 2 {
             self.show_toast(ui, "Select exactly two files to compare.");
             return;
@@ -26486,11 +27262,7 @@ impl NativeController {
     }
 
     fn batch_tag_selected(&mut self, ui: &MainWindow) {
-        let paths: Vec<String> = self
-            .active_selected_indices()
-            .into_iter()
-            .filter_map(|i| self.visible_files.get(i).map(|e| e.path.clone()))
-            .collect();
+        let paths = self.selected_paths();
         if paths.is_empty() {
             self.show_toast(ui, "Select files to tag.");
             return;
@@ -26503,11 +27275,7 @@ impl NativeController {
     }
 
     fn batch_note_selected(&mut self, ui: &MainWindow) {
-        let paths: Vec<String> = self
-            .active_selected_indices()
-            .into_iter()
-            .filter_map(|i| self.visible_files.get(i).map(|e| e.path.clone()))
-            .collect();
+        let paths = self.selected_paths();
         if paths.is_empty() {
             self.show_toast(ui, "Select files to annotate.");
             return;
@@ -26584,6 +27352,10 @@ impl NativeController {
 
     /// Soft-refresh the primary pane listing without respecting active_pane.
     fn refresh_primary_listing(&mut self, ui: &MainWindow) {
+        if !self.search_query.trim().is_empty() && !is_virtual_nav_path(&self.current_path) {
+            self.search(ui, self.search_query.clone());
+            return;
+        }
         if self.current_path == "storage://" && ui.get_is_storage_view() {
             self.rescan_storage(ui);
             return;
@@ -26970,6 +27742,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_primary_refresh(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().refresh_primary_listing(&ui);
+        }
+    });
+
     // Refresh the secondary pane explicitly. Used by the post-drag-drop refresh
     // path so both panes pick up moved files without depending on which pane is
     // currently "active".
@@ -27021,7 +27801,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             let q = query.to_string();
             let mut ctrl = c.borrow_mut();
             if looks_like_path_query(&q) {
-                let _ = ctrl.search_by_path(&ui, &q, true);
+                if !ctrl.search_by_path(&ui, &q, true) {
+                    ctrl.search(&ui, q);
+                }
             } else {
                 ctrl.search(&ui, q);
             }
@@ -27318,6 +28100,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let c = controller.clone();
     ui.on_compare_row_activate(move |path| {
         if let Some(ui) = weak.upgrade() {
+            if ui.get_compare_sync_mode() {
+                return;
+            }
             let left = c.borrow().compare_left.clone();
             let full = Path::new(&left).join(path.as_str());
             if let Some(parent) = full.parent() {
@@ -27328,8 +28113,12 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
     let weak = ui.as_weak();
+    let c = controller.clone();
     ui.on_compare_overlay_close(move || {
         if let Some(ui) = weak.upgrade() {
+            if ui.get_compare_sync_mode() {
+                c.borrow().sync_cancel.store(true, Ordering::Release);
+            }
             ui.set_compare_overlay_visible(false);
         }
     });
@@ -27338,8 +28127,46 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_compare_toggle_hide_same(move || {
         if let Some(ui) = weak.upgrade() {
             let mut ctrl = c.borrow_mut();
+            if ui.get_compare_sync_mode() && (ctrl.sync_running || ctrl.sync_plan.is_none()) {
+                return;
+            }
             ctrl.compare_hide_same = !ctrl.compare_hide_same;
-            ctrl.push_compare_overlay(&ui);
+            if ui.get_compare_sync_mode() {
+                if let Some(plan) = ctrl.sync_plan.as_ref() {
+                    NativeController::render_sync_preview(&ui, plan, ctrl.compare_hide_same);
+                }
+            } else {
+                ctrl.push_compare_overlay(&ui);
+            }
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_sync_preview(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().start_sync_preview(&ui);
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_sync_apply(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().start_sync_apply(&ui);
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_sync_cancel(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow().sync_cancel.store(true, Ordering::Release);
+            ui.set_compare_sync_summary(ss("Stopping after the current file…"));
+        }
+    });
+    let weak = ui.as_weak();
+    let c = controller.clone();
+    ui.on_sync_open_versions(move || {
+        if let Some(ui) = weak.upgrade() {
+            c.borrow_mut().open_sync_versions(&ui);
         }
     });
     let weak = ui.as_weak();
@@ -27364,13 +28191,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     });
     let weak = ui.as_weak();
     let c = controller.clone();
-    ui.on_search_chip(move |op| {
-        if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().search_chip_insert(&ui, op.to_string());
-        }
-    });
-    let weak = ui.as_weak();
-    let c = controller.clone();
     ui.on_search_save_requested(move || {
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut().search_save_current(&ui);
@@ -27380,11 +28200,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_search_help_toggle(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_search_help_visible(!ui.get_search_help_visible());
-            if ui.get_search_help_visible() {
-                ui.set_search_chip_hint(ss(
-                    "Tips: ext:pdf  kind:image  size:>10mb  modified:week  tag:yellow  content:TODO",
-                ));
-            }
         }
     });
     let weak = ui.as_weak();
@@ -27837,13 +28652,29 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 local_ai::read_manifest().state,
                 local_ai::InstallState::Installed
             );
+            let current_profile = local_ai::read_manifest().profile;
+            let needs_install = installed && current_profile != profile;
+            if needs_install {
+                let b = c_ai.borrow();
+                if !b.settings.network_downloads_enabled {
+                    drop(b);
+                    c_ai.borrow_mut().show_toast(&ui,
+                        "Turn on App and model downloads in Settings first.");
+                    return;
+                }
+                if b.ai_progress.busy.load(Ordering::Acquire) {
+                    drop(b);
+                    c_ai.borrow_mut().show_toast(&ui, "A Local AI install is already running.");
+                    return;
+                }
+            }
             {
                 let mut b = c_ai.borrow_mut();
                 b.settings.ai_profile = profile.clone();
                 b.save_settings();
                 b.sync_ai_settings_ui(&ui);
             }
-            if installed {
+            if needs_install {
                 let progress = c_ai.borrow().ai_progress.clone();
                 local_ai::change_profile(progress, profile);
                 ui.set_ai_install_state(SharedString::from("downloading"));
@@ -28464,6 +29295,10 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         let pending_git = controller.borrow().pending_git_status.clone();
         let op_ready = controller.borrow().operation_ready.clone();
         let pending_op = controller.borrow().pending_operation_result.clone();
+        let dupe_ready = controller.borrow().duplicate_scan_ready.clone();
+        let pending_dupe = controller.borrow().pending_duplicate_scan.clone();
+        let sync_ready = controller.borrow().sync_ready.clone();
+        let pending_sync = controller.borrow().pending_sync_result.clone();
         let op_queue_for_progress = controller.borrow().app_state.operation_queue.clone();
         let ai_progress_for_ui = controller.borrow().ai_progress.clone();
         let dir_ready = controller.borrow().directory_ready.clone();
@@ -28503,6 +29338,15 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                     ctrl.pause_folder_watchers();
                                 } else {
                                     ctrl.resume_folder_watchers();
+                                    let query = ctrl.search_query.clone();
+                                    if query.trim().is_empty() {
+                                        ctrl.refresh_primary_listing(&ui);
+                                    } else {
+                                        ctrl.search(&ui, query);
+                                    }
+                                    if ui.get_dual_pane() {
+                                        ctrl.refresh_secondary_listing(&ui);
+                                    }
                                 }
                             }
                         }
@@ -28524,6 +29368,48 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     }
                 }
 
+                if dupe_ready.load(Ordering::Acquire) {
+                    if let (Some(ui), Ok(mut ctrl)) = (weak.upgrade(), c.try_borrow_mut()) {
+                        let result = pending_dupe.lock().ok().and_then(|mut slot| {
+                            let result = slot.take();
+                            if result.is_some() {
+                                dupe_ready.store(false, Ordering::Release);
+                            }
+                            result
+                        });
+                        if let Some(result) = result {
+                            ctrl.apply_duplicate_scan_result(&ui, result);
+                        }
+                    }
+                }
+                if sync_ready.load(Ordering::Acquire) {
+                    if let (Some(ui), Ok(mut ctrl)) = (weak.upgrade(), c.try_borrow_mut()) {
+                        let result = pending_sync.lock().ok().and_then(|mut slot| {
+                            let result = slot.take();
+                            if result.is_some() {
+                                sync_ready.store(false, Ordering::Release);
+                            }
+                            result
+                        });
+                        if let Some(result) = result {
+                            ctrl.apply_sync_work_result(&ui, result);
+                        }
+                    }
+                }
+                if let Some(ui) = weak.upgrade() {
+                    if let Ok(mut ctrl) = c.try_borrow_mut() {
+                        if ctrl.sync_applying {
+                            let done = ctrl.sync_progress.load(Ordering::Acquire);
+                            if done != ctrl.sync_progress_last {
+                                ctrl.sync_progress_last = done;
+                                ui.set_compare_sync_summary(ss(format!(
+                                    "Applying reviewed plan: {done}/{} entries. Previous versions are kept.",
+                                    ctrl.sync_progress_total
+                                )));
+                            }
+                        }
+                    }
+                }
                 let thumb_fired = ready_flag.swap(false, Ordering::AcqRel);
                 let git_fired = git_ready.swap(false, Ordering::AcqRel);
                 let op_fired = op_ready.swap(false, Ordering::AcqRel);
@@ -28685,15 +29571,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                             let semantic_ready = local_ai_semantic_ready_cached();
                             let image_ready = local_ai_image_search_ready_cached();
                             ui.set_semantic_search_available(semantic_ready);
-                            if semantic_ready {
-                                ctrl.settings.search_semantic_mode = true;
-                                ui.set_search_semantic_mode(true);
+                            if !ctrl.settings.ai_ever_installed {
+                                ctrl.settings.search_semantic_mode = semantic_ready;
+                                ctrl.settings.clip_search_enabled = image_ready;
+                                ctrl.settings.ai_ever_installed = true;
+                                ui.set_search_semantic_mode(semantic_ready);
+                                ui.set_clip_search_enabled(image_ready);
+                                ctrl.save_settings();
                             }
-                            if image_ready {
-                                ctrl.settings.clip_search_enabled = true;
-                                ui.set_clip_search_enabled(true);
-                            }
-                            ctrl.save_settings();
                             ctrl.sync_ai_settings_ui(&ui);
                             ctrl.spawn_performance_status(&ui);
                             ctrl.show_toast(&ui, "Local AI installed. Semantic search is ready.");
@@ -28899,9 +29784,14 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                 if same_path_string(&ctrl.search_root(), &result.path)
                                     && ctrl.search_query == result.query
                                 {
-                                    let count = result.entries.len();
                                     let partial = result.partial;
-                                    ctrl.visible_files = result.entries;
+                                    ctrl.search_results = result.entries;
+                                    ctrl.visible_files = ctrl.search_results.iter()
+                                        .filter(|entry| ctrl.show_hidden || !NativeController::is_hidden_entry(entry))
+                                        .cloned()
+                                        .collect();
+                                    ctrl.apply_folder_filter();
+                                    let count = ctrl.visible_files.len();
                                     // Worker already name-sorted. Re-sorting
                                     // up to 25k rows on the UI thread hitch
                                     // maximize + typing; only re-sort when the
@@ -29165,25 +30055,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                 &ui,
                 "Tab: middle-click to close · use command palette for New Window",
             );
-        }
-    });
-
-    let weak = ui.as_weak();
-    let c = controller.clone();
-    ui.on_apply_tag_chip(move |chip| {
-        if let Some(ui) = weak.upgrade() {
-            c.borrow_mut().apply_tag_chip_filter(&ui, &chip);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let c = controller.clone();
-    ui.on_search_source_picked(move |source| {
-        if let Some(ui) = weak.upgrade() {
-            let mut ctrl = c.borrow_mut();
-            ctrl.search_source_pref = source.to_string();
-            ui.set_search_source_pref(ss(&source));
-            ctrl.show_toast_kind(&ui, format!("Search source: {source}"), "info");
         }
     });
 
@@ -31137,8 +32008,11 @@ pub fn run() {
         i_slint_backend_winit::Backend::new().expect("failed to create Slint winit backend"),
     ));
 
-    let initial_settings: NativeSettings =
+    let mut initial_settings: NativeSettings =
         read_native_json("settings.json", NativeSettings::default());
+    if matches!(local_ai::read_manifest().state, local_ai::InstallState::Installed) {
+        initial_settings.ai_ever_installed = true;
+    }
     let restore_maximized = initial_settings.window_maximized;
     let ui = MainWindow::new().expect("failed to create Pathfinder window");
     // Bundled translations must be selected after the first component exists.

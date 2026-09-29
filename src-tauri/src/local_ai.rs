@@ -277,13 +277,49 @@ pub fn bundled_catalog() -> AiCatalog {
     serde_json::from_str(BUNDLED_CATALOG_JSON).expect("bundled ai-catalog.json must parse")
 }
 
+fn catalog_is_valid(catalog: &AiCatalog) -> bool {
+    use std::path::Component;
+    if catalog.schema_version != 1
+        || catalog.assets.is_empty()
+        || catalog.profiles.is_empty()
+        || !catalog.profiles.contains_key(&catalog.default_profile)
+    {
+        return false;
+    }
+    if !catalog.assets.iter().all(|(id, asset)| {
+        let mut components = Path::new(&asset.local_name).components();
+        let safe_name = matches!(components.next(), Some(Component::Normal(_)))
+            && components.next().is_none()
+            && !asset.local_name.contains(':');
+        id == &asset.id
+            && safe_name
+            && asset.url.starts_with("https://")
+            && asset.bytes > 0
+            && asset.sha256.len() == 64
+            && asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && asset.embed_dim.is_none_or(|size| (1..=4096).contains(&size))
+            && asset.max_seq.is_none_or(|size| (1..=4096).contains(&size))
+            && asset.input_size.is_none_or(|size| (32..=1024).contains(&size))
+            && matches!(asset.extract.as_deref(), None | Some("ort_nupkg_win_x64"))
+    }) {
+        return false;
+    }
+    catalog.profiles.iter().all(|(id, profile)| {
+        id == &profile.id
+            && !profile.assets.is_empty()
+            && profile.assets.iter().all(|asset| catalog.assets.contains_key(asset))
+            && profile.assets.contains(&profile.embedding_asset)
+            && profile.assets.contains(&profile.classifier_asset)
+    })
+}
+
 /// Prefer a freshly fetched remote catalog cache; fall back to bundled.
 pub fn active_catalog() -> AiCatalog {
     let cache = catalog_cache_path();
     if cache.is_file() {
         if let Ok(s) = fs::read_to_string(&cache) {
             if let Ok(c) = serde_json::from_str::<AiCatalog>(&s) {
-                if c.schema_version >= 1 && !c.assets.is_empty() {
+                if catalog_is_valid(&c) {
                     return c;
                 }
             }
@@ -452,30 +488,41 @@ pub fn active_model_info() -> Option<ActiveModelInfo> {
 }
 
 fn try_acquire_lock() -> Result<(), String> {
+    use std::io::Write;
     let dir = ai_dir();
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let lock = lock_path();
-    if lock.exists() {
-        if let Ok(meta) = fs::metadata(&lock) {
-            if let Ok(modified) = meta.modified() {
-                if modified
-                    .elapsed()
-                    .unwrap_or(Duration::from_secs(0))
-                    .as_secs()
-                    < LOCK_STALE_SECS
-                {
-                    return Err("Another Local AI install is already running.".into());
-                }
+    let create = || std::fs::OpenOptions::new().write(true).create_new(true).open(&lock);
+    let mut file = match create() {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let stale = fs::metadata(&lock)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .map(|elapsed| elapsed.as_secs() >= LOCK_STALE_SECS)
+                .unwrap_or(false);
+            if !stale {
+                return Err("Another Local AI install is already running.".into());
             }
+            fs::remove_file(&lock).map_err(|e| e.to_string())?;
+            create().map_err(|e| format!("Could not acquire Local AI install lock: {e}"))?
         }
+        Err(error) => return Err(error.to_string()),
+    };
+    if let Err(error) = write!(file, "{}", std::process::id()) {
+        drop(file);
         let _ = fs::remove_file(&lock);
+        return Err(error.to_string());
     }
-    fs::write(&lock, format!("{}", std::process::id())).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-fn release_lock() {
-    let _ = fs::remove_file(lock_path());
+struct InstallLockGuard;
+impl Drop for InstallLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(lock_path());
+    }
 }
 
 fn now_unix_secs() -> u64 {
@@ -707,6 +754,7 @@ fn install_profile_inner(
     updating: bool,
 ) -> Result<Manifest, String> {
     try_acquire_lock()?;
+    let _install_lock = InstallLockGuard;
     let catalog = fetch_catalog_best_effort();
     let profile = resolve_profile(&catalog, profile_id).clone();
     let assets: Vec<CatalogAsset> = profile
@@ -715,7 +763,6 @@ fn install_profile_inner(
         .filter_map(|id| catalog.assets.get(id).cloned())
         .collect();
     if assets.is_empty() {
-        release_lock();
         return Err("Profile has no assets.".into());
     }
 
@@ -762,7 +809,6 @@ fn install_profile_inner(
                 installed.push(row);
             }
             Err(e) => {
-                release_lock();
                 return Err(e);
             }
         }
@@ -800,7 +846,6 @@ fn install_profile_inner(
         installed_models: Vec::new(),
     };
     write_manifest(&manifest);
-    release_lock();
     Ok(manifest)
 }
 
@@ -879,7 +924,7 @@ pub fn fetch_catalog_best_effort() -> AiCatalog {
         Ok(resp) if (200..300).contains(&resp.status()) => {
             if let Ok(body) = resp.into_string() {
                 if let Ok(remote) = serde_json::from_str::<AiCatalog>(&body) {
-                    if remote.schema_version >= 1 && !remote.assets.is_empty() {
+                    if catalog_is_valid(&remote) {
                         let _ = fs::create_dir_all(ai_dir());
                         let _ = fs::write(catalog_cache_path(), body);
                         // Prefer whichever catalog_version string compares newer
@@ -1075,6 +1120,7 @@ mod tests {
     #[test]
     fn bundled_catalog_parses_and_has_profiles() {
         let c = bundled_catalog();
+        assert!(catalog_is_valid(&c));
         assert!(c.profiles.contains_key("balanced"));
         assert!(c.profiles.contains_key("compact"));
         assert!(c.profiles.contains_key("quality"));
@@ -1084,6 +1130,13 @@ mod tests {
         // Storage should grow Compact < Balanced < Quality.
         assert_eq!(c.profiles["balanced"].embedding_asset, "bge-small-quant");
         assert_eq!(c.profiles["quality"].classifier_asset, "efficientnet-lite4");
+    }
+
+    #[test]
+    fn catalog_rejects_unbounded_model_dimensions() {
+        let mut catalog = bundled_catalog();
+        catalog.assets.get_mut("efficientnet-lite4").unwrap().input_size = Some(0);
+        assert!(!catalog_is_valid(&catalog));
     }
 
     #[test]

@@ -120,6 +120,8 @@ export struct ShortcutEditItem {
 export struct CompareRowItem {
     path: string,
     status: string,
+    result_state: string,
+    detail: string,
     left_size: string,
     right_size: string,
 }
@@ -3784,12 +3786,18 @@ export component MainWindow inherits Window {
     in-out property <string> compare_overlay_right: "";
     in-out property <bool> compare_overlay_hide_same: false;
     in-out property <[CompareRowItem]> compare_rows;
+    in-out property <bool> compare_sync_mode: false;
+    in-out property <bool> compare_sync_ready: false;
+    in-out property <bool> compare_sync_running: false;
+    in-out property <bool> compare_sync_delete_extra: false;
+    in-out property <bool> compare_sync_has_versions: false;
+    in-out property <string> compare_sync_exclusions: "";
+    in-out property <string> compare_sync_summary: "";
     in-out property <bool> dupe_overlay_visible: false;
     in-out property <string> dupe_overlay_title: "";
     in-out property <string> dupe_overlay_subtitle: "";
     in-out property <[DupeGroupItem]> dupe_groups;
     in-out property <bool> search_help_visible: false;
-    in-out property <string> search_chip_hint: "";
     in-out property <bool> queue_busy: false;
     in-out property <string> queue_busy_text: "";
     in-out property <int> welcome_step: 0;
@@ -3811,10 +3819,14 @@ export component MainWindow inherits Window {
     callback compare_row_activate(string);
     callback compare_overlay_close();
     callback compare_toggle_hide_same();
+    callback sync_preview();
+    callback sync_apply();
+    callback sync_cancel();
+    callback sync_open_versions();
+    callback primary_refresh();
     callback dupe_group_keep(string);
     callback dupe_group_delete_others(string);
     callback dupe_overlay_close();
-    callback search_chip(string);
     callback search_save_requested();
     callback search_help_toggle();
     callback queue_pill_clicked();
@@ -3848,9 +3860,7 @@ export component MainWindow inherits Window {
     // When non-empty, toast shows an action button (e.g. "Undo").
     in-out property <string> toast_action: "";
     in-out property <bool> folder_changed_banner: false;
-    in-out property <string> search_source_pref: "auto";
     in-out property <float> thumb_size_scale: 1.0;
-    in-out property <[ChoiceItem]> tag_chips: [];
     in-out property <[ChoiceItem]> crumb_sibling_items: [];
     in-out property <bool> crumb_siblings_visible: false;
     in-out property <int> crumb_siblings_index: -1;
@@ -3938,8 +3948,6 @@ export component MainWindow inherits Window {
     callback preview_action(string);
     callback tab_middle_close(int);
     callback tab_context(int);
-    callback apply_tag_chip(string);
-    callback search_source_picked(string);
     callback dupe_keep_strategy(string);
     callback redo_command();
     callback batch_tag_selected();
@@ -4946,7 +4954,10 @@ export component MainWindow inherits Window {
                     }
                     accepted => { root.search_immediate(self.text); }
                     key-pressed(event) => {
-                        if (event.text == Key.Escape) {
+                        if (event.text == Key.Escape && root.search_help_visible) {
+                            root.search_help_toggle();
+                            accept
+                        } else if (event.text == Key.Escape) {
                             self.text = "";
                             root.search_text = "";
                             root.search_requested("");
@@ -5053,7 +5064,10 @@ export component MainWindow inherits Window {
                     }
                     accepted => { root.search_immediate(self.text); }
                     key-pressed(event) => {
-                        if (event.text == Key.Escape) {
+                        if (event.text == Key.Escape && root.search_help_visible) {
+                            root.search_help_toggle();
+                            accept
+                        } else if (event.text == Key.Escape) {
                             self.text = "";
                             root.search_text = "";
                             root.search_requested("");
@@ -5091,7 +5105,7 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // Search help (?) + save bookmark + optional chip strip
+            // Search reference and saved searches
             ToolButton {
                 visible: toolbar.show_toolbar_search;
                 x: toolbar.tb_search_x + toolbar.tb_search_w + 4px;
@@ -5100,7 +5114,7 @@ export component MainWindow inherits Window {
                 button_height: 31px;
                 active: root.search_help_visible;
                 text_label: "?";
-                tooltip: @tr("Search operators");
+                tooltip: @tr("Search help and examples");
                 clicked => { root.search_help_toggle(); }
             }
             ToolButton {
@@ -5118,101 +5132,81 @@ export component MainWindow inherits Window {
                 x: toolbar.tb_search_x;
                 y: 40px;
                 width: min(460px, parent.width - toolbar.tb_search_x - 12px);
-                height: root.search_chip_hint != "" ? 118px : 96px;
+                height: 344px;
                 border-radius: AppMetrics.radius_small;
                 border-width: 1px;
                 border-color: ThemePalette.border_strong;
                 background: ThemePalette.panel_solid;
                 drop-shadow-blur: 12px;
                 drop-shadow-color: rgba(0, 0, 0, 0.3);
-                HorizontalLayout {
-                    x: 6px; y: 4px;
-                    width: parent.width - 12px;
-                    height: 26px;
-                    spacing: 4px;
-                    for chip_label[ci] in ["ext:", "kind:", "size:", "modified:", "tag:", "content:"]: Rectangle {
-                        property <string> chip_op: chip_label;
-                        preferred-width: chip_txt.preferred-width + 12px;
-                        width: self.preferred-width;
-                        height: 24px;
-                        border-radius: 4px;
-                        border-width: 1px;
-                        border-color: ThemePalette.border;
-                        background: chip_ta.has-hover ? ThemePalette.accent_soft : ThemePalette.panel_alt;
-                        chip_txt := Text {
-                            width: parent.width; height: parent.height;
-                            text: chip_label;
-                            color: ThemePalette.text_muted;
-                            font-size: 10.5px;
+                // Consume clicks on the reference rather than the file list below.
+                TouchArea { }
+                Text {
+                    x: 12px; y: 10px; width: parent.width - 50px; height: 24px;
+                    text: @tr("Search beyond filenames");
+                    color: ThemePalette.text;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+                ToolButton {
+                    x: parent.width - 34px; y: 8px;
+                    button_width: 24px; button_height: 24px;
+                    icon_data: "M18 6L6 18 M6 6l12 12";
+                    tooltip: @tr("Close search help");
+                    clicked => { root.search_help_toggle(); }
+                }
+                Text {
+                    x: 12px; y: 40px; width: parent.width - 24px; height: 54px;
+                    text: @tr("Filter narrows the visible list by name. Search can find files by type, size, date or text inside a file. Click an example to search:");
+                    color: ThemePalette.text_muted;
+                    font-size: 11.5px;
+                    wrap: word-wrap;
+                }
+                VerticalLayout {
+                    x: 12px; y: 100px;
+                    width: parent.width - 24px; height: 154px;
+                    spacing: 0px;
+                    for example in [
+                        { query: "ext:pdf", meaning: @tr("PDF files") },
+                        { query: "kind:image", meaning: @tr("Images") },
+                        { query: "size:>10mb", meaning: @tr("Files larger than 10 MB") },
+                        { query: "modified:week", meaning: @tr("Changed in the last 7 days") },
+                        { query: "name:\"annual report\"", meaning: @tr("A phrase in the filename") },
+                        { query: "content:TODO", meaning: @tr("Text inside supported files") },
+                        { query: "tag:yellow", meaning: @tr("Files with the yellow tag") }
+                    ]: HorizontalLayout {
+                        spacing: 10px;
+                        Text {
+                            width: 164px;
+                            text: example.query;
+                            color: ThemePalette.accent_strong;
                             font-family: AppMetrics.mono_font;
-                            horizontal-alignment: center;
+                            font-size: 11px;
                             vertical-alignment: center;
                         }
-                        chip_ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.search_chip(chip_op); }
-                        }
-                    }
-                }
-                HorizontalLayout {
-                    x: 6px; y: 32px;
-                    width: parent.width - 12px;
-                    height: 24px;
-                    spacing: 4px;
-                    for src[si] in ["auto", "index", "live", "windows"]: Rectangle {
-                        preferred-width: src_txt.preferred-width + 14px;
-                        width: self.preferred-width;
-                        height: 22px;
-                        border-radius: 4px;
-                        border-width: 1px;
-                        border-color: root.search_source_pref == src ? ThemePalette.accent : ThemePalette.border;
-                        background: root.search_source_pref == src ? ThemePalette.accent_soft : ThemePalette.panel_alt;
-                        src_txt := Text {
-                            width: parent.width; height: parent.height;
-                            text: src;
+                        Text {
+                            text: example.meaning;
                             color: ThemePalette.text_muted;
-                            font-size: 10px;
-                            horizontal-alignment: center;
+                            font-size: 11px;
                             vertical-alignment: center;
+                            overflow: elide;
                         }
                         TouchArea {
                             mouse-cursor: pointer;
-                            clicked => { root.search_source_picked(src); }
+                            clicked => {
+                                root.search_text = example.query;
+                                root.search_help_visible = false;
+                                root.search_immediate(example.query);
+                            }
                         }
                     }
                 }
-                HorizontalLayout {
-                    x: 6px; y: 58px;
-                    width: parent.width - 12px;
-                    height: 24px;
-                    spacing: 4px;
-                    for chip[ti] in root.tag_chips: Rectangle {
-                        preferred-width: tag_chip_txt.preferred-width + 16px;
-                        width: self.preferred-width;
-                        height: 22px;
-                        border-radius: 11px;
-                        background: chip.color;
-                        tag_chip_txt := Text {
-                            width: parent.width; height: parent.height;
-                            text: chip.label;
-                            color: white;
-                            font-size: 10px;
-                            font-weight: 600;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.apply_tag_chip(chip.id); }
-                        }
-                    }
-                }
-                if root.search_chip_hint != "": Text {
-                    x: 8px; y: 86px; width: parent.width - 16px; height: 18px;
-                    text: root.search_chip_hint;
-                    color: ThemePalette.text_faint;
-                    font-size: 10.5px;
-                    overflow: elide;
+                Text {
+                    x: 12px; y: 264px; width: parent.width - 24px; height: 68px;
+                    text: @tr("Combine rules: ext:pdf modified:week\nUse tag searches on their own.\nContent: text files up to 1 MB; PDF, DOCX and PPTX up to 8 MB. No image text recognition.");
+                    color: ThemePalette.text_muted;
+                    font-size: 11px;
+                    wrap: word-wrap;
                 }
             }
 
@@ -10251,13 +10245,19 @@ export component MainWindow inherits Window {
         width: parent.width;
         height: parent.height;
         background: rgba(0, 0, 0, 0.42);
-        TouchArea { clicked => { root.compare_overlay_close(); } }
+        TouchArea {
+            clicked => {
+                if (!root.compare_sync_mode || !root.compare_sync_running) {
+                    root.compare_overlay_close();
+                }
+            }
+        }
         Rectangle {
             opacity: parent.shown;
-            x: (parent.width - min(560px, parent.width - 32px)) / 2;
-            y: (parent.height - min(440px, parent.height - 32px)) / 2 + parent.rise;
-            width: min(560px, parent.width - 32px);
-            height: min(440px, parent.height - 32px);
+            x: (parent.width - min(root.compare_sync_mode ? 680px : 560px, parent.width - 32px)) / 2;
+            y: (parent.height - min(root.compare_sync_mode ? 560px : 440px, parent.height - 32px)) / 2 + parent.rise;
+            width: min(root.compare_sync_mode ? 680px : 560px, parent.width - 32px);
+            height: min(root.compare_sync_mode ? 560px : 440px, parent.height - 32px);
             border-width: 1px;
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
@@ -10272,11 +10272,17 @@ export component MainWindow inherits Window {
             }
             Text {
                 x: 18px; y: 40px; width: parent.width - 36px; height: 16px;
-                text: root.compare_overlay_left + "  ↔  " + root.compare_overlay_right;
+                text: root.compare_overlay_left + (root.compare_sync_mode ? "  →  " : "  ↔  ") + root.compare_overlay_right;
                 color: ThemePalette.text_faint; font-size: 11px; overflow: elide;
             }
+            if root.compare_sync_mode: Text {
+                x: 18px; y: 62px; width: parent.width - 36px; height: 34px;
+                text: root.compare_sync_summary;
+                color: ThemePalette.text_muted; font-size: 11px; wrap: word-wrap; overflow: elide;
+            }
             Rectangle {
-                x: 18px; y: 62px; width: 160px; height: 26px;
+                x: 18px; y: root.compare_sync_mode ? 100px : 62px; width: 160px; height: 26px;
+                opacity: root.compare_sync_mode && (root.compare_sync_running || !root.compare_sync_ready) ? 0.55 : 1;
                 border-radius: AppMetrics.radius_small;
                 border-width: 1px;
                 border-color: root.compare_overlay_hide_same ? ThemePalette.accent : ThemePalette.border;
@@ -10287,19 +10293,67 @@ export component MainWindow inherits Window {
                     color: root.compare_overlay_hide_same ? ThemePalette.accent_strong : ThemePalette.text_muted;
                     font-size: 11.5px; vertical-alignment: center;
                 }
-                hide_same_ta := TouchArea { mouse-cursor: pointer; clicked => { root.compare_toggle_hide_same(); } }
+                hide_same_ta := TouchArea {
+                    mouse-cursor: root.compare_sync_mode && (root.compare_sync_running || !root.compare_sync_ready) ? default : pointer;
+                    clicked => {
+                        if (!root.compare_sync_mode || (root.compare_sync_ready && !root.compare_sync_running)) {
+                            root.compare_toggle_hide_same();
+                        }
+                    }
+                }
+            }
+            if root.compare_sync_mode: Text {
+                x: 18px; y: 136px; width: 84px; height: 25px;
+                text: @tr("Exclude"); color: ThemePalette.text_muted; font-size: 12px; vertical-alignment: center;
+            }
+            if root.compare_sync_mode: LineEdit {
+                x: 104px; y: 134px; width: parent.width - 122px; height: 28px;
+                text: root.compare_sync_exclusions;
+                enabled: !root.compare_sync_running;
+                placeholder-text: @tr("Patterns separated by commas, e.g. *.tmp, node_modules/**");
+                edited(value) => { root.compare_sync_exclusions = value; root.compare_sync_ready = false; }
+            }
+            if root.compare_sync_mode: Rectangle {
+                x: 18px; y: 169px; width: parent.width - 36px; height: 29px;
+                opacity: root.compare_sync_running ? 0.55 : 1;
+                border-width: 1px;
+                border-color: root.compare_sync_delete_extra ? ThemePalette.warning : ThemePalette.border;
+                border-radius: AppMetrics.radius_small;
+                background: root.compare_sync_delete_extra ? ThemePalette.accent_soft : ThemePalette.panel_alt;
+                Text {
+                    x: 10px; width: parent.width - 20px; height: parent.height;
+                    text: root.compare_sync_delete_extra ? @tr("Delete destination-only items: On (previous versions kept)") : @tr("Delete destination-only items: Off (default)");
+                    color: ThemePalette.text; font-size: 11.5px; vertical-alignment: center;
+                }
+                TouchArea {
+                    mouse-cursor: root.compare_sync_running ? default : pointer;
+                    clicked => {
+                        if (!root.compare_sync_running) {
+                            root.compare_sync_delete_extra = !root.compare_sync_delete_extra;
+                            root.compare_sync_ready = false;
+                        }
+                    }
+                }
             }
             ScrollView {
-                x: 12px; y: 96px; width: parent.width - 24px; height: parent.height - 152px;
+                x: 12px; y: root.compare_sync_mode ? 208px : 96px;
+                width: parent.width - 24px;
+                height: parent.height - (root.compare_sync_mode ? 308px : 152px);
                 for row[ri] in root.compare_rows: Rectangle {
                     width: parent.width - 8px - AppMetrics.scroll_gutter;
                     height: 40px;
                     border-radius: AppMetrics.radius_small;
-                    background: cmp_ta.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
+                    background: !root.compare_sync_mode && cmp_ta.has-hover ? ThemePalette.accent_soft : rgba(0, 0, 0, 0);
                     property <color> status_color:
+                        row.result_state == "done" ? ThemePalette.success :
+                        row.result_state == "cancelled" ? ThemePalette.text_muted :
+                        row.result_state == "skipped" ? ThemePalette.warning :
                         row.status == "same" ? ThemePalette.success :
+                        (row.status == "copy" || row.status == "create folder" ? ThemePalette.accent :
+                        (row.status == "update" ? ThemePalette.warning :
+                        (row.status == "extra — kept" ? ThemePalette.text_muted :
                         (row.status == "left-only" || row.status == "newer-left" ? ThemePalette.accent :
-                        (row.status == "right-only" || row.status == "newer-right" ? ThemePalette.warning : ThemePalette.danger));
+                        (row.status == "right-only" || row.status == "newer-right" ? ThemePalette.warning : ThemePalette.danger)))));
                     Rectangle {
                         x: 8px; y: 12px; width: 8px; height: 8px;
                         border-radius: 4px;
@@ -10312,19 +10366,43 @@ export component MainWindow inherits Window {
                     }
                     Text {
                         x: 24px; y: 22px; width: parent.width - 160px; height: 14px;
-                        text: row.status + " · L " + row.left_size + " · R " + row.right_size;
+                        text: root.compare_sync_mode && row.detail != ""
+                            ? row.status + " · " + row.detail
+                            : root.compare_sync_mode && row.left_size == ""
+                            ? (row.right_size == "" ? row.status : row.status + " · " + row.right_size)
+                            : row.status + " · L " + row.left_size + " · R " + row.right_size;
                         color: ThemePalette.text_faint; font-size: 10.5px; overflow: elide;
                     }
                     cmp_ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.compare_row_activate(row.path); }
+                        mouse-cursor: root.compare_sync_mode ? default : pointer;
+                        clicked => { if (!root.compare_sync_mode) { root.compare_row_activate(row.path); } }
                     }
                 }
             }
+            if root.compare_sync_mode && !root.compare_sync_running: DialogButton {
+                x: 18px; y: parent.height - 48px;
+                label: @tr("Preview changes");
+                clicked => { root.sync_preview(); }
+            }
+            if root.compare_sync_mode && root.compare_sync_running: DialogButton {
+                x: 18px; y: parent.height - 48px;
+                label: @tr("Stop sync"); danger: true;
+                clicked => { root.sync_cancel(); }
+            }
+            if root.compare_sync_mode && root.compare_sync_has_versions: DialogButton {
+                x: 18px; y: parent.height - 88px;
+                label: @tr("Open recovery folder");
+                clicked => { root.sync_open_versions(); }
+            }
+            if root.compare_sync_mode && root.compare_sync_ready && !root.compare_sync_running: DialogButton {
+                x: parent.width - 225px; y: parent.height - 48px;
+                label: @tr("Apply preview"); primary: true;
+                clicked => { root.sync_apply(); }
+            }
             DialogButton {
                 x: parent.width - self.preferred-width - 18px; y: parent.height - 48px;
-                label: @tr("Close");
-                primary: true;
+                label: root.compare_sync_mode && root.compare_sync_running ? @tr("Stop & close") : @tr("Close");
+                primary: !root.compare_sync_mode;
                 clicked => { root.compare_overlay_close(); }
             }
         }
