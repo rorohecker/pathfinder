@@ -106,7 +106,7 @@ impl Chord {
         if self.alt {
             parts.push("Alt".to_string());
         }
-        if self.shift && !shift_implied(&self.key) {
+        if self.shift {
             parts.push("Shift".to_string());
         }
         parts.push(display_key(&self.key));
@@ -119,10 +119,6 @@ impl Chord {
             && self.shift == shift
             && self.key.eq_ignore_ascii_case(&normalize_key_name(key))
     }
-}
-
-fn shift_implied(key: &str) -> bool {
-    matches!(key, "," | "." | ";" | "/" | "\\" | "'" | "[" | "]")
 }
 
 /// Map Slint `event.text` (control chars / PUA) and typed names onto one key id.
@@ -204,6 +200,28 @@ pub fn hint_for(command: &str, overrides: &HashMap<String, String>, default_hint
         return (*chord).to_string();
     }
     default_hint.to_string()
+}
+
+/// Find another command that would claim this chord after an edit.
+pub fn chord_conflict(
+    command: &str,
+    chord: &Chord,
+    overrides: &HashMap<String, String>,
+) -> Option<String> {
+    for (other, raw) in overrides {
+        if other != command && Chord::parse(raw).as_ref() == Some(chord) {
+            return Some(other.clone());
+        }
+    }
+    for (other, raw) in DEFAULT_SHORTCUTS {
+        if *other != command
+            && !overrides.contains_key(*other)
+            && Chord::parse(raw).as_ref() == Some(chord)
+        {
+            return Some((*other).to_string());
+        }
+    }
+    None
 }
 
 /// Resolve a physical key event to a command id.
@@ -338,6 +356,12 @@ mod tests {
     }
 
     #[test]
+    fn shifted_punctuation_round_trips() {
+        let chord = Chord::from_parts(true, true, false, ",").unwrap();
+        assert_eq!(Chord::parse(&chord.display()), Some(chord));
+    }
+
+    #[test]
     fn canonical_key_maps_slint_control_chars() {
         assert_eq!(canonical_key("\u{001b}"), "Escape");
         assert_eq!(canonical_key("\u{0008}"), "Backspace");
@@ -368,6 +392,18 @@ mod tests {
         map.insert("copy".into(), "Ctrl+E".into());
         assert_eq!(hint_for("copy", &map, "Ctrl+C"), "Ctrl+E");
         assert_eq!(hint_for("cut", &map, "Ctrl+X"), "Ctrl+X");
+    }
+
+    #[test]
+    fn detects_conflicts_with_defaults_and_overrides() {
+        let mut map = HashMap::new();
+        let copy = Chord::parse("Ctrl+C").unwrap();
+        assert_eq!(chord_conflict("cut", &copy, &map).as_deref(), Some("copy"));
+        map.insert("copy".into(), "Ctrl+E".into());
+        assert_eq!(chord_conflict("cut", &copy, &map), None);
+        let custom = Chord::parse("Ctrl+E").unwrap();
+        assert_eq!(chord_conflict("cut", &custom, &map).as_deref(), Some("copy"));
+        assert_eq!(chord_conflict("copy", &custom, &map), None);
     }
 
     #[test]

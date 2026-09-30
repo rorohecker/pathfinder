@@ -22900,6 +22900,16 @@ impl NativeController {
                     ui.set_shortcut_consumed(true);
                     return;
                 };
+                if let Some(other) = shortcuts::chord_conflict(&target, &built, &self.shortcut_draft) {
+                    let label = ALL_COMMANDS
+                        .iter()
+                        .find(|(_, _, _, command)| *command == other)
+                        .map(|(_, label, _, _)| i18n::t(label))
+                        .unwrap_or(other);
+                    self.show_toast_kind(ui, format!("Shortcut already used by {label}"), "error");
+                    ui.set_shortcut_consumed(true);
+                    return;
+                }
                 self.shortcut_draft.insert(target, built.display());
             }
             ui.set_shortcut_capture_active(false);
@@ -26247,7 +26257,7 @@ impl NativeController {
         ui.set_tool_overlay_kind(ss("shortcuts"));
         ui.set_tool_overlay_title(ss(&i18n::t("Shortcut Editor")));
         ui.set_tool_overlay_subtitle(ss(&i18n::t(
-            "Click a row and press a key combination. Save to apply.",
+            "Click a row and press a key combination. Backspace restores its default. Save to apply.",
         )));
         ui.set_shortcut_edit_items(model_from_vec(items));
         ui.set_tool_overlay_visible(true);
@@ -31611,6 +31621,10 @@ fn apply_mica(ui: &MainWindow) {
 
     const DWMWA_SYSTEMBACKDROP_TYPE_ID: i32 = 38;
     const DWMSBT_MAINWINDOW: i32 = 2;
+    // Windows 11 rounds this custom-frame window when restored and keeps it
+    // square while maximized or snapped. Older Windows ignores this hint.
+    const DWMWA_WINDOW_CORNER_PREFERENCE_ID: i32 = 33;
+    const DWMWCP_ROUND: i32 = 2;
 
     ui.window().with_winit_window(|window| {
         let Ok(handle) = window.window_handle() else {
@@ -31626,6 +31640,12 @@ fn apply_mica(ui: &MainWindow) {
                 DWMWINDOWATTRIBUTE(DWMWA_SYSTEMBACKDROP_TYPE_ID),
                 &DWMSBT_MAINWINDOW as *const _ as *const _,
                 std::mem::size_of_val(&DWMSBT_MAINWINDOW) as u32,
+            );
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWINDOWATTRIBUTE(DWMWA_WINDOW_CORNER_PREFERENCE_ID),
+                &DWMWCP_ROUND as *const _ as *const _,
+                std::mem::size_of_val(&DWMWCP_ROUND) as u32,
             );
         }
     });

@@ -4,4 +4,6 @@ This release adds opt-in document-content search with snippets and optional on-d
 
 The update installer now requires an official versioned x64 release asset, its advertised size, and SHA-256 digest. Shell registration restores previous values only while Pathfinder still owns them. The privacy copy accurately describes automatic GitHub update checks, and the opt-in content index can be removed from the app. See [the security review](SECURITY_REVIEW_2026-09-29.md) for storage and encryption behavior.
 
+Settings now shows useful default keyboard shortcuts and opens the custom shortcut editor with clearer reset guidance; conflicting assignments are rejected. Windows 11 requests rounded corners in windowed mode while keeping the custom Settings, minimize, maximize, and close controls at the top. The Settings heading uses regular weight.
+
 Limits: folder transfers are not yet fully transactional; some sync and replacement crash points still need manual recovery. The content index stores extracted text in the user's local profile unless Windows volume encryption is enabled. OCR requires supported Windows language packs and runtime validation. Installers are not code signed, and installer success does not yet have a durable in-app receipt. Remaining audit items are tracked in [implementation status](IMPLEMENTATION_STATUS_2026-09-28.md).

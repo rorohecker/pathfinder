@@ -11,6 +11,21 @@ msgstr ""
 "Language: it\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
+msgid "Keyboard shortcuts"
+msgstr "Scorciatoie da tastiera"
+
+msgid "Customize"
+msgstr "Personalizza"
+
+msgid "Defaults: Ctrl+P commands  ·  Ctrl+L address  ·  F3 dual pane"
+msgstr "Predefiniti: Ctrl+P comandi  ·  Ctrl+L indirizzo  ·  F3 doppio pannello"
+
+msgid "Customize any command; Backspace restores its default shortcut."
+msgstr "Personalizza ogni comando; Backspace ripristina la scorciatoia predefinita."
+
+msgid "Click a row and press a key combination. Backspace restores its default. Save to apply."
+msgstr "Fai clic su una riga e premi una combinazione. Backspace ripristina il valore predefinito. Salva per applicare."
+
 msgid "Close tab"
 msgstr "Chiudi scheda"
 
