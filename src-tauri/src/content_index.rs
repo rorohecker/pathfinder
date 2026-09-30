@@ -4,10 +4,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::fs;
 #[cfg(windows)]
 use std::future::IntoFuture;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{LazyLock, Mutex, TryLockError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 const MAX_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
@@ -246,6 +248,19 @@ fn modified_ns(meta: &fs::Metadata) -> Option<String> {
         .map(|duration| duration.as_nanos().to_string())
 }
 
+fn is_efs_encrypted(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        meta.file_attributes() & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_ENCRYPTED.0
+            != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
 fn supported(path: &Path) -> bool {
     let ext = super::extension(path);
     matches!(ext.as_str(), "pdf" | "docx" | "pptx")
@@ -281,7 +296,10 @@ fn extract_pdf_bounded(path: &Path, _source_len: u64) -> Option<String> {
 }
 
 fn extract(path: &Path, meta: &fs::Metadata, ocr: bool) -> Option<String> {
-    if meta.len() > MAX_SOURCE_BYTES || super::cloud_files::hydration_risk(path) {
+    if is_efs_encrypted(meta)
+        || meta.len() > MAX_SOURCE_BYTES
+        || super::cloud_files::hydration_risk(path)
+    {
         return None;
     }
     let ext = super::extension(path);
@@ -421,9 +439,16 @@ pub fn scan_with_cancel(
     root: &Path,
     cancelled: impl Fn() -> bool,
 ) -> Result<RootStatus, String> {
-    let _guard = SCAN_LOCK
-        .try_lock()
-        .map_err(|_| "A content scan is already running".to_string())?;
+    let _guard = loop {
+        if cancelled() {
+            return Err("Content scan cancelled".into());
+        }
+        match SCAN_LOCK.try_lock() {
+            Ok(guard) => break guard,
+            Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(25)),
+            Err(error) => return Err(error.to_string()),
+        }
+    };
     let key = root_key(root)?;
     let mut conn = open_at(db)?;
     let ocr: bool = conn
@@ -477,6 +502,12 @@ pub fn scan_with_cancel(
                 continue;
             }
         };
+        // EFS contents must not be copied into the plaintext search database.
+        // The stale-row pass also removes a document encrypted since last scan.
+        if is_efs_encrypted(&meta) {
+            skipped += 1;
+            continue;
+        }
         let stamp = match modified_ns(&meta) {
             Some(stamp) => stamp,
             None => {
@@ -681,6 +712,9 @@ pub fn search_with_filter(
         let Ok(meta) = fs::metadata(&path) else {
             continue;
         };
+        if is_efs_encrypted(&meta) {
+            continue;
+        }
         if meta.len() != size.max(0) as u64 || modified_ns(&meta).as_deref() != Some(stamp.as_str())
         {
             continue;
@@ -772,6 +806,27 @@ mod tests {
         .unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].path.ends_with("b.txt"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn queued_scan_waits_for_active_scan() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pathfinder-content-queued-{nonce}"));
+        let root = dir.join("documents");
+        let db = dir.join("index.sqlite3");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("note.txt"), "queue test").unwrap();
+        add_root(&db, &root).unwrap();
+        let active = SCAN_LOCK.lock().unwrap();
+        let worker =
+            std::thread::spawn(move || scan(&db, &root, &AtomicBool::new(false)).unwrap().indexed);
+        std::thread::sleep(Duration::from_millis(50));
+        drop(active);
+        assert_eq!(worker.join().unwrap(), 1);
         let _ = fs::remove_dir_all(dir);
     }
 }

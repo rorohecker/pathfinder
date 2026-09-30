@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -64,6 +66,37 @@ fn modified_ns(meta: &fs::Metadata) -> Result<u128, String> {
         })
         .map(|elapsed| elapsed.as_nanos())
         .map_err(|error| error.to_string())
+}
+
+fn is_efs_encrypted(path: &Path) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        let meta = fs::metadata(path).map_err(|error| error.to_string())?;
+        Ok(
+            meta.file_attributes()
+                & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_ENCRYPTED.0
+                != 0,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
+#[cfg(windows)]
+fn encrypt_stage(stage: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::EncryptFileW;
+    use windows::core::PCWSTR;
+    let wide: Vec<u16> = stage.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe { EncryptFileW(PCWSTR(wide.as_ptr())) }
+        .map_err(|error| format!("Cannot protect EFS transfer stage: {error}"))?;
+    if !is_efs_encrypted(stage)? {
+        return Err("EFS transfer stage is not encrypted".into());
+    }
+    Ok(())
 }
 
 fn plan_path(dir: &Path, id: u64) -> PathBuf {
@@ -145,6 +178,14 @@ fn start_with_kind(
         .create_new(true)
         .open(&stage)
         .map_err(|error| format!("Cannot reserve transfer stage: {error}"))?;
+    #[cfg(windows)]
+    if meta.file_attributes() & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_ENCRYPTED.0 != 0
+    {
+        if let Err(error) = encrypt_stage(&stage) {
+            let _ = fs::remove_file(&stage);
+            return Err(error);
+        }
+    }
     let plan = TransferPlan {
         id,
         kind: kind.into(),
@@ -250,6 +291,11 @@ pub fn run(
     // success. Reconcile that phase from the actual bytes before retrying.
     if !plan.stage.exists() && plan.destination.is_file() {
         validate_source_fingerprint(&plan)?;
+        if is_efs_encrypted(&plan.source)? && !is_efs_encrypted(&plan.destination)? {
+            return Err(
+                "Encrypted source has an unencrypted destination; source was preserved".into(),
+            );
+        }
         if files_equal(&plan.source, &plan.destination)? {
             plan.status = "done".into();
             plan.error.clear();
@@ -260,6 +306,11 @@ pub fn run(
     }
     let result = (|| -> Result<(), String> {
         validate_source(&plan)?;
+        if is_efs_encrypted(&plan.source)? && !is_efs_encrypted(&plan.stage)? {
+            return Err(
+                "Encrypted source has an unencrypted transfer stage; copy was stopped".into(),
+            );
+        }
         let offset = verify_prefix(&plan)?;
         let mut source = File::open(&plan.source).map_err(|error| error.to_string())?;
         let mut stage = OpenOptions::new()
@@ -303,6 +354,11 @@ pub fn run(
         stage.sync_all().map_err(|error| error.to_string())?;
         persist(dir, &plan)?;
         validate_source(&plan)?;
+        if is_efs_encrypted(&plan.source)? && !is_efs_encrypted(&plan.stage)? {
+            return Err(
+                "Encrypted source lost stage encryption; destination was not published".into(),
+            );
+        }
         // rename cannot replace a changed target: the existing-target check is
         // repeated immediately before commit. Other processes can still race;
         // Windows rename fails when the target appears, which is safe.
