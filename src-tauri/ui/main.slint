@@ -3880,7 +3880,6 @@ export component MainWindow inherits Window {
     // When non-empty, toast shows an action button (e.g. "Undo").
     in-out property <string> toast_action: "";
     in-out property <bool> folder_changed_banner: false;
-    in-out property <float> thumb_size_scale: 1.0;
     in-out property <[ChoiceItem]> crumb_sibling_items: [];
     in-out property <bool> crumb_siblings_visible: false;
     in-out property <int> crumb_siblings_index: -1;
@@ -3975,7 +3974,6 @@ export component MainWindow inherits Window {
     callback batch_note_selected();
     callback folder_changed_refresh();
     callback new_window();
-    callback thumb_size_changed(float);
     callback file_diff_selected();
     in-out property <bool> welcome_visible: false;
     in-out property <string> welcome_default_status: @tr("Click Set as default below to register Pathfinder for folder shortcuts in Explorer.");
@@ -4144,8 +4142,8 @@ export component MainWindow inherits Window {
     property <length> grid_cell_w: root.file_area_w / root.grid_columns;
     property <length> secondary_grid_cell_w: root.secondary_file_area_w / root.secondary_grid_columns;
     out property <length> grid_item_h: root.view_mode == "gallery"
-        ? (154px * root.thumb_size_scale)
-        : (root.view_mode == "compact" ? 32px : (AppMetrics.grid_h * root.thumb_size_scale));
+        ? 154px
+        : (root.view_mode == "compact" ? 32px : AppMetrics.grid_h);
     out property <length> secondary_grid_item_h: root.grid_item_h;
     property <int> grid_rows: (root.files.length + root.grid_columns - 1) / root.grid_columns;
     property <int> secondary_grid_rows: (root.secondary_files.length + root.secondary_grid_columns - 1) / root.secondary_grid_columns;
@@ -4666,10 +4664,7 @@ export component MainWindow inherits Window {
             // View cluster: Icons→Dual (Filter folder removed — use command palette
             // "Filter Folder" or the filter bar via Ctrl+Shift+G).
             property <length> tb_view_cluster_w: 352px;
-            property <length> tb_thumb_zoom_w: !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid")
-                ? 68px
-                : 0px;
-            property <length> tb_view_x: self.width - tb_view_cluster_w - tb_thumb_zoom_w;
+            property <length> tb_view_x: self.width - tb_view_cluster_w;
             property <length> tb_addr_x: 167px;
             // Address keeps a real minimum; search only appears when both fit.
             // (Older math used an 80px address stub in the threshold while the
@@ -4679,7 +4674,7 @@ export component MainWindow inherits Window {
             // suddenly show/hide the search field.
             property <length> tb_addr_min_w: root.address_editing ? 320px : 180px;
             property <length> tb_search_min_w: root.address_editing ? 112px : 260px;
-            property <length> tb_min_w_search: tb_addr_x + 180px + tb_gap + 260px + tb_ops_w + tb_gap + tb_view_cluster_w + tb_thumb_zoom_w;
+            property <length> tb_min_w_search: tb_addr_x + 180px + tb_gap + 260px + tb_ops_w + tb_gap + tb_view_cluster_w;
             property <length> tb_min_w_sort: tb_min_w_search + tb_gap + tb_sort_w + 120px;
             property <bool> show_toolbar_search: !root.is_simple && self.width >= tb_min_w_search;
             property <bool> show_toolbar_sort: !root.is_simple && self.width >= tb_min_w_sort;
@@ -5395,29 +5390,6 @@ export component MainWindow inherits Window {
             }
 
             Rectangle { visible: !root.is_simple; x: toolbar.tb_view_x - 11px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
-            // Thumb zoom sits left of the view cluster so −/+ never cover Icon/Compact.
-            // ToolButton (not DialogButton) — DialogButton auto-sizes to ≥76px and
-            // would spill over the Icons/Compact hit targets despite width: 28px.
-            if !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid"): HorizontalLayout {
-                x: toolbar.tb_view_x;
-                y: 8px;
-                height: 26px;
-                spacing: 4px;
-                ToolButton {
-                    button_width: 28px;
-                    button_height: 26px;
-                    text_label: "−";
-                    tooltip: @tr("Smaller thumbs");
-                    clicked => { root.thumb_size_changed(root.thumb_size_scale - 0.15); }
-                }
-                ToolButton {
-                    button_width: 28px;
-                    button_height: 26px;
-                    text_label: "+";
-                    tooltip: @tr("Larger thumbs");
-                    clicked => { root.thumb_size_changed(root.thumb_size_scale + 0.15); }
-                }
-            }
             // View-mode cluster. 34px stride (31px button + 3px gap) so icons
             // stay centered in their hit boxes without overlapping neighbors.
             ToolButton {

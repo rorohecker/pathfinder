@@ -9065,7 +9065,6 @@ struct NativeController {
     /// Redo stack populated when undoing.
     redo_stack: Vec<FileOp>,
     redo_generation: u64,
-    thumb_size_scale: f32,
     folder_changed_pending: bool,
     /// Recursive flat listing of the current folder (capped).
     flat_view: bool,
@@ -15904,7 +15903,6 @@ impl NativeController {
             expanded_tree_paths: std::collections::HashSet::new(),
             redo_stack: Vec::new(),
             redo_generation: 0,
-            thumb_size_scale: 1.0,
             folder_changed_pending: false,
             flat_view: false,
             pending_nav_search: None,
@@ -16002,7 +16000,6 @@ impl NativeController {
         ui.set_list_col_modified(self.settings.list_col_modified);
         ui.set_list_col_type(self.settings.list_col_type);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
-        ui.set_thumb_size_scale(self.thumb_size_scale);
         self.apply_power_budget(ui);
     }
 
@@ -31116,16 +31113,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_new_window(move || {
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut().open_new_window(&ui);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let c = controller.clone();
-    ui.on_thumb_size_changed(move |scale| {
-        if let Some(ui) = weak.upgrade() {
-            let mut ctrl = c.borrow_mut();
-            ctrl.thumb_size_scale = scale.clamp(0.75, 1.75);
-            ui.set_thumb_size_scale(ctrl.thumb_size_scale);
         }
     });
 
