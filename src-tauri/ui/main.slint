@@ -1696,15 +1696,17 @@ component FileRow inherits Rectangle {
         (root.width < 120px ? 10.5px :
         (root.width < 150px ? 11px : 12px));
 
-    // Grid/gallery: name as text (not renaming)
+    // Grid/gallery: name as text (not renaming). Use most of the cell width and
+    // allow two lines so names like GroundStationPCB.kicad_pcb stay readable.
     if root.view_mode != "list" && root.view_mode != "compact" && !root.is_renaming: Text {
-        x: 18px;
-        y: parent.height - 38px;
-        width: parent.width - 36px;
-        height: 30px;
+        x: 6px;
+        y: parent.height - 40px;
+        width: parent.width - 12px;
+        height: 34px;
         text: root.item.name;
         color: root.item.is_selected ? ThemePalette.text : ThemePalette.text_muted;
         font-size: root.grid_name_font;
+        wrap: word-wrap;
         overflow: elide;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -1899,10 +1901,10 @@ component FileRow inherits Rectangle {
 
     if root.view_mode != "list" && root.view_mode != "compact" && root.is_renaming: rename_grid := LineEdit {
         z: 2;
-        x: 8px;
+        x: 6px;
         y: parent.height - 40px;
-        width: parent.width - 16px;
-        height: 32px;
+        width: parent.width - 12px;
+        height: 34px;
         text: root.item.rename_label;
         font-size: 12px;
         horizontal-alignment: center;
@@ -4657,7 +4659,9 @@ export component MainWindow inherits Window {
             // Search + address share the flex budget between nav and the view
             // cluster so wide windows don't leave a dead gap on the right.
             property <length> tb_gap: 8px;
-            property <length> tb_ops_w: root.search_text != "" ? 64px : 32px;
+            // Always reserve room for search-help (?) and save-search so typing
+            // into an empty query cannot shove the field left or flip visibility.
+            property <length> tb_ops_w: 64px;
             property <length> tb_sort_w: 168px;
             // View cluster: Icons→Dual (Filter folder removed — use command palette
             // "Filter Folder" or the filter bar via Ctrl+Shift+G).
@@ -4667,8 +4671,15 @@ export component MainWindow inherits Window {
                 : 0px;
             property <length> tb_view_x: self.width - tb_view_cluster_w - tb_thumb_zoom_w;
             property <length> tb_addr_x: 167px;
-            // Prefer showing search earlier; sort only when there's real room left.
-            property <length> tb_min_w_search: 167px + 80px + tb_gap + 260px + tb_ops_w + tb_gap + tb_view_cluster_w + tb_thumb_zoom_w;
+            // Address keeps a real minimum; search only appears when both fit.
+            // (Older math used an 80px address stub in the threshold while the
+            // address floor was 180px, so the search magnifier painted on top
+            // of the breadcrumb — e.g. over "Home" — on medium-width windows.)
+            // Threshold uses idle minima so focusing the address bar does not
+            // suddenly show/hide the search field.
+            property <length> tb_addr_min_w: root.address_editing ? 320px : 180px;
+            property <length> tb_search_min_w: root.address_editing ? 112px : 260px;
+            property <length> tb_min_w_search: tb_addr_x + 180px + tb_gap + 260px + tb_ops_w + tb_gap + tb_view_cluster_w + tb_thumb_zoom_w;
             property <length> tb_min_w_sort: tb_min_w_search + tb_gap + tb_sort_w + 120px;
             property <bool> show_toolbar_search: !root.is_simple && self.width >= tb_min_w_search;
             property <bool> show_toolbar_sort: !root.is_simple && self.width >= tb_min_w_sort;
@@ -4676,17 +4687,25 @@ export component MainWindow inherits Window {
             property <length> tb_flex_right: show_toolbar_sort ? tb_sort_x : tb_view_x;
             property <length> tb_flex_budget: max(0px, tb_flex_right - tb_addr_x - tb_gap);
             // Idle: search takes ~55% of flex (min 260, max 560). Editing address:
-            // address expands; search compresses to a compact chip.
-            property <length> tb_search_w: !show_toolbar_search ? 0px
+            // address expands; search compresses to a compact chip. Layout is
+            // [addr][gap][search][ops][gap][sort/view], so search is capped to
+            // leave tb_addr_min_w — never paint the magnifier over breadcrumbs.
+            property <length> tb_search_desired: !show_toolbar_search ? 0px
                 : (root.address_editing
                     ? 112px
                     : max(260px, min(560px, tb_flex_budget * 0.55)));
+            property <length> tb_search_w: !show_toolbar_search ? 0px
+                : min(tb_search_desired, max(0px, tb_flex_budget - tb_gap - tb_ops_w - tb_addr_min_w));
             property <length> tb_search_x: show_toolbar_search
                 ? (tb_flex_right - tb_gap - tb_ops_w - tb_search_w)
                 : tb_flex_right;
             property <length> tb_addr_right: show_toolbar_search ? tb_search_x : tb_flex_right;
-            property <length> tb_addr_min_w: root.address_editing ? 320px : 180px;
-            property <length> tb_addr_w: max(tb_addr_min_w, tb_addr_right - tb_addr_x - tb_gap);
+            // Space before search (or before sort/view). When search is visible,
+            // use exactly that span so a min-width floor cannot spill into it.
+            property <length> tb_addr_avail: max(0px, tb_addr_right - tb_addr_x - tb_gap);
+            property <length> tb_addr_w: show_toolbar_search
+                ? tb_addr_avail
+                : max(tb_addr_min_w, tb_addr_avail);
             animate tb_addr_w { duration: 160ms; easing: ease-out; }
             animate tb_search_w { duration: 160ms; easing: ease-out; }
             animate tb_search_x { duration: 160ms; easing: ease-out; }
@@ -4799,15 +4818,17 @@ export component MainWindow inherits Window {
                         spacing: 0px;
                         alignment: start;
                         for crumb[ci] in root.breadcrumbs: HorizontalLayout {
-                            spacing: 0px;
+                            spacing: 2px;
                             alignment: start;
                             Text {
                                 visible: ci > 0;
-                                text: " > ";
+                                text: "›";
                                 color: ThemePalette.text_faint;
-                                font-size: 12px;
-                                font-family: AppMetrics.mono_font;
+                                font-size: 13px;
+                                font-family: AppMetrics.ui_font;
                                 vertical-alignment: center;
+                                horizontal-alignment: center;
+                                width: 12px;
                             }
                             crumb_touch := Rectangle {
                                 // Highlight on hover OR when this chip's path is the
@@ -4817,7 +4838,9 @@ export component MainWindow inherits Window {
                                 property <bool> drop_target: root.drag_target_path != ""
                                     && root.drag_target_path == crumb.id;
                                 height: parent.height;
-                                width: Math.min(crumb_label.preferred-width + 10px, 160px);
+                                // Slightly wider chip so folder names like "Home" and
+                                // mid-length segments stay readable before eliding.
+                                width: Math.min(crumb_label.preferred-width + 10px, 200px);
                                 border-radius: 4px;
                                 border-width: drop_target ? 1px : 0px;
                                 border-color: drop_target ? ThemePalette.accent_strong : rgba(0, 0, 0, 0);
