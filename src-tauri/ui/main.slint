@@ -3525,6 +3525,9 @@ component FolderFilterBar inherits FocusScope {
     callback edited(FolderFilterOptions);
     callback dismissed();
     property <bool> narrow: root.width < 380px;
+    property <bool> wide: root.width >= 620px;
+    property <length> field_column_w: (root.width - 32px) / 2;
+    property <length> option_column_w: (root.width - 40px) / 3;
     changed focus_nonce => { name_input.focus(); }
     init => { name_input.focus(); }
     changed options => {
@@ -3567,26 +3570,29 @@ component FolderFilterBar inherits FocusScope {
         text: @tr("Name"); color: ThemePalette.text_muted; font-size: 11px; vertical-alignment: center;
     }
     name_input := LineEdit {
-        x: 68px; y: 34px; width: parent.width - 80px; height: 28px;
+        x: 68px; y: 34px; width: root.wide ? root.field_column_w - 56px : parent.width - 80px; height: 28px;
         text: root.options.name; font-size: 12px;
         placeholder-text: @tr("Any filename");
         edited => { root.apply(); }
         accepted => { root.apply(); }
     }
     Text {
-        x: 12px; y: 70px; width: 52px; height: 28px;
+        x: root.wide ? 20px + root.field_column_w : 12px;
+        y: root.wide ? 34px : 70px; width: 52px; height: 28px;
         text: @tr("Type"); color: ThemePalette.text_muted; font-size: 11px; vertical-alignment: center;
     }
     ext_input := LineEdit {
-        x: 68px; y: 70px; width: parent.width - 80px; height: 28px;
+        x: root.wide ? 76px + root.field_column_w : 68px;
+        y: root.wide ? 34px : 70px;
+        width: root.wide ? root.field_column_w - 56px : parent.width - 80px; height: 28px;
         text: root.options.extensions; font-size: 12px;
         placeholder-text: @tr("Any extension (.pdf, .sys, .txt)");
         edited => { root.apply(); }
         accepted => { root.apply(); }
     }
     kind_input := ComboBox {
-        x: 12px; y: 108px;
-        width: root.narrow ? parent.width - 24px : (parent.width - 32px) / 2;
+        x: 12px; y: root.wide ? 70px : 106px;
+        width: root.wide ? root.option_column_w : root.narrow ? parent.width - 24px : root.field_column_w;
         min-width: 0px; height: 32px;
         model: [@tr("Any kind"), @tr("Files only"), @tr("Folders only"), @tr("Documents"),
             @tr("Images"), @tr("Audio"), @tr("Video"), @tr("Archives"), @tr("Programs"),
@@ -3595,9 +3601,9 @@ component FolderFilterBar inherits FocusScope {
         selected => { root.apply(); }
     }
     size_input := ComboBox {
-        x: root.narrow ? 12px : 20px + (parent.width - 32px) / 2;
-        y: root.narrow ? 144px : 108px;
-        width: root.narrow ? parent.width - 24px : (parent.width - 32px) / 2;
+        x: root.wide ? 20px + root.option_column_w : root.narrow ? 12px : 20px + root.field_column_w;
+        y: root.wide ? 70px : root.narrow ? 146px : 106px;
+        width: root.wide ? root.option_column_w : root.narrow ? parent.width - 24px : root.field_column_w;
         min-width: 0px; height: 32px;
         model: [@tr("Any size"), @tr("Empty files (0 bytes)"), @tr("Under 1 MB"),
             @tr("1 MB to 100 MB"), @tr("100 MB to 1 GB"), @tr("1 GB or larger")];
@@ -3605,7 +3611,9 @@ component FolderFilterBar inherits FocusScope {
         selected => { root.apply(); }
     }
     date_input := ComboBox {
-        x: 12px; y: root.narrow ? 180px : 144px; width: parent.width - 24px;
+        x: root.wide ? 28px + 2 * root.option_column_w : 12px;
+        y: root.wide ? 70px : root.narrow ? 186px : 146px;
+        width: root.wide ? root.option_column_w : parent.width - 24px;
         min-width: 0px; height: 32px;
         model: [@tr("Modified: any time"), @tr("Modified: last 24 hours"),
             @tr("Modified: last 7 days"), @tr("Modified: last 30 days"), @tr("Modified: over a year ago")];
@@ -4218,13 +4226,13 @@ export component MainWindow inherits Window {
     property <length> simple_row2_y: 48px;
     property <length> simple_btn_w: 88px;
     property <length> simple_btn_h: 38px;
-    property <length> filter_bar_h: (root.filter_bar_visible || root.filter_active) ? (root.primary_pane_w < 380px ? 220px : 184px) : 0px;
+    property <length> filter_bar_h: (root.filter_bar_visible || root.filter_active) ? (root.primary_pane_w >= 620px ? 110px : root.primary_pane_w < 380px ? 226px : 186px) : 0px;
     animate filter_bar_h {
         duration: 180ms;
         easing: cubic-bezier(0.22, 1, 0.36, 1);
     }
     // Each pane has independent filters.
-    property <length> secondary_filter_h: (root.secondary_filter_bar_visible || root.secondary_filter_active) ? (root.secondary_pane_w < 380px ? 220px : 184px) : 0px;
+    property <length> secondary_filter_h: (root.secondary_filter_bar_visible || root.secondary_filter_active) ? (root.secondary_pane_w >= 620px ? 110px : root.secondary_pane_w < 380px ? 226px : 186px) : 0px;
     property <length> status_h: 26px;
     // User-set preview pane width (drag handle on its left edge writes here).
     // Clamped to a usable range so the preview never shrinks to nothing or
@@ -4762,42 +4770,34 @@ export component MainWindow inherits Window {
             // Above theme atmospheres (z:40) so Icon/Compact/etc. stay on top.
             z: 50;
             background: ThemePalette.panel;
-            // Normal-mode toolbar layout is computed right-to-left so address,
-            // search, sort, and view controls never overlap at narrow widths.
-            // Search + address share the flex budget between nav and the view
-            // cluster so wide windows don't leave a dead gap on the right.
+            // One button rhythm for navigation and views. Only visible controls
+            // occupy space; occasional search/sort actions live in More.
+            property <length> tb_inset: 8px;
+            property <length> tb_step: 35px;
             property <length> tb_gap: 8px;
-            // Keep address + search on the row at every supported width. The
-            // view buttons move into More before either field becomes cramped.
-            property <bool> tb_compact: self.width < 940px;
-            property <bool> show_search_actions: self.width >= 1000px || (tb_compact && self.width >= 680px);
-            property <length> tb_ops_w: show_search_actions ? 64px : 0px;
-            property <length> tb_sort_w: 168px;
-            property <length> tb_view_cluster_w: tb_compact ? 110px : 386px;
-            property <length> tb_view_x: self.width - tb_view_cluster_w;
-            property <length> tb_addr_x: 167px;
+            property <bool> tb_compact: self.width < 860px;
+            property <length> tb_sort_w: 196px;
+            property <int> tb_view_count: tb_compact ? 3 : 10;
+            property <length> tb_view_cluster_w: tb_view_count * tb_step - 4px;
+            property <length> tb_view_x: self.width - tb_inset - tb_view_cluster_w;
+            property <length> tb_addr_x: tb_inset + 4 * tb_step - 4px + tb_gap;
             property <length> tb_addr_min_w: self.width < 640px ? 96px : 140px;
-            property <length> tb_search_min_w: self.width < 640px ? 128px : 160px;
             property <bool> show_toolbar_search: !root.is_simple;
-            property <bool> show_toolbar_sort: !root.is_simple && self.width >= 1330px;
+            property <bool> show_toolbar_sort: !root.is_simple && self.width >= 1120px;
             property <length> tb_sort_x: tb_view_x - tb_gap - tb_sort_w;
             property <length> tb_flex_right: show_toolbar_sort ? tb_sort_x : tb_view_x;
-            property <length> tb_flex_budget: max(0px, tb_flex_right - tb_addr_x - 2 * tb_gap - tb_ops_w);
-            property <length> tb_search_desired: root.address_editing
-                ? tb_search_min_w
-                : max(tb_search_min_w, min(560px, tb_flex_budget * 0.55));
-            property <length> tb_search_w: min(tb_search_desired, max(0px, tb_flex_budget - tb_addr_min_w));
+            property <length> tb_flex_budget: max(0px, tb_flex_right - tb_addr_x - 2 * tb_gap);
+            // Keep search compact and stable when typing or editing the path.
+            // The remaining width displays more of the breadcrumb/address.
+            property <length> tb_search_w: min(192px, max(128px, tb_flex_budget - tb_addr_min_w));
             property <length> tb_addr_w: max(0px, tb_flex_budget - tb_search_w);
             property <length> tb_search_x: tb_addr_x + tb_addr_w + tb_gap;
             // Geometry updates together; independent width/x animations can
             // overlap fields while crossing a toolbar breakpoint.
-            property <bool> tb_clear_sort: show_toolbar_sort && (root.sort_by != "name" || root.sort_dir != "asc");
             // Simple mode keeps its captioned buttons in seven row-2 slots.
             property <length> simple_row_gap: 4px;
             property <int> simple_row2_slots: 7;
-            property <length> simple_row2_slot_w: min(
-                root.simple_btn_w,
-                max(54px, (self.width - 20px - (self.simple_row2_slots - 1) * self.simple_row_gap) / self.simple_row2_slots));
+            property <length> simple_row2_slot_w: (self.width - 20px - (self.simple_row2_slots - 1) * self.simple_row_gap) / self.simple_row2_slots;
             property <length> simple_row2_step: self.simple_row2_slot_w + self.simple_row_gap;
             property <int> simple_row1_slots: 4;
             property <length> simple_row1_budget: min(380px, max(240px, self.width * 0.42));
@@ -4807,13 +4807,13 @@ export component MainWindow inherits Window {
             property <length> simple_row1_step: self.simple_row1_slot_w + self.simple_row_gap;
             property <length> simple_addr_x: 10px + self.simple_row1_slots * self.simple_row1_step + 8px;
             property <bool> simple_show_search: root.is_simple;
-            property <length> simple_search_w: min(220px, max(128px, (self.width - self.simple_addr_x - 20px) * 0.48));
+            property <length> simple_search_w: min(192px, max(128px, (self.width - self.simple_addr_x - 20px) * 0.40));
             property <length> simple_addr_w: max(0px, self.width - self.simple_addr_x - self.simple_search_w - 20px);
 
             // Navigation cluster. Normal mode: compact 31x31 icons on a 44 px bar.
             // Simple mode: 88x38 buttons with an inline label, on row 1 of an 88 px bar.
             ToolButton {
-                x: 10px;
+                x: root.is_simple ? 10px : toolbar.tb_inset;
                 y: root.is_simple ? root.simple_row1_y : 6px;
                 icon_data: "M15 18l-6-6 6-6";
                 text_label: @tr("Back");
@@ -4824,7 +4824,7 @@ export component MainWindow inherits Window {
                 clicked => { root.go_back(); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + toolbar.simple_row1_step : 45px;
+                x: root.is_simple ? 10px + toolbar.simple_row1_step : toolbar.tb_inset + toolbar.tb_step;
                 y: root.is_simple ? root.simple_row1_y : 6px;
                 icon_data: "M9 18l6-6-6-6";
                 text_label: @tr("Forward");
@@ -4835,7 +4835,7 @@ export component MainWindow inherits Window {
                 clicked => { root.go_forward(); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 2 * toolbar.simple_row1_step : 80px;
+                x: root.is_simple ? 10px + 2 * toolbar.simple_row1_step : toolbar.tb_inset + 2 * toolbar.tb_step;
                 y: root.is_simple ? root.simple_row1_y : 6px;
                 icon_data: "M12 19V5 M5 12l7-7 7 7";
                 text_label: @tr("Up");
@@ -4846,7 +4846,7 @@ export component MainWindow inherits Window {
                 clicked => { root.go_up(); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 3 * toolbar.simple_row1_step : 115px;
+                x: root.is_simple ? 10px + 3 * toolbar.simple_row1_step : toolbar.tb_inset + 3 * toolbar.tb_step;
                 y: root.is_simple ? root.simple_row1_y : 6px;
                 icon_data: "M3 12a9 9 0 0 1 15-6.7L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-15 6.7L3 16 M3 21v-5h5";
                 text_label: @tr("Refresh");
@@ -4859,7 +4859,7 @@ export component MainWindow inherits Window {
 
             // Subtle divider between the navigation cluster and the address bar.
             Rectangle {
-                x: root.is_simple ? toolbar.simple_addr_x - 6px : 156px;
+                x: root.is_simple ? toolbar.simple_addr_x - 4px : toolbar.tb_addr_x - 4px;
                 y: root.is_simple ? 8px : 12px;
                 width: 1px;
                 height: root.is_simple ? 30px : 20px;
@@ -5106,7 +5106,7 @@ export component MainWindow inherits Window {
                 simple_search_input := TextInput {
                     x: 30px;
                     y: 0;
-                    width: parent.width - 58px;
+                    width: parent.width - (root.search_text != "" ? 58px : 38px);
                     height: parent.height;
                     text: root.search_text;
                     font-size: 12px;
@@ -5132,7 +5132,7 @@ export component MainWindow inherits Window {
                 if root.search_text == "" && simple_search_input.text == "" && !simple_search_input.has-focus: Text {
                     x: 30px;
                     y: 0;
-                    width: parent.width - 58px;
+                    width: parent.width - (root.search_text != "" ? 58px : 38px);
                     height: parent.height;
                     text: @tr("Search folder");
                     overflow: elide;
@@ -5157,7 +5157,7 @@ export component MainWindow inherits Window {
             search_box := Rectangle {
                 // Hidden in simple mode - simple search lives on row 1 instead.
                 visible: toolbar.show_toolbar_search;
-                property <bool> semantic_available: root.semantic_search_available && self.width >= 220px;
+                property <bool> semantic_available: root.semantic_search_available && self.width >= 180px;
                 property <int> focus_nonce: root.toolbar_search_focus_nonce;
                 changed focus_nonce => {
                     if (self.focus_nonce > 0 && self.visible && toolbar.visible) {
@@ -5217,7 +5217,7 @@ export component MainWindow inherits Window {
                 search_input := TextInput {
                     x: search_box.semantic_available ? 56px : 30px;
                     y: 0;
-                    width: parent.width - (search_box.semantic_available ? 84px : 58px);
+                    width: parent.width - (search_box.semantic_available ? 56px : 30px) - (root.search_text != "" ? 28px : 8px);
                     height: parent.height;
                     text: root.search_text;
                     font-size: 12.5px;
@@ -5246,7 +5246,7 @@ export component MainWindow inherits Window {
                 if root.search_text == "" && search_input.text == "" && !search_input.has-focus: Text {
                     x: search_box.semantic_available ? 56px : 30px;
                     y: 0;
-                    width: parent.width - (search_box.semantic_available ? 84px : 58px);
+                    width: parent.width - (search_box.semantic_available ? 56px : 30px) - (root.search_text != "" ? 28px : 8px);
                     height: parent.height;
                     overflow: elide;
                     text: search_box.width < 260px ? @tr("Search") : root.search_scope_all
@@ -5271,28 +5271,6 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // Search reference and saved searches
-            ToolButton {
-                visible: toolbar.show_toolbar_search && toolbar.show_search_actions;
-                x: toolbar.tb_search_x + toolbar.tb_search_w + 4px;
-                y: 6px;
-                button_width: 28px;
-                button_height: 31px;
-                active: root.search_help_visible;
-                text_label: "?";
-                tooltip: @tr("Search help and examples");
-                clicked => { root.search_help_toggle(); }
-            }
-            ToolButton {
-                visible: toolbar.show_toolbar_search && toolbar.show_search_actions && root.search_text != "";
-                x: toolbar.tb_search_x + toolbar.tb_search_w + 34px;
-                y: 6px;
-                button_width: 28px;
-                button_height: 31px;
-                icon_data: "M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z";
-                tooltip: @tr("Save search");
-                clicked => { root.search_save_requested(); }
-            }
             if toolbar.show_toolbar_search && root.search_help_visible: Rectangle {
                 z: 40;
                 x: max(8px, min(toolbar.tb_search_x, parent.width - 472px));
@@ -5490,11 +5468,11 @@ export component MainWindow inherits Window {
                     : root.filter_bar_visible || root.filter_active;
                 clicked => { root.command("filter-folder"); }
             }
-            // View-mode cluster. 34px stride (31px button + 3px gap) so icons
+            // View-mode cluster. 35px stride (31px button + 4px gap) so icons
             // stay centered in their hit boxes without overlapping neighbors.
             ToolButton {
                 visible: root.is_simple || !toolbar.tb_compact;
-                x: root.is_simple ? 10px : parent.width - 352px;
+                x: root.is_simple ? 10px : toolbar.tb_view_x + 1 * toolbar.tb_step;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z";
@@ -5508,7 +5486,7 @@ export component MainWindow inherits Window {
             }
             ToolButton {
                 visible: root.is_simple || !toolbar.tb_compact;
-                x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 318px;
+                x: root.is_simple ? 10px + toolbar.simple_row2_step : toolbar.tb_view_x + 2 * toolbar.tb_step;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 5h4v4H3z M9 7h12 M3 13h4v4H3z M9 15h12";
@@ -5522,7 +5500,7 @@ export component MainWindow inherits Window {
             }
             ToolButton {
                 visible: root.is_simple || !toolbar.tb_compact;
-                x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 284px;
+                x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : toolbar.tb_view_x + 3 * toolbar.tb_step;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01";
@@ -5536,7 +5514,7 @@ export component MainWindow inherits Window {
             }
             ToolButton {
                 visible: root.is_simple || !toolbar.tb_compact;
-                x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 250px;
+                x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : toolbar.tb_view_x + 4 * toolbar.tb_step;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5 M9 9h.01";
@@ -5550,7 +5528,7 @@ export component MainWindow inherits Window {
             }
             ToolButton {
                 visible: root.is_simple || !toolbar.tb_compact;
-                x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 216px;
+                x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : toolbar.tb_view_x + 5 * toolbar.tb_step;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 4h18v16H3z M14 4v16";
@@ -5564,7 +5542,7 @@ export component MainWindow inherits Window {
             }
             ToolButton {
                 visible: !root.is_simple && !toolbar.tb_compact;
-                x: parent.width - 182px;
+                x: toolbar.tb_view_x + 6 * toolbar.tb_step;
                 y: 6px;
                 opacity: (root.is_home_view || root.in_recycle_bin) ? 0.4 : 1.0;
                 icon_data: "M4 6h16 M4 12h16 M4 18h10";
@@ -5574,21 +5552,9 @@ export component MainWindow inherits Window {
                 active: root.flat_view;
                 clicked => { root.command("toggle-flat-view"); }
             }
-            ToolButton { visible: !root.is_simple && !toolbar.tb_compact; x: parent.width - 148px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: @tr("Dual pane"); active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
-            // Clear-sort button - appears in the gap between Dual Pane and Command Palette
-            // when any non-default sort is active. Resets to Name ^ (natural order).
+            ToolButton { visible: !root.is_simple && !toolbar.tb_compact; x: toolbar.tb_view_x + 7 * toolbar.tb_step; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: @tr("Dual pane"); active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
             ToolButton {
-                visible: toolbar.tb_clear_sort;
-                x: parent.width - 113px;
-                y: 6px;
-                button_width: 28px;
-                button_height: 31px;
-                icon_data: "M18 6L6 18 M6 6l12 12";
-                tooltip: @tr("Clear sort (reset to Name ^)");
-                clicked => { root.sort_column("reset"); }
-            }
-            ToolButton {
-                x: root.is_simple ? 10px + 5 * toolbar.simple_row2_step : parent.width - (toolbar.tb_compact ? 42px : 78px);
+                x: root.is_simple ? 10px + 5 * toolbar.simple_row2_step : toolbar.tb_view_x + (toolbar.tb_view_count - 2) * toolbar.tb_step;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z";
@@ -5602,7 +5568,7 @@ export component MainWindow inherits Window {
 
             ToolButton {
                 visible: !root.is_simple;
-                x: parent.width - (toolbar.tb_compact ? 76px : 42px); y: 6px;
+                x: toolbar.tb_view_x + (toolbar.tb_view_count - 1) * toolbar.tb_step; y: 6px;
                 button_width: 31px; button_height: 31px;
                 icon_data: "M5 12h.01 M12 12h.01 M19 12h.01";
                 tooltip: @tr("More view and search options");
@@ -5610,7 +5576,7 @@ export component MainWindow inherits Window {
                 clicked => { toolbar_more.show(); }
             }
             toolbar_more := PopupWindow {
-                x: parent.width - 250px; y: 40px;
+                x: parent.width - 248px; y: 40px;
                 width: 240px;
                 height: 288px + (root.search_text != "" ? 30px : 0px) + (root.semantic_search_available ? 30px : 0px);
                 Rectangle {
