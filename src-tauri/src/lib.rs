@@ -78,6 +78,7 @@ mod cloud_files;
 mod content_index;
 mod durable_transfer;
 mod fantasy_icons;
+mod folder_filter;
 mod folder_sync;
 mod imagenet_labels;
 mod inference;
@@ -9039,8 +9040,8 @@ struct NativeController {
     secondary_select_anchor: i32,
     secondary_files_model: Option<ModelRc<FileItem>>,
     active_pane: ActivePane,
-    folder_filter: String,
-    secondary_folder_filter: String,
+    folder_filter: folder_filter::FileFilter,
+    secondary_folder_filter: folder_filter::FileFilter,
     git_status: Arc<GitStatusMap>,
     git_dir_status: HashMap<String, String>,
     settings: NativeSettings,
@@ -9065,7 +9066,6 @@ struct NativeController {
     /// Redo stack populated when undoing.
     redo_stack: Vec<FileOp>,
     redo_generation: u64,
-    thumb_size_scale: f32,
     folder_changed_pending: bool,
     /// Recursive flat listing of the current folder (capped).
     flat_view: bool,
@@ -15866,8 +15866,8 @@ impl NativeController {
             secondary_select_anchor: -1,
             secondary_files_model: None,
             active_pane: ActivePane::Primary,
-            folder_filter: String::new(),
-            secondary_folder_filter: String::new(),
+            folder_filter: folder_filter::FileFilter::default(),
+            secondary_folder_filter: folder_filter::FileFilter::default(),
             git_status: Arc::new(HashMap::new()),
             git_dir_status: HashMap::new(),
             settings,
@@ -15904,7 +15904,6 @@ impl NativeController {
             expanded_tree_paths: std::collections::HashSet::new(),
             redo_stack: Vec::new(),
             redo_generation: 0,
-            thumb_size_scale: 1.0,
             folder_changed_pending: false,
             flat_view: false,
             pending_nav_search: None,
@@ -16002,7 +16001,6 @@ impl NativeController {
         ui.set_list_col_modified(self.settings.list_col_modified);
         ui.set_list_col_type(self.settings.list_col_type);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
-        ui.set_thumb_size_scale(self.thumb_size_scale);
         self.apply_power_budget(ui);
     }
 
@@ -16871,12 +16869,12 @@ impl NativeController {
     }
 
     fn apply_secondary_filter(&mut self) {
-        let name_filter = self.secondary_folder_filter.trim().to_lowercase();
+        let now = now_unix_secs();
         self.secondary_visible_files = self
             .secondary_files
             .iter()
             .filter(|e| self.show_hidden || !Self::is_hidden_entry(e))
-            .filter(|e| name_filter.is_empty() || e.name_lower.contains(&name_filter))
+            .filter(|e| Self::matches_folder_filter(&self.secondary_folder_filter, e, now))
             .cloned()
             .collect();
         // Home keeps its built section order (Drives / Pins / …).
@@ -16885,13 +16883,28 @@ impl NativeController {
         }
     }
 
+    fn matches_folder_filter(
+        filter: &folder_filter::FileFilter,
+        entry: &FileEntry,
+        now: u64,
+    ) -> bool {
+        filter.matches(
+            &entry.name_lower,
+            entry.extension.as_deref().unwrap_or(""),
+            entry.kind == FileKind::Directory,
+            entry.size,
+            entry.modified,
+            now,
+        )
+    }
+
     fn apply_folder_filter(&mut self) {
-        let filter = self.folder_filter.trim().to_lowercase();
-        if filter.is_empty() {
+        if !self.folder_filter.is_active() {
             return;
         }
+        let now = now_unix_secs();
         self.visible_files
-            .retain(|e| e.name_lower.contains(&filter));
+            .retain(|entry| Self::matches_folder_filter(&self.folder_filter, entry, now));
     }
 
     /// Returns true if an entry should be hidden from view unless show_hidden
@@ -16984,11 +16997,13 @@ impl NativeController {
                     self.visible_files.push(entry.clone());
                 }
             }
+            self.apply_folder_filter();
             self.apply_sort();
             return;
         }
         if let Some(expected) = query.strip_prefix("tag:") {
             self.visible_files = self.entries_for_tag(expected);
+            self.apply_folder_filter();
             self.apply_sort();
             return;
         }
@@ -17022,6 +17037,7 @@ impl NativeController {
                 self.visible_files.push(entry.clone());
             }
         }
+        self.apply_folder_filter();
         self.apply_sort();
     }
 
@@ -18675,6 +18691,11 @@ impl NativeController {
                     prefix: prefix.clone(),
                     return_path,
                 });
+                if !same_path_string(&self.current_path, &virtual_path) {
+                    self.folder_filter.clear();
+                    ui.set_filter_options(FolderFilterOptions::default());
+                    ui.set_filter_bar_visible(false);
+                }
                 self.current_path = virtual_path.clone();
                 self.files = files;
                 self.visible_files.clear();
@@ -18819,7 +18840,7 @@ impl NativeController {
         self.search_query.clear();
         // Folder filter is per-folder chrome — don't carry it into the next path.
         self.folder_filter.clear();
-        ui.set_filter_text(ss(""));
+        ui.set_filter_options(FolderFilterOptions::default());
         ui.set_filter_bar_visible(false);
         self.selected_index = -1;
         self.selected_set.clear();
@@ -18869,6 +18890,11 @@ impl NativeController {
                     .insert(format!("{prev_path}:sort_by"), self.sort_by.clone());
                 self.folder_views
                     .insert(format!("{prev_path}:sort_dir"), self.sort_dir.clone());
+            }
+            if !same_path_string(&prev_path, &path) {
+                self.folder_filter.clear();
+                ui.set_filter_options(FolderFilterOptions::default());
+                ui.set_filter_bar_visible(false);
             }
             self.current_path = path.clone();
             self.thumbnail_memory.retain(|k, _| k.starts_with(&path));
@@ -19362,6 +19388,9 @@ impl NativeController {
         }
         let already_in_bin = self.current_path == "recycle://";
         if !already_in_bin {
+            self.folder_filter.clear();
+            ui.set_filter_options(FolderFilterOptions::default());
+            ui.set_filter_bar_visible(false);
             self.bump_nav_generation();
             self.files.clear();
             self.visible_files.clear();
@@ -21764,6 +21793,9 @@ impl NativeController {
         let prev = self.secondary_path.clone();
         if !prev.is_empty() && !same_path_string(&prev, &path) {
             self.remember_secondary_scroll(ui, &prev);
+            self.secondary_folder_filter.clear();
+            ui.set_secondary_filter_options(FolderFilterOptions::default());
+            ui.set_secondary_filter_bar_visible(false);
         }
         self.secondary_path = path;
         self.secondary_files = entries;
@@ -21791,6 +21823,9 @@ impl NativeController {
         let prev = self.secondary_path.clone();
         if !prev.is_empty() && !same_path_string(&prev, &path) {
             self.remember_secondary_scroll(ui, &prev);
+            self.secondary_folder_filter.clear();
+            ui.set_secondary_filter_options(FolderFilterOptions::default());
+            ui.set_secondary_filter_bar_visible(false);
         }
         self.secondary_path = path.clone();
         // Soft refresh keeps selection until the async listing remaps by path.
@@ -21850,6 +21885,9 @@ impl NativeController {
                 let prev = self.secondary_path.clone();
                 if !prev.is_empty() && !same_path_string(&prev, &virtual_path) {
                     self.remember_secondary_scroll(ui, &prev);
+                    self.secondary_folder_filter.clear();
+                    ui.set_secondary_filter_options(FolderFilterOptions::default());
+                    ui.set_secondary_filter_bar_visible(false);
                 }
                 self.active_pane = ActivePane::Secondary;
                 self.secondary_path = virtual_path;
@@ -21917,7 +21955,8 @@ impl NativeController {
         if !prev_secondary.is_empty() && !same_path_string(&prev_secondary, &path) {
             self.remember_secondary_scroll(ui, &prev_secondary);
             self.secondary_folder_filter.clear();
-            ui.set_secondary_filter_text(ss(""));
+            ui.set_secondary_filter_options(FolderFilterOptions::default());
+            ui.set_secondary_filter_bar_visible(false);
         }
         self.active_pane = ActivePane::Secondary;
         self.secondary_path = path.clone();
@@ -22206,23 +22245,41 @@ impl NativeController {
         self.update_secondary_models(ui);
     }
 
-    fn set_folder_filter(&mut self, ui: &MainWindow, text: String) {
+    fn set_folder_filter(&mut self, ui: &MainWindow, options: FolderFilterOptions) {
         let sticky = self.selected_paths_sticky();
-        self.folder_filter = text;
-        ui.set_filter_text(ss(&self.folder_filter));
+        self.folder_filter = folder_filter::FileFilter::new(
+            &options.name,
+            &options.extensions,
+            options.kind,
+            options.size,
+            options.modified,
+        );
+        ui.set_filter_options(options);
+        ui.set_scroll_animating(false);
+        ui.set_primary_list_scroll_y(0.0);
+        ui.set_primary_grid_scroll_y(0.0);
+        self.status_cached_total = usize::MAX;
         self.apply_filter();
         self.restore_selection_from_paths(&sticky);
         self.update_models(ui);
     }
 
-    fn set_secondary_folder_filter(&mut self, ui: &MainWindow, text: String) {
+    fn set_secondary_folder_filter(&mut self, ui: &MainWindow, options: FolderFilterOptions) {
         let sticky: Vec<String> = self
             .secondary_selected_set
             .iter()
             .filter_map(|&i| self.secondary_visible_files.get(i).map(|e| e.path.clone()))
             .collect();
-        self.secondary_folder_filter = text;
-        ui.set_secondary_filter_text(ss(&self.secondary_folder_filter));
+        self.secondary_folder_filter = folder_filter::FileFilter::new(
+            &options.name,
+            &options.extensions,
+            options.kind,
+            options.size,
+            options.modified,
+        );
+        ui.set_secondary_filter_options(options);
+        ui.set_scroll_animating(false);
+        ui.set_secondary_list_scroll_y(0.0);
         self.apply_secondary_filter();
         if !sticky.is_empty() {
             self.secondary_selected_set.clear();
@@ -22814,13 +22871,24 @@ impl NativeController {
                 ui.set_toolbar_search_focus_nonce(n.wrapping_add(1));
             }
             "filter-folder" => {
-                let open = !ui.get_filter_bar_visible();
-                ui.set_filter_bar_visible(open);
-                if open {
-                    let n = ui.get_filter_focus_nonce();
-                    ui.set_filter_focus_nonce(n.wrapping_add(1));
-                } else if !ui.get_filter_text().is_empty() {
-                    self.set_folder_filter(ui, String::new());
+                if self.active_pane == ActivePane::Secondary && ui.get_dual_pane() {
+                    let open = !ui.get_secondary_filter_bar_visible();
+                    ui.set_secondary_filter_bar_visible(open);
+                    if open {
+                        ui.set_secondary_filter_focus_nonce(
+                            ui.get_secondary_filter_focus_nonce().wrapping_add(1),
+                        );
+                    } else {
+                        self.set_secondary_folder_filter(ui, FolderFilterOptions::default());
+                    }
+                } else {
+                    let open = !ui.get_filter_bar_visible();
+                    ui.set_filter_bar_visible(open);
+                    if open {
+                        ui.set_filter_focus_nonce(ui.get_filter_focus_nonce().wrapping_add(1));
+                    } else {
+                        self.set_folder_filter(ui, FolderFilterOptions::default());
+                    }
                 }
             }
             "restore" => self.restore_from_recycle_bin(ui),
@@ -24973,7 +25041,7 @@ impl NativeController {
         self.search_query.clear();
         ui.set_search_text(ss(""));
         self.folder_filter.clear();
-        ui.set_filter_text(ss(""));
+        ui.set_filter_options(FolderFilterOptions::default());
         ui.set_filter_bar_visible(false);
         self.selected_index = -1;
         self.selected_set.clear();
@@ -29440,12 +29508,13 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
+    // Read current UI options when the timer fires: navigation/reset may have
+    // cleared them since the edit, and must not resurrect an old filter.
     let filter_debounce = Rc::new(slint::Timer::default());
     let weak = ui.as_weak();
     let c = controller.clone();
     let fd = filter_debounce.clone();
-    ui.on_filter_changed(move |text| {
-        let t = text.to_string();
+    ui.on_filter_changed(move |_options| {
         let weak2 = weak.clone();
         let c2 = c.clone();
         fd.start(
@@ -29453,7 +29522,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             Duration::from_millis(150),
             move || {
                 if let Some(ui) = weak2.upgrade() {
-                    c2.borrow_mut().set_folder_filter(&ui, t.clone());
+                    let options = ui.get_filter_options();
+                    c2.borrow_mut().set_folder_filter(&ui, options);
                 }
             },
         );
@@ -29463,8 +29533,7 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     let weak = ui.as_weak();
     let c = controller.clone();
     let sfd = secondary_filter_debounce.clone();
-    ui.on_secondary_filter_changed(move |text| {
-        let t = text.to_string();
+    ui.on_secondary_filter_changed(move |_options| {
         let weak2 = weak.clone();
         let c2 = c.clone();
         sfd.start(
@@ -29472,7 +29541,8 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
             Duration::from_millis(150),
             move || {
                 if let Some(ui) = weak2.upgrade() {
-                    c2.borrow_mut().set_secondary_folder_filter(&ui, t.clone());
+                    let options = ui.get_secondary_filter_options();
+                    c2.borrow_mut().set_secondary_folder_filter(&ui, options);
                 }
             },
         );
@@ -31116,16 +31186,6 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_new_window(move || {
         if let Some(ui) = weak.upgrade() {
             c.borrow_mut().open_new_window(&ui);
-        }
-    });
-
-    let weak = ui.as_weak();
-    let c = controller.clone();
-    ui.on_thumb_size_changed(move |scale| {
-        if let Some(ui) = weak.upgrade() {
-            let mut ctrl = c.borrow_mut();
-            ctrl.thumb_size_scale = scale.clamp(0.75, 1.75);
-            ui.set_thumb_size_scale(ctrl.thumb_size_scale);
         }
     });
 

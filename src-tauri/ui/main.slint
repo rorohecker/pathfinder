@@ -1,4 +1,4 @@
-import { LineEdit, ListView, ScrollView, Slider, Palette } from "std-widgets.slint";
+import { ComboBox, LineEdit, ListView, ScrollView, Slider, Palette } from "std-widgets.slint";
 export { Palette }
 import { FantasyAtmosphere, FantasyChestSparkles } from "fantasy_fx.slint";
 import {
@@ -1696,15 +1696,17 @@ component FileRow inherits Rectangle {
         (root.width < 120px ? 10.5px :
         (root.width < 150px ? 11px : 12px));
 
-    // Grid/gallery: name as text (not renaming)
+    // Grid/gallery: name as text (not renaming). Use most of the cell width and
+    // allow two lines so names like GroundStationPCB.kicad_pcb stay readable.
     if root.view_mode != "list" && root.view_mode != "compact" && !root.is_renaming: Text {
-        x: 18px;
-        y: parent.height - 38px;
-        width: parent.width - 36px;
-        height: 30px;
+        x: 6px;
+        y: parent.height - 40px;
+        width: parent.width - 12px;
+        height: 34px;
         text: root.item.name;
         color: root.item.is_selected ? ThemePalette.text : ThemePalette.text_muted;
         font-size: root.grid_name_font;
+        wrap: word-wrap;
         overflow: elide;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -1899,10 +1901,10 @@ component FileRow inherits Rectangle {
 
     if root.view_mode != "list" && root.view_mode != "compact" && root.is_renaming: rename_grid := LineEdit {
         z: 2;
-        x: 8px;
+        x: 6px;
         y: parent.height - 40px;
-        width: parent.width - 16px;
-        height: 32px;
+        width: parent.width - 12px;
+        height: 34px;
         text: root.item.rename_label;
         font-size: 12px;
         horizontal-alignment: center;
@@ -3509,6 +3511,110 @@ component StorageDrillIn inherits Rectangle {
 }
 
 
+export struct FolderFilterOptions {
+    name: string,
+    extensions: string,
+    kind: int,
+    size: int,
+    modified: int,
+}
+
+component FolderFilterBar inherits FocusScope {
+    in property <FolderFilterOptions> options;
+    in property <int> focus_nonce;
+    callback edited(FolderFilterOptions);
+    callback dismissed();
+    property <bool> narrow: root.width < 380px;
+    changed focus_nonce => { name_input.focus(); }
+    init => { name_input.focus(); }
+    changed options => {
+        name_input.text = root.options.name;
+        ext_input.text = root.options.extensions;
+        kind_input.current-index = root.options.kind;
+        size_input.current-index = root.options.size;
+        date_input.current-index = root.options.modified;
+    }
+    function apply() {
+        root.edited({ name: name_input.text, extensions: ext_input.text,
+            kind: kind_input.current-index, size: size_input.current-index,
+            modified: date_input.current-index });
+    }
+    function reset() {
+        root.edited({ name: "", extensions: "", kind: 0, size: 0, modified: 0 });
+    }
+    key-pressed(event) => {
+        if event.text == Key.Escape { root.dismissed(); return accept; }
+        return reject;
+    }
+    Rectangle { width: parent.width; height: parent.height; background: ThemePalette.panel; }
+    Text {
+        x: 12px; y: 4px; width: parent.width - 112px; height: 24px;
+        text: @tr("Filters"); color: ThemePalette.text; font-size: 12px; font-weight: 600;
+        vertical-alignment: center;
+    }
+    ToolButton {
+        x: parent.width - 94px; y: 3px; button_width: 54px; button_height: 26px;
+        text_label: @tr("Reset"); tooltip: @tr("Reset all filters");
+        clicked => { root.reset(); }
+    }
+    ToolButton {
+        x: parent.width - 34px; y: 3px; button_width: 26px; button_height: 26px;
+        icon_data: "M18 6L6 18 M6 6l12 12"; tooltip: @tr("Clear and close filters");
+        clicked => { root.dismissed(); }
+    }
+    Text {
+        x: 12px; y: 34px; width: 52px; height: 28px;
+        text: @tr("Name"); color: ThemePalette.text_muted; font-size: 11px; vertical-alignment: center;
+    }
+    name_input := LineEdit {
+        x: 68px; y: 34px; width: parent.width - 80px; height: 28px;
+        text: root.options.name; font-size: 12px;
+        placeholder-text: @tr("Any filename");
+        edited => { root.apply(); }
+        accepted => { root.apply(); }
+    }
+    Text {
+        x: 12px; y: 70px; width: 52px; height: 28px;
+        text: @tr("Type"); color: ThemePalette.text_muted; font-size: 11px; vertical-alignment: center;
+    }
+    ext_input := LineEdit {
+        x: 68px; y: 70px; width: parent.width - 80px; height: 28px;
+        text: root.options.extensions; font-size: 12px;
+        placeholder-text: @tr("Any extension (.pdf, .sys, .txt)");
+        edited => { root.apply(); }
+        accepted => { root.apply(); }
+    }
+    kind_input := ComboBox {
+        x: 12px; y: 108px;
+        width: root.narrow ? parent.width - 24px : (parent.width - 32px) / 2;
+        min-width: 0px; height: 32px;
+        model: [@tr("Any kind"), @tr("Files only"), @tr("Folders only"), @tr("Documents"),
+            @tr("Images"), @tr("Audio"), @tr("Video"), @tr("Archives"), @tr("Programs"),
+            @tr("System files"), @tr("No extension")];
+        current-index: root.options.kind;
+        selected => { root.apply(); }
+    }
+    size_input := ComboBox {
+        x: root.narrow ? 12px : 20px + (parent.width - 32px) / 2;
+        y: root.narrow ? 144px : 108px;
+        width: root.narrow ? parent.width - 24px : (parent.width - 32px) / 2;
+        min-width: 0px; height: 32px;
+        model: [@tr("Any size"), @tr("Empty files (0 bytes)"), @tr("Under 1 MB"),
+            @tr("1 MB to 100 MB"), @tr("100 MB to 1 GB"), @tr("1 GB or larger")];
+        current-index: root.options.size;
+        selected => { root.apply(); }
+    }
+    date_input := ComboBox {
+        x: 12px; y: root.narrow ? 180px : 144px; width: parent.width - 24px;
+        min-width: 0px; height: 32px;
+        model: [@tr("Modified: any time"), @tr("Modified: last 24 hours"),
+            @tr("Modified: last 7 days"), @tr("Modified: last 30 days"), @tr("Modified: over a year ago")];
+        current-index: root.options.modified;
+        selected => { root.apply(); }
+    }
+    Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
+}
+
 export component MainWindow inherits Window {
     // Keep Fluent std-widgets (LineEdit etc.) aligned with ThemePalette light/dark.
     public function sync_widget_palette(light: bool) {
@@ -3878,7 +3984,6 @@ export component MainWindow inherits Window {
     // When non-empty, toast shows an action button (e.g. "Undo").
     in-out property <string> toast_action: "";
     in-out property <bool> folder_changed_banner: false;
-    in-out property <float> thumb_size_scale: 1.0;
     in-out property <[ChoiceItem]> crumb_sibling_items: [];
     in-out property <bool> crumb_siblings_visible: false;
     in-out property <int> crumb_siblings_index: -1;
@@ -3894,9 +3999,15 @@ export component MainWindow inherits Window {
     in-out property <string> secondary_path: "";
     in-out property <string> secondary_sort_by: "modified";
     in-out property <string> secondary_sort_dir: "desc";
-    in-out property <string> filter_text: "";
+    in-out property <FolderFilterOptions> filter_options;
+    property <bool> filter_active: root.filter_options.name != "" || root.filter_options.extensions != ""
+        || root.filter_options.kind != 0 || root.filter_options.size != 0 || root.filter_options.modified != 0;
     in-out property <bool> filter_bar_visible: false;
-    in-out property <string> secondary_filter_text: "";
+    in-out property <FolderFilterOptions> secondary_filter_options;
+    in-out property <bool> secondary_filter_bar_visible: false;
+    in-out property <int> secondary_filter_focus_nonce: 0;
+    property <bool> secondary_filter_active: root.secondary_filter_options.name != "" || root.secondary_filter_options.extensions != ""
+        || root.secondary_filter_options.kind != 0 || root.secondary_filter_options.size != 0 || root.secondary_filter_options.modified != 0;
     in-out property <[string]> tag_names: ["Urgent", "Important", "Review", "Done", "Personal", "Code"];
     in-out property <bool> context_on_file: false;
     in-out property <bool> context_is_archive: false;
@@ -3905,7 +4016,7 @@ export component MainWindow inherits Window {
     in-out property <bool> secondary_addr_editing: false;
 
     callback filter_commands(string);
-    callback secondary_filter_changed(string);
+    callback secondary_filter_changed(FolderFilterOptions);
     callback command_run_first(string);
     callback navigate(string);
     callback crumb_navigate(int);
@@ -3973,7 +4084,6 @@ export component MainWindow inherits Window {
     callback batch_note_selected();
     callback folder_changed_refresh();
     callback new_window();
-    callback thumb_size_changed(float);
     callback file_diff_selected();
     in-out property <bool> welcome_visible: false;
     in-out property <string> welcome_default_status: @tr("Click Set as default below to register Pathfinder for folder shortcuts in Explorer.");
@@ -4007,7 +4117,7 @@ export component MainWindow inherits Window {
     callback secondary_go_back();
     callback secondary_sort_column(string);
     callback secondary_navigate_path(string);
-    callback filter_changed(string);
+    callback filter_changed(FolderFilterOptions);
     callback set_ui_mode(string);
     callback ui_mode_prompt_choice(string);
     callback set_ui_language(string);
@@ -4108,13 +4218,13 @@ export component MainWindow inherits Window {
     property <length> simple_row2_y: 48px;
     property <length> simple_btn_w: 88px;
     property <length> simple_btn_h: 38px;
-    property <length> filter_bar_h: (root.filter_bar_visible || root.filter_text != "") ? 36px : 0px;
+    property <length> filter_bar_h: (root.filter_bar_visible || root.filter_active) ? (root.primary_pane_w < 380px ? 220px : 184px) : 0px;
     animate filter_bar_h {
         duration: 180ms;
         easing: cubic-bezier(0.22, 1, 0.36, 1);
     }
-    // Secondary pane filter row (always available in dual pane; keeps parity with primary).
-    property <length> secondary_filter_h: 32px;
+    // Each pane has independent filters.
+    property <length> secondary_filter_h: (root.secondary_filter_bar_visible || root.secondary_filter_active) ? (root.secondary_pane_w < 380px ? 220px : 184px) : 0px;
     property <length> status_h: 26px;
     // User-set preview pane width (drag handle on its left edge writes here).
     // Clamped to a usable range so the preview never shrinks to nothing or
@@ -4142,8 +4252,8 @@ export component MainWindow inherits Window {
     property <length> grid_cell_w: root.file_area_w / root.grid_columns;
     property <length> secondary_grid_cell_w: root.secondary_file_area_w / root.secondary_grid_columns;
     out property <length> grid_item_h: root.view_mode == "gallery"
-        ? (154px * root.thumb_size_scale)
-        : (root.view_mode == "compact" ? 32px : (AppMetrics.grid_h * root.thumb_size_scale));
+        ? 154px
+        : (root.view_mode == "compact" ? 32px : AppMetrics.grid_h);
     out property <length> secondary_grid_item_h: root.grid_item_h;
     property <int> grid_rows: (root.files.length + root.grid_columns - 1) / root.grid_columns;
     property <int> secondary_grid_rows: (root.secondary_files.length + root.secondary_grid_columns - 1) / root.secondary_grid_columns;
@@ -4657,18 +4767,23 @@ export component MainWindow inherits Window {
             // Search + address share the flex budget between nav and the view
             // cluster so wide windows don't leave a dead gap on the right.
             property <length> tb_gap: 8px;
-            property <length> tb_ops_w: root.search_text != "" ? 64px : 32px;
+            // Always reserve room for search-help (?) and save-search so typing
+            // into an empty query cannot shove the field left or flip visibility.
+            property <length> tb_ops_w: 64px;
             property <length> tb_sort_w: 168px;
-            // View cluster: Icons→Dual (Filter folder removed — use command palette
-            // "Filter Folder" or the filter bar via Ctrl+Shift+G).
-            property <length> tb_view_cluster_w: 352px;
-            property <length> tb_thumb_zoom_w: !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid")
-                ? 68px
-                : 0px;
-            property <length> tb_view_x: self.width - tb_view_cluster_w - tb_thumb_zoom_w;
+            // View cluster includes Filters (also Ctrl+Shift+G).
+            property <length> tb_view_cluster_w: 386px;
+            property <length> tb_view_x: self.width - tb_view_cluster_w;
             property <length> tb_addr_x: 167px;
-            // Prefer showing search earlier; sort only when there's real room left.
-            property <length> tb_min_w_search: 167px + 80px + tb_gap + 260px + tb_ops_w + tb_gap + tb_view_cluster_w + tb_thumb_zoom_w;
+            // Address keeps a real minimum; search only appears when both fit.
+            // (Older math used an 80px address stub in the threshold while the
+            // address floor was 180px, so the search magnifier painted on top
+            // of the breadcrumb — e.g. over "Home" — on medium-width windows.)
+            // Threshold uses idle minima so focusing the address bar does not
+            // suddenly show/hide the search field.
+            property <length> tb_addr_min_w: root.address_editing ? 320px : 180px;
+            property <length> tb_search_min_w: root.address_editing ? 112px : 260px;
+            property <length> tb_min_w_search: tb_addr_x + 180px + tb_gap + 260px + tb_ops_w + tb_gap + tb_view_cluster_w;
             property <length> tb_min_w_sort: tb_min_w_search + tb_gap + tb_sort_w + 120px;
             property <bool> show_toolbar_search: !root.is_simple && self.width >= tb_min_w_search;
             property <bool> show_toolbar_sort: !root.is_simple && self.width >= tb_min_w_sort;
@@ -4676,17 +4791,25 @@ export component MainWindow inherits Window {
             property <length> tb_flex_right: show_toolbar_sort ? tb_sort_x : tb_view_x;
             property <length> tb_flex_budget: max(0px, tb_flex_right - tb_addr_x - tb_gap);
             // Idle: search takes ~55% of flex (min 260, max 560). Editing address:
-            // address expands; search compresses to a compact chip.
-            property <length> tb_search_w: !show_toolbar_search ? 0px
+            // address expands; search compresses to a compact chip. Layout is
+            // [addr][gap][search][ops][gap][sort/view], so search is capped to
+            // leave tb_addr_min_w — never paint the magnifier over breadcrumbs.
+            property <length> tb_search_desired: !show_toolbar_search ? 0px
                 : (root.address_editing
                     ? 112px
                     : max(260px, min(560px, tb_flex_budget * 0.55)));
+            property <length> tb_search_w: !show_toolbar_search ? 0px
+                : min(tb_search_desired, max(0px, tb_flex_budget - tb_gap - tb_ops_w - tb_addr_min_w));
             property <length> tb_search_x: show_toolbar_search
                 ? (tb_flex_right - tb_gap - tb_ops_w - tb_search_w)
                 : tb_flex_right;
             property <length> tb_addr_right: show_toolbar_search ? tb_search_x : tb_flex_right;
-            property <length> tb_addr_min_w: root.address_editing ? 320px : 180px;
-            property <length> tb_addr_w: max(tb_addr_min_w, tb_addr_right - tb_addr_x - tb_gap);
+            // Space before search (or before sort/view). When search is visible,
+            // use exactly that span so a min-width floor cannot spill into it.
+            property <length> tb_addr_avail: max(0px, tb_addr_right - tb_addr_x - tb_gap);
+            property <length> tb_addr_w: show_toolbar_search
+                ? tb_addr_avail
+                : max(tb_addr_min_w, tb_addr_avail);
             animate tb_addr_w { duration: 160ms; easing: ease-out; }
             animate tb_search_w { duration: 160ms; easing: ease-out; }
             animate tb_search_x { duration: 160ms; easing: ease-out; }
@@ -4695,7 +4818,7 @@ export component MainWindow inherits Window {
             // modes + Actions). Slot width shrinks on narrow toolbars so the
             // captioned buttons stop overlapping each other.
             property <length> simple_row_gap: 4px;
-            property <int> simple_row2_slots: 6;
+            property <int> simple_row2_slots: 7;
             property <length> simple_row2_slot_w: min(
                 root.simple_btn_w,
                 max(54px, (self.width - 20px - (self.simple_row2_slots - 1) * self.simple_row_gap) / self.simple_row2_slots));
@@ -4799,15 +4922,17 @@ export component MainWindow inherits Window {
                         spacing: 0px;
                         alignment: start;
                         for crumb[ci] in root.breadcrumbs: HorizontalLayout {
-                            spacing: 0px;
+                            spacing: 2px;
                             alignment: start;
                             Text {
                                 visible: ci > 0;
-                                text: " > ";
+                                text: "›";
                                 color: ThemePalette.text_faint;
-                                font-size: 12px;
-                                font-family: AppMetrics.mono_font;
+                                font-size: 13px;
+                                font-family: AppMetrics.ui_font;
                                 vertical-alignment: center;
+                                horizontal-alignment: center;
+                                width: 12px;
                             }
                             crumb_touch := Rectangle {
                                 // Highlight on hover OR when this chip's path is the
@@ -4817,7 +4942,9 @@ export component MainWindow inherits Window {
                                 property <bool> drop_target: root.drag_target_path != ""
                                     && root.drag_target_path == crumb.id;
                                 height: parent.height;
-                                width: Math.min(crumb_label.preferred-width + 10px, 160px);
+                                // Slightly wider chip so folder names like "Home" and
+                                // mid-length segments stay readable before eliding.
+                                width: Math.min(crumb_label.preferred-width + 10px, 200px);
                                 border-radius: 4px;
                                 border-width: drop_target ? 1px : 0px;
                                 border-color: drop_target ? ThemePalette.accent_strong : rgba(0, 0, 0, 0);
@@ -5220,7 +5347,7 @@ export component MainWindow inherits Window {
                 }
                 Text {
                     x: 12px; y: 40px; width: parent.width - 24px; height: 54px;
-                    text: @tr("Filter narrows the visible list by name. Search can find files by type, size, date or text inside a file. Click an example to search:");
+                    text: @tr("Filters narrow the current list by name, file type, size, and date. Search can also look inside files. Click an example to search:");
                     color: ThemePalette.text_muted;
                     font-size: 11.5px;
                     wrap: word-wrap;
@@ -5372,28 +5499,20 @@ export component MainWindow inherits Window {
             }
 
             Rectangle { visible: !root.is_simple; x: toolbar.tb_view_x - 11px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
-            // Thumb zoom sits left of the view cluster so −/+ never cover Icon/Compact.
-            // ToolButton (not DialogButton) — DialogButton auto-sizes to ≥76px and
-            // would spill over the Icons/Compact hit targets despite width: 28px.
-            if !root.is_simple && (root.view_mode == "gallery" || root.view_mode == "grid"): HorizontalLayout {
-                x: toolbar.tb_view_x;
-                y: 8px;
-                height: 26px;
-                spacing: 4px;
-                ToolButton {
-                    button_width: 28px;
-                    button_height: 26px;
-                    text_label: "−";
-                    tooltip: @tr("Smaller thumbs");
-                    clicked => { root.thumb_size_changed(root.thumb_size_scale - 0.15); }
-                }
-                ToolButton {
-                    button_width: 28px;
-                    button_height: 26px;
-                    text_label: "+";
-                    tooltip: @tr("Larger thumbs");
-                    clicked => { root.thumb_size_changed(root.thumb_size_scale + 0.15); }
-                }
+            ToolButton {
+                x: root.is_simple ? 10px + 6 * toolbar.simple_row2_step : parent.width - 386px;
+                y: root.is_simple ? root.simple_row2_y : 6px;
+                tooltip_above: root.is_simple;
+                icon_data: "M3 5h18l-7 8v6l-4 2v-8z";
+                text_label: @tr("Filters");
+                show_caption: root.is_simple;
+                button_width: root.is_simple ? toolbar.simple_row2_slot_w : 31px;
+                button_height: root.is_simple ? root.simple_btn_h : 31px;
+                tooltip: @tr("Filter by name, file type, size, or date (Ctrl+Shift+G)");
+                active: root.active_pane == "secondary" && root.dual_pane
+                    ? root.secondary_filter_bar_visible || root.secondary_filter_active
+                    : root.filter_bar_visible || root.filter_active;
+                clicked => { root.command("filter-folder"); }
             }
             // View-mode cluster. 34px stride (31px button + 3px gap) so icons
             // stay centered in their hit boxes without overlapping neighbors.
@@ -5598,56 +5717,24 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // Primary folder filter — keep the node while height animates so
-            // closing does not leave a blank strip under the toolbar.
             if root.filter_bar_h > 0.5px: Rectangle {
                 x: 0;
                 y: root.folder_changed_banner ? 28px : 0;
                 width: root.primary_pane_w;
                 height: root.filter_bar_h;
-                background: ThemePalette.panel;
                 z: 7;
                 clip: true;
-                Text {
-                    x: 12px; y: 0; width: 48px; height: parent.height;
-                    text: @tr("Filter");
-                    color: ThemePalette.text_faint; font-size: 11px; font-weight: 600;
-                    vertical-alignment: center;
-                }
-                filter_input := LineEdit {
-                    x: 64px;
-                    y: 5px;
-                    width: parent.width - 108px;
-                    height: 26px;
-                    text <=> root.filter_text;
-                    font-size: 12px;
-                    placeholder-text: @tr("Filter this folder…");
-                    property <int> focus_nonce: root.filter_focus_nonce;
-                    changed focus_nonce => { self.focus(); }
-                    edited => { root.filter_changed(self.text); }
-                    accepted => { root.filter_changed(self.text); }
-                    key-pressed(e) => {
-                        if (e.text == Key.Escape) {
-                            root.filter_text = "";
-                            root.filter_changed("");
-                            root.filter_bar_visible = false;
-                            return accept;
-                        }
-                        return reject;
-                    }
-                }
-                ToolButton {
-                    x: parent.width - 36px; y: 4px;
-                    button_width: 28px; button_height: 28px;
-                    icon_data: "M18 6L6 18 M6 6l12 12";
-                    tooltip: @tr("Clear filter");
-                    clicked => {
-                        root.filter_text = "";
-                        root.filter_changed("");
+                FolderFilterBar {
+                    width: parent.width; height: parent.height;
+                    options: root.filter_options;
+                    focus_nonce: root.filter_focus_nonce;
+                    edited(options) => { root.filter_options = options; root.filter_changed(options); }
+                    dismissed => {
+                        root.filter_options = { name: "", extensions: "", kind: 0, size: 0, modified: 0 };
+                        root.filter_changed(root.filter_options);
                         root.filter_bar_visible = false;
                     }
                 }
-                Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
             }
 
             primary_pane_root := Rectangle {
@@ -6247,7 +6334,7 @@ export component MainWindow inherits Window {
                             width: parent.width;
                             text: root.empty_state != "" ? root.empty_state :
                                   root.search_text != "" ? "No results for \"" + root.search_text + "\"" :
-                                  root.filter_text != "" ? "No files match \"" + root.filter_text + "\"" :
+                                  root.filter_active ? @tr("No files match these filters") :
                                   root.is_home_view ? @tr("Your Home is quiet") :
                                   root.in_recycle_bin ? @tr("Recycle Bin is empty") :
                                   "This folder is empty";
@@ -6257,7 +6344,7 @@ export component MainWindow inherits Window {
                             horizontal-alignment: center;
                         }
                         Text {
-                            visible: root.search_text != "" || root.filter_text != "" || root.is_home_view || root.in_recycle_bin
+                            visible: root.search_text != "" || root.filter_active || root.is_home_view || root.in_recycle_bin
                                 || root.empty_state == "Loading folder..."
                                 || root.empty_state == "Loading Recycle Bin..."
                                 || root.empty_state == "Searching..."
@@ -6265,7 +6352,7 @@ export component MainWindow inherits Window {
                             width: min(360px, parent.width - 48px);
                             x: (parent.width - self.width) / 2;
                             text: root.search_text != "" ? (root.search_scope_all ? @tr("Try a different query or switch back to this folder") : @tr("Try a different query or search the whole drive")) :
-                                  root.filter_text != "" ? @tr("Clear the filter or try a different name") :
+                                  root.filter_active ? @tr("Reset the filters or choose different options") :
                                   root.is_home_view ? @tr("Pin folders from the sidebar or open a drive — shortcuts collect here.") :
                                   root.in_recycle_bin ? @tr("Deleted files appear here until you empty the bin.") :
                                   root.empty_state == "Loading Recycle Bin..." ? @tr("Reading the OS Recycle Bin…") :
@@ -6546,49 +6633,16 @@ export component MainWindow inherits Window {
                     Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
                 }
 
-                // Secondary folder filter — parity with the primary filter bar.
-                Rectangle {
-                    x: 0;
-                    y: 38px;
-                    width: parent.width;
-                    height: root.secondary_filter_h;
-                    background: ThemePalette.bg_soft;
-                    Text {
-                        x: 8px; y: 0; width: 40px; height: parent.height;
-                        text: @tr("Filter");
-                        color: ThemePalette.text_faint; font-size: 10.5px; font-weight: 600;
-                        vertical-alignment: center;
+                if root.secondary_filter_h > 0px: FolderFilterBar {
+                    x: 0; y: 38px; width: parent.width; height: root.secondary_filter_h;
+                    options: root.secondary_filter_options;
+                    focus_nonce: root.secondary_filter_focus_nonce;
+                    edited(options) => { root.secondary_filter_options = options; root.secondary_filter_changed(options); }
+                    dismissed => {
+                        root.secondary_filter_options = { name: "", extensions: "", kind: 0, size: 0, modified: 0 };
+                        root.secondary_filter_changed(root.secondary_filter_options);
+                        root.secondary_filter_bar_visible = false;
                     }
-                    sec_filter_input := LineEdit {
-                        x: 50px;
-                        y: 3px;
-                        width: parent.width - 90px;
-                        height: 26px;
-                        text <=> root.secondary_filter_text;
-                        font-size: 11.5px;
-                        placeholder-text: @tr("Filter…");
-                        edited => { root.secondary_filter_changed(self.text); }
-                        accepted => { root.secondary_filter_changed(self.text); }
-                        key-pressed(e) => {
-                            if (e.text == Key.Escape) {
-                                root.secondary_filter_text = "";
-                                root.secondary_filter_changed("");
-                                return accept;
-                            }
-                            return reject;
-                        }
-                    }
-                    ToolButton {
-                        x: parent.width - 34px; y: 2px;
-                        button_width: 28px; button_height: 28px;
-                        icon_data: "M18 6L6 18 M6 6l12 12";
-                        tooltip: @tr("Clear filter");
-                        clicked => {
-                            root.secondary_filter_text = "";
-                            root.secondary_filter_changed("");
-                        }
-                    }
-                    Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }
                 }
 
                 // Sort header (list mode only)
@@ -6787,7 +6841,7 @@ export component MainWindow inherits Window {
                         Text {
                             width: parent.width;
                             text: root.secondary_path == "" ? @tr("Enable dual pane to browse a second location")
-                                : (root.secondary_filter_text != "" ? @tr("No files match the filter") : @tr("Empty folder"));
+                                : (root.secondary_filter_active ? @tr("No files match the filter") : @tr("Empty folder"));
                             color: ThemePalette.text_faint;
                             font-size: 12px;
                             horizontal-alignment: center;

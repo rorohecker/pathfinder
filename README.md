@@ -37,6 +37,7 @@ The goal is simple: feel faster and cleaner than File Explorer, while keeping th
 - Properties, checksums, git status badges, color tags, and per-file notes
 
 ### Find and organize
+- **Filters** toolbar button (`Ctrl+Shift+G`) — combine filename, extensions (such as `.pdf, .sys`), category, size, and modification date; each pane filters independently
 - Fast search with operators: `ext:`, `kind:`, `size:`, `name:`, `content:`, `modified:`, `tag:`
 - Optional on-device semantic ranking when Local AI models are installed
 - Smart folders and saved searches in the sidebar

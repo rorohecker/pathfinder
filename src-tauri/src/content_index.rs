@@ -94,7 +94,9 @@ fn root_key(path: &Path) -> Result<String, String> {
 
 fn path_key(path: &Path) -> String {
     let value = path.to_string_lossy().replace('/', "\\");
-    #[cfg(windows)]
+    // Strip Windows extended/UNC prefixes on every host. Scope keys in the
+    // content index are Windows-style strings; gating this behind cfg(windows)
+    // broke comparisons (and the unit test) when the helper ran on Linux CI.
     let value = if let Some(unc) = value.strip_prefix("\\\\?\\UNC\\") {
         format!("\\\\{unc}")
     } else {
@@ -679,6 +681,10 @@ pub fn search_with_filter(
     if needle.is_empty() || max == 0 {
         return Ok(Vec::new());
     }
+    // Scans store canonical paths. Resolve the scope once too, so Windows
+    // short names (e.g. RUNNER~1 in TEMP) and relative components match them.
+    let canonical_scope = fs::canonicalize(scope).ok();
+    let scope = canonical_scope.as_deref().unwrap_or(scope);
     let conn = open_at(db)?;
     let use_fts = needle.is_ascii() && needle.len() >= 3 && !needle.contains(['%', '_']);
     let sql = if use_fts {
@@ -806,6 +812,46 @@ mod tests {
         .unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].path.ends_with("b.txt"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_resolves_scope_aliases() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pathfinder-content-scope-{nonce}"));
+        let root = dir.join("long-documents-folder");
+        let child = root.join("child");
+        let db = dir.join("index.sqlite3");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(root.join("note.txt"), "unique phrase").unwrap();
+        add_root(&db, &root).unwrap();
+        scan(&db, &root, &AtomicBool::new(false)).unwrap();
+
+        let hits = search(&db, &child.join(".."), "unique", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].path.ends_with("note.txt"));
+        assert!(search(&db, &child, "unique", 10).unwrap().is_empty());
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+            use windows::core::PCWSTR;
+
+            let wide: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+            let mut short = vec![0u16; 32768];
+            let len = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut short)) };
+            assert!(len > 0 && (len as usize) < short.len());
+            let short = String::from_utf16(&short[..len as usize]).unwrap();
+            assert_eq!(
+                search(&db, Path::new(&short), "unique", 10).unwrap().len(),
+                1
+            );
+        }
+
         let _ = fs::remove_dir_all(dir);
     }
 
