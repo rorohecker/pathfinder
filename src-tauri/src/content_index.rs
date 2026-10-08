@@ -94,7 +94,9 @@ fn root_key(path: &Path) -> Result<String, String> {
 
 fn path_key(path: &Path) -> String {
     let value = path.to_string_lossy().replace('/', "\\");
-    #[cfg(windows)]
+    // Strip Windows extended/UNC prefixes on every host. Scope keys in the
+    // content index are Windows-style strings; gating this behind cfg(windows)
+    // broke comparisons (and the unit test) when the helper ran on Linux CI.
     let value = if let Some(unc) = value.strip_prefix("\\\\?\\UNC\\") {
         format!("\\\\{unc}")
     } else {
