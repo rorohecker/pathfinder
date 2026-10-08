@@ -4767,56 +4767,32 @@ export component MainWindow inherits Window {
             // Search + address share the flex budget between nav and the view
             // cluster so wide windows don't leave a dead gap on the right.
             property <length> tb_gap: 8px;
-            // Always reserve room for search-help (?) and save-search so typing
-            // into an empty query cannot shove the field left or flip visibility.
-            property <length> tb_ops_w: 64px;
+            // Keep address + search on the row at every supported width. The
+            // view buttons move into More before either field becomes cramped.
+            property <bool> tb_compact: self.width < 940px;
+            property <bool> show_search_actions: self.width >= 1000px || (tb_compact && self.width >= 680px);
+            property <length> tb_ops_w: show_search_actions ? 64px : 0px;
             property <length> tb_sort_w: 168px;
-            // View cluster includes Filters (also Ctrl+Shift+G).
-            property <length> tb_view_cluster_w: 386px;
+            property <length> tb_view_cluster_w: tb_compact ? 110px : 386px;
             property <length> tb_view_x: self.width - tb_view_cluster_w;
             property <length> tb_addr_x: 167px;
-            // Address keeps a real minimum; search only appears when both fit.
-            // (Older math used an 80px address stub in the threshold while the
-            // address floor was 180px, so the search magnifier painted on top
-            // of the breadcrumb — e.g. over "Home" — on medium-width windows.)
-            // Threshold uses idle minima so focusing the address bar does not
-            // suddenly show/hide the search field.
-            property <length> tb_addr_min_w: root.address_editing ? 320px : 180px;
-            property <length> tb_search_min_w: root.address_editing ? 112px : 260px;
-            property <length> tb_min_w_search: tb_addr_x + 180px + tb_gap + 260px + tb_ops_w + tb_gap + tb_view_cluster_w;
-            property <length> tb_min_w_sort: tb_min_w_search + tb_gap + tb_sort_w + 120px;
-            property <bool> show_toolbar_search: !root.is_simple && self.width >= tb_min_w_search;
-            property <bool> show_toolbar_sort: !root.is_simple && self.width >= tb_min_w_sort;
+            property <length> tb_addr_min_w: self.width < 640px ? 96px : 140px;
+            property <length> tb_search_min_w: self.width < 640px ? 128px : 160px;
+            property <bool> show_toolbar_search: !root.is_simple;
+            property <bool> show_toolbar_sort: !root.is_simple && self.width >= 1330px;
             property <length> tb_sort_x: tb_view_x - tb_gap - tb_sort_w;
             property <length> tb_flex_right: show_toolbar_sort ? tb_sort_x : tb_view_x;
-            property <length> tb_flex_budget: max(0px, tb_flex_right - tb_addr_x - tb_gap);
-            // Idle: search takes ~55% of flex (min 260, max 560). Editing address:
-            // address expands; search compresses to a compact chip. Layout is
-            // [addr][gap][search][ops][gap][sort/view], so search is capped to
-            // leave tb_addr_min_w — never paint the magnifier over breadcrumbs.
-            property <length> tb_search_desired: !show_toolbar_search ? 0px
-                : (root.address_editing
-                    ? 112px
-                    : max(260px, min(560px, tb_flex_budget * 0.55)));
-            property <length> tb_search_w: !show_toolbar_search ? 0px
-                : min(tb_search_desired, max(0px, tb_flex_budget - tb_gap - tb_ops_w - tb_addr_min_w));
-            property <length> tb_search_x: show_toolbar_search
-                ? (tb_flex_right - tb_gap - tb_ops_w - tb_search_w)
-                : tb_flex_right;
-            property <length> tb_addr_right: show_toolbar_search ? tb_search_x : tb_flex_right;
-            // Space before search (or before sort/view). When search is visible,
-            // use exactly that span so a min-width floor cannot spill into it.
-            property <length> tb_addr_avail: max(0px, tb_addr_right - tb_addr_x - tb_gap);
-            property <length> tb_addr_w: show_toolbar_search
-                ? tb_addr_avail
-                : max(tb_addr_min_w, tb_addr_avail);
-            animate tb_addr_w { duration: 160ms; easing: ease-out; }
-            animate tb_search_w { duration: 160ms; easing: ease-out; }
-            animate tb_search_x { duration: 160ms; easing: ease-out; }
+            property <length> tb_flex_budget: max(0px, tb_flex_right - tb_addr_x - 2 * tb_gap - tb_ops_w);
+            property <length> tb_search_desired: root.address_editing
+                ? tb_search_min_w
+                : max(tb_search_min_w, min(560px, tb_flex_budget * 0.55));
+            property <length> tb_search_w: min(tb_search_desired, max(0px, tb_flex_budget - tb_addr_min_w));
+            property <length> tb_addr_w: max(0px, tb_flex_budget - tb_search_w);
+            property <length> tb_search_x: tb_addr_x + tb_addr_w + tb_gap;
+            // Geometry updates together; independent width/x animations can
+            // overlap fields while crossing a toolbar breakpoint.
             property <bool> tb_clear_sort: show_toolbar_sort && (root.sort_by != "name" || root.sort_dir != "asc");
-            // Simple-mode layout math. Row 2 packs six equal slots (five view
-            // modes + Actions). Slot width shrinks on narrow toolbars so the
-            // captioned buttons stop overlapping each other.
+            // Simple mode keeps its captioned buttons in seven row-2 slots.
             property <length> simple_row_gap: 4px;
             property <int> simple_row2_slots: 7;
             property <length> simple_row2_slot_w: min(
@@ -4830,11 +4806,9 @@ export component MainWindow inherits Window {
                 max(54px, (self.simple_row1_budget - 10px - (self.simple_row1_slots - 1) * self.simple_row_gap) / self.simple_row1_slots));
             property <length> simple_row1_step: self.simple_row1_slot_w + self.simple_row_gap;
             property <length> simple_addr_x: 10px + self.simple_row1_slots * self.simple_row1_step + 8px;
-            property <bool> simple_show_search: root.is_simple && self.width >= 560px;
-            property <length> simple_search_w: min(176px, max(120px, self.width - self.simple_addr_x - 20px - 80px));
-            property <length> simple_addr_w: self.simple_show_search
-                ? max(100px, self.width - self.simple_addr_x - self.simple_search_w - 12px)
-                : max(120px, self.width - self.simple_addr_x - 10px);
+            property <bool> simple_show_search: root.is_simple;
+            property <length> simple_search_w: min(220px, max(128px, (self.width - self.simple_addr_x - 20px) * 0.48));
+            property <length> simple_addr_w: max(0px, self.width - self.simple_addr_x - self.simple_search_w - 20px);
 
             // Navigation cluster. Normal mode: compact 31x31 icons on a 44 px bar.
             // Simple mode: 88x38 buttons with an inline label, on row 1 of an 88 px bar.
@@ -5161,6 +5135,7 @@ export component MainWindow inherits Window {
                     width: parent.width - 58px;
                     height: parent.height;
                     text: @tr("Search folder");
+                    overflow: elide;
                     color: ThemePalette.text_faint;
                     font-size: 12px;
                     vertical-alignment: center;
@@ -5182,10 +5157,10 @@ export component MainWindow inherits Window {
             search_box := Rectangle {
                 // Hidden in simple mode - simple search lives on row 1 instead.
                 visible: toolbar.show_toolbar_search;
-                property <bool> semantic_available: root.semantic_search_available;
+                property <bool> semantic_available: root.semantic_search_available && self.width >= 220px;
                 property <int> focus_nonce: root.toolbar_search_focus_nonce;
                 changed focus_nonce => {
-                    if (self.focus_nonce > 0) {
+                    if (self.focus_nonce > 0 && self.visible && toolbar.visible) {
                         search_input.focus();
                     }
                 }
@@ -5273,7 +5248,8 @@ export component MainWindow inherits Window {
                     y: 0;
                     width: parent.width - (search_box.semantic_available ? 84px : 58px);
                     height: parent.height;
-                    text: root.search_scope_all
+                    overflow: elide;
+                    text: search_box.width < 260px ? @tr("Search") : root.search_scope_all
                         ? @tr("Path or name — e.g. %localappdata%\\App\\")
                         : @tr("Path or name in this folder");
                     color: ThemePalette.text_faint;
@@ -5297,7 +5273,7 @@ export component MainWindow inherits Window {
 
             // Search reference and saved searches
             ToolButton {
-                visible: toolbar.show_toolbar_search;
+                visible: toolbar.show_toolbar_search && toolbar.show_search_actions;
                 x: toolbar.tb_search_x + toolbar.tb_search_w + 4px;
                 y: 6px;
                 button_width: 28px;
@@ -5308,7 +5284,7 @@ export component MainWindow inherits Window {
                 clicked => { root.search_help_toggle(); }
             }
             ToolButton {
-                visible: toolbar.show_toolbar_search && root.search_text != "";
+                visible: toolbar.show_toolbar_search && toolbar.show_search_actions && root.search_text != "";
                 x: toolbar.tb_search_x + toolbar.tb_search_w + 34px;
                 y: 6px;
                 button_width: 28px;
@@ -5319,9 +5295,9 @@ export component MainWindow inherits Window {
             }
             if toolbar.show_toolbar_search && root.search_help_visible: Rectangle {
                 z: 40;
-                x: toolbar.tb_search_x;
+                x: max(8px, min(toolbar.tb_search_x, parent.width - 472px));
                 y: 40px;
-                width: min(460px, parent.width - toolbar.tb_search_x - 12px);
+                width: min(460px, parent.width - 16px);
                 height: 344px;
                 border-radius: AppMetrics.radius_small;
                 border-width: 1px;
@@ -5498,9 +5474,9 @@ export component MainWindow inherits Window {
                 }
             }
 
-            Rectangle { visible: !root.is_simple; x: toolbar.tb_view_x - 11px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
+            Rectangle { visible: !root.is_simple; x: toolbar.tb_view_x - 4px; y: 12px; width: 1px; height: 20px; background: ThemePalette.border; }
             ToolButton {
-                x: root.is_simple ? 10px + 6 * toolbar.simple_row2_step : parent.width - 386px;
+                x: root.is_simple ? 10px + 6 * toolbar.simple_row2_step : toolbar.tb_view_x;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M3 5h18l-7 8v6l-4 2v-8z";
@@ -5517,6 +5493,7 @@ export component MainWindow inherits Window {
             // View-mode cluster. 34px stride (31px button + 3px gap) so icons
             // stay centered in their hit boxes without overlapping neighbors.
             ToolButton {
+                visible: root.is_simple || !toolbar.tb_compact;
                 x: root.is_simple ? 10px : parent.width - 352px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
@@ -5530,6 +5507,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("grid"); }
             }
             ToolButton {
+                visible: root.is_simple || !toolbar.tb_compact;
                 x: root.is_simple ? 10px + toolbar.simple_row2_step : parent.width - 318px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
@@ -5543,6 +5521,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("compact"); }
             }
             ToolButton {
+                visible: root.is_simple || !toolbar.tb_compact;
                 x: root.is_simple ? 10px + 2 * toolbar.simple_row2_step : parent.width - 284px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
@@ -5556,6 +5535,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("list"); }
             }
             ToolButton {
+                visible: root.is_simple || !toolbar.tb_compact;
                 x: root.is_simple ? 10px + 3 * toolbar.simple_row2_step : parent.width - 250px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
@@ -5569,6 +5549,7 @@ export component MainWindow inherits Window {
                 clicked => { root.set_view("gallery"); }
             }
             ToolButton {
+                visible: root.is_simple || !toolbar.tb_compact;
                 x: root.is_simple ? 10px + 4 * toolbar.simple_row2_step : parent.width - 216px;
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
@@ -5582,7 +5563,7 @@ export component MainWindow inherits Window {
                 clicked => { root.toggle_preview(); }
             }
             ToolButton {
-                visible: !root.is_simple;
+                visible: !root.is_simple && !toolbar.tb_compact;
                 x: parent.width - 182px;
                 y: 6px;
                 opacity: (root.is_home_view || root.in_recycle_bin) ? 0.4 : 1.0;
@@ -5593,7 +5574,7 @@ export component MainWindow inherits Window {
                 active: root.flat_view;
                 clicked => { root.command("toggle-flat-view"); }
             }
-            ToolButton { visible: !root.is_simple; x: parent.width - 148px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: @tr("Dual pane"); active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
+            ToolButton { visible: !root.is_simple && !toolbar.tb_compact; x: parent.width - 148px; y: 6px; icon_data: "M4 5h7v14H4z M13 5h7v14h-7z"; tooltip: @tr("Dual pane"); active: root.dual_pane; clicked => { root.toggle_dual_pane(); } }
             // Clear-sort button - appears in the gap between Dual Pane and Command Palette
             // when any non-default sort is active. Resets to Name ^ (natural order).
             ToolButton {
@@ -5607,7 +5588,7 @@ export component MainWindow inherits Window {
                 clicked => { root.sort_column("reset"); }
             }
             ToolButton {
-                x: root.is_simple ? 10px + 5 * toolbar.simple_row2_step : parent.width - 78px;
+                x: root.is_simple ? 10px + 5 * toolbar.simple_row2_step : parent.width - (toolbar.tb_compact ? 42px : 78px);
                 y: root.is_simple ? root.simple_row2_y : 6px;
                 tooltip_above: root.is_simple;
                 icon_data: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z";
@@ -5617,6 +5598,46 @@ export component MainWindow inherits Window {
                 button_height: root.is_simple ? root.simple_btn_h : 31px;
                 tooltip: @tr("Command palette");
                 clicked => { root.command_filter = ""; root.filter_commands(""); root.command_visible = true; }
+            }
+
+            ToolButton {
+                visible: !root.is_simple;
+                x: parent.width - (toolbar.tb_compact ? 76px : 42px); y: 6px;
+                button_width: 31px; button_height: 31px;
+                icon_data: "M5 12h.01 M12 12h.01 M19 12h.01";
+                tooltip: @tr("More view and search options");
+                active: toolbar_more.is-open;
+                clicked => { toolbar_more.show(); }
+            }
+            toolbar_more := PopupWindow {
+                x: parent.width - 250px; y: 40px;
+                width: 240px;
+                height: 288px + (root.search_text != "" ? 30px : 0px) + (root.semantic_search_available ? 30px : 0px);
+                Rectangle {
+                    width: parent.width; height: parent.height;
+                    background: ThemePalette.panel_solid;
+                    border-radius: AppMetrics.radius_small;
+                    border-width: 1px; border-color: ThemePalette.border_strong;
+                    VerticalLayout {
+                        padding: 8px; spacing: 0px;
+                        ChoiceMenuRow { label: @tr("Icon view"); picked(_) => { root.set_view("grid"); toolbar_more.close(); } }
+                        ChoiceMenuRow { label: @tr("Compact view"); picked(_) => { root.set_view("compact"); toolbar_more.close(); } }
+                        ChoiceMenuRow { label: @tr("Details view"); picked(_) => { root.set_view("list"); toolbar_more.close(); } }
+                        ChoiceMenuRow { label: @tr("Gallery view"); picked(_) => { root.set_view("gallery"); toolbar_more.close(); } }
+                        Rectangle { height: 1px; background: ThemePalette.border; }
+                        ChoiceMenuRow { label: root.preview_visible ? @tr("Hide preview pane") : @tr("Show preview pane"); picked(_) => { root.toggle_preview(); toolbar_more.close(); } }
+                        ChoiceMenuRow { label: root.dual_pane ? @tr("Single pane") : @tr("Dual pane"); picked(_) => { root.toggle_dual_pane(); toolbar_more.close(); } }
+                        ChoiceMenuRow { label: root.flat_view ? @tr("Turn off flat view") : @tr("Flat view"); picked(_) => { root.command("toggle-flat-view"); toolbar_more.close(); } }
+                        ChoiceMenuRow { label: @tr("Reset sort to name"); picked(_) => { root.sort_column("reset"); toolbar_more.close(); } }
+                        Rectangle { height: 1px; background: ThemePalette.border; }
+                        ChoiceMenuRow { label: @tr("Search help and examples"); picked(_) => { root.search_help_toggle(); toolbar_more.close(); } }
+                        if root.search_text != "": ChoiceMenuRow { label: @tr("Save search"); picked(_) => { root.search_save_requested(); toolbar_more.close(); } }
+                        if root.semantic_search_available: ChoiceMenuRow {
+                            label: root.search_semantic_mode ? @tr("Turn off semantic ranking") : @tr("Turn on semantic ranking");
+                            picked(_) => { root.toggle_search_semantic_mode(); toolbar_more.close(); }
+                        }
+                    }
+                }
             }
 
             Rectangle { y: parent.height - 1px; width: parent.width; height: 1px; background: ThemePalette.border; }

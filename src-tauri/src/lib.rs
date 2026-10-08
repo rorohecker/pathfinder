@@ -22867,6 +22867,8 @@ impl NativeController {
             "batch-tag" => self.batch_tag_selected(ui),
             "batch-note" => self.batch_note_selected(ui),
             "focus-search" => {
+                // Reveal the navigation row before focusing its search input.
+                self.clear_selection(ui);
                 let n = ui.get_toolbar_search_focus_nonce();
                 ui.set_toolbar_search_focus_nonce(n.wrapping_add(1));
             }
