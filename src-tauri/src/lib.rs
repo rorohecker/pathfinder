@@ -7736,6 +7736,20 @@ const EXTRACT_STAGE_SUFFIX: &str = ".pathfinder-extract";
 
 fn safe_archive_out_path(dest: &Path, entry_name: &str) -> Option<PathBuf> {
     use std::path::Component;
+    // Reject rooted / absolute forms before normalize strips their markers
+    // (e.g. `\outside.txt` must not become a relative `outside.txt`).
+    let raw = entry_name.trim();
+    if raw.starts_with('/') || raw.starts_with('\\') {
+        return None;
+    }
+    if Path::new(raw).components().any(|c| {
+        matches!(
+            c,
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir
+        )
+    }) {
+        return None;
+    }
     // Normalize separators and drop "." segments before joining so zip names
     // like `foo\..\bar` or `./file.txt` cannot slip past the component check.
     let normalized = normalize_archive_prefix(entry_name);
