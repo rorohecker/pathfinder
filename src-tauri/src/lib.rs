@@ -7732,9 +7732,17 @@ mod storage_tests {
 
 // ----- archives -----
 
+const EXTRACT_STAGE_SUFFIX: &str = ".pathfinder-extract";
+
 fn safe_archive_out_path(dest: &Path, entry_name: &str) -> Option<PathBuf> {
     use std::path::Component;
-    let relative = Path::new(entry_name);
+    // Normalize separators and drop "." segments before joining so zip names
+    // like `foo\..\bar` or `./file.txt` cannot slip past the component check.
+    let normalized = normalize_archive_prefix(entry_name);
+    if normalized.is_empty() {
+        return None;
+    }
+    let relative = Path::new(&normalized);
     let mut seen_name = false;
     for component in relative.components() {
         match component {
@@ -7755,22 +7763,414 @@ fn safe_archive_out_path(dest: &Path, entry_name: &str) -> Option<PathBuf> {
     Some(out)
 }
 
+fn archive_member_matches(normalized_name: &str, selected: &HashSet<String>) -> bool {
+    selected.iter().any(|item| {
+        let item = normalize_archive_prefix(item);
+        !item.is_empty()
+            && (normalized_name == item || normalized_name.starts_with(&format!("{item}/")))
+    })
+}
+
+fn archive_entry_is_dir(name: &str, marked_dir: bool) -> bool {
+    marked_dir || name.ends_with('/') || name.ends_with('\\')
+}
+
+fn extract_stage_path_for(final_path: &Path) -> Result<PathBuf, String> {
+    let name = final_path
+        .file_name()
+        .ok_or_else(|| "Destination has no file name".to_string())?
+        .to_string_lossy();
+    let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
+    Ok(keep_both_destination(
+        &parent.join(format!(".{name}{EXTRACT_STAGE_SUFFIX}")),
+    ))
+}
+
+/// Write archive bytes to a hidden staging file, verify size, then rename into
+/// place. Callers must never `File::create` the final path first — that left
+/// visible 0-byte files when a read failed, was cancelled, or hit encryption.
+fn publish_extracted_file(stage: &Path, final_path: &Path, expected_size: u64) -> Result<(), String> {
+    {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(stage)
+            .map_err(|e| format!("Could not reopen staged extract: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("Could not flush extracted file: {e}"))?;
+    }
+    let actual = fs::metadata(stage)
+        .map(|m| m.len())
+        .map_err(|e| format!("Could not stat staged extract: {e}"))?;
+    // Some legacy ZIP local headers report size 0 with a data descriptor;
+    // only enforce the match when the archive declared a positive size.
+    if expected_size > 0 && actual != expected_size {
+        let _ = fs::remove_file(stage);
+        return Err(format!(
+            "Extracted size mismatch for {}: expected {expected_size} bytes, got {actual}",
+            final_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| final_path.display().to_string())
+        ));
+    }
+    if final_path.exists() {
+        fs::remove_file(final_path).map_err(|e| {
+            format!(
+                "Could not replace existing file at {}: {e}",
+                final_path.display()
+            )
+        })?;
+    }
+    if let Err(error) = fs::rename(stage, final_path) {
+        let _ = fs::remove_file(stage);
+        return Err(format!(
+            "Could not publish extracted file to {}: {error}",
+            final_path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn write_reader_to_stage<R: Read>(
+    reader: &mut R,
+    stage: &Path,
+    expected_size: u64,
+    state: Option<&AppState>,
+    op_id: u64,
+    bytes_done: &mut u64,
+    started: Instant,
+) -> Result<(), String> {
+    let mut outfile = File::create(stage).map_err(|e| e.to_string())?;
+    let mut buf = [0u8; 64 * 1024];
+    let mut written = 0u64;
+    let fail = |outfile: File, stage: &Path, error: String| -> Result<(), String> {
+        drop(outfile);
+        let _ = fs::remove_file(stage);
+        Err(error)
+    };
+    loop {
+        if state.is_some_and(|s| s.queue_cancel_requested()) {
+            return fail(outfile, stage, OP_CANCELLED.to_string());
+        }
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => return fail(outfile, stage, e.to_string()),
+        };
+        if n == 0 {
+            break;
+        }
+        if let Err(error) = outfile.write_all(&buf[..n]) {
+            return fail(outfile, stage, error.to_string());
+        }
+        written = written.saturating_add(n as u64);
+        *bytes_done = bytes_done.saturating_add(n as u64);
+        if let Some(state) = state {
+            state.queue_progress(op_id, *bytes_done, started);
+        }
+        // Guard against zip bombs / corrupt size headers: stop if we already
+        // exceeded the declared uncompressed size.
+        if expected_size > 0 && written > expected_size {
+            return fail(
+                outfile,
+                stage,
+                format!(
+                    "Extracted more bytes ({written}) than the archive declared ({expected_size})"
+                ),
+            );
+        }
+    }
+    drop(outfile);
+    if expected_size > 0 && written != expected_size {
+        let _ = fs::remove_file(stage);
+        return Err(format!(
+            "Extracted {written} bytes but the archive declared {expected_size}"
+        ));
+    }
+    Ok(())
+}
+
+fn extract_zip_entry_atomically<R: Read>(
+    reader: &mut R,
+    final_path: &Path,
+    expected_size: u64,
+    state: Option<&AppState>,
+    op_id: u64,
+    bytes_done: &mut u64,
+    started: Instant,
+) -> Result<(), String> {
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let stage = extract_stage_path_for(final_path)?;
+    if let Err(error) = write_reader_to_stage(
+        reader,
+        &stage,
+        expected_size,
+        state,
+        op_id,
+        bytes_done,
+        started,
+    ) {
+        let _ = fs::remove_file(&stage);
+        return Err(error);
+    }
+    publish_extracted_file(&stage, final_path, expected_size).inspect_err(|_| {
+        let _ = fs::remove_file(&stage);
+    })
+}
+
+fn archive_open_cache_dir() -> Result<PathBuf, String> {
+    let root = dirs::cache_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = root.join("Pathfinder").join("archive-open");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Extract one archive member to a content-addressed cache and return the path.
+/// Used when the user opens a file inside the archive browser so we never hand
+/// ShellExecute a virtual `archive://` path or a half-written 0-byte stub.
+fn extract_archive_member_for_open(
+    archive_path: &str,
+    member: &str,
+    password: Option<&str>,
+) -> Result<PathBuf, String> {
+    let member = normalize_archive_prefix(member);
+    if member.is_empty() {
+        return Err("Nothing to open inside the archive.".to_string());
+    }
+    let src = Path::new(archive_path);
+    if !src.is_file() {
+        return Err(format!("Archive not found: {archive_path}"));
+    }
+    let meta = fs::metadata(src).map_err(|e| e.to_string())?;
+    let stamp = unix_secs(meta.modified());
+    let mut hasher = Sha256::new();
+    hasher.update(archive_path.as_bytes());
+    hasher.update(stamp.to_le_bytes());
+    hasher.update(member.as_bytes());
+    hasher.update(password.unwrap_or_default().as_bytes());
+    let key = hex::encode(hasher.finalize());
+    let file_name = Path::new(&member)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| "Archive member has no file name".to_string())?;
+    let out_dir = archive_open_cache_dir()?.join(&key);
+    let out_path = out_dir.join(&file_name);
+    if out_path.is_file() {
+        return Ok(out_path);
+    }
+    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+
+    let ext = extension(src);
+    if ext == "zip" && password.unwrap_or_default().is_empty() {
+        extract_single_zip_member(src, &member, &out_path)?;
+    } else {
+        let seven_zip =
+            find_7z().ok_or_else(|| "7-Zip was not found on this system.".to_string())?;
+        let mut command = ProcessCommand::new(seven_zip);
+        command
+            .arg("e")
+            .arg(src)
+            .arg(format!("-o{}", out_dir.display()))
+            .arg("-aoa")
+            .arg("-y")
+            .arg(&member);
+        if let Some(password) = password {
+            command.arg(format!("-p{password}"));
+        }
+        command.no_window();
+        let output = command.output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let detail = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                "7-Zip could not extract that file.".to_string()
+            };
+            return Err(detail);
+        }
+        if !out_path.is_file() {
+            // 7z `e` flattens; look for the basename if the exact path missed.
+            if let Ok(entries) = fs::read_dir(&out_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file()
+                        && path
+                            .file_name()
+                            .is_some_and(|n| n.to_string_lossy() == file_name)
+                    {
+                        return Ok(path);
+                    }
+                }
+            }
+            return Err(format!("Extracted file missing: {file_name}"));
+        }
+    }
+    Ok(out_path)
+}
+
+fn extract_single_zip_member(src: &Path, member: &str, out_path: &Path) -> Result<(), String> {
+    let file = File::open(src).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let member = normalize_archive_prefix(member);
+    let mut found_index = None;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let name = normalize_archive_prefix(entry.name());
+        if name == member {
+            if archive_entry_is_dir(entry.name(), entry.is_dir()) {
+                return Err("That archive entry is a folder.".to_string());
+            }
+            if entry.encrypted() {
+                return Err(
+                    "That file is encrypted. Use Extract Here and enter the password.".to_string(),
+                );
+            }
+            found_index = Some(i);
+            break;
+        }
+    }
+    let Some(index) = found_index else {
+        return Err(format!("'{member}' was not found in the archive."));
+    };
+    let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
+    let expected = entry.size();
+    let mut bytes_done = 0u64;
+    extract_zip_entry_atomically(
+        &mut entry,
+        out_path,
+        expected,
+        None,
+        0,
+        &mut bytes_done,
+        Instant::now(),
+    )
+}
+
 #[cfg(test)]
 mod archive_path_tests {
-    use super::safe_archive_out_path;
+    use super::{
+        extract_archive_member_for_open, extract_zip_archive, normalize_archive_prefix,
+        safe_archive_out_path, AppState,
+    };
+    use std::collections::HashSet;
+    use std::fs::{self, File};
+    use std::io::Write;
     use std::path::Path;
+    use std::sync::atomic::Ordering;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn rejects_escape_and_windows_special_paths() {
         let root = Path::new("archive-output");
         assert!(safe_archive_out_path(root, "nested/file.txt").is_some());
         assert!(safe_archive_out_path(root, "../outside.txt").is_none());
+        assert!(safe_archive_out_path(root, "foo/../../outside.txt").is_none());
         assert!(safe_archive_out_path(root, "file.txt:stream").is_none());
+        assert!(safe_archive_out_path(root, "./nested/file.txt").is_some());
         #[cfg(target_os = "windows")]
         {
             assert!(safe_archive_out_path(root, r"C:\outside.txt").is_none());
             assert!(safe_archive_out_path(root, r"\outside.txt").is_none());
         }
+    }
+
+    #[test]
+    fn zip_extract_publishes_full_file_not_zero_byte_stub() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pathfinder-zip-extract-{nonce}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let zip_path = root.join("sample.zip");
+        let dest = root.join("out");
+        fs::create_dir_all(&dest).unwrap();
+
+        {
+            let file = File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("docs/readme.txt", opts).unwrap();
+            zip.write_all(b"hello from pathfinder archive").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let state = AppState::default();
+        extract_zip_archive(&state, &zip_path, &dest, None, "keep").unwrap();
+        let extracted = dest.join("docs").join("readme.txt");
+        assert!(extracted.is_file(), "extracted file should exist");
+        assert_eq!(
+            fs::read_to_string(&extracted).unwrap(),
+            "hello from pathfinder archive"
+        );
+        assert!(
+            fs::read_dir(&dest.join("docs"))
+                .unwrap()
+                .flatten()
+                .all(|e| {
+                    !e.file_name()
+                        .to_string_lossy()
+                        .contains(".pathfinder-extract")
+                }),
+            "staging files must not remain beside the published file"
+        );
+
+        let opened = extract_archive_member_for_open(
+            &zip_path.to_string_lossy(),
+            "docs/readme.txt",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&opened).unwrap(),
+            "hello from pathfinder archive"
+        );
+
+        let selected = HashSet::from([normalize_archive_prefix("docs/readme.txt")]);
+        let dest2 = root.join("out-selected");
+        fs::create_dir_all(&dest2).unwrap();
+        extract_zip_archive(&state, &zip_path, &dest2, Some(&selected), "keep").unwrap();
+        assert_eq!(
+            fs::read_to_string(dest2.join("docs").join("readme.txt")).unwrap(),
+            "hello from pathfinder archive"
+        );
+
+        // Cancel mid-extract must not leave a visible 0-byte final file.
+        let dest3 = root.join("out-cancel");
+        fs::create_dir_all(&dest3).unwrap();
+        state.queue_cancel.store(true, Ordering::SeqCst);
+        let cancelled = extract_zip_archive(&state, &zip_path, &dest3, None, "keep");
+        assert!(cancelled.is_err());
+        if dest3.join("docs").join("readme.txt").exists() {
+            assert_ne!(
+                dest3.join("docs").join("readme.txt").metadata().unwrap().len(),
+                0,
+                "cancelled extract must not publish a 0-byte final file"
+            );
+        }
+        // No leftover staging names either.
+        if let Ok(entries) = fs::read_dir(dest3.join("docs")) {
+            for entry in entries.flatten() {
+                assert!(
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".pathfinder-extract"),
+                    "staging file leaked after cancel"
+                );
+            }
+        }
+
+        let _ = fs::remove_dir_all(root);
     }
 }
 
@@ -7784,21 +8184,30 @@ fn extract_zip_archive(
     let file = File::open(src).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let mut total = 0u64;
+    let mut encrypted_selected = false;
     for i in 0..archive.len() {
         if let Ok(entry) = archive.by_index(i) {
             let normalized_name = normalize_archive_prefix(entry.name());
             let included = selected
-                .map(|items| {
-                    items.iter().any(|item| {
-                        normalized_name == *item || normalized_name.starts_with(&format!("{item}/"))
-                    })
-                })
+                .map(|items| archive_member_matches(&normalized_name, items))
                 .unwrap_or(true);
-            if included {
+            if !included {
+                continue;
+            }
+            if entry.encrypted() && !archive_entry_is_dir(entry.name(), entry.is_dir()) {
+                encrypted_selected = true;
+            }
+            if !archive_entry_is_dir(entry.name(), entry.is_dir()) {
                 total = total.saturating_add(entry.size());
             }
         }
     }
+    if encrypted_selected {
+        return Err(
+            "This ZIP contains encrypted files. Enter the archive password to extract.".to_string(),
+        );
+    }
+
     let op_id = state.queue_start(
         "extract",
         &src.to_string_lossy(),
@@ -7807,73 +8216,86 @@ fn extract_zip_archive(
     );
     let started = Instant::now();
     let mut bytes_done: u64 = 0;
+    let mut skipped_unsafe = 0u32;
 
+    let mut extracted_files = 0u32;
     let result = (|| -> Result<(), String> {
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
             let name = entry.name().to_string();
+            let normalized_name = normalize_archive_prefix(&name);
             if let Some(items) = selected {
-                let normalized_name = normalize_archive_prefix(&name);
-                let matched = items.iter().any(|item| {
-                    normalized_name == *item || normalized_name.starts_with(&format!("{item}/"))
-                });
-                if !matched {
+                if !archive_member_matches(&normalized_name, items) {
                     continue;
                 }
             }
+            let is_dir = archive_entry_is_dir(&name, entry.is_dir());
             let Some(mut out) = safe_archive_out_path(dest, &name) else {
+                skipped_unsafe = skipped_unsafe.saturating_add(1);
                 continue;
             };
             if state.queue_cancel_requested() {
                 return Err(OP_CANCELLED.to_string());
             }
-            let replace_existing = out.exists() && conflict == "replace" && !entry.is_dir();
-            if out.exists() && !entry.is_dir() {
+            if entry.encrypted() && !is_dir {
+                return Err(format!(
+                    "'{normalized_name}' is encrypted. Enter the archive password to extract."
+                ));
+            }
+            let replace_existing = out.exists() && conflict == "replace" && !is_dir;
+            if out.exists() && !is_dir {
                 match conflict {
                     "replace" => {}
                     "skip" => continue,
                     _ => out = keep_both_destination(&out),
                 }
             }
-            if entry.is_dir() {
+            if is_dir {
                 // Preserve existing children; removing the directory here would
                 // destroy data before the archive's contents were extracted.
                 fs::create_dir_all(&out).map_err(|e| e.to_string())?;
             } else {
-                if let Some(parent) = out.parent() {
-                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                }
+                let expected_size = entry.size();
                 let mut write_entry = || -> Result<(), String> {
-                    let mut outfile = File::create(&out).map_err(|e| e.to_string())?;
-                    let mut buf = [0u8; 64 * 1024];
-                    loop {
-                        if state.queue_cancel_requested() {
-                            return Err(OP_CANCELLED.to_string());
-                        }
-                        let n = entry.read(&mut buf).map_err(|e| e.to_string())?;
-                        if n == 0 {
-                            break;
-                        }
-                        outfile.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-                        bytes_done = bytes_done.saturating_add(n as u64);
-                        state.queue_progress(op_id, bytes_done, started);
-                    }
-                    Ok(())
+                    extract_zip_entry_atomically(
+                        &mut entry,
+                        &out,
+                        expected_size,
+                        Some(state),
+                        op_id,
+                        &mut bytes_done,
+                        started,
+                    )
                 };
                 if replace_existing {
                     replace_preserving_destination(&out, write_entry)?;
                 } else {
                     write_entry()?;
                 }
+                extracted_files = extracted_files.saturating_add(1);
             }
         }
 
+        if extracted_files == 0 && skipped_unsafe > 0 {
+            return Err(format!(
+                "Blocked {skipped_unsafe} unsafe archive path{}; nothing was extracted",
+                if skipped_unsafe == 1 { "" } else { "s" }
+            ));
+        }
         Ok(())
     })();
     match result {
         Ok(()) => {
             state.invalidate_path(dest);
-            state.queue_finish(op_id, "done", "Extracted", bytes_done, started.elapsed());
+            let detail = if skipped_unsafe > 0 {
+                format!(
+                    "Extracted ({skipped_unsafe} unsafe path{} skipped)",
+                    if skipped_unsafe == 1 { "" } else { "s" }
+                )
+            } else {
+                "Extracted".to_string()
+            };
+            state.queue_finish(op_id, "done", detail, bytes_done, started.elapsed());
             Ok(())
         }
         Err(error) => {
@@ -7898,7 +8320,28 @@ fn extract_with_7z(
 ) -> Result<(), String> {
     let seven_zip = find_7z().ok_or_else(|| "7-Zip was not found on this system.".to_string())?;
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    let total = src.metadata().map(|m| m.len()).unwrap_or(0);
+    // Prefer declared uncompressed sizes from a listing when available so the
+    // progress bar tracks extracted payload, not the compressed archive length.
+    let total = list_archive_entries(src, 100_000)
+        .ok()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    if selected.is_empty() {
+                        return !entry.is_dir;
+                    }
+                    let name = normalize_archive_prefix(&entry.name);
+                    selected.iter().any(|item| {
+                        let item = normalize_archive_prefix(item);
+                        name == item || name.starts_with(&format!("{item}/"))
+                    }) && !entry.is_dir
+                })
+                .map(|entry| entry.size)
+                .sum::<u64>()
+        })
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| src.metadata().map(|m| m.len()).unwrap_or(0));
     let op_id = state.queue_start(
         "extract",
         &src.to_string_lossy(),
@@ -7906,6 +8349,16 @@ fn extract_with_7z(
         total,
     );
     let started = Instant::now();
+    if state.queue_cancel_requested() {
+        state.queue_finish(
+            op_id,
+            "cancelled",
+            OP_CANCELLED.to_string(),
+            0,
+            started.elapsed(),
+        );
+        return Err(OP_CANCELLED.to_string());
+    }
     let overwrite = match conflict {
         "replace" => "-aoa",
         "skip" => "-aos",
@@ -7916,9 +8369,13 @@ fn extract_with_7z(
         .arg("x")
         .arg(src)
         .arg(format!("-o{}", dest.display()))
-        .arg(overwrite);
+        .arg(overwrite)
+        .arg("-y");
     if let Some(password) = password {
         command.arg(format!("-p{password}"));
+    } else {
+        // Avoid interactive password prompts hanging a background worker.
+        command.arg("-p");
     }
     for item in selected {
         command.arg(item);
@@ -7930,7 +8387,15 @@ fn extract_with_7z(
         state.queue_finish(op_id, "done", "Extracted", total, started.elapsed());
         Ok(())
     } else {
-        let error = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let error = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "7-Zip extraction failed.".to_string()
+        };
         state.queue_finish(op_id, "failed", error.clone(), 0, started.elapsed());
         Err(error)
     }
@@ -7948,7 +8413,10 @@ fn extract_archive_impl(
     let dst = PathBuf::from(dest);
     fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
     let ext = extension(&src);
-    if ext == "zip" && password.unwrap_or_default().is_empty() {
+    let password_empty = password.unwrap_or_default().is_empty();
+    // Encrypted ZIPs must not go through the pure-Rust path without a password:
+    // a failed decrypt previously left a visible 0-byte final file behind.
+    if ext == "zip" && password_empty && !archive_has_encrypted_entries(path) {
         let selected_set = if selected.is_empty() {
             None
         } else {
@@ -8867,6 +9335,11 @@ enum PendingPrompt {
     ArchivePassword {
         jobs: Vec<ArchiveExtractJob>,
         conflict: String,
+    },
+    /// Open a single encrypted archive member after the user enters a password.
+    ArchiveOpen {
+        archive_path: String,
+        member: String,
     },
     NewTemplate(FileTemplate),
     CompareFolder(String),
@@ -20479,17 +20952,8 @@ impl NativeController {
                 if let Some((_, prefix)) = parse_archive_virtual_path(&entry.path) {
                     self.open_archive_view(ui, archive.archive_path, prefix, true);
                 }
-            } else {
-                ui.set_preview_title(ss(&entry.name));
-                ui.set_preview_body(ss(format!(
-                    "{}\n\nUse Extract Here to unpack files from this archive.",
-                    archive_display_path(&archive.archive_path, &archive.prefix)
-                )));
-                ui.set_preview_meta(ss(format!(
-                    "Archive item | {} | {}",
-                    entry_type(&entry),
-                    format_size_short(entry.size)
-                )));
+            } else if let Some((_, member)) = parse_archive_virtual_path(&entry.path) {
+                self.open_archive_member(ui, archive.archive_path, member);
             }
             return;
         }
@@ -20551,6 +21015,24 @@ impl NativeController {
                         self.open_archive_view(ui, archive.archive_path, prefix, true);
                         opened_dirs += 1;
                     }
+                } else if let Some((_, member)) = parse_archive_virtual_path(&entry.path) {
+                    self.open_archive_member(ui, archive.archive_path, member);
+                    opened_files += 1;
+                }
+                continue;
+            }
+            // Secondary pane archive browser (primary `active_archive` is unset).
+            if let Some((archive_path, member)) = parse_archive_virtual_path(&entry.path) {
+                if entry.kind == FileKind::Directory {
+                    if self.active_pane == ActivePane::Secondary {
+                        self.open_secondary_archive_view(ui, archive_path, member, true);
+                    } else {
+                        self.open_archive_view(ui, archive_path, member, true);
+                    }
+                    opened_dirs += 1;
+                } else {
+                    self.open_archive_member(ui, archive_path, member);
+                    opened_files += 1;
                 }
                 continue;
             }
@@ -20645,7 +21127,8 @@ impl NativeController {
             ui.set_preview_body(ss(if entry.kind == FileKind::Directory {
                 "Archive folder".to_string()
             } else {
-                "Archive file. Use Extract Here to unpack it.".to_string()
+                "Archive file. Double-click to open a temporary copy, or use Extract Here to unpack."
+                    .to_string()
             }));
             ui.set_preview_meta(ss(format!(
                 "Archive: {}\nInside: {}\nSize: {}\nType: {}",
@@ -22378,6 +22861,10 @@ impl NativeController {
             }
             if entry.kind == FileKind::Directory {
                 self.secondary_navigate(ui, entry.path);
+            } else if let Some((archive_path, member)) = parse_archive_virtual_path(&entry.path) {
+                // Never ShellExecute archive:// virtual paths — that produced
+                // confusing failures (and 0-byte stubs if a bad extract raced).
+                self.open_archive_member(ui, archive_path, member);
             } else if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
                 self.open_secondary_archive_view(ui, entry.path, String::new(), true);
             } else {
@@ -23427,6 +23914,58 @@ impl NativeController {
                     Some(value)
                 };
                 self.start_bulk_archive_extract_async(ui, jobs, password, conflict);
+            }
+            Some(PendingPrompt::ArchiveOpen {
+                archive_path,
+                member,
+            }) => {
+                let password = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value)
+                };
+                let label = Path::new(&member)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| member.clone());
+                self.show_toast(ui, format!("Opening {label}…"));
+                let ready = self.operation_ready.clone();
+                let pending = self.pending_operation_result.clone();
+                std::thread::spawn(move || {
+                    let result =
+                        match extract_archive_member_for_open(&archive_path, &member, password.as_deref())
+                        {
+                            Ok(path) => {
+                                open_file_detached(path.to_string_lossy().to_string());
+                                NativeOperationResult {
+                                    message: format!("Opened {label}"),
+                                    kind: "success".to_string(),
+                                    refresh: false,
+                                    refresh_both_panes: false,
+                                    secondary_refresh_path: None,
+                                    clear_clipboard: false,
+                                    invalidate_dirs: Vec::new(),
+                                    optimistic_remove_paths: Vec::new(),
+                                    toast_action: String::new(),
+                                }
+                            }
+                            Err(error) => NativeOperationResult {
+                                message: error,
+                                kind: "error".to_string(),
+                                refresh: false,
+                                refresh_both_panes: false,
+                                secondary_refresh_path: None,
+                                clear_clipboard: false,
+                                invalidate_dirs: Vec::new(),
+                                optimistic_remove_paths: Vec::new(),
+                                toast_action: String::new(),
+                            },
+                        };
+                    if let Ok(mut lock) = pending.lock() {
+                        *lock = Some(result);
+                    }
+                    ready.store(true, Ordering::Release);
+                });
             }
             Some(PendingPrompt::NewTemplate(template)) => {
                 let base = value.trim();
@@ -25693,6 +26232,66 @@ impl NativeController {
             return;
         }
         self.open_archive_view(ui, entry.path, String::new(), true);
+    }
+
+    /// Extract one archive member to the open-cache and launch it with the
+    /// default app. Never opens the virtual `archive://` path directly.
+    fn open_archive_member(&mut self, ui: &MainWindow, archive_path: String, member: String) {
+        let member = normalize_archive_prefix(&member);
+        if member.is_empty() {
+            self.show_toast(ui, "Nothing to open inside the archive.");
+            return;
+        }
+        let label = Path::new(&member)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| member.clone());
+        if archive_has_encrypted_entries(&archive_path) {
+            self.pending_prompt = Some(PendingPrompt::ArchiveOpen {
+                archive_path,
+                member,
+            });
+            ui.set_prompt_title(ss("Archive password"));
+            ui.set_prompt_value(ss(""));
+            ui.set_prompt_visible(true);
+            return;
+        }
+        self.show_toast(ui, format!("Opening {label}…"));
+        let ready = self.operation_ready.clone();
+        let pending = self.pending_operation_result.clone();
+        std::thread::spawn(move || {
+            let result = match extract_archive_member_for_open(&archive_path, &member, None) {
+                Ok(path) => {
+                    open_file_detached(path.to_string_lossy().to_string());
+                    NativeOperationResult {
+                        message: format!("Opened {label}"),
+                        kind: "success".to_string(),
+                        refresh: false,
+                        refresh_both_panes: false,
+                        secondary_refresh_path: None,
+                        clear_clipboard: false,
+                        invalidate_dirs: Vec::new(),
+                        optimistic_remove_paths: Vec::new(),
+                        toast_action: String::new(),
+                    }
+                }
+                Err(error) => NativeOperationResult {
+                    message: error,
+                    kind: "error".to_string(),
+                    refresh: false,
+                    refresh_both_panes: false,
+                    secondary_refresh_path: None,
+                    clear_clipboard: false,
+                    invalidate_dirs: Vec::new(),
+                    optimistic_remove_paths: Vec::new(),
+                    toast_action: String::new(),
+                },
+            };
+            if let Ok(mut lock) = pending.lock() {
+                *lock = Some(result);
+            }
+            ready.store(true, Ordering::Release);
+        });
     }
 
     fn selected_archive_items(&self) -> Vec<String> {
