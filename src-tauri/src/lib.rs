@@ -7942,6 +7942,29 @@ fn archive_open_cache_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn archive_open_ok_marker(out_path: &Path) -> PathBuf {
+    let name = out_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    out_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".{name}.pathfinder-open-ok"))
+}
+
+fn archive_open_cache_is_ready(out_path: &Path) -> bool {
+    out_path.is_file() && archive_open_ok_marker(out_path).is_file()
+}
+
+fn mark_archive_open_cache_ready(out_path: &Path) -> Result<(), String> {
+    fs::write(archive_open_ok_marker(out_path), b"ok").map_err(|e| e.to_string())
+}
+
+fn clear_archive_open_cache_dir(out_dir: &Path) {
+    let _ = fs::remove_dir_all(out_dir);
+}
+
 /// Extract one archive member to a content-addressed cache and return the path.
 /// Used when the user opens a file inside the archive browser so we never hand
 /// ShellExecute a virtual `archive://` path or a half-written 0-byte stub.
@@ -7973,27 +7996,41 @@ fn extract_archive_member_for_open(
         .ok_or_else(|| "Archive member has no file name".to_string())?;
     let out_dir = archive_open_cache_dir()?.join(&key);
     let out_path = out_dir.join(&file_name);
-    if out_path.is_file() {
+    // Only reuse a prior open when both the file and the success marker exist.
+    // A failed 7-Zip run can leave a truncated/0-byte stub without the marker.
+    if archive_open_cache_is_ready(&out_path) {
         return Ok(out_path);
     }
+    clear_archive_open_cache_dir(&out_dir);
     fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
 
     let ext = extension(src);
-    if ext == "zip" && password.unwrap_or_default().is_empty() {
-        extract_single_zip_member(src, &member, &out_path)?;
-    } else {
+    let result = (|| -> Result<PathBuf, String> {
+        if ext == "zip" && password.unwrap_or_default().is_empty() {
+            extract_single_zip_member(src, &member, &out_path)?;
+            mark_archive_open_cache_ready(&out_path)?;
+            return Ok(out_path.clone());
+        }
+
         let seven_zip =
             find_7z().ok_or_else(|| "7-Zip was not found on this system.".to_string())?;
+        // Stage under a nested folder so a failed extract never leaves a
+        // publishable file at the final cache path.
+        let stage_dir = out_dir.join("stage");
+        fs::create_dir_all(&stage_dir).map_err(|e| e.to_string())?;
         let mut command = ProcessCommand::new(seven_zip);
         command
             .arg("e")
             .arg(src)
-            .arg(format!("-o{}", out_dir.display()))
+            .arg(format!("-o{}", stage_dir.display()))
             .arg("-aoa")
             .arg("-y")
             .arg(&member);
-        if let Some(password) = password {
+        if let Some(password) = password.filter(|p| !p.is_empty()) {
             command.arg(format!("-p{password}"));
+        } else {
+            // Avoid interactive password prompts hanging a background worker.
+            command.arg("-p");
         }
         command.no_window();
         let output = command.output().map_err(|e| e.to_string())?;
@@ -8009,24 +8046,42 @@ fn extract_archive_member_for_open(
             };
             return Err(detail);
         }
-        if !out_path.is_file() {
-            // 7z `e` flattens; look for the basename if the exact path missed.
-            if let Ok(entries) = fs::read_dir(&out_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file()
+        let staged = {
+            let direct = stage_dir.join(&file_name);
+            if direct.is_file() {
+                Some(direct)
+            } else if let Ok(entries) = fs::read_dir(&stage_dir) {
+                entries.flatten().map(|e| e.path()).find(|path| {
+                    path.is_file()
                         && path
                             .file_name()
                             .is_some_and(|n| n.to_string_lossy() == file_name)
-                    {
-                        return Ok(path);
-                    }
-                }
+                })
+            } else {
+                None
             }
+        };
+        let Some(staged) = staged else {
             return Err(format!("Extracted file missing: {file_name}"));
+        };
+        fs::rename(&staged, &out_path).map_err(|e| {
+            format!(
+                "Could not publish opened archive file to {}: {e}",
+                out_path.display()
+            )
+        })?;
+        let _ = fs::remove_dir_all(&stage_dir);
+        mark_archive_open_cache_ready(&out_path)?;
+        Ok(out_path.clone())
+    })();
+
+    match result {
+        Ok(path) => Ok(path),
+        Err(error) => {
+            clear_archive_open_cache_dir(&out_dir);
+            Err(error)
         }
     }
-    Ok(out_path)
 }
 
 fn extract_single_zip_member(src: &Path, member: &str, out_path: &Path) -> Result<(), String> {
@@ -8070,8 +8125,8 @@ fn extract_single_zip_member(src: &Path, member: &str, out_path: &Path) -> Resul
 #[cfg(test)]
 mod archive_path_tests {
     use super::{
-        extract_archive_member_for_open, extract_zip_archive, normalize_archive_prefix,
-        safe_archive_out_path, AppState,
+        archive_open_cache_is_ready, archive_open_ok_marker, extract_archive_member_for_open,
+        extract_zip_archive, normalize_archive_prefix, safe_archive_out_path, AppState,
     };
     use std::collections::HashSet;
     use std::fs::{self, File};
@@ -8148,6 +8203,26 @@ mod archive_path_tests {
             fs::read_to_string(&opened).unwrap(),
             "hello from pathfinder archive"
         );
+        assert!(
+            archive_open_cache_is_ready(&opened),
+            "open-from-archive cache must record a success marker"
+        );
+        // A stale 0-byte stub without the marker must not be reused.
+        let stale_dir = opened.parent().unwrap();
+        let _ = fs::remove_file(archive_open_ok_marker(&opened));
+        fs::write(&opened, b"").unwrap();
+        assert!(!archive_open_cache_is_ready(&opened));
+        let reopened = extract_archive_member_for_open(
+            &zip_path.to_string_lossy(),
+            "docs/readme.txt",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&reopened).unwrap(),
+            "hello from pathfinder archive"
+        );
+        let _ = stale_dir;
 
         let selected = HashSet::from([normalize_archive_prefix("docs/readme.txt")]);
         let dest2 = root.join("out-selected");
