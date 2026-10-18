@@ -786,7 +786,22 @@ mod tests {
         fs::remove_file(file).unwrap();
         scan(&db, &root, &AtomicBool::new(false)).unwrap();
         assert!(search(&db, &root, "unique", 10).unwrap().is_empty());
-        remove_root(&db, &root).unwrap();
+        // remove_root uses a process-wide try_lock; sibling tests that hold
+        // SCAN_LOCK briefly can race here, so retry instead of flaking CI.
+        let mut removed = false;
+        for _ in 0..100 {
+            match remove_root(&db, &root) {
+                Ok(()) => {
+                    removed = true;
+                    break;
+                }
+                Err(error) if error.contains("Stop the content scan") => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+        assert!(removed, "timed out waiting to remove content-index root");
         assert!(roots(&db).unwrap().is_empty());
         let _ = fs::remove_dir_all(dir);
     }
