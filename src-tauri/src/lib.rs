@@ -36,7 +36,8 @@ mod file_drag;
 mod file_drag {
     pub(crate) fn log(_msg: &str) {}
 }
-#[cfg(target_os = "windows")]
+mod cpu_topology;
+mod display_timing;
 mod file_icons;
 #[cfg(target_os = "windows")]
 mod folder_shell_registry;
@@ -111,9 +112,10 @@ const THUMBNAIL_CACHE_LIMIT_BYTES: u64 = 40 * 1024 * 1024;
 const INDEX_ESTIMATE_BYTES_PER_FILE: u64 = 420;
 const MAX_OPERATION_QUEUE_ITEMS: usize = 200;
 // Cap on concurrent heavy background jobs (duplicate scans, preview cache
-// warming, etc). Scaled to the machine so multi-core systems get more
-// throughput instead of a fixed pair of workers.
-static MAX_HEAVY_OPS: LazyLock<usize> = LazyLock::new(|| (num_cpus() / 2).clamp(2, 6));
+// warming, etc). On hybrid CPUs this tracks efficiency-core capacity so we
+// don't flood P-cores with background work.
+static MAX_HEAVY_OPS: LazyLock<usize> =
+    LazyLock::new(|| cpu_topology::topology().background_threads().clamp(2, 6));
 const GITHUB_LATEST_RELEASE_API: &str =
     "https://api.github.com/repos/rorohecker/pathfinder/releases/latest";
 /// Recent releases — used when `/latest` is a newer tag that still has no
@@ -128,24 +130,18 @@ static LOW_POWER_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Last applied power-saver UI/worker state.
 static POWER_SAVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-// Dedicated pool for thumbnail generation, sized to the machine (up to 8
-// threads). Threads run at below-normal priority on Windows so they don't
-// compete with foreground I/O even when we use more of them.
+// Dedicated pool for thumbnail generation. Sized to efficiency cores on hybrid
+// Intel/AMD CPUs; threads take EcoQoS + E-core affinity so they stay out of the
+// way of UI / burst work on P-cores.
 static THUMBNAIL_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     rayon::ThreadPoolBuilder::new()
-        .num_threads(num_cpus().saturating_sub(1).clamp(2, 8))
+        .num_threads(cpu_topology::topology().background_threads())
         .thread_name(|i| format!("pathfinder-thumb-{i}"))
         .spawn_handler(|thread| {
             std::thread::Builder::new()
                 .name(thread.name().unwrap_or("thumb").to_owned())
                 .spawn(move || {
-                    #[cfg(target_os = "windows")]
-                    unsafe {
-                        use windows::Win32::System::Threading::{
-                            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
-                        };
-                        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-                    }
+                    cpu_topology::configure_current_thread(cpu_topology::ThreadRole::Background);
                     thread.run();
                 })
                 .map(|_| ())
@@ -5086,6 +5082,8 @@ fn hybrid_search_background(
     max: usize,
     token: u64,
 ) -> (Vec<FileEntry>, String) {
+    // Interactive search latency matters — prefer P-cores / HighQoS on hybrid CPUs.
+    cpu_topology::configure_current_thread(cpu_topology::ThreadRole::Burst);
     let mut results = index_search(root, query, max).unwrap_or_default();
     let mut source = if results.is_empty() {
         "live scan".to_string()
@@ -7432,6 +7430,9 @@ fn num_cpus() -> usize {
 }
 
 fn scan_storage_root(root: String, top_n: Option<usize>) -> Result<StorageScanResult, String> {
+    // Storage analyzer is user-initiated — burst on performance cores, then the
+    // walk itself is I/O bound so EcoQoS is not applied here.
+    cpu_topology::configure_current_thread(cpu_topology::ThreadRole::Burst);
     let dir = PathBuf::from(&root);
     if !dir.is_dir() {
         return Err(format!("Not a directory: {root}"));
@@ -9169,6 +9170,10 @@ struct NativeSettings {
         deserialize_with = "deserialize_low_power_enabled"
     )]
     low_power_enabled: bool,
+    /// Decorative animation pacing: `auto` | `60` | `120` | `144` | `165` | `240`.
+    /// Auto matches the active monitor; a fixed value is capped to the panel Hz.
+    #[serde(default = "default_display_refresh")]
+    display_refresh: String,
     /// UI language: `system` | `en` | `it` | `es`. Applied via Slint bundled
     /// translations (`@tr`) and [`i18n`] for Rust-fed model strings.
     #[serde(default = "default_ui_language")]
@@ -9192,6 +9197,10 @@ fn default_true() -> bool {
 
 fn default_ui_language() -> String {
     "system".into()
+}
+
+fn default_display_refresh() -> String {
+    "auto".into()
 }
 
 /// Accept bool or legacy string (`auto`/`on`/`off`) from earlier builds.
@@ -9255,6 +9264,7 @@ impl Default for NativeSettings {
             custom_accent_hex: None,
             theme_animations: true,
             low_power_enabled: false,
+            display_refresh: default_display_refresh(),
             ui_language: default_ui_language(),
             list_col_size: true,
             list_col_modified: true,
@@ -12306,13 +12316,8 @@ fn schedule_index_roots_with_refresh(
         return;
     }
     std::thread::spawn(move || {
-        #[cfg(target_os = "windows")]
-        unsafe {
-            use windows::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
-            };
-            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-        }
+        // Indexing is sustained background work — EcoQoS + E-cores on hybrid CPUs.
+        cpu_topology::configure_current_thread(cpu_topology::ThreadRole::Background);
         // Give the settings UI a beat to repaint before background I/O starts.
         std::thread::sleep(Duration::from_millis(350));
         // Skip background indexing when on low battery to avoid draining it.
@@ -16564,6 +16569,7 @@ impl NativeController {
         ui.set_list_col_type(self.settings.list_col_type);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         self.apply_power_budget(ui);
+        self.apply_display_timing(ui);
     }
 
     /// Refresh labels that come from Rust models after a language change.
@@ -16679,6 +16685,19 @@ impl NativeController {
                 "#8b6cff",
             ),
             ("max", "Max", "All fixed drives, highest storage", "#d98a24"),
+        ]));
+        ui.set_refresh_choices(choice_items(&[
+            (
+                "auto",
+                "Auto",
+                "Match the active monitor refresh rate",
+                "#4f9cff",
+            ),
+            ("60", "60 Hz", "Classic pacing, lightest CPU", "#2aa96b"),
+            ("120", "120 Hz", "Smooth on 120 Hz panels", "#37b26c"),
+            ("144", "144 Hz", "Gaming panels", "#e3a524"),
+            ("165", "165 Hz", "High-refresh panels", "#d98a24"),
+            ("240", "240 Hz", "Maximum theme tick rate", "#e5484d"),
         ]));
         ui.set_command_items(command_items());
         ui.set_ai_install_size_mb(0);
@@ -17172,6 +17191,47 @@ impl NativeController {
         );
     }
 
+    /// Push monitor-aware animation tick budgets into ThemePalette / MainWindow.
+    fn apply_display_timing(&mut self, ui: &MainWindow) {
+        let setting = display_timing::normalize_setting(&self.settings.display_refresh);
+        if self.settings.display_refresh != setting {
+            self.settings.display_refresh = setting.to_string();
+        }
+        let timing = display_timing::resolve(setting);
+        let palette = ui.global::<ThemePalette>();
+        palette.set_motion_tick_ms(timing.theme_tick_ms as i32);
+        palette.set_motion_step_scale(timing.theme_step_scale);
+        palette.set_display_hz(timing.target_hz as i32);
+        ui.set_display_refresh(ss(setting));
+        ui.set_display_hz(timing.target_hz as i32);
+        ui.set_motion_tick_ms(timing.theme_tick_ms as i32);
+        ui.set_hardware_schedule_summary(ss(format!(
+            "{}\n{}\n{}",
+            timing.summary,
+            cpu_topology::topology().summary,
+            gpu_capability_summary()
+        )));
+    }
+
+    fn set_display_refresh(&mut self, ui: &MainWindow, mode: &str) {
+        let normalized = display_timing::normalize_setting(mode).to_string();
+        if self.settings.display_refresh == normalized {
+            self.apply_display_timing(ui);
+            return;
+        }
+        self.settings.display_refresh = normalized;
+        self.save_settings();
+        self.apply_display_timing(ui);
+        let timing = display_timing::resolve(&self.settings.display_refresh);
+        self.show_toast(
+            ui,
+            format!(
+                "Display pacing: {} Hz ({} ms theme ticks).",
+                timing.target_hz, timing.theme_tick_ms
+            ),
+        );
+    }
+
     /// Sync Slint + atomics from the user low-power toggle.
     /// When leaving saver, resume background indexing for the active mode.
     fn apply_power_budget(&mut self, ui: &MainWindow) {
@@ -17505,6 +17565,10 @@ impl NativeController {
     }
 
     fn apply_filter(&mut self) {
+        // Capture paths before rebuilding the list — indices go stale as soon as
+        // visible_files is cleared, and folder-filter retain after sort used to
+        // leave selection pointing at the wrong rows.
+        let sticky = self.selected_paths_sticky();
         let query = self.search_query.trim().to_lowercase();
         self.visible_files.clear();
         if !query.is_empty() && !query.starts_with("tag:") && !query.starts_with("smart:") {
@@ -17514,11 +17578,7 @@ impl NativeController {
                     .filter(|entry| self.show_hidden || !Self::is_hidden_entry(entry))
                     .cloned(),
             );
-            self.apply_folder_filter();
-            self.apply_sort();
-            return;
-        }
-        if query.is_empty() {
+        } else if query.is_empty() {
             if self.show_hidden {
                 self.visible_files.extend_from_slice(&self.files);
             } else {
@@ -17529,11 +17589,7 @@ impl NativeController {
                         .cloned(),
                 );
             }
-            self.apply_sort();
-            self.apply_folder_filter();
-            return;
-        }
-        if let Some(id) = query.strip_prefix("smart:") {
+        } else if let Some(id) = query.strip_prefix("smart:") {
             let now = now_unix_secs();
             for entry in &self.files {
                 let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
@@ -17559,48 +17615,48 @@ impl NativeController {
                     self.visible_files.push(entry.clone());
                 }
             }
-            self.apply_folder_filter();
-            self.apply_sort();
-            return;
-        }
-        if let Some(expected) = query.strip_prefix("tag:") {
+        } else if let Some(expected) = query.strip_prefix("tag:") {
             self.visible_files = self.entries_for_tag(expected);
-            self.apply_folder_filter();
-            self.apply_sort();
-            return;
-        }
-        for entry in &self.files {
-            let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
-            let matched = if let Some(expected) = query.strip_prefix("ext:") {
-                ext == expected.trim_start_matches('.')
-            } else if let Some(expected) = query.strip_prefix("name:") {
-                entry.name_lower.contains(expected)
-            } else if let Some(expected) = query.strip_prefix("kind:") {
-                let kind = if entry.kind == FileKind::Directory {
-                    "folder"
-                } else {
-                    match ext.as_str() {
-                        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "ico" => "image",
-                        "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" => "video",
-                        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
-                        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" => {
-                            "doc"
+        } else {
+            for entry in &self.files {
+                let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
+                let matched = if let Some(expected) = query.strip_prefix("ext:") {
+                    ext == expected.trim_start_matches('.')
+                } else if let Some(expected) = query.strip_prefix("name:") {
+                    entry.name_lower.contains(expected)
+                } else if let Some(expected) = query.strip_prefix("kind:") {
+                    let kind = if entry.kind == FileKind::Directory {
+                        "folder"
+                    } else {
+                        match ext.as_str() {
+                            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "ico" => {
+                                "image"
+                            }
+                            "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" => "video",
+                            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
+                            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt"
+                            | "md" => "doc",
+                            _ => "file",
                         }
-                        _ => "file",
-                    }
+                    };
+                    kind == expected
+                } else {
+                    entry.name_lower.contains(&query)
+                        || entry.path.to_lowercase().contains(&query)
+                        || ext.contains(&query)
                 };
-                kind == expected
-            } else {
-                entry.name_lower.contains(&query)
-                    || entry.path.to_lowercase().contains(&query)
-                    || ext.contains(&query)
-            };
-            if matched && (self.show_hidden || !Self::is_hidden_entry(entry)) {
-                self.visible_files.push(entry.clone());
+                if matched && (self.show_hidden || !Self::is_hidden_entry(entry)) {
+                    self.visible_files.push(entry.clone());
+                }
             }
         }
         self.apply_folder_filter();
-        self.apply_sort();
+        // Sort without apply_sort()'s sticky capture — indices are already stale
+        // after the rebuild above, so restore from the pre-clear path list.
+        if self.current_path != "home://" {
+            sort_entries_by(&mut self.visible_files, &self.sort_by, &self.sort_dir);
+        }
+        self.restore_selection_from_paths(&sticky);
     }
 
     fn drive_space_for_status(&mut self, path: &str) -> Option<(u64, u64)> {
@@ -23374,6 +23430,7 @@ impl NativeController {
             "performance-settings" => {
                 ui.set_settings_tab(ss("performance"));
                 ui.set_settings_visible(true);
+                self.apply_display_timing(ui);
                 self.spawn_performance_status(ui);
             }
             "ai-settings" => {
@@ -27103,6 +27160,9 @@ impl NativeController {
             .unwrap_or(0);
         let op_queue_paused = self.app_state.queue_is_paused();
         let battery_ok = indexing_permitted();
+        let timing = display_timing::resolve(&self.settings.display_refresh);
+        let topo = cpu_topology::topology();
+        let npu = detect_npu_names();
         ui.set_preview_title(ss("Performance Debug"));
         ui.set_preview_body(ss(format!(
             "Index mode: {}\n\
@@ -27116,6 +27176,13 @@ impl NativeController {
              Background indexing: {}\n\
              Low power toggle: {}\n\
              Power saver active: {}\n\
+             Display refresh setting: {}\n\
+             {}\n\
+             {}\n\
+             {}\n\
+             NPU: {}\n\
+             AI runtime: {}\n\
+             Thumb pool threads: {}\n\
              Current folder: {} items\n\
              Search mode: {}\n\
              Roots:\n{}",
@@ -27140,6 +27207,17 @@ impl NativeController {
                 "off"
             },
             if power_saver_active() { "yes" } else { "no" },
+            self.settings.display_refresh,
+            timing.summary,
+            topo.summary,
+            gpu_capability_summary(),
+            if npu.is_empty() {
+                "none detected".to_string()
+            } else {
+                npu.join(", ")
+            },
+            inference::ort_runtime_line(),
+            topo.background_threads(),
             self.visible_files.len(),
             if self.search_query.is_empty() {
                 "browsing"
@@ -30291,6 +30369,16 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_toggle_low_power(move || {
         if let Some(ui) = weak.upgrade() {
             c_lp.borrow_mut().toggle_low_power(&ui);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let c_refresh = controller.clone();
+    ui.on_refresh_rate_selected(move |mode| {
+        if let Some(ui) = weak.upgrade() {
+            c_refresh
+                .borrow_mut()
+                .set_display_refresh(&ui, mode.as_str());
         }
     });
 

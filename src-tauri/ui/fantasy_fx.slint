@@ -12,6 +12,9 @@ export component FantasyAtmosphere inherits Rectangle {
     in property <bool> active: false;
     // When false, Timers stop so minimized / hidden / off-theme windows idle cheaply.
     in property <bool> running: true;
+    // Display-paced motion from Settings → Performance (defaults match legacy 30 Hz).
+    in property <int> tick_ms: 33;
+    in property <float> step_scale: 1.0;
 
     width: 100%;
     height: 100%;
@@ -22,14 +25,13 @@ export component FantasyAtmosphere inherits Rectangle {
 
     // Shared wind clock — wraps 0→1. Motes sample this with a phase offset so
     // the stream never reverses (no ease-in-out ping-pong / "spring" feel).
-    // 33ms (~30 Hz) keeps dust silky without matching full display refresh.
     property <float> wind_t: 0.0;
     Timer {
-        interval: 33ms;
+        interval: root.tick_ms * 1ms;
         running: root.anim_on;
         triggered => {
-            // Full sweep ~14s (0.0023 × ~30/s).
-            wind_t = Math.mod(root.wind_t + 0.0023, 1.0);
+            // Full sweep ~14s at the 33 ms baseline; step_scale keeps wall-clock speed.
+            wind_t = Math.mod(root.wind_t + 0.0023 * root.step_scale, 1.0);
         }
     }
 
@@ -97,11 +99,11 @@ export component FantasyAtmosphere inherits Rectangle {
     // One-way upward wrap — not a bounce — so they feel like rising ash.
     property <float> ember_t: 0.0;
     Timer {
-        interval: 33ms;
+        interval: root.tick_ms * 1ms;
         running: root.anim_on;
         triggered => {
-            // Full rise ~15s (0.0022 × ~30/s).
-            ember_t = Math.mod(root.ember_t + 0.0022, 1.0);
+            // Full rise ~15s at the 33 ms baseline; step_scale keeps wall-clock speed.
+            ember_t = Math.mod(root.ember_t + 0.0022 * root.step_scale, 1.0);
         }
     }
     for e[i] in [

@@ -16,9 +16,10 @@ use ort::session::Session;
 use ort::value::TensorRef;
 use tokenizers::Tokenizer;
 
+use crate::cpu_topology::{self, ThreadRole};
 use crate::imagenet_labels;
 use crate::local_ai;
-use crate::winml_bridge::{self, AcceleratorKind, ProviderCandidate};
+use crate::winml_bridge::{self, AcceleratorKind, AiWorkload, ProviderCandidate};
 
 const DEFAULT_EMBED_DIM: usize = 384;
 const DEFAULT_MAX_SEQ: usize = 128;
@@ -28,10 +29,12 @@ pub const DHASH_NEAR_DUP_THRESHOLD: u32 = 10;
 const CLASSIFY_MIN_CONFIDENCE: f32 = 0.08;
 
 fn intra_threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .max(1)
+    // Prefer P-cores on hybrid Intel/AMD so ORT CPU EP does not thrash E-cores.
+    cpu_topology::topology().ai_cpu_threads()
+}
+
+fn prepare_ai_cpu_thread() {
+    cpu_topology::configure_current_thread(ThreadRole::AiCpu);
 }
 
 #[derive(Debug, Clone)]
@@ -206,16 +209,26 @@ fn try_session_with_candidate(
     model_path: &Path,
     candidate: &ProviderCandidate,
 ) -> ort::Result<Session> {
+    if candidate.kind == AcceleratorKind::Cpu {
+        prepare_ai_cpu_thread();
+    }
     Session::builder()?
         .with_execution_providers(eps_for_candidate(candidate))?
         .with_intra_threads(intra_threads())?
         .commit_from_file(model_path)
 }
 
-/// Probe candidates in NPU → GPU → CPU order; keep the first session that builds.
-fn open_session_preferring_hardware(model_path: &Path) -> ort::Result<(Session, SelectedProvider)> {
+/// Probe candidates for a workload; keep the first session that builds.
+/// When `record_primary` is true, update the global accelerator status line
+/// (used for embeddings). Classifier sessions skip that so a dGPU burst EP
+/// does not overwrite the sustained NPU selection shown in Settings.
+fn open_session_for_workload(
+    model_path: &Path,
+    workload: AiWorkload,
+    record_primary: bool,
+) -> ort::Result<(Session, SelectedProvider)> {
     ensure_ort_environment()?;
-    let candidates = winml_bridge::provider_candidates();
+    let candidates = winml_bridge::provider_candidates_for(workload);
     let mut last_err: Option<ort::Error> = None;
     for c in candidates {
         match try_session_with_candidate(model_path, &c) {
@@ -225,8 +238,10 @@ fn open_session_preferring_hardware(model_path: &Path) -> ort::Result<(Session, 
                     kind: c.kind,
                     tag: c.tag.clone(),
                 };
-                if let Ok(mut g) = SELECTED_PROVIDER.lock() {
-                    *g = Some(selected.clone());
+                if record_primary {
+                    if let Ok(mut g) = SELECTED_PROVIDER.lock() {
+                        *g = Some(selected.clone());
+                    }
                 }
                 return Ok((session, selected));
             }
@@ -234,6 +249,11 @@ fn open_session_preferring_hardware(model_path: &Path) -> ort::Result<(Session, 
         }
     }
     Err(last_err.unwrap_or_else(|| ort::Error::new("no execution provider available")))
+}
+
+/// Default sustained path (embeddings): NPU → iGPU → dGPU → CPU.
+fn open_session_preferring_hardware(model_path: &Path) -> ort::Result<(Session, SelectedProvider)> {
+    open_session_for_workload(model_path, AiWorkload::Sustained, true)
 }
 
 fn try_build_text_embedder() -> ort::Result<TextEmbedder> {
@@ -568,7 +588,17 @@ fn try_classifier_session() -> ort::Result<ClassifierSession> {
         .as_ref()
         .map(|i| i.classifier_id.clone())
         .unwrap_or_default();
-    let (session, _) = open_session_preferring_hardware(&path)?;
+    // Interactive classify: prefer dGPU burst latency over NPU when both exist.
+    let (session, selected) =
+        open_session_for_workload(&path, AiWorkload::Interactive, false)?;
+    if let Ok(mut s) = ORT_STATUS.lock() {
+        let prior = s.clone();
+        *s = format!(
+            "classifier ready on {} [{}] (interactive) · {prior}",
+            selected.label,
+            selected.kind.as_str()
+        );
+    }
     Ok(ClassifierSession {
         session,
         input_name,
