@@ -99,8 +99,10 @@ fn detect_windows_monitor_hz() -> Option<u32> {
     let mut max_hz = 0u32;
 
     // Primary display (null device name).
-    let mut mode = DEVMODEW::default();
-    mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+    let mut mode = DEVMODEW {
+        dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
     let ok = unsafe {
         EnumDisplaySettingsW(
             windows::core::PCWSTR::null(),
@@ -118,14 +120,18 @@ fn detect_windows_monitor_hz() -> Option<u32> {
     // Walk attached adapters for the highest active mode.
     let mut adapter = 0u32;
     while adapter <= 16 {
-        let mut device = DISPLAY_DEVICEW::default();
-        device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
+        let mut device = DISPLAY_DEVICEW {
+            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            ..Default::default()
+        };
         let listed = unsafe { EnumDisplayDevicesW(None, adapter, &mut device, 0) };
         if !listed.as_bool() {
             break;
         }
-        let mut mode = DEVMODEW::default();
-        mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+        let mut mode = DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
         let name = windows::core::PCWSTR(device.DeviceName.as_ptr());
         let mode_ok = unsafe { EnumDisplaySettingsW(name, ENUM_CURRENT_SETTINGS, &mut mode) };
         if mode_ok.as_bool() {
