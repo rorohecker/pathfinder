@@ -36,7 +36,8 @@ mod file_drag;
 mod file_drag {
     pub(crate) fn log(_msg: &str) {}
 }
-#[cfg(target_os = "windows")]
+mod cpu_topology;
+mod display_timing;
 mod file_icons;
 #[cfg(target_os = "windows")]
 mod folder_shell_registry;
@@ -111,9 +112,10 @@ const THUMBNAIL_CACHE_LIMIT_BYTES: u64 = 40 * 1024 * 1024;
 const INDEX_ESTIMATE_BYTES_PER_FILE: u64 = 420;
 const MAX_OPERATION_QUEUE_ITEMS: usize = 200;
 // Cap on concurrent heavy background jobs (duplicate scans, preview cache
-// warming, etc). Scaled to the machine so multi-core systems get more
-// throughput instead of a fixed pair of workers.
-static MAX_HEAVY_OPS: LazyLock<usize> = LazyLock::new(|| (num_cpus() / 2).clamp(2, 6));
+// warming, etc). On hybrid CPUs this tracks efficiency-core capacity so we
+// don't flood P-cores with background work.
+static MAX_HEAVY_OPS: LazyLock<usize> =
+    LazyLock::new(|| cpu_topology::topology().background_threads().clamp(2, 6));
 const GITHUB_LATEST_RELEASE_API: &str =
     "https://api.github.com/repos/rorohecker/pathfinder/releases/latest";
 /// Recent releases — used when `/latest` is a newer tag that still has no
@@ -128,24 +130,18 @@ static LOW_POWER_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Last applied power-saver UI/worker state.
 static POWER_SAVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-// Dedicated pool for thumbnail generation, sized to the machine (up to 8
-// threads). Threads run at below-normal priority on Windows so they don't
-// compete with foreground I/O even when we use more of them.
+// Dedicated pool for thumbnail generation. Sized to efficiency cores on hybrid
+// Intel/AMD CPUs; threads take EcoQoS + E-core affinity so they stay out of the
+// way of UI / burst work on P-cores.
 static THUMBNAIL_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
     rayon::ThreadPoolBuilder::new()
-        .num_threads(num_cpus().saturating_sub(1).clamp(2, 8))
+        .num_threads(cpu_topology::topology().background_threads())
         .thread_name(|i| format!("pathfinder-thumb-{i}"))
         .spawn_handler(|thread| {
             std::thread::Builder::new()
                 .name(thread.name().unwrap_or("thumb").to_owned())
                 .spawn(move || {
-                    #[cfg(target_os = "windows")]
-                    unsafe {
-                        use windows::Win32::System::Threading::{
-                            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
-                        };
-                        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-                    }
+                    cpu_topology::configure_current_thread(cpu_topology::ThreadRole::Background);
                     thread.run();
                 })
                 .map(|_| ())
@@ -1764,20 +1760,93 @@ fn destination_within_source(from: &Path, to: &Path) -> Result<bool, String> {
     for name in missing.iter().rev() {
         destination.push(name);
     }
+    Ok(path_is_within(&source, &destination))
+}
+
+/// True when `inner` is `outer` or a path under `outer` (case-insensitive on Windows).
+fn path_is_within(outer: &Path, inner: &Path) -> bool {
     #[cfg(target_os = "windows")]
     {
-        let source = source.to_string_lossy().to_lowercase();
-        let destination = destination.to_string_lossy().to_lowercase();
-        let prefix = if source.ends_with(std::path::MAIN_SEPARATOR) {
-            source.clone()
+        let outer = outer.to_string_lossy().to_lowercase();
+        let inner = inner.to_string_lossy().to_lowercase();
+        let prefix = if outer.ends_with(std::path::MAIN_SEPARATOR) {
+            outer.clone()
         } else {
-            format!("{source}{}", std::path::MAIN_SEPARATOR)
+            format!("{outer}{}", std::path::MAIN_SEPARATOR)
         };
-        Ok(destination == source || destination.starts_with(&prefix))
+        inner == outer || inner.starts_with(&prefix)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Ok(destination.starts_with(source))
+        inner.starts_with(outer)
+    }
+}
+
+/// Reject paste/move of a directory into itself or a descendant before any I/O.
+fn reject_descendant_transfer(src: &str, dest: &Path) -> Result<(), String> {
+    let src_path = Path::new(src);
+    if !src_path.is_dir() {
+        return Ok(());
+    }
+    if destination_within_source(src_path, dest)? {
+        return Err("Cannot place a folder inside itself or a descendant.".to_string());
+    }
+    Ok(())
+}
+
+/// Best-effort refresh rate of the monitor currently hosting the Pathfinder window.
+fn probe_window_monitor_hz(ui: &MainWindow) -> Option<u32> {
+    use i_slint_backend_winit::WinitWindowAccessor;
+    ui.window().with_winit_window(|window| {
+        window.current_monitor().and_then(|monitor| {
+            monitor
+                .refresh_rate_millihertz()
+                .map(|milli| ((milli + 500) / 1000).max(1))
+        })
+    })
+    .flatten()
+}
+
+#[cfg(test)]
+mod transfer_ancestry_tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!("pathfinder-ancestry-{label}-{nonce}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn rejects_copy_into_own_descendant() {
+        let dir = scratch("desc");
+        let root = dir.join("photos");
+        let child = root.join("2024");
+        fs::create_dir_all(&child).unwrap();
+        let into_child = child.join("photos");
+        assert!(destination_within_source(&root, &into_child).unwrap());
+        assert!(reject_descendant_transfer(&root.to_string_lossy(), &into_child).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allows_sibling_destination() {
+        let dir = scratch("sib");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let dest = b.join("a");
+        assert!(!destination_within_source(&a, &dest).unwrap());
+        assert!(reject_descendant_transfer(&a.to_string_lossy(), &dest).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 
@@ -5086,6 +5155,8 @@ fn hybrid_search_background(
     max: usize,
     token: u64,
 ) -> (Vec<FileEntry>, String) {
+    // Interactive search latency matters — prefer P-cores / HighQoS on hybrid CPUs.
+    cpu_topology::configure_current_thread(cpu_topology::ThreadRole::Burst);
     let mut results = index_search(root, query, max).unwrap_or_default();
     let mut source = if results.is_empty() {
         "live scan".to_string()
@@ -7432,6 +7503,9 @@ fn num_cpus() -> usize {
 }
 
 fn scan_storage_root(root: String, top_n: Option<usize>) -> Result<StorageScanResult, String> {
+    // Storage analyzer is user-initiated — burst on performance cores, then the
+    // walk itself is I/O bound so EcoQoS is not applied here.
+    cpu_topology::configure_current_thread(cpu_topology::ThreadRole::Burst);
     let dir = PathBuf::from(&root);
     if !dir.is_dir() {
         return Err(format!("Not a directory: {root}"));
@@ -9169,6 +9243,10 @@ struct NativeSettings {
         deserialize_with = "deserialize_low_power_enabled"
     )]
     low_power_enabled: bool,
+    /// Decorative animation pacing: `auto` | `60` | `120` | `144` | `165` | `240`.
+    /// Auto matches the active monitor; a fixed value is capped to the panel Hz.
+    #[serde(default = "default_display_refresh")]
+    display_refresh: String,
     /// UI language: `system` | `en` | `it` | `es`. Applied via Slint bundled
     /// translations (`@tr`) and [`i18n`] for Rust-fed model strings.
     #[serde(default = "default_ui_language")]
@@ -9192,6 +9270,10 @@ fn default_true() -> bool {
 
 fn default_ui_language() -> String {
     "system".into()
+}
+
+fn default_display_refresh() -> String {
+    "auto".into()
 }
 
 /// Accept bool or legacy string (`auto`/`on`/`off`) from earlier builds.
@@ -9255,6 +9337,7 @@ impl Default for NativeSettings {
             custom_accent_hex: None,
             theme_animations: true,
             low_power_enabled: false,
+            display_refresh: default_display_refresh(),
             ui_language: default_ui_language(),
             list_col_size: true,
             list_col_modified: true,
@@ -9627,6 +9710,9 @@ struct NativeController {
     expanded_tree_paths: std::collections::HashSet<String>,
     /// Redo stack populated when undoing.
     redo_stack: Vec<FileOp>,
+    /// Last monitor refresh (Hz) applied to theme timers — used to detect
+    /// moves between displays without re-resolving every idle tick.
+    last_applied_monitor_hz: u32,
     redo_generation: u64,
     folder_changed_pending: bool,
     /// Recursive flat listing of the current folder (capped).
@@ -12306,13 +12392,8 @@ fn schedule_index_roots_with_refresh(
         return;
     }
     std::thread::spawn(move || {
-        #[cfg(target_os = "windows")]
-        unsafe {
-            use windows::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
-            };
-            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-        }
+        // Indexing is sustained background work — EcoQoS + E-cores on hybrid CPUs.
+        cpu_topology::configure_current_thread(cpu_topology::ThreadRole::Background);
         // Give the settings UI a beat to repaint before background I/O starts.
         std::thread::sleep(Duration::from_millis(350));
         // Skip background indexing when on low battery to avoid draining it.
@@ -14318,6 +14399,15 @@ fn native_create_file(state: &AppState, path: &str) -> Result<(), String> {
 }
 
 fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
+    native_copy_inner(state, from, to, true)
+}
+
+/// Replay a recorded copy without conflict-renaming or writing a new undo entry.
+fn native_copy_replay(state: &AppState, from: &str, to: &str) -> Result<(), String> {
+    native_copy_inner(state, from, to, false)
+}
+
+fn native_copy_inner(state: &AppState, from: &str, to: &str, record: bool) -> Result<(), String> {
     if state.queue_cancel_requested() {
         return Err(OP_CANCELLED.to_string());
     }
@@ -14326,7 +14416,13 @@ fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
     }
     let src = PathBuf::from(from);
     let mut dst = PathBuf::from(to);
+    if src.is_dir() && destination_within_source(&src, &dst)? {
+        return Err("Cannot copy a folder into itself or a descendant.".to_string());
+    }
     if dst.exists() {
+        if !record {
+            return Err(format!("Destination already exists: {}", dst.display()));
+        }
         let op_id = state.queue_start("copy", from, Some(&dst.to_string_lossy()), 0);
         state.queue_conflict(op_id, conflict_info(&src, &dst));
         dst = keep_both_destination(&dst);
@@ -14350,7 +14446,9 @@ fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
     };
     if result.is_ok() {
         state.invalidate_path(&dst);
-        state.log_op("copy", from, Some(&dst.to_string_lossy()));
+        if record {
+            state.log_op("copy", from, Some(&dst.to_string_lossy()));
+        }
         state.queue_finish(op_id, "done", "Copied", total, started.elapsed());
     } else if let Err(error) = &result {
         state.queue_finish(op_id, "failed", error.clone(), 0, started.elapsed());
@@ -14375,6 +14473,11 @@ fn native_move_inner(state: &AppState, from: &str, to: &str, record: bool) -> Re
     }
     let src = PathBuf::from(from);
     let mut dst = PathBuf::from(to);
+    // Must run before fs::rename — moving a folder into its own descendant
+    // can orphan or destroy the tree on Windows.
+    if src.is_dir() && destination_within_source(&src, &dst)? {
+        return Err("Cannot move a folder into itself or a descendant.".to_string());
+    }
     if dst.exists() {
         if !record {
             return Err(format!("Destination already exists: {}", dst.display()));
@@ -14382,6 +14485,9 @@ fn native_move_inner(state: &AppState, from: &str, to: &str, record: bool) -> Re
         let op_id = state.queue_start("move", from, Some(&dst.to_string_lossy()), 0);
         state.queue_conflict(op_id, conflict_info(&src, &dst));
         dst = keep_both_destination(&dst);
+        if src.is_dir() && destination_within_source(&src, &dst)? {
+            return Err("Cannot move a folder into itself or a descendant.".to_string());
+        }
     }
     // Same-volume moves are metadata-only. Do not prewalk a directory before
     // attempting the rename; a cross-volume fallback has an unknown total.
@@ -16466,6 +16572,7 @@ impl NativeController {
             expanded_tree_paths: std::collections::HashSet::new(),
             redo_stack: Vec::new(),
             redo_generation: 0,
+            last_applied_monitor_hz: 0,
             folder_changed_pending: false,
             flat_view: false,
             pending_nav_search: None,
@@ -16564,6 +16671,7 @@ impl NativeController {
         ui.set_list_col_type(self.settings.list_col_type);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         self.apply_power_budget(ui);
+        let _ = self.apply_display_timing(ui);
     }
 
     /// Refresh labels that come from Rust models after a language change.
@@ -16679,6 +16787,19 @@ impl NativeController {
                 "#8b6cff",
             ),
             ("max", "Max", "All fixed drives, highest storage", "#d98a24"),
+        ]));
+        ui.set_refresh_choices(choice_items(&[
+            (
+                "auto",
+                "Auto",
+                "Match the active monitor refresh rate",
+                "#4f9cff",
+            ),
+            ("60", "60 Hz", "Classic pacing, lightest CPU", "#2aa96b"),
+            ("120", "120 Hz", "Smooth on 120 Hz panels", "#37b26c"),
+            ("144", "144 Hz", "Gaming panels", "#e3a524"),
+            ("165", "165 Hz", "High-refresh panels", "#d98a24"),
+            ("240", "240 Hz", "Maximum theme tick rate", "#e5484d"),
         ]));
         ui.set_command_items(command_items());
         ui.set_ai_install_size_mb(0);
@@ -17172,6 +17293,69 @@ impl NativeController {
         );
     }
 
+    /// Push monitor-aware animation tick budgets into ThemePalette / MainWindow.
+    fn apply_display_timing(&mut self, ui: &MainWindow) -> display_timing::DisplayTiming {
+        let window_hz = probe_window_monitor_hz(ui);
+        self.apply_display_timing_with_hz(ui, window_hz)
+    }
+
+    fn apply_display_timing_with_hz(
+        &mut self,
+        ui: &MainWindow,
+        window_hz: Option<u32>,
+    ) -> display_timing::DisplayTiming {
+        let setting = display_timing::normalize_setting(&self.settings.display_refresh);
+        if self.settings.display_refresh != setting {
+            self.settings.display_refresh = setting.to_string();
+        }
+        let timing = display_timing::resolve_for_window_hz(setting, window_hz);
+        self.last_applied_monitor_hz = timing.monitor_hz;
+        let palette = ui.global::<ThemePalette>();
+        palette.set_motion_tick_ms(timing.theme_tick_ms as i32);
+        palette.set_motion_step_scale(timing.theme_step_scale);
+        palette.set_display_hz(timing.target_hz as i32);
+        ui.set_display_refresh(ss(setting));
+        ui.set_display_hz(timing.target_hz as i32);
+        ui.set_motion_tick_ms(timing.theme_tick_ms as i32);
+        ui.set_hardware_schedule_summary(ss(format!(
+            "{}\n{}\n{}",
+            timing.summary,
+            cpu_topology::topology().summary,
+            gpu_capability_summary()
+        )));
+        timing
+    }
+
+    /// Re-probe the window's current monitor and update theme pacing when Hz changes
+    /// (user dragged the window to another display, or the panel mode changed).
+    fn sync_display_timing_if_monitor_changed(&mut self, ui: &MainWindow) {
+        let Some(hz) = probe_window_monitor_hz(ui) else {
+            return;
+        };
+        if hz == self.last_applied_monitor_hz {
+            return;
+        }
+        let _ = self.apply_display_timing_with_hz(ui, Some(hz));
+    }
+
+    fn set_display_refresh(&mut self, ui: &MainWindow, mode: &str) {
+        let normalized = display_timing::normalize_setting(mode).to_string();
+        if self.settings.display_refresh == normalized {
+            let _ = self.apply_display_timing(ui);
+            return;
+        }
+        self.settings.display_refresh = normalized;
+        self.save_settings();
+        let timing = self.apply_display_timing(ui);
+        self.show_toast(
+            ui,
+            format!(
+                "Display pacing: {} Hz ({} ms theme ticks).",
+                timing.target_hz, timing.theme_tick_ms
+            ),
+        );
+    }
+
     /// Sync Slint + atomics from the user low-power toggle.
     /// When leaving saver, resume background indexing for the active mode.
     fn apply_power_budget(&mut self, ui: &MainWindow) {
@@ -17505,6 +17689,10 @@ impl NativeController {
     }
 
     fn apply_filter(&mut self) {
+        // Capture paths before rebuilding the list — indices go stale as soon as
+        // visible_files is cleared, and folder-filter retain after sort used to
+        // leave selection pointing at the wrong rows.
+        let sticky = self.selected_paths_sticky();
         let query = self.search_query.trim().to_lowercase();
         self.visible_files.clear();
         if !query.is_empty() && !query.starts_with("tag:") && !query.starts_with("smart:") {
@@ -17514,11 +17702,7 @@ impl NativeController {
                     .filter(|entry| self.show_hidden || !Self::is_hidden_entry(entry))
                     .cloned(),
             );
-            self.apply_folder_filter();
-            self.apply_sort();
-            return;
-        }
-        if query.is_empty() {
+        } else if query.is_empty() {
             if self.show_hidden {
                 self.visible_files.extend_from_slice(&self.files);
             } else {
@@ -17529,11 +17713,7 @@ impl NativeController {
                         .cloned(),
                 );
             }
-            self.apply_sort();
-            self.apply_folder_filter();
-            return;
-        }
-        if let Some(id) = query.strip_prefix("smart:") {
+        } else if let Some(id) = query.strip_prefix("smart:") {
             let now = now_unix_secs();
             for entry in &self.files {
                 let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
@@ -17559,48 +17739,48 @@ impl NativeController {
                     self.visible_files.push(entry.clone());
                 }
             }
-            self.apply_folder_filter();
-            self.apply_sort();
-            return;
-        }
-        if let Some(expected) = query.strip_prefix("tag:") {
+        } else if let Some(expected) = query.strip_prefix("tag:") {
             self.visible_files = self.entries_for_tag(expected);
-            self.apply_folder_filter();
-            self.apply_sort();
-            return;
-        }
-        for entry in &self.files {
-            let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
-            let matched = if let Some(expected) = query.strip_prefix("ext:") {
-                ext == expected.trim_start_matches('.')
-            } else if let Some(expected) = query.strip_prefix("name:") {
-                entry.name_lower.contains(expected)
-            } else if let Some(expected) = query.strip_prefix("kind:") {
-                let kind = if entry.kind == FileKind::Directory {
-                    "folder"
-                } else {
-                    match ext.as_str() {
-                        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "ico" => "image",
-                        "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" => "video",
-                        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
-                        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" => {
-                            "doc"
+        } else {
+            for entry in &self.files {
+                let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
+                let matched = if let Some(expected) = query.strip_prefix("ext:") {
+                    ext == expected.trim_start_matches('.')
+                } else if let Some(expected) = query.strip_prefix("name:") {
+                    entry.name_lower.contains(expected)
+                } else if let Some(expected) = query.strip_prefix("kind:") {
+                    let kind = if entry.kind == FileKind::Directory {
+                        "folder"
+                    } else {
+                        match ext.as_str() {
+                            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" | "ico" => {
+                                "image"
+                            }
+                            "mp4" | "mov" | "mkv" | "avi" | "webm" | "wmv" => "video",
+                            "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
+                            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt"
+                            | "md" => "doc",
+                            _ => "file",
                         }
-                        _ => "file",
-                    }
+                    };
+                    kind == expected
+                } else {
+                    entry.name_lower.contains(&query)
+                        || entry.path.to_lowercase().contains(&query)
+                        || ext.contains(&query)
                 };
-                kind == expected
-            } else {
-                entry.name_lower.contains(&query)
-                    || entry.path.to_lowercase().contains(&query)
-                    || ext.contains(&query)
-            };
-            if matched && (self.show_hidden || !Self::is_hidden_entry(entry)) {
-                self.visible_files.push(entry.clone());
+                if matched && (self.show_hidden || !Self::is_hidden_entry(entry)) {
+                    self.visible_files.push(entry.clone());
+                }
             }
         }
         self.apply_folder_filter();
-        self.apply_sort();
+        // Sort without apply_sort()'s sticky capture — indices are already stale
+        // after the rebuild above, so restore from the pre-clear path list.
+        if self.current_path != "home://" {
+            sort_entries_by(&mut self.visible_files, &self.sort_by, &self.sort_dir);
+        }
+        self.restore_selection_from_paths(&sticky);
     }
 
     fn drive_space_for_status(&mut self, path: &str) -> Option<(u64, u64)> {
@@ -23374,6 +23554,7 @@ impl NativeController {
             "performance-settings" => {
                 ui.set_settings_tab(ss("performance"));
                 ui.set_settings_visible(true);
+                let _ = self.apply_display_timing(ui);
                 self.spawn_performance_status(ui);
             }
             "ai-settings" => {
@@ -24580,11 +24761,17 @@ impl NativeController {
             ui.set_op_drawer_visible(true);
         }
         let mut pasted = 0usize;
+        let mut skipped_ancestry = 0usize;
         for src in &clipboard.paths {
             let Some(name) = Path::new(src).file_name() else {
                 continue;
             };
             let dest = PathBuf::from(&dest_dir).join(name);
+            // Skip unsafe folder→descendant items; keep pasting the rest.
+            if reject_descendant_transfer(src, &dest).is_err() {
+                skipped_ancestry += 1;
+                continue;
+            }
             if self.paste_skips_dest(src, &dest, clipboard.cut) {
                 continue;
             }
@@ -24651,13 +24838,31 @@ impl NativeController {
             pasted += 1;
         }
         ui.set_op_drawer_visible(false);
+        if pasted == 0 {
+            if skipped_ancestry > 0 {
+                self.show_toast_kind(
+                    ui,
+                    "Cannot place a folder inside itself or a descendant.".to_string(),
+                    "error",
+                );
+            } else {
+                self.show_toast(ui, "Nothing to paste here.");
+            }
+            return;
+        }
         self.refresh_after_paste(ui, clipboard.cut, &clipboard.paths);
         let verb = if clipboard.cut { "Moved" } else { "Pasted" };
-        let msg = if pasted == 1 {
+        let mut msg = if pasted == 1 {
             format!("{verb} 1 item")
         } else {
             format!("{verb} {pasted} items")
         };
+        if skipped_ancestry > 0 {
+            msg.push_str(&format!(
+                " · skipped {skipped_ancestry} unsafe folder{}",
+                if skipped_ancestry == 1 { "" } else { "s" }
+            ));
+        }
         self.show_toast_kind(ui, msg, "success");
     }
 
@@ -24743,17 +24948,9 @@ impl NativeController {
             };
             let dest = PathBuf::from(&dest_dir).join(name);
             let same = same_inode_or_canonical_path(src, &dest);
-            // Catch the "drag folder onto itself or into a descendant of itself"
-            // case before fs::rename returns an OS error that's hard to parse.
-            // Comparing canonicalised paths handles symlinks too.
-            let canonical_src = std::fs::canonicalize(src).ok();
-            let canonical_dest_parent = std::fs::canonicalize(&dest_dir).ok();
-            let is_self_descent = match (canonical_src.as_ref(), canonical_dest_parent.as_ref()) {
-                (Some(c_src), Some(c_dest_parent)) => {
-                    src.is_dir() && c_dest_parent.starts_with(c_src)
-                }
-                _ => false,
-            };
+            // Shared ancestry check (junctions / missing leaf components) —
+            // same helper used by paste and native_move/copy.
+            let is_self_descent = reject_descendant_transfer(src_str, &dest).is_err();
             file_drag::log(&format!(
                 "  src='{}' -> dest='{}' same={} self_descent={}",
                 src_str,
@@ -24969,33 +25166,53 @@ impl NativeController {
             }
         }
 
-        let paths_to_paste: Vec<String> = clipboard
-            .paths
-            .iter()
-            .filter(|src| {
-                if src.starts_with("recycle://") || is_virtual_nav_path(src) {
-                    return false;
-                }
-                let Some(name) = Path::new(src).file_name() else {
-                    return false;
-                };
-                let dest = PathBuf::from(&dest_dir).join(name);
-                if self.paste_skips_dest(src, &dest, cut) || !Path::new(src).exists() {
-                    return false;
-                }
-                if self.session_conflict_action.as_deref() == Some("skip")
-                    && self.paste_has_real_conflict(src, &dest)
-                {
-                    return false;
-                }
-                true
-            })
-            .cloned()
-            .collect();
+        let mut paths_to_paste: Vec<String> = Vec::new();
+        let mut skipped_ancestry = 0usize;
+        for src in &clipboard.paths {
+            if src.starts_with("recycle://") || is_virtual_nav_path(src) {
+                continue;
+            }
+            let Some(name) = Path::new(src).file_name() else {
+                continue;
+            };
+            let dest = PathBuf::from(&dest_dir).join(name);
+            // Skip unsafe folder→descendant items; keep pasting the rest of the selection.
+            if reject_descendant_transfer(src, &dest).is_err() {
+                skipped_ancestry += 1;
+                continue;
+            }
+            if self.paste_skips_dest(src, &dest, cut) || !Path::new(src).exists() {
+                continue;
+            }
+            if self.session_conflict_action.as_deref() == Some("skip")
+                && self.paste_has_real_conflict(src, &dest)
+            {
+                continue;
+            }
+            paths_to_paste.push(src.clone());
+        }
         let n = paths_to_paste.len();
         if n == 0 {
-            self.show_toast(ui, "Nothing to paste here.");
+            if skipped_ancestry > 0 {
+                self.show_toast_kind(
+                    ui,
+                    "Cannot place a folder inside itself or a descendant.".to_string(),
+                    "error",
+                );
+            } else {
+                self.show_toast(ui, "Nothing to paste here.");
+            }
             return;
+        }
+        if skipped_ancestry > 0 {
+            self.show_toast_kind(
+                ui,
+                format!(
+                    "Skipped {skipped_ancestry} folder{} (cannot paste into itself).",
+                    if skipped_ancestry == 1 { "" } else { "s" }
+                ),
+                "error",
+            );
         }
 
         let verb = if cut { "Moving" } else { "Copying" };
@@ -27103,6 +27320,16 @@ impl NativeController {
             .unwrap_or(0);
         let op_queue_paused = self.app_state.queue_is_paused();
         let battery_ok = indexing_permitted();
+        let timing = if self.last_applied_monitor_hz > 0 {
+            display_timing::resolve_with_monitor(
+                &self.settings.display_refresh,
+                self.last_applied_monitor_hz,
+            )
+        } else {
+            display_timing::resolve(&self.settings.display_refresh)
+        };
+        let topo = cpu_topology::topology();
+        let npu = detect_npu_names();
         ui.set_preview_title(ss("Performance Debug"));
         ui.set_preview_body(ss(format!(
             "Index mode: {}\n\
@@ -27116,6 +27343,13 @@ impl NativeController {
              Background indexing: {}\n\
              Low power toggle: {}\n\
              Power saver active: {}\n\
+             Display refresh setting: {}\n\
+             {}\n\
+             {}\n\
+             {}\n\
+             NPU: {}\n\
+             AI runtime: {}\n\
+             Thumb pool threads: {}\n\
              Current folder: {} items\n\
              Search mode: {}\n\
              Roots:\n{}",
@@ -27140,6 +27374,17 @@ impl NativeController {
                 "off"
             },
             if power_saver_active() { "yes" } else { "no" },
+            self.settings.display_refresh,
+            timing.summary,
+            topo.summary,
+            gpu_capability_summary(),
+            if npu.is_empty() {
+                "none detected".to_string()
+            } else {
+                npu.join(", ")
+            },
+            inference::ort_runtime_line(),
+            topo.background_threads(),
             self.visible_files.len(),
             if self.search_query.is_empty() {
                 "browsing"
@@ -28663,7 +28908,19 @@ impl NativeController {
         );
     }
 
+    fn invalidate_redo_if_stale(&mut self) {
+        let log_gen = self
+            .app_state
+            .operation_log_generation
+            .load(Ordering::SeqCst);
+        if self.redo_generation != log_gen {
+            self.redo_stack.clear();
+            self.redo_generation = log_gen;
+        }
+    }
+
     fn undo(&mut self, ui: &MainWindow) {
+        self.invalidate_redo_if_stale();
         let op = self
             .app_state
             .operation_log
@@ -28774,14 +29031,7 @@ impl NativeController {
     }
 
     fn redo(&mut self, ui: &MainWindow) {
-        if self.redo_generation
-            != self
-                .app_state
-                .operation_log_generation
-                .load(Ordering::SeqCst)
-        {
-            self.redo_stack.clear();
-        }
+        self.invalidate_redo_if_stale();
         let Some(mut op) = self.redo_stack.pop() else {
             self.show_toast(ui, "Nothing to redo.");
             return;
@@ -28795,18 +29045,13 @@ impl NativeController {
                 native_move_replay(&self.app_state, &from, dest)
             }
             "copy" => {
-                let source = Path::new(&from);
-                let dest = Path::new(to.as_deref().unwrap_or(""));
-                if dest.exists() {
-                    Err(format!("Destination already exists: {}", dest.display()))
-                } else if source.is_dir() {
-                    copy_dir_recursive(&self.app_state, source, dest)
-                } else {
-                    fs::copy(source, dest)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                }
+                let dest = to.as_deref().unwrap_or("");
+                // Replay through the same engine as the original copy (ancestry
+                // checks, durable file transfer, no conflict auto-rename, no
+                // second undo entry).
+                native_copy_replay(&self.app_state, &from, dest)
             }
+            // Recycle-bin delete only — permanent deletes are never logged.
             "delete" => trash::delete(&from).map_err(|e| e.to_string()).map(|()| {
                 let ids = trash_ids_for_originals(std::slice::from_ref(&from));
                 op.trash_id = ids
@@ -30294,6 +30539,16 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
         }
     });
 
+    let weak = ui.as_weak();
+    let c_refresh = controller.clone();
+    ui.on_refresh_rate_selected(move |mode| {
+        if let Some(ui) = weak.upgrade() {
+            c_refresh
+                .borrow_mut()
+                .set_display_refresh(&ui, mode.as_str());
+        }
+    });
+
     // HTML / Markdown preview: open the selected file in the system default
     // browser so the user can see the rendered output. The preview pane
     // itself keeps showing source code so this is the "Output" half of the
@@ -31132,6 +31387,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     } else if let Ok(mut ctrl) = c.try_borrow_mut() {
                         ctrl.apply_deferred_startup_if_ready(&ui);
                         ctrl.pump_visible_enrichment(&ui);
+                        // Cheap: only rewrites theme timers when the window's
+                        // monitor refresh rate actually changed (multi-monitor).
+                        ctrl.sync_display_timing_if_monitor_changed(&ui);
                     }
                 }
 
@@ -33773,10 +34031,11 @@ pub fn run() {
     set_app_user_model_id();
 
     let _ = slint::platform::set_platform(Box::new(
-        // FemtoVG (OpenGL) — vsync is on by default via winit/glutin, which
-        // caps theme animation cost to the display refresh and saves power.
-        // Skia is faster but currently fails to link against windows-rs ICU.
-        i_slint_backend_winit::Backend::new().expect("failed to create Slint winit backend"),
+        // Prefer Skia (GPU) for high-refresh paint; FemtoVG remains compiled in
+        // as an automatic fallback if Skia fails to initialise.
+        i_slint_backend_winit::Backend::new_with_renderer_by_name(Some("skia"))
+            .or_else(|_| i_slint_backend_winit::Backend::new())
+            .expect("failed to create Slint winit backend"),
     ));
 
     let mut initial_settings: NativeSettings =

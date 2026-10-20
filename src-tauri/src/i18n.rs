@@ -54,7 +54,12 @@ fn detect_system_language() -> &'static str {
 
 #[cfg(windows)]
 fn detect_windows_ui_language() -> Option<&'static str> {
-    use windows::Win32::Globalization::GetUserDefaultUILanguage;
+    // Raw kernel32 link — avoid windows::Win32::Globalization, whose icuuc.dll
+    // imports collide with Skia's statically linked ICU at link time.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetUserDefaultUILanguage() -> u16;
+    }
     // LANGID primary language: Italian 0x10, Spanish 0x0A, English 0x09.
     let primary = unsafe { GetUserDefaultUILanguage() } & 0x3FF;
     match primary {

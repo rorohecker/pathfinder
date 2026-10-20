@@ -223,6 +223,11 @@ export global ThemePalette {
     // Shared idle bob for retro/sunset folder glyphs — one timer in MainWindow,
     // never a per-row Timer (those stalled the UI with many folders visible).
     in-out property <bool> folder_idle_phase: false;
+    // Display-paced theme motion (set from Rust via Settings → Performance).
+    // Baseline authoring used 33 ms (~30 Hz); step_scale keeps wall-clock speed.
+    in-out property <int> motion_tick_ms: 33;
+    in-out property <float> motion_step_scale: 1.0;
+    in-out property <int> display_hz: 60;
 }
 
 // Pixel banks for High Fantasy animated icons (filled from Rust once at startup).
@@ -3697,6 +3702,12 @@ export component MainWindow inherits Window {
     in-out property <bool> low_power_enabled: false;
     // Decorative theme atmospheres + animated relics. Persisted in settings.json.
     in-out property <bool> theme_animations: true;
+    // Display refresh pacing (auto / 60 / 120 / 144 / 165 / 240).
+    in-out property <string> display_refresh: "auto";
+    in-out property <int> display_hz: 60;
+    in-out property <int> motion_tick_ms: 33;
+    in-out property <[ChoiceItem]> refresh_choices;
+    in-out property <string> hardware_schedule_summary: "";
     // Sunset solar cycle — shared by atmosphere + content-pane sky wash.
     // Phase 0 = late afternoon (high), 1 = on the horizon.
     // Driven by a low-rate timer (not a one-shot flip) so motion starts
@@ -4055,6 +4066,7 @@ export component MainWindow inherits Window {
     callback toggle_list_column(string);
     callback toggle_theme_animations();
     callback toggle_low_power();
+    callback refresh_rate_selected(string);
     callback command(string);
     callback shortcut_key(bool, bool, bool, string);
     callback shell_verb(string);
@@ -7479,25 +7491,25 @@ export component MainWindow inherits Window {
                 ThemePalette.folder_idle_phase = !ThemePalette.folder_idle_phase;
             }
         }
-        // Sunset sun arc: nudge phase every tick so the disc drifts slowly and
-        // continuously (~2 min high→horizon, then back). Pauses when minimized,
-        // resizing, animations off, or low-power mode (was a 10 Hz drain on battery).
+        // Sunset sun arc: nudge phase every display-paced tick so the disc drifts
+        // slowly (~2 min high→horizon). Step scales with tick ms so wall-clock
+        // speed stays constant from 60 Hz through 240 Hz panels.
         Timer {
-            interval: 100ms;
+            interval: ThemePalette.motion_tick_ms * 1ms;
             running: ThemePalette.active_theme == "sunset"
                 && ThemePalette.theme_animations
                 && !root.window_occluded
                 && !root.window_resizing
                 && !root.power_saver;
             triggered => {
-                // 0.00084 × 10 Hz ≈ full arc in ~119s (was 0.00042 @ 20 Hz).
+                // Baseline 0.00084 was authored at 100 ms; rescale to motion tick.
                 if (root.sunset_descending) {
-                    root.sunset_phase = Math.min(1.0, root.sunset_phase + 0.00084);
+                    root.sunset_phase = Math.min(1.0, root.sunset_phase + 0.00084 * (ThemePalette.motion_tick_ms / 100.0));
                     if (root.sunset_phase >= 1.0) {
                         root.sunset_descending = false;
                     }
                 } else {
-                    root.sunset_phase = Math.max(0.0, root.sunset_phase - 0.00084);
+                    root.sunset_phase = Math.max(0.0, root.sunset_phase - 0.00084 * (ThemePalette.motion_tick_ms / 100.0));
                     if (root.sunset_phase <= 0.0) {
                         root.sunset_descending = true;
                     }
@@ -7517,6 +7529,8 @@ export component MainWindow inherits Window {
                 && !root.window_occluded
                 && !root.window_resizing
                 && !root.power_saver;
+            tick_ms: ThemePalette.motion_tick_ms;
+            step_scale: ThemePalette.motion_step_scale;
         }
         RetroAtmosphere {
             x: 0;
@@ -9362,6 +9376,51 @@ export component MainWindow inherits Window {
                         font-size: 11px;
                         wrap: word-wrap;
                         height: self.preferred-height;
+                    }
+
+                    Text { text: @tr("DISPLAY REFRESH"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+                    Text {
+                        text: @tr("Pace theme atmospheres to your monitor. Auto matches the panel; pick 240 Hz on a 240 Hz display for the smoothest motion. UI chrome already vsyncs with the display.");
+                        color: ThemePalette.text_muted;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        width: parent.width;
+                        height: self.preferred-height;
+                    }
+                    Rectangle {
+                        width: parent.width;
+                        height: Math.ceil(root.refresh_choices.length / 2) * AppMetrics.index_chip_row_stride;
+                        for mode[i] in root.refresh_choices: ChoiceChip {
+                            x: Math.mod(i, 2) == 0 ? 0px : (parent.width / 2 + 3px);
+                            y: Math.floor(i / 2) * AppMetrics.index_chip_row_stride;
+                            width: parent.width / 2 - 3px;
+                            item: mode;
+                            active: root.display_refresh == mode.id;
+                            picked(id) => { root.refresh_rate_selected(id); }
+                        }
+                    }
+                    Rectangle {
+                        height: hw_label.preferred-height + hw_text.preferred-height + 36px;
+                        border-radius: AppMetrics.radius;
+                        border-width: 1px;
+                        border-color: ThemePalette.border;
+                        background: ThemePalette.panel;
+                        hw_label := Text {
+                            x: 14px; y: 12px; width: parent.width - 28px; height: 20px;
+                            text: @tr("Hardware schedule");
+                            color: ThemePalette.text; font-size: 13px; font-weight: 700;
+                        }
+                        hw_text := Text {
+                            x: 14px;
+                            y: 36px;
+                            width: parent.width - 28px;
+                            text: root.hardware_schedule_summary;
+                            color: ThemePalette.text_muted;
+                            font-size: 11.5px;
+                            font-family: AppMetrics.mono_font;
+                            wrap: word-wrap;
+                            height: self.preferred-height;
+                        }
                     }
 
                     Text { text: @tr("SEARCH PERFORMANCE"); color: ThemePalette.text_faint; font-size: 10px; font-weight: 700; letter-spacing: 1px; }

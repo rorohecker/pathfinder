@@ -31,6 +31,17 @@ pub struct ProviderCandidate {
     pub tag: String,
 }
 
+/// How the caller intends to use the accelerator.
+///
+/// Sustained workloads (embeddings / background ranking) prefer NPU for power
+/// efficiency. Interactive bursts (image classify on selection) prefer a discrete
+/// GPU for lowest latency, then NPU, then iGPU, then CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiWorkload {
+    Sustained,
+    Interactive,
+}
+
 /// Returns true when the OS build is Windows 11 24H2+ (build >= 26100).
 #[cfg(windows)]
 pub fn windows_ml_ep_supported() -> bool {
@@ -153,22 +164,30 @@ pub fn discover_winml_ep_libraries() -> Vec<(String, PathBuf)> {
     }
 }
 
-/// Build an ordered list of provider candidates: NPU → GPU → CPU.
+/// Default ordering: NPU → GPU → CPU (sustained / general).
 pub fn provider_candidates() -> Vec<ProviderCandidate> {
+    provider_candidates_for(AiWorkload::Sustained)
+}
+
+/// Build an ordered list of provider candidates for a workload class.
+pub fn provider_candidates_for(workload: AiWorkload) -> Vec<ProviderCandidate> {
     #[cfg(not(windows))]
     {
-        vec![ProviderCandidate {
+        let _ = workload;
+        return vec![ProviderCandidate {
             label: "CPU".into(),
             kind: AcceleratorKind::Cpu,
             tag: "cpu".into(),
-        }]
+        }];
     }
-    #[cfg(windows)]
-    let mut out = Vec::new();
     #[cfg(windows)]
     {
         let has_npu = !crate::gpu_detect::detect_npus().is_empty();
+        let inv = crate::gpu_detect::detect_gpus();
         let winml = discover_winml_ep_libraries();
+
+        let mut npu_eps = Vec::new();
+        let mut gpu_eps = Vec::new();
         for (ep, _) in &winml {
             let kind = if ep.contains("QNN") || ep.contains("VitisAI") {
                 AcceleratorKind::Npu
@@ -181,46 +200,69 @@ pub fn provider_candidates() -> Vec<ProviderCandidate> {
             } else {
                 AcceleratorKind::Gpu
             };
-            out.push(ProviderCandidate {
+            let candidate = ProviderCandidate {
                 label: ep.clone(),
                 kind,
                 tag: format!("winml:{ep}"),
-            });
+            };
+            match kind {
+                AcceleratorKind::Npu => npu_eps.push(candidate),
+                AcceleratorKind::Gpu => gpu_eps.push(candidate),
+                AcceleratorKind::Cpu => {}
+            }
         }
         if has_npu {
-            out.push(ProviderCandidate {
+            npu_eps.push(ProviderCandidate {
                 label: "DirectML NPU".into(),
                 kind: AcceleratorKind::Npu,
                 tag: "dml:npu".into(),
             });
-            out.push(ProviderCandidate {
+            npu_eps.push(ProviderCandidate {
                 label: "DirectML HighPerformance".into(),
                 kind: AcceleratorKind::Npu,
                 tag: "dml:any_hp".into(),
             });
         }
-        let inv = crate::gpu_detect::detect_gpus();
+
+        let mut dgpu = Vec::new();
+        let mut igpu = Vec::new();
         for (i, adapter) in inv.adapters.iter().enumerate() {
             if !adapter.is_hardware {
                 continue;
             }
-            if adapter.is_discrete {
-                out.push(ProviderCandidate {
-                    label: format!("DirectML dGPU ({})", adapter.name),
-                    kind: AcceleratorKind::Gpu,
-                    tag: format!("dml:idx:{i}"),
-                });
-            }
-        }
-        for (i, adapter) in inv.adapters.iter().enumerate() {
-            if !adapter.is_hardware || adapter.is_discrete {
-                continue;
-            }
-            out.push(ProviderCandidate {
-                label: format!("DirectML iGPU ({})", adapter.name),
+            let candidate = ProviderCandidate {
+                label: format!(
+                    "DirectML {} ({})",
+                    if adapter.is_discrete { "dGPU" } else { "iGPU" },
+                    adapter.name
+                ),
                 kind: AcceleratorKind::Gpu,
                 tag: format!("dml:idx:{i}"),
-            });
+            };
+            if adapter.is_discrete {
+                dgpu.push(candidate);
+            } else {
+                igpu.push(candidate);
+            }
+        }
+
+        let mut out = Vec::new();
+        match workload {
+            // Continuous embedding / ranking: NPU first (efficient), then iGPU
+            // (shared power budget), then dGPU, then CPU.
+            AiWorkload::Sustained => {
+                out.extend(npu_eps);
+                out.extend(gpu_eps);
+                out.extend(igpu);
+                out.extend(dgpu);
+            }
+            // User-facing classify: dGPU burst latency, then NPU, then iGPU.
+            AiWorkload::Interactive => {
+                out.extend(dgpu);
+                out.extend(npu_eps);
+                out.extend(gpu_eps);
+                out.extend(igpu);
+            }
         }
         out.push(ProviderCandidate {
             label: "DirectML default".into(),

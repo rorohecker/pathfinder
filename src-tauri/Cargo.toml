@@ -1,6 +1,6 @@
 [package]
 name = "pathfinder"
-version = "1.0.28"
+version = "1.0.29"
 edition = "2024"
 
 [lib]
@@ -14,10 +14,14 @@ winres = "0.1"
 
 [dependencies]
 slint = "1"
-# Default femtovg/OpenGL renderer. Skia would be faster but its bundled ICU
-# duplicates symbols with the windows-rs crate (`u_memcmp`, `u_unescapeAt`,
-# etc.) - link fails. Stick with femtovg.
-i-slint-backend-winit = "1"
+# Prefer Skia (GPU) with FemtoVG kept as compile-time fallback. Skia's bundled
+# ICU clashes with windows-rs `Win32_Globalization` ICU imports, so we omit that
+# feature (i18n + patched accesskit_windows use raw kernel32 links instead).
+i-slint-backend-winit = { version = "1", features = [
+    "renderer-skia",
+    "renderer-femtovg",
+    "renderer-software",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
@@ -54,7 +58,9 @@ once_cell = "1.19"
 # `native-tls` left the binary with no TLS backend wired in. Keep defaults on so
 # HTTPS works out of the box.
 ureq = { version = "2.12", features = ["json"] }
-tokenizers = "0.20"
+# Disable default `esaxx_fast`: esaxx-rs builds with /MT on MSVC, which clashes
+# with Skia's /MD CRT when linking the Windows binary (rust-lld LNK2038).
+tokenizers = { version = "0.20", default-features = false, features = ["progressbar", "onig"] }
 ndarray = { version = "0.17", default-features = false, features = ["std"] }
 
 # Windows: ONNX Runtime is not linked into the main binary; the Local AI
@@ -76,7 +82,9 @@ windows = { version = "0.62", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_Properties",
     "Win32_Foundation",
-    "Win32_Globalization",
+    # Intentionally omit Win32_Globalization: its icuuc.dll imports collide with
+    # Skia's statically linked ICU (`u_memcmp`, …). Language detection uses a
+    # raw kernel32 GetUserDefaultUILanguage link in i18n.rs instead.
     "Win32_NetworkManagement_WNet",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi",
@@ -113,6 +121,10 @@ ort = { version = "=2.0.0-rc.12", default-features = false, features = [
     "api-24",
     "tls-rustls",
 ] }
+
+# Drop Win32_Globalization from accesskit so Skia's static ICU can link.
+[patch.crates-io]
+accesskit_windows = { path = "../patches/accesskit_windows" }
 
 [profile.release]
 # Parallelizable LTO: ~95% the runtime perf of full LTO, but compiles 5-10x faster
