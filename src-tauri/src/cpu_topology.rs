@@ -165,7 +165,8 @@ fn detect_windows_topology() -> CpuTopology {
         return fallback_topology(vendor, brand);
     }
 
-    let mut cores: Vec<(u8, usize)> = Vec::new();
+    // (efficiency class, group-0 affinity mask or 0, logical processor count)
+    let mut cores: Vec<(u8, usize, u32)> = Vec::new();
     let mut offset = 0usize;
     while offset + std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>() <= buffer.len()
     {
@@ -178,17 +179,17 @@ fn detect_windows_topology() -> CpuTopology {
         }
         if info.Relationship == RelationProcessorCore {
             let processor = unsafe { info.Anonymous.Processor };
-            // Prefer group 0 for SetThreadAffinityMask consumers.
-            if processor.GroupCount > 0 && processor.GroupMask[0].Group == 0 {
-                let mask = processor.GroupMask[0].Mask;
-                if mask != 0 {
-                    cores.push((processor.EfficiencyClass, mask));
-                }
-            } else if processor.GroupCount > 0 {
-                // Non-zero group: still count bits for summary, skip affinity mask.
-                let mask = processor.GroupMask[0].Mask;
-                if mask != 0 {
-                    cores.push((processor.EfficiencyClass, mask));
+            if processor.GroupCount > 0 {
+                let group = processor.GroupMask[0];
+                if group.Mask != 0 {
+                    // SetThreadAffinityMask only accepts group-0 masks. Still
+                    // count logical processors in other groups for budgets.
+                    let affinity_mask = if group.Group == 0 { group.Mask } else { 0 };
+                    cores.push((
+                        processor.EfficiencyClass,
+                        affinity_mask,
+                        group.Mask.count_ones(),
+                    ));
                 }
             }
         }
@@ -199,8 +200,8 @@ fn detect_windows_topology() -> CpuTopology {
         return fallback_topology(vendor, brand);
     }
 
-    let max_class = cores.iter().map(|(c, _)| *c).max().unwrap_or(0);
-    let min_class = cores.iter().map(|(c, _)| *c).min().unwrap_or(0);
+    let max_class = cores.iter().map(|(c, _, _)| *c).max().unwrap_or(0);
+    let min_class = cores.iter().map(|(c, _, _)| *c).min().unwrap_or(0);
     let is_hybrid = max_class > min_class;
 
     let mut performance_mask = 0usize;
@@ -208,10 +209,11 @@ fn detect_windows_topology() -> CpuTopology {
     let mut all_mask = 0usize;
     let mut performance_count = 0u32;
     let mut efficiency_count = 0u32;
+    let mut logical_cpus = 0u32;
 
-    for (class, mask) in &cores {
+    for (class, mask, bits) in &cores {
         all_mask |= mask;
-        let bits = mask.count_ones();
+        logical_cpus += bits;
         if is_hybrid {
             if *class == max_class {
                 performance_mask |= mask;
@@ -227,7 +229,7 @@ fn detect_windows_topology() -> CpuTopology {
         }
     }
 
-    let logical_cpus = all_mask.count_ones().max(1);
+    let logical_cpus = logical_cpus.max(1);
     if !is_hybrid {
         efficiency_mask = 0;
         efficiency_count = 0;

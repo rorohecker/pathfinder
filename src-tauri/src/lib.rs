@@ -16671,7 +16671,7 @@ impl NativeController {
         ui.set_list_col_type(self.settings.list_col_type);
         ui.set_network_downloads_enabled(self.settings.network_downloads_enabled);
         self.apply_power_budget(ui);
-        self.apply_display_timing(ui);
+        let _ = self.apply_display_timing(ui);
     }
 
     /// Refresh labels that come from Rust models after a language change.
@@ -17294,12 +17294,16 @@ impl NativeController {
     }
 
     /// Push monitor-aware animation tick budgets into ThemePalette / MainWindow.
-    fn apply_display_timing(&mut self, ui: &MainWindow) {
+    fn apply_display_timing(&mut self, ui: &MainWindow) -> display_timing::DisplayTiming {
         let window_hz = probe_window_monitor_hz(ui);
-        self.apply_display_timing_with_hz(ui, window_hz);
+        self.apply_display_timing_with_hz(ui, window_hz)
     }
 
-    fn apply_display_timing_with_hz(&mut self, ui: &MainWindow, window_hz: Option<u32>) {
+    fn apply_display_timing_with_hz(
+        &mut self,
+        ui: &MainWindow,
+        window_hz: Option<u32>,
+    ) -> display_timing::DisplayTiming {
         let setting = display_timing::normalize_setting(&self.settings.display_refresh);
         if self.settings.display_refresh != setting {
             self.settings.display_refresh = setting.to_string();
@@ -17319,6 +17323,7 @@ impl NativeController {
             cpu_topology::topology().summary,
             gpu_capability_summary()
         )));
+        timing
     }
 
     /// Re-probe the window's current monitor and update theme pacing when Hz changes
@@ -17330,19 +17335,18 @@ impl NativeController {
         if hz == self.last_applied_monitor_hz {
             return;
         }
-        self.apply_display_timing_with_hz(ui, Some(hz));
+        let _ = self.apply_display_timing_with_hz(ui, Some(hz));
     }
 
     fn set_display_refresh(&mut self, ui: &MainWindow, mode: &str) {
         let normalized = display_timing::normalize_setting(mode).to_string();
         if self.settings.display_refresh == normalized {
-            self.apply_display_timing(ui);
+            let _ = self.apply_display_timing(ui);
             return;
         }
         self.settings.display_refresh = normalized;
         self.save_settings();
-        self.apply_display_timing(ui);
-        let timing = display_timing::resolve(&self.settings.display_refresh);
+        let timing = self.apply_display_timing(ui);
         self.show_toast(
             ui,
             format!(
@@ -23550,7 +23554,7 @@ impl NativeController {
             "performance-settings" => {
                 ui.set_settings_tab(ss("performance"));
                 ui.set_settings_visible(true);
-                self.apply_display_timing(ui);
+                let _ = self.apply_display_timing(ui);
                 self.spawn_performance_status(ui);
             }
             "ai-settings" => {
@@ -24757,15 +24761,16 @@ impl NativeController {
             ui.set_op_drawer_visible(true);
         }
         let mut pasted = 0usize;
+        let mut skipped_ancestry = 0usize;
         for src in &clipboard.paths {
             let Some(name) = Path::new(src).file_name() else {
                 continue;
             };
             let dest = PathBuf::from(&dest_dir).join(name);
-            if let Err(error) = reject_descendant_transfer(src, &dest) {
-                ui.set_op_drawer_visible(false);
-                self.show_toast_kind(ui, error, "error");
-                return;
+            // Skip unsafe folder→descendant items; keep pasting the rest.
+            if reject_descendant_transfer(src, &dest).is_err() {
+                skipped_ancestry += 1;
+                continue;
             }
             if self.paste_skips_dest(src, &dest, clipboard.cut) {
                 continue;
@@ -24833,13 +24838,31 @@ impl NativeController {
             pasted += 1;
         }
         ui.set_op_drawer_visible(false);
+        if pasted == 0 {
+            if skipped_ancestry > 0 {
+                self.show_toast_kind(
+                    ui,
+                    "Cannot place a folder inside itself or a descendant.".to_string(),
+                    "error",
+                );
+            } else {
+                self.show_toast(ui, "Nothing to paste here.");
+            }
+            return;
+        }
         self.refresh_after_paste(ui, clipboard.cut, &clipboard.paths);
         let verb = if clipboard.cut { "Moved" } else { "Pasted" };
-        let msg = if pasted == 1 {
+        let mut msg = if pasted == 1 {
             format!("{verb} 1 item")
         } else {
             format!("{verb} {pasted} items")
         };
+        if skipped_ancestry > 0 {
+            msg.push_str(&format!(
+                " · skipped {skipped_ancestry} unsafe folder{}",
+                if skipped_ancestry == 1 { "" } else { "s" }
+            ));
+        }
         self.show_toast_kind(ui, msg, "success");
     }
 
@@ -25144,6 +25167,7 @@ impl NativeController {
         }
 
         let mut paths_to_paste: Vec<String> = Vec::new();
+        let mut skipped_ancestry = 0usize;
         for src in &clipboard.paths {
             if src.starts_with("recycle://") || is_virtual_nav_path(src) {
                 continue;
@@ -25152,9 +25176,10 @@ impl NativeController {
                 continue;
             };
             let dest = PathBuf::from(&dest_dir).join(name);
-            if let Err(error) = reject_descendant_transfer(src, &dest) {
-                self.show_toast_kind(ui, error, "error");
-                return;
+            // Skip unsafe folder→descendant items; keep pasting the rest of the selection.
+            if reject_descendant_transfer(src, &dest).is_err() {
+                skipped_ancestry += 1;
+                continue;
             }
             if self.paste_skips_dest(src, &dest, cut) || !Path::new(src).exists() {
                 continue;
@@ -25168,8 +25193,26 @@ impl NativeController {
         }
         let n = paths_to_paste.len();
         if n == 0 {
-            self.show_toast(ui, "Nothing to paste here.");
+            if skipped_ancestry > 0 {
+                self.show_toast_kind(
+                    ui,
+                    "Cannot place a folder inside itself or a descendant.".to_string(),
+                    "error",
+                );
+            } else {
+                self.show_toast(ui, "Nothing to paste here.");
+            }
             return;
+        }
+        if skipped_ancestry > 0 {
+            self.show_toast_kind(
+                ui,
+                format!(
+                    "Skipped {skipped_ancestry} folder{} (cannot paste into itself).",
+                    if skipped_ancestry == 1 { "" } else { "s" }
+                ),
+                "error",
+            );
         }
 
         let verb = if cut { "Moving" } else { "Copying" };
@@ -27277,7 +27320,14 @@ impl NativeController {
             .unwrap_or(0);
         let op_queue_paused = self.app_state.queue_is_paused();
         let battery_ok = indexing_permitted();
-        let timing = display_timing::resolve(&self.settings.display_refresh);
+        let timing = if self.last_applied_monitor_hz > 0 {
+            display_timing::resolve_with_monitor(
+                &self.settings.display_refresh,
+                self.last_applied_monitor_hz,
+            )
+        } else {
+            display_timing::resolve(&self.settings.display_refresh)
+        };
         let topo = cpu_topology::topology();
         let npu = detect_npu_names();
         ui.set_preview_title(ss("Performance Debug"));
