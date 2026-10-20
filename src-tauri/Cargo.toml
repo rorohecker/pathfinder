@@ -14,10 +14,14 @@ winres = "0.1"
 
 [dependencies]
 slint = "1"
-# Default femtovg/OpenGL renderer. Skia would be faster but its bundled ICU
-# duplicates symbols with the windows-rs crate (`u_memcmp`, `u_unescapeAt`,
-# etc.) - link fails. Stick with femtovg.
-i-slint-backend-winit = "1"
+# Prefer Skia (GPU) with FemtoVG kept as compile-time fallback. Skia's bundled
+# ICU used to clash with windows-rs `Win32_Globalization` ICU imports; we avoid
+# that feature and call GetUserDefaultUILanguage via a raw kernel32 link instead.
+i-slint-backend-winit = { version = "1", features = [
+    "renderer-skia",
+    "renderer-femtovg",
+    "renderer-software",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
@@ -76,7 +80,9 @@ windows = { version = "0.62", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_Properties",
     "Win32_Foundation",
-    "Win32_Globalization",
+    # Intentionally omit Win32_Globalization: its icuuc.dll imports collide with
+    # Skia's statically linked ICU (`u_memcmp`, …). Language detection uses a
+    # raw kernel32 GetUserDefaultUILanguage link in i18n.rs instead.
     "Win32_NetworkManagement_WNet",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi",

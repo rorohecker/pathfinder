@@ -28,6 +28,14 @@ pub fn resolve(setting: &str) -> DisplayTiming {
     resolve_with_monitor(setting, detect_monitor_hz())
 }
 
+/// Prefer the window's current monitor (winit), falling back to a system-wide probe.
+pub fn resolve_for_window_hz(setting: &str, window_hz: Option<u32>) -> DisplayTiming {
+    let hz = window_hz
+        .filter(|h| (30..=360).contains(h))
+        .unwrap_or_else(detect_monitor_hz);
+    resolve_with_monitor(setting, hz)
+}
+
 pub fn resolve_with_monitor(setting: &str, monitor_hz: u32) -> DisplayTiming {
     let monitor_hz = monitor_hz.clamp(30, 360);
     let target_hz = match normalize_setting(setting) {

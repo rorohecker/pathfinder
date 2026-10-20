@@ -1760,20 +1760,93 @@ fn destination_within_source(from: &Path, to: &Path) -> Result<bool, String> {
     for name in missing.iter().rev() {
         destination.push(name);
     }
+    Ok(path_is_within(&source, &destination))
+}
+
+/// True when `inner` is `outer` or a path under `outer` (case-insensitive on Windows).
+fn path_is_within(outer: &Path, inner: &Path) -> bool {
     #[cfg(target_os = "windows")]
     {
-        let source = source.to_string_lossy().to_lowercase();
-        let destination = destination.to_string_lossy().to_lowercase();
-        let prefix = if source.ends_with(std::path::MAIN_SEPARATOR) {
-            source.clone()
+        let outer = outer.to_string_lossy().to_lowercase();
+        let inner = inner.to_string_lossy().to_lowercase();
+        let prefix = if outer.ends_with(std::path::MAIN_SEPARATOR) {
+            outer.clone()
         } else {
-            format!("{source}{}", std::path::MAIN_SEPARATOR)
+            format!("{outer}{}", std::path::MAIN_SEPARATOR)
         };
-        Ok(destination == source || destination.starts_with(&prefix))
+        inner == outer || inner.starts_with(&prefix)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Ok(destination.starts_with(source))
+        inner.starts_with(outer)
+    }
+}
+
+/// Reject paste/move of a directory into itself or a descendant before any I/O.
+fn reject_descendant_transfer(src: &str, dest: &Path) -> Result<(), String> {
+    let src_path = Path::new(src);
+    if !src_path.is_dir() {
+        return Ok(());
+    }
+    if destination_within_source(src_path, dest)? {
+        return Err("Cannot place a folder inside itself or a descendant.".to_string());
+    }
+    Ok(())
+}
+
+/// Best-effort refresh rate of the monitor currently hosting the Pathfinder window.
+fn probe_window_monitor_hz(ui: &MainWindow) -> Option<u32> {
+    use i_slint_backend_winit::WinitWindowAccessor;
+    ui.window().with_winit_window(|window| {
+        window.current_monitor().and_then(|monitor| {
+            monitor
+                .refresh_rate_millihertz()
+                .map(|milli| ((milli + 500) / 1000).max(1))
+        })
+    })
+    .flatten()
+}
+
+#[cfg(test)]
+mod transfer_ancestry_tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!("pathfinder-ancestry-{label}-{nonce}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn rejects_copy_into_own_descendant() {
+        let dir = scratch("desc");
+        let root = dir.join("photos");
+        let child = root.join("2024");
+        fs::create_dir_all(&child).unwrap();
+        let into_child = child.join("photos");
+        assert!(destination_within_source(&root, &into_child).unwrap());
+        assert!(reject_descendant_transfer(&root.to_string_lossy(), &into_child).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allows_sibling_destination() {
+        let dir = scratch("sib");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let dest = b.join("a");
+        assert!(!destination_within_source(&a, &dest).unwrap());
+        assert!(reject_descendant_transfer(&a.to_string_lossy(), &dest).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 
@@ -9637,6 +9710,9 @@ struct NativeController {
     expanded_tree_paths: std::collections::HashSet<String>,
     /// Redo stack populated when undoing.
     redo_stack: Vec<FileOp>,
+    /// Last monitor refresh (Hz) applied to theme timers — used to detect
+    /// moves between displays without re-resolving every idle tick.
+    last_applied_monitor_hz: u32,
     redo_generation: u64,
     folder_changed_pending: bool,
     /// Recursive flat listing of the current folder (capped).
@@ -14323,6 +14399,15 @@ fn native_create_file(state: &AppState, path: &str) -> Result<(), String> {
 }
 
 fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
+    native_copy_inner(state, from, to, true)
+}
+
+/// Replay a recorded copy without conflict-renaming or writing a new undo entry.
+fn native_copy_replay(state: &AppState, from: &str, to: &str) -> Result<(), String> {
+    native_copy_inner(state, from, to, false)
+}
+
+fn native_copy_inner(state: &AppState, from: &str, to: &str, record: bool) -> Result<(), String> {
     if state.queue_cancel_requested() {
         return Err(OP_CANCELLED.to_string());
     }
@@ -14331,7 +14416,13 @@ fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
     }
     let src = PathBuf::from(from);
     let mut dst = PathBuf::from(to);
+    if src.is_dir() && destination_within_source(&src, &dst)? {
+        return Err("Cannot copy a folder into itself or a descendant.".to_string());
+    }
     if dst.exists() {
+        if !record {
+            return Err(format!("Destination already exists: {}", dst.display()));
+        }
         let op_id = state.queue_start("copy", from, Some(&dst.to_string_lossy()), 0);
         state.queue_conflict(op_id, conflict_info(&src, &dst));
         dst = keep_both_destination(&dst);
@@ -14355,7 +14446,9 @@ fn native_copy(state: &AppState, from: &str, to: &str) -> Result<(), String> {
     };
     if result.is_ok() {
         state.invalidate_path(&dst);
-        state.log_op("copy", from, Some(&dst.to_string_lossy()));
+        if record {
+            state.log_op("copy", from, Some(&dst.to_string_lossy()));
+        }
         state.queue_finish(op_id, "done", "Copied", total, started.elapsed());
     } else if let Err(error) = &result {
         state.queue_finish(op_id, "failed", error.clone(), 0, started.elapsed());
@@ -14380,6 +14473,11 @@ fn native_move_inner(state: &AppState, from: &str, to: &str, record: bool) -> Re
     }
     let src = PathBuf::from(from);
     let mut dst = PathBuf::from(to);
+    // Must run before fs::rename — moving a folder into its own descendant
+    // can orphan or destroy the tree on Windows.
+    if src.is_dir() && destination_within_source(&src, &dst)? {
+        return Err("Cannot move a folder into itself or a descendant.".to_string());
+    }
     if dst.exists() {
         if !record {
             return Err(format!("Destination already exists: {}", dst.display()));
@@ -14387,6 +14485,9 @@ fn native_move_inner(state: &AppState, from: &str, to: &str, record: bool) -> Re
         let op_id = state.queue_start("move", from, Some(&dst.to_string_lossy()), 0);
         state.queue_conflict(op_id, conflict_info(&src, &dst));
         dst = keep_both_destination(&dst);
+        if src.is_dir() && destination_within_source(&src, &dst)? {
+            return Err("Cannot move a folder into itself or a descendant.".to_string());
+        }
     }
     // Same-volume moves are metadata-only. Do not prewalk a directory before
     // attempting the rename; a cross-volume fallback has an unknown total.
@@ -16471,6 +16572,7 @@ impl NativeController {
             expanded_tree_paths: std::collections::HashSet::new(),
             redo_stack: Vec::new(),
             redo_generation: 0,
+            last_applied_monitor_hz: 0,
             folder_changed_pending: false,
             flat_view: false,
             pending_nav_search: None,
@@ -17193,11 +17295,17 @@ impl NativeController {
 
     /// Push monitor-aware animation tick budgets into ThemePalette / MainWindow.
     fn apply_display_timing(&mut self, ui: &MainWindow) {
+        let window_hz = probe_window_monitor_hz(ui);
+        self.apply_display_timing_with_hz(ui, window_hz);
+    }
+
+    fn apply_display_timing_with_hz(&mut self, ui: &MainWindow, window_hz: Option<u32>) {
         let setting = display_timing::normalize_setting(&self.settings.display_refresh);
         if self.settings.display_refresh != setting {
             self.settings.display_refresh = setting.to_string();
         }
-        let timing = display_timing::resolve(setting);
+        let timing = display_timing::resolve_for_window_hz(setting, window_hz);
+        self.last_applied_monitor_hz = timing.monitor_hz;
         let palette = ui.global::<ThemePalette>();
         palette.set_motion_tick_ms(timing.theme_tick_ms as i32);
         palette.set_motion_step_scale(timing.theme_step_scale);
@@ -17211,6 +17319,18 @@ impl NativeController {
             cpu_topology::topology().summary,
             gpu_capability_summary()
         )));
+    }
+
+    /// Re-probe the window's current monitor and update theme pacing when Hz changes
+    /// (user dragged the window to another display, or the panel mode changed).
+    fn sync_display_timing_if_monitor_changed(&mut self, ui: &MainWindow) {
+        let Some(hz) = probe_window_monitor_hz(ui) else {
+            return;
+        };
+        if hz == self.last_applied_monitor_hz {
+            return;
+        }
+        self.apply_display_timing_with_hz(ui, Some(hz));
     }
 
     fn set_display_refresh(&mut self, ui: &MainWindow, mode: &str) {
@@ -24642,6 +24762,11 @@ impl NativeController {
                 continue;
             };
             let dest = PathBuf::from(&dest_dir).join(name);
+            if let Err(error) = reject_descendant_transfer(src, &dest) {
+                ui.set_op_drawer_visible(false);
+                self.show_toast_kind(ui, error, "error");
+                return;
+            }
             if self.paste_skips_dest(src, &dest, clipboard.cut) {
                 continue;
             }
@@ -24800,17 +24925,9 @@ impl NativeController {
             };
             let dest = PathBuf::from(&dest_dir).join(name);
             let same = same_inode_or_canonical_path(src, &dest);
-            // Catch the "drag folder onto itself or into a descendant of itself"
-            // case before fs::rename returns an OS error that's hard to parse.
-            // Comparing canonicalised paths handles symlinks too.
-            let canonical_src = std::fs::canonicalize(src).ok();
-            let canonical_dest_parent = std::fs::canonicalize(&dest_dir).ok();
-            let is_self_descent = match (canonical_src.as_ref(), canonical_dest_parent.as_ref()) {
-                (Some(c_src), Some(c_dest_parent)) => {
-                    src.is_dir() && c_dest_parent.starts_with(c_src)
-                }
-                _ => false,
-            };
+            // Shared ancestry check (junctions / missing leaf components) —
+            // same helper used by paste and native_move/copy.
+            let is_self_descent = reject_descendant_transfer(src_str, &dest).is_err();
             file_drag::log(&format!(
                 "  src='{}' -> dest='{}' same={} self_descent={}",
                 src_str,
@@ -25026,29 +25143,29 @@ impl NativeController {
             }
         }
 
-        let paths_to_paste: Vec<String> = clipboard
-            .paths
-            .iter()
-            .filter(|src| {
-                if src.starts_with("recycle://") || is_virtual_nav_path(src) {
-                    return false;
-                }
-                let Some(name) = Path::new(src).file_name() else {
-                    return false;
-                };
-                let dest = PathBuf::from(&dest_dir).join(name);
-                if self.paste_skips_dest(src, &dest, cut) || !Path::new(src).exists() {
-                    return false;
-                }
-                if self.session_conflict_action.as_deref() == Some("skip")
-                    && self.paste_has_real_conflict(src, &dest)
-                {
-                    return false;
-                }
-                true
-            })
-            .cloned()
-            .collect();
+        let mut paths_to_paste: Vec<String> = Vec::new();
+        for src in &clipboard.paths {
+            if src.starts_with("recycle://") || is_virtual_nav_path(src) {
+                continue;
+            }
+            let Some(name) = Path::new(src).file_name() else {
+                continue;
+            };
+            let dest = PathBuf::from(&dest_dir).join(name);
+            if let Err(error) = reject_descendant_transfer(src, &dest) {
+                self.show_toast_kind(ui, error, "error");
+                return;
+            }
+            if self.paste_skips_dest(src, &dest, cut) || !Path::new(src).exists() {
+                continue;
+            }
+            if self.session_conflict_action.as_deref() == Some("skip")
+                && self.paste_has_real_conflict(src, &dest)
+            {
+                continue;
+            }
+            paths_to_paste.push(src.clone());
+        }
         let n = paths_to_paste.len();
         if n == 0 {
             self.show_toast(ui, "Nothing to paste here.");
@@ -28741,7 +28858,19 @@ impl NativeController {
         );
     }
 
+    fn invalidate_redo_if_stale(&mut self) {
+        let log_gen = self
+            .app_state
+            .operation_log_generation
+            .load(Ordering::SeqCst);
+        if self.redo_generation != log_gen {
+            self.redo_stack.clear();
+            self.redo_generation = log_gen;
+        }
+    }
+
     fn undo(&mut self, ui: &MainWindow) {
+        self.invalidate_redo_if_stale();
         let op = self
             .app_state
             .operation_log
@@ -28852,14 +28981,7 @@ impl NativeController {
     }
 
     fn redo(&mut self, ui: &MainWindow) {
-        if self.redo_generation
-            != self
-                .app_state
-                .operation_log_generation
-                .load(Ordering::SeqCst)
-        {
-            self.redo_stack.clear();
-        }
+        self.invalidate_redo_if_stale();
         let Some(mut op) = self.redo_stack.pop() else {
             self.show_toast(ui, "Nothing to redo.");
             return;
@@ -28873,18 +28995,13 @@ impl NativeController {
                 native_move_replay(&self.app_state, &from, dest)
             }
             "copy" => {
-                let source = Path::new(&from);
-                let dest = Path::new(to.as_deref().unwrap_or(""));
-                if dest.exists() {
-                    Err(format!("Destination already exists: {}", dest.display()))
-                } else if source.is_dir() {
-                    copy_dir_recursive(&self.app_state, source, dest)
-                } else {
-                    fs::copy(source, dest)
-                        .map(|_| ())
-                        .map_err(|e| e.to_string())
-                }
+                let dest = to.as_deref().unwrap_or("");
+                // Replay through the same engine as the original copy (ancestry
+                // checks, durable file transfer, no conflict auto-rename, no
+                // second undo entry).
+                native_copy_replay(&self.app_state, &from, dest)
             }
+            // Recycle-bin delete only — permanent deletes are never logged.
             "delete" => trash::delete(&from).map_err(|e| e.to_string()).map(|()| {
                 let ids = trash_ids_for_originals(std::slice::from_ref(&from));
                 op.trash_id = ids
@@ -31220,6 +31337,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     } else if let Ok(mut ctrl) = c.try_borrow_mut() {
                         ctrl.apply_deferred_startup_if_ready(&ui);
                         ctrl.pump_visible_enrichment(&ui);
+                        // Cheap: only rewrites theme timers when the window's
+                        // monitor refresh rate actually changed (multi-monitor).
+                        ctrl.sync_display_timing_if_monitor_changed(&ui);
                     }
                 }
 
@@ -33861,10 +33981,11 @@ pub fn run() {
     set_app_user_model_id();
 
     let _ = slint::platform::set_platform(Box::new(
-        // FemtoVG (OpenGL) — vsync is on by default via winit/glutin, which
-        // caps theme animation cost to the display refresh and saves power.
-        // Skia is faster but currently fails to link against windows-rs ICU.
-        i_slint_backend_winit::Backend::new().expect("failed to create Slint winit backend"),
+        // Prefer Skia (GPU) for high-refresh paint; FemtoVG remains compiled in
+        // as an automatic fallback if Skia fails to initialise.
+        i_slint_backend_winit::Backend::new_with_renderer_by_name(Some("skia"))
+            .or_else(|_| i_slint_backend_winit::Backend::new())
+            .expect("failed to create Slint winit backend"),
     ));
 
     let mut initial_settings: NativeSettings =
