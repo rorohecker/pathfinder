@@ -8,6 +8,13 @@ incremental = false
 
 # Use rust-lld for linking on Windows. Bundled with rustup, much faster than link.exe
 # (the default MSVC linker), especially for large dependency graphs like this one.
+#
+# /FORCE:MULTIPLE: Skia statically links ICU (`skunicode_icu`), while winit/muda/
+# dirs-sys enable windows-sys `Win32_Globalization`, which imports the same
+# symbols from icuuc.dll. Prefer Skia's definitions so the Skia renderer can link.
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld.exe"
-rustflags = ["-C", "link-arg=/STACK:8388608"]
+rustflags = [
+    "-C", "link-arg=/STACK:8388608",
+    "-C", "link-arg=/FORCE:MULTIPLE",
+]
