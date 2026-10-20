@@ -15,8 +15,8 @@ winres = "0.1"
 [dependencies]
 slint = "1"
 # Prefer Skia (GPU) with FemtoVG kept as compile-time fallback. Skia's bundled
-# ICU used to clash with windows-rs `Win32_Globalization` ICU imports; we avoid
-# that feature and call GetUserDefaultUILanguage via a raw kernel32 link instead.
+# ICU clashes with windows-rs `Win32_Globalization` ICU imports, so we omit that
+# feature (i18n + patched accesskit_windows use raw kernel32 links instead).
 i-slint-backend-winit = { version = "1", features = [
     "renderer-skia",
     "renderer-femtovg",
@@ -121,6 +121,10 @@ ort = { version = "=2.0.0-rc.12", default-features = false, features = [
     "api-24",
     "tls-rustls",
 ] }
+
+# Drop Win32_Globalization from accesskit so Skia's static ICU can link.
+[patch.crates-io]
+accesskit_windows = { path = "../patches/accesskit_windows" }
 
 [profile.release]
 # Parallelizable LTO: ~95% the runtime perf of full LTO, but compiles 5-10x faster
