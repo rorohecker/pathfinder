@@ -1679,6 +1679,7 @@ fn file_kind(path: &Path, metadata: &fs::Metadata) -> FileKind {
 /// broken empty folder while Explorer opened the real `Name (1)` contents.
 fn recover_extract_stub_folder(path: &str) -> Option<String> {
     let path_buf = Path::new(path);
+    // Only extensionless stubs look like mistaken folders in the listing.
     if path_buf.extension().is_some() {
         return None;
     }
@@ -1688,13 +1689,21 @@ fn recover_extract_stub_folder(path: &str) -> Option<String> {
     }
     let parent = path_buf.parent()?;
     let stem = path_buf.file_name()?.to_string_lossy();
+    let mut best: Option<(u64, PathBuf)> = None;
     for index in 1..50 {
         let candidate = parent.join(format!("{stem} ({index})"));
-        if candidate.is_dir() {
-            return Some(candidate.to_string_lossy().into_owned());
+        if !candidate.is_dir() {
+            continue;
+        }
+        // Prefer the sibling with real payload so a stale empty `Name (1)` does
+        // not win over a later successful `Name (2)` extract.
+        let score = folder_size_quick(&candidate, 2_000);
+        match &best {
+            Some((best_score, _)) if score <= *best_score => {}
+            _ => best = Some((score, candidate)),
         }
     }
-    None
+    best.map(|(_, path)| path.to_string_lossy().into_owned())
 }
 
 /// Remove a leftover 0-byte file at the intended extract folder path so a fresh
@@ -1705,6 +1714,19 @@ fn clear_zero_byte_extract_stub(path: &Path) {
     };
     if meta.is_file() && meta.len() == 0 {
         let _ = fs::remove_file(path);
+    }
+}
+
+/// Recycle a recovered 0-byte extract stub so it stops stealing double-clicks.
+fn recycle_extract_stub(path: &str) {
+    let path_buf = Path::new(path);
+    let Ok(meta) = fs::symlink_metadata(path_buf) else {
+        return;
+    };
+    if meta.is_file() && meta.len() == 0 {
+        if trash::delete(path_buf).is_err() {
+            let _ = fs::remove_file(path_buf);
+        }
     }
 }
 
@@ -8279,12 +8301,18 @@ mod archive_path_tests {
 
         let stub = root.join("kicad-schematics");
         fs::write(&stub, b"").unwrap();
-        let real = root.join("kicad-schematics (1)");
+        let empty_sibling = root.join("kicad-schematics (1)");
+        fs::create_dir_all(&empty_sibling).unwrap();
+        let real = root.join("kicad-schematics (2)");
         fs::create_dir_all(&real).unwrap();
         fs::write(real.join("board.kicad_sch"), b"(kicad_sch)").unwrap();
 
         let recovered = recover_extract_stub_folder(&stub.to_string_lossy()).unwrap();
-        assert_eq!(Path::new(&recovered), real.as_path());
+        assert_eq!(
+            Path::new(&recovered),
+            real.as_path(),
+            "prefer the sibling folder that actually has files"
+        );
 
         // Non-empty files must not be treated as stubs.
         fs::write(&stub, b"not empty").unwrap();
@@ -8294,6 +8322,7 @@ mod archive_path_tests {
         clear_zero_byte_extract_stub(&stub);
         assert!(!stub.exists(), "0-byte stub should be removed before extract");
         assert!(real.is_dir());
+        let _ = empty_sibling;
 
         let _ = fs::remove_dir_all(root);
     }
@@ -21370,20 +21399,21 @@ impl NativeController {
         } else if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
             self.open_archive_view(ui, entry.path, String::new(), true);
         } else if let Some(folder) = recover_extract_stub_folder(&entry.path) {
+            recycle_extract_stub(&entry.path);
             self.show_toast_kind(
                 ui,
-                "Opened the extracted folder next to an empty 0-byte stub from an older extract.",
+                "Opened the extracted folder and moved the empty 0-byte stub to the Recycle Bin.",
                 "warning",
             );
             self.navigate(ui, folder, true);
+        } else if entry.size == 0 && entry.extension.as_deref().unwrap_or("").is_empty() {
+            self.show_toast_kind(
+                ui,
+                "That item is 0 bytes. If it came from an archive, extract again — Explorer may be opening a different copy.",
+                "warning",
+            );
+            open_file_detached(entry.path);
         } else {
-            if entry.size == 0 {
-                self.show_toast_kind(
-                    ui,
-                    "That file is 0 bytes. If it came from an archive, extract again — Explorer may be opening a different copy.",
-                    "warning",
-                );
-            }
             open_file_detached(entry.path);
         }
     }
@@ -23266,20 +23296,21 @@ impl NativeController {
             } else if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
                 self.open_secondary_archive_view(ui, entry.path, String::new(), true);
             } else if let Some(folder) = recover_extract_stub_folder(&entry.path) {
+                recycle_extract_stub(&entry.path);
                 self.show_toast_kind(
                     ui,
-                    "Opened the extracted folder next to an empty 0-byte stub from an older extract.",
+                    "Opened the extracted folder and moved the empty 0-byte stub to the Recycle Bin.",
                     "warning",
                 );
                 self.secondary_navigate(ui, folder);
+            } else if entry.size == 0 && entry.extension.as_deref().unwrap_or("").is_empty() {
+                self.show_toast_kind(
+                    ui,
+                    "That item is 0 bytes. If it came from an archive, extract again — Explorer may be opening a different copy.",
+                    "warning",
+                );
+                open_file_detached(entry.path);
             } else {
-                if entry.size == 0 {
-                    self.show_toast_kind(
-                        ui,
-                        "That file is 0 bytes. If it came from an archive, extract again — Explorer may be opening a different copy.",
-                        "warning",
-                    );
-                }
                 open_file_detached(entry.path);
             }
         }
