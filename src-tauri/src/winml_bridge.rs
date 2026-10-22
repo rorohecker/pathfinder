@@ -174,11 +174,11 @@ pub fn provider_candidates_for(workload: AiWorkload) -> Vec<ProviderCandidate> {
     #[cfg(not(windows))]
     {
         let _ = workload;
-        return vec![ProviderCandidate {
+        vec![ProviderCandidate {
             label: "CPU".into(),
             kind: AcceleratorKind::Cpu,
             tag: "cpu".into(),
-        }];
+        }]
     }
     #[cfg(windows)]
     {

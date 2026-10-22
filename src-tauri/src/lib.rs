@@ -1655,17 +1655,78 @@ fn capture_storage_root_signature(root: &Path) -> Vec<StorageRootMtime> {
 // (e.g. an explicit "Reload from cache" affordance).
 
 fn file_kind(path: &Path, metadata: &fs::Metadata) -> FileKind {
-    if fs::symlink_metadata(path)
+    // Prefer the followed/metadata directory bit first. On Windows, directory
+    // junctions and symlink-to-dir reparse points report `is_symlink() == true`
+    // while still being folders in Explorer — classifying them as Symlink made
+    // Pathfinder show "0 B" and ShellExecute instead of navigating.
+    if metadata.is_dir() {
+        FileKind::Directory
+    } else if fs::symlink_metadata(path)
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false)
     {
         FileKind::Symlink
-    } else if metadata.is_dir() {
-        FileKind::Directory
     } else if metadata.is_file() {
         FileKind::File
     } else {
         FileKind::Other
+    }
+}
+
+/// Older Pathfinder ZIP extracts could leave a visible 0-byte *file* where the
+/// archive stem should be a folder. A later Extract Here then created
+/// `Name (1)/` beside that stub, so double-clicking `Name` looked like a
+/// broken empty folder while Explorer opened the real `Name (1)` contents.
+fn recover_extract_stub_folder(path: &str) -> Option<String> {
+    let path_buf = Path::new(path);
+    // Only extensionless stubs look like mistaken folders in the listing.
+    if path_buf.extension().is_some() {
+        return None;
+    }
+    let meta = fs::symlink_metadata(path_buf).ok()?;
+    if !meta.is_file() || meta.len() != 0 {
+        return None;
+    }
+    let parent = path_buf.parent()?;
+    let stem = path_buf.file_name()?.to_string_lossy();
+    let mut best: Option<(u64, PathBuf)> = None;
+    for index in 1..50 {
+        let candidate = parent.join(format!("{stem} ({index})"));
+        if !candidate.is_dir() {
+            continue;
+        }
+        // Prefer the sibling with real payload so a stale empty `Name (1)` does
+        // not win over a later successful `Name (2)` extract.
+        let score = folder_size_quick(&candidate, 2_000);
+        match &best {
+            Some((best_score, _)) if score <= *best_score => {}
+            _ => best = Some((score, candidate)),
+        }
+    }
+    best.map(|(_, path)| path.to_string_lossy().into_owned())
+}
+
+/// Remove a leftover 0-byte file at the intended extract folder path so a fresh
+/// extract can create a real directory instead of `stem (1)` beside the stub.
+fn clear_zero_byte_extract_stub(path: &Path) {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if meta.is_file() && meta.len() == 0 {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Recycle a recovered 0-byte extract stub so it stops stealing double-clicks.
+fn recycle_extract_stub(path: &str) {
+    let path_buf = Path::new(path);
+    let Ok(meta) = fs::symlink_metadata(path_buf) else {
+        return;
+    };
+    if meta.is_file() && meta.len() == 0 {
+        if trash::delete(path_buf).is_err() {
+            let _ = fs::remove_file(path_buf);
+        }
     }
 }
 
@@ -8199,8 +8260,9 @@ fn extract_single_zip_member(src: &Path, member: &str, out_path: &Path) -> Resul
 #[cfg(test)]
 mod archive_path_tests {
     use super::{
-        archive_open_cache_is_ready, archive_open_ok_marker, extract_archive_member_for_open,
-        extract_zip_archive, normalize_archive_prefix, safe_archive_out_path, AppState,
+        archive_open_cache_is_ready, archive_open_ok_marker, clear_zero_byte_extract_stub,
+        extract_archive_member_for_open, extract_zip_archive, file_kind, normalize_archive_prefix,
+        recover_extract_stub_folder, safe_archive_out_path, AppState, FileKind,
     };
     use std::collections::HashSet;
     use std::fs::{self, File};
@@ -8208,6 +8270,62 @@ mod archive_path_tests {
     use std::path::Path;
     use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn directory_metadata_classifies_as_folder_not_symlink_stub() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pathfinder-file-kind-{nonce}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let meta = fs::metadata(&root).unwrap();
+        assert_eq!(file_kind(&root, &meta), FileKind::Directory);
+        let file = root.join("note.txt");
+        fs::write(&file, b"hi").unwrap();
+        let file_meta = fs::metadata(&file).unwrap();
+        assert_eq!(file_kind(&file, &file_meta), FileKind::File);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recover_and_clear_zero_byte_extract_stub_beside_real_folder() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pathfinder-extract-stub-{nonce}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let stub = root.join("kicad-schematics");
+        fs::write(&stub, b"").unwrap();
+        let empty_sibling = root.join("kicad-schematics (1)");
+        fs::create_dir_all(&empty_sibling).unwrap();
+        let real = root.join("kicad-schematics (2)");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("board.kicad_sch"), b"(kicad_sch)").unwrap();
+
+        let recovered = recover_extract_stub_folder(&stub.to_string_lossy()).unwrap();
+        assert_eq!(
+            Path::new(&recovered),
+            real.as_path(),
+            "prefer the sibling folder that actually has files"
+        );
+
+        // Non-empty files must not be treated as stubs.
+        fs::write(&stub, b"not empty").unwrap();
+        assert!(recover_extract_stub_folder(&stub.to_string_lossy()).is_none());
+        fs::write(&stub, b"").unwrap();
+
+        clear_zero_byte_extract_stub(&stub);
+        assert!(!stub.exists(), "0-byte stub should be removed before extract");
+        assert!(real.is_dir());
+        let _ = empty_sibling;
+
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn rejects_escape_and_windows_special_paths() {
@@ -9803,6 +9921,9 @@ struct NativeOperationResult {
     /// showed moved files and looked like a copy).
     refresh_both_panes: bool,
     secondary_refresh_path: Option<String>,
+    /// When set, navigate the primary pane here after the op finishes (e.g. open
+    /// the folder produced by Extract Here).
+    navigate_path: Option<String>,
     clear_clipboard: bool,
     /// Directory paths whose listing cache must be dropped after paste/move.
     invalidate_dirs: Vec<String>,
@@ -17822,12 +17943,29 @@ impl NativeController {
                 ),
             }
         } else {
-            let sel_size: u64 = sel
+            // Folder rows use metadata.len() == 0 on Windows. Summing that in made
+            // a single selected folder read as "1 selected | 0 B" and looked like
+            // Pathfinder failed to read the folder after an extract.
+            let selected_entries: Vec<&FileEntry> = sel
                 .iter()
                 .filter_map(|&i| self.visible_files.get(i))
+                .collect();
+            let file_size: u64 = selected_entries
+                .iter()
+                .filter(|e| e.kind != FileKind::Directory)
                 .map(|e| e.size)
                 .sum();
-            format!("{sel_count} selected | {}", format_size_short(sel_size))
+            let only_folders = selected_entries
+                .iter()
+                .all(|e| e.kind == FileKind::Directory);
+            if only_folders {
+                format!(
+                    "{sel_count} folder{} selected",
+                    if sel_count == 1 { "" } else { "s" }
+                )
+            } else {
+                format!("{sel_count} selected | {}", format_size_short(file_size))
+            }
         };
 
         ui.set_status_left(ss(left));
@@ -20339,6 +20477,7 @@ impl NativeController {
                     refresh: true,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs,
                     optimistic_remove_paths,
@@ -20350,6 +20489,7 @@ impl NativeController {
                     refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -20449,6 +20589,7 @@ impl NativeController {
                     refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -20460,6 +20601,7 @@ impl NativeController {
                     refresh: true,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -20511,6 +20653,7 @@ impl NativeController {
                     refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -20522,6 +20665,7 @@ impl NativeController {
                     refresh: true,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -21254,6 +21398,21 @@ impl NativeController {
             self.navigate(ui, entry.path, true);
         } else if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
             self.open_archive_view(ui, entry.path, String::new(), true);
+        } else if let Some(folder) = recover_extract_stub_folder(&entry.path) {
+            recycle_extract_stub(&entry.path);
+            self.show_toast_kind(
+                ui,
+                "Opened the extracted folder and moved the empty 0-byte stub to the Recycle Bin.",
+                "warning",
+            );
+            self.navigate(ui, folder, true);
+        } else if entry.size == 0 && entry.extension.as_deref().unwrap_or("").is_empty() {
+            self.show_toast_kind(
+                ui,
+                "That item is 0 bytes. If it came from an archive, extract again — Explorer may be opening a different copy.",
+                "warning",
+            );
+            open_file_detached(entry.path);
         } else {
             open_file_detached(entry.path);
         }
@@ -23136,6 +23295,21 @@ impl NativeController {
                 self.open_archive_member(ui, archive_path, member);
             } else if is_archive_ext(entry.extension.as_deref().unwrap_or("")) {
                 self.open_secondary_archive_view(ui, entry.path, String::new(), true);
+            } else if let Some(folder) = recover_extract_stub_folder(&entry.path) {
+                recycle_extract_stub(&entry.path);
+                self.show_toast_kind(
+                    ui,
+                    "Opened the extracted folder and moved the empty 0-byte stub to the Recycle Bin.",
+                    "warning",
+                );
+                self.secondary_navigate(ui, folder);
+            } else if entry.size == 0 && entry.extension.as_deref().unwrap_or("").is_empty() {
+                self.show_toast_kind(
+                    ui,
+                    "That item is 0 bytes. If it came from an archive, extract again — Explorer may be opening a different copy.",
+                    "warning",
+                );
+                open_file_detached(entry.path);
             } else {
                 open_file_detached(entry.path);
             }
@@ -24213,6 +24387,7 @@ impl NativeController {
                                     refresh: false,
                                     refresh_both_panes: false,
                                     secondary_refresh_path: None,
+                                    navigate_path: None,
                                     clear_clipboard: false,
                                     invalidate_dirs: Vec::new(),
                                     optimistic_remove_paths: Vec::new(),
@@ -24225,6 +24400,7 @@ impl NativeController {
                                 refresh: false,
                                 refresh_both_panes: false,
                                 secondary_refresh_path: None,
+                                navigate_path: None,
                                 clear_clipboard: false,
                                 invalidate_dirs: Vec::new(),
                                 optimistic_remove_paths: Vec::new(),
@@ -24589,6 +24765,7 @@ impl NativeController {
                         refresh: false,
                         refresh_both_panes: false,
                         secondary_refresh_path: None,
+                        navigate_path: None,
                         clear_clipboard: false,
                         invalidate_dirs: Vec::new(),
                         // Already removed optimistically above.
@@ -24603,6 +24780,7 @@ impl NativeController {
                     refresh: true,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -24663,6 +24841,7 @@ impl NativeController {
                     refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -24683,6 +24862,7 @@ impl NativeController {
                     refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: paths_for_optimistic,
@@ -24909,6 +25089,7 @@ impl NativeController {
                         refresh: false,
                         refresh_both_panes: false,
                         secondary_refresh_path: None,
+                        navigate_path: None,
                         clear_clipboard: false,
                         invalidate_dirs: Vec::new(),
                         optimistic_remove_paths: Vec::new(),
@@ -24920,6 +25101,7 @@ impl NativeController {
                         refresh: true,
                         refresh_both_panes: false,
                         secondary_refresh_path: None,
+                        navigate_path: None,
                         clear_clipboard: false,
                         invalidate_dirs: Vec::new(),
                         optimistic_remove_paths: Vec::new(),
@@ -25283,6 +25465,7 @@ impl NativeController {
                     } else {
                         None
                     },
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs,
                     optimistic_remove_paths: Vec::new(),
@@ -25303,6 +25486,7 @@ impl NativeController {
                     } else {
                         None
                     },
+                    navigate_path: None,
                     clear_clipboard: cut,
                     invalidate_dirs: invalidate_dirs_on_success,
                     optimistic_remove_paths: Vec::new(),
@@ -26491,6 +26675,7 @@ impl NativeController {
                     } else {
                         None
                     },
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -26513,6 +26698,7 @@ impl NativeController {
                     } else {
                         None
                     },
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -26575,6 +26761,7 @@ impl NativeController {
                         refresh: false,
                         refresh_both_panes: false,
                         secondary_refresh_path: None,
+                        navigate_path: None,
                         clear_clipboard: false,
                         invalidate_dirs: Vec::new(),
                         optimistic_remove_paths: Vec::new(),
@@ -26587,6 +26774,7 @@ impl NativeController {
                     refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -26620,17 +26808,19 @@ impl NativeController {
     }
 
     fn archive_extract_dest_for(&self, archive_name: &str) -> String {
-        keep_both_destination(
-            &PathBuf::from(self.active_directory()).join(
-                Path::new(archive_name)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-        )
-        .to_string_lossy()
-        .to_string()
+        let candidate = PathBuf::from(self.active_directory()).join(
+            Path::new(archive_name)
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+        );
+        // Drop leftover 0-byte stub files so extract creates `Name/` instead of
+        // leaving a fake empty `Name` beside a real `Name (1)/` folder.
+        clear_zero_byte_extract_stub(&candidate);
+        keep_both_destination(&candidate)
+            .to_string_lossy()
+            .to_string()
     }
 
     fn start_archive_extract_async(
@@ -26718,6 +26908,7 @@ impl NativeController {
                     } else {
                         None
                     },
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -26731,9 +26922,17 @@ impl NativeController {
                         format!("Extracted {completed} archives")
                     },
                     kind: "success".to_string(),
-                    refresh: pasted && !dual_pane && !dest_is_secondary,
+                    // Open the extracted folder instead of only refreshing the parent
+                    // listing — avoids users double-clicking a leftover 0-byte stub
+                    // that sits beside a successful `Name (1)/` extract.
+                    refresh: false,
                     refresh_both_panes: pasted && dual_pane,
-                    secondary_refresh_path: if pasted && !dual_pane && dest_is_secondary {
+                    secondary_refresh_path: if pasted && dest_is_secondary {
+                        Some(last_dest.clone())
+                    } else {
+                        None
+                    },
+                    navigate_path: if pasted && !dest_is_secondary {
                         Some(last_dest)
                     } else {
                         None
@@ -26759,16 +26958,17 @@ impl NativeController {
             } else {
                 selected
             };
-            let dest = keep_both_destination(
-                &PathBuf::from(&archive.return_path).join(
-                    Path::new(&archive.archive_path)
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string(),
-                ),
+            let candidate = PathBuf::from(&archive.return_path).join(
+                Path::new(&archive.archive_path)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
             );
-            let dest = dest.to_string_lossy().to_string();
+            clear_zero_byte_extract_stub(&candidate);
+            let dest = keep_both_destination(&candidate)
+                .to_string_lossy()
+                .to_string();
             let job = ArchiveExtractJob {
                 source: archive.archive_path,
                 dest,
@@ -26855,6 +27055,7 @@ impl NativeController {
                     } else {
                         None
                     },
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -26866,6 +27067,7 @@ impl NativeController {
                     refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -28706,6 +28908,7 @@ impl NativeController {
                     refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: paths_for_optimistic,
@@ -28717,6 +28920,7 @@ impl NativeController {
                     refresh: false,
                     refresh_both_panes: false,
                     secondary_refresh_path: None,
+                    navigate_path: None,
                     clear_clipboard: false,
                     invalidate_dirs: Vec::new(),
                     optimistic_remove_paths: Vec::new(),
@@ -31905,6 +32109,9 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                 }
                                 if let Some(path) = result.secondary_refresh_path {
                                     ctrl.secondary_navigate(&ui, path);
+                                }
+                                if let Some(path) = result.navigate_path {
+                                    ctrl.navigate(&ui, path, true);
                                 }
                                 if result.toast_action.is_empty() {
                                     ctrl.show_toast_kind(&ui, result.message, &result.kind);
