@@ -7670,6 +7670,7 @@ mod search_query_tests {
 #[cfg(test)]
 mod path_query_tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn expand_path_query_expands_percent_vars() {
@@ -7692,6 +7693,46 @@ mod path_query_tests {
         assert!(!looks_like_path_query("recycle://"));
         assert!(!looks_like_path_query("storage://"));
         assert!(!looks_like_path_query("archive://Zm9v!/%2F"));
+    }
+
+    #[test]
+    fn comma_in_real_kicad_folder_name_does_not_redirect_navigation() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pathfinder-comma-folder-{nonce}"));
+        let folder = root.join("RP-008099-DD-1-CM5 IO Board, revision 2, KiCAD files");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("CM5IO.kicad_pro"), b"{}").unwrap();
+
+        assert_eq!(recover_navigable_path(&folder.to_string_lossy()), None);
+        let page = list_directory_chunk(&folder, 100).unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].name, "CM5IO.kicad_pro");
+
+        let missing = root.join("missing, revision 2, KiCAD files");
+        assert_eq!(recover_navigable_path(&missing.to_string_lossy()), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn comma_joined_file_paths_recover_the_existing_parent() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("pathfinder-comma-files-{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("first.kicad_pro");
+        fs::write(&file, b"{}").unwrap();
+
+        let joined = format!("{},second.kicad_sch", file.display());
+        assert_eq!(
+            recover_navigable_path(&joined),
+            Some(root.to_string_lossy().into_owned())
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -16407,31 +16448,28 @@ fn index_search_paths(root: &str, pattern: &str, max: usize) -> Result<Vec<FileE
     Ok(rows.filter_map(Result::ok).collect())
 }
 
-/// Attempt to coerce a bogus user-supplied path into a navigable
-/// folder. The common case this guards against: "Open With" or shell
-/// shortcuts that hand us a comma-joined multi-file string like
-/// `C:\Downloads\a.txt,b.txt,c.txt...`. Strategy: take the first
-/// comma-separated chunk, then walk up parents until something exists
-/// and is a directory. Returns the recovered path string, or None if
-/// nothing reasonable can be salvaged.
+/// Recover a comma-joined multi-file argument from a shell shortcut. A comma
+/// is also a valid character in a folder name, so existing directories must
+/// always pass through unchanged. Only recover when the first chunk itself
+/// exists; otherwise a typo in a comma-containing path would silently jump to
+/// an unrelated ancestor.
 fn recover_navigable_path(raw: &str) -> Option<String> {
+    if Path::new(raw).is_dir() {
+        return None;
+    }
     let first = raw.split(',').next().unwrap_or("").trim();
-    if first.is_empty() {
+    if first.is_empty() || first == raw {
         return None;
     }
     let p = Path::new(first);
     if p.is_dir() {
         return Some(first.to_string());
     }
-    let mut cur = p.parent();
-    while let Some(parent) = cur {
-        if parent.as_os_str().is_empty() {
-            break;
-        }
-        if parent.is_dir() {
-            return Some(parent.to_string_lossy().into_owned());
-        }
-        cur = parent.parent();
+    if p.is_file() {
+        return p
+            .parent()
+            .filter(|parent| parent.is_dir())
+            .map(|parent| parent.to_string_lossy().into_owned());
     }
     None
 }
@@ -20230,15 +20268,13 @@ impl NativeController {
         // Only synchronously probe comma-joined paste mistakes. Normal folder
         // opens validate on a worker thread so slow/network paths never block
         // the UI thread during startup.
-        if !path.is_empty() && path.contains(',') {
+        if !path.is_empty() && path.contains(',') && !Path::new(&path).is_dir() {
             if let Some(target) = recover_navigable_path(&path) {
                 self.navigate(ui, target, push_history);
                 return;
             }
-            if !Path::new(&path).is_dir() {
-                ui.set_empty_state(ss(format!("Cannot open \"{}\"", path)));
-                return;
-            }
+            self.show_toast_kind(ui, format!("Cannot open \"{}\"", path), "error");
+            return;
         }
         if !same_path_string(&self.current_path, &path) {
             self.bump_nav_generation();
