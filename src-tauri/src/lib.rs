@@ -1191,6 +1191,7 @@ fn storage_path_matches_markers(path: &str, markers: &[&str]) -> bool {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_location_tip(
     out: &mut Vec<StorageTipUi>,
     result: &StorageScanResult,
