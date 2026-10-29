@@ -154,7 +154,10 @@ export struct StorageBucketUi {
 
 export struct StorageEntryUi {
     name: string,
+    // Absolute filesystem path used for open / reveal / open-with.
     path: string,
+    // Shortened path shown in the row (may use …). Never used for navigation.
+    path_display: string,
     bytes_text: string,
     modified_text: string,
     bucket: string,
@@ -1444,8 +1447,10 @@ component FileRow inherits Rectangle {
         if (root.is_renaming) { root.rename_focus_nonce += 1; }
     }
     property <bool> drag_started: false;
-    // Hold drag/marquee until the double-click window passes so a second
-    // click on an already-selected row opens instead of starting DoDragDrop.
+    // Hold drag/marquee until past a click dwell so a second click on an
+    // already-selected row opens instead of starting DoDragDrop. Slightly
+    // longer than a typical press-release so micro-jitters during click /
+    // double-click do not arm a drag that moves icons.
     property <bool> drag_armed: false;
     // When the user releases a click, remember position/time so the next
     // press at the same spot within ~500ms suppresses drag arming. That
@@ -1455,6 +1460,9 @@ component FileRow inherits Rectangle {
     property <length> last_up_y: 0;
     property <bool> recent_click: false;
     property <bool> suppress_drag_arm: false;
+    // Movement required before a press becomes a drag/marquee. 6px was too
+    // tight — normal click jitter (especially trackpads) moved icons.
+    property <length> drag_slop: 12px;
     property <bool> is_drop_target: root.item.is_dir
         && root.drag_target_path != ""
         && root.drag_target_path == root.item.file_path;
@@ -1554,10 +1562,10 @@ component FileRow inherits Rectangle {
     if root.view_mode == "list": NodeVisual {
         x: 8px;
         y: root.group_header_h + (parent.height - root.group_header_h - self.height) / 2;
-        visual_width: ThemePalette.is_dragging && root.item.is_selected ? 32px : 28px;
-        visual_height: root.item.is_dir
-            ? (ThemePalette.is_dragging && root.item.is_selected ? 26px : 22px)
-            : (ThemePalette.is_dragging && root.item.is_selected ? 32px : 28px);
+        // Keep icon size stable while dragging so a click that briefly arms
+        // DoDragDrop does not make icons jump / grow in place.
+        visual_width: 28px;
+        visual_height: root.item.is_dir ? 22px : 28px;
         is_dir: root.item.is_dir;
         extension: root.item.extension;
         has_system_icon: root.item.has_system_icon;
@@ -1678,16 +1686,11 @@ component FileRow inherits Rectangle {
     }
 
     if root.view_mode != "list" && root.view_mode != "compact" && !root.item.has_thumbnail: NodeVisual {
-        x: (parent.width - (root.view_mode == "gallery"
-            ? (ThemePalette.is_dragging && root.item.is_selected ? 72px : 64px)
-            : (ThemePalette.is_dragging && root.item.is_selected ? 62px : 54px))) / 2;
-        y: (root.view_mode == "gallery" ? 18px : 12px) - (ThemePalette.is_dragging && root.item.is_selected ? 4px : 0px);
-        visual_width: root.view_mode == "gallery"
-            ? (ThemePalette.is_dragging && root.item.is_selected ? 72px : 64px)
-            : (ThemePalette.is_dragging && root.item.is_selected ? 62px : 54px);
-        visual_height: root.view_mode == "gallery"
-            ? (ThemePalette.is_dragging && root.item.is_selected ? 78px : 70px)
-            : (ThemePalette.is_dragging && root.item.is_selected ? 62px : 54px);
+        x: (parent.width - (root.view_mode == "gallery" ? 64px : 54px)) / 2;
+        y: root.view_mode == "gallery" ? 18px : 12px;
+        // Stable size during drag — glow handles drag feedback instead.
+        visual_width: root.view_mode == "gallery" ? 64px : 54px;
+        visual_height: root.view_mode == "gallery" ? 70px : 54px;
         is_dir: root.item.is_dir;
         extension: root.item.extension;
         has_system_icon: root.item.has_system_icon;
@@ -1817,10 +1820,10 @@ component FileRow inherits Rectangle {
         moved => {
             if (self.pressed && root.drag_armed) {
                 if (!root.drag_started && (
-                    (self.mouse-x - self.pressed-x > 6px) ||
-                    (self.pressed-x - self.mouse-x > 6px) ||
-                    (self.mouse-y - self.pressed-y > 6px) ||
-                    (self.pressed-y - self.mouse-y > 6px))) {
+                    (self.mouse-x - self.pressed-x > root.drag_slop) ||
+                    (self.pressed-x - self.mouse-x > root.drag_slop) ||
+                    (self.mouse-y - self.pressed-y > root.drag_slop) ||
+                    (self.pressed-y - self.mouse-y > root.drag_slop))) {
                     root.drag_started = true;
                     if (root.item.is_selected) {
                         root.file_drag_requested(root.index);
@@ -1843,8 +1846,8 @@ component FileRow inherits Rectangle {
                 root.shift_held = event.modifiers.shift;
                 root.drag_started = false;
                 root.suppress_drag_arm = root.recent_click
-                    && abs(self.mouse-x - root.last_up_x) <= 8px
-                    && abs(self.mouse-y - root.last_up_y) <= 8px;
+                    && abs(self.mouse-x - root.last_up_x) <= root.drag_slop
+                    && abs(self.mouse-y - root.last_up_y) <= root.drag_slop;
                 root.recent_click = false;
                 root.drag_armed = false;
             }
@@ -1876,7 +1879,9 @@ component FileRow inherits Rectangle {
     }
 
     drag_arm_timer := Timer {
-        interval: 220ms;
+        // Longer than a normal click; short enough that intentional drags
+        // still feel immediate. Prevents click jitter from moving icons.
+        interval: 300ms;
         running: touch.pressed;
         triggered => {
             if (touch.pressed && !root.suppress_drag_arm) {
@@ -2351,7 +2356,7 @@ component StorageEntryRow inherits Rectangle {
         y: 32px;
         width: root.name_w;
         height: 14px;
-        text: root.entry.path;
+        text: root.entry.path_display != "" ? root.entry.path_display : root.entry.path;
         color: ThemePalette.text_faint;
         font-size: 11px;
         vertical-alignment: center;
@@ -5805,11 +5810,11 @@ export component MainWindow inherits Window {
                     }
                     moved => {
                         if (self.pressed) {
-                            // 4px deadzone keeps a click from accidentally
-                            // triggering a 1px marquee that latches onto the
+                            // 10px deadzone keeps a click from accidentally
+                            // triggering a tiny marquee that latches onto the
                             // top row. Real drags pass this threshold instantly.
-                            if (abs(self.mouse-x - primary_pane_root.marquee_start_x) > 4px ||
-                                abs(self.mouse-y - primary_pane_root.marquee_start_y) > 4px) {
+                            if (abs(self.mouse-x - primary_pane_root.marquee_start_x) > 10px ||
+                                abs(self.mouse-y - primary_pane_root.marquee_start_y) > 10px) {
                                 primary_pane_root.marquee_active = true;
                                 primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, self.mouse-x);
                                 primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, self.mouse-y);
@@ -5974,8 +5979,8 @@ export component MainWindow inherits Window {
                             if (self.pressed) {
                                 // 4px deadzone matches empty_context behavior so a
                                 // simple click stays a click instead of a 1px marquee.
-                                if (abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x) > 4px ||
-                                    abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y) > 4px) {
+                                if (abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x) > 10px ||
+                                    abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y) > 10px) {
                                     primary_pane_root.marquee_active = true;
                                     primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, parent.x + self.mouse-x);
                                     primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, parent.y + self.mouse-y);
@@ -6045,8 +6050,8 @@ export component MainWindow inherits Window {
                         }
                         moved => {
                             if (self.pressed) {
-                                if (abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x) > 4px ||
-                                    abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y) > 4px) {
+                                if (abs((parent.x + self.mouse-x) - primary_pane_root.marquee_start_x) > 10px ||
+                                    abs((parent.y + self.mouse-y) - primary_pane_root.marquee_start_y) > 10px) {
                                     primary_pane_root.marquee_active = true;
                                     primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, parent.x + self.mouse-x);
                                     primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, parent.y + self.mouse-y);
@@ -6122,8 +6127,8 @@ export component MainWindow inherits Window {
                             }
                             moved => {
                                 if (self.pressed) {
-                                    if (abs((self.absolute-position.x - primary_pane_root.absolute-position.x + self.mouse-x) - primary_pane_root.marquee_start_x) > 4px ||
-                                        abs((self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y) - primary_pane_root.marquee_start_y) > 4px) {
+                                    if (abs((self.absolute-position.x - primary_pane_root.absolute-position.x + self.mouse-x) - primary_pane_root.marquee_start_x) > 10px ||
+                                        abs((self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y) - primary_pane_root.marquee_start_y) > 10px) {
                                         primary_pane_root.marquee_active = true;
                                         primary_pane_root.marquee_x = min(primary_pane_root.marquee_start_x, self.absolute-position.x - primary_pane_root.absolute-position.x + self.mouse-x);
                                         primary_pane_root.marquee_y = min(primary_pane_root.marquee_start_y, self.absolute-position.y - primary_pane_root.absolute-position.y + self.mouse-y);

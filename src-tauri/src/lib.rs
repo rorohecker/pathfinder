@@ -851,25 +851,21 @@ fn profile_bucket_for_rest(rest: &[u8]) -> Option<&'static str> {
     if rest.is_empty() {
         return None;
     }
-    if rest.starts_with(b"downloads\\") || rest == b"downloads" {
-        return Some("downloads");
+    // First path segment under the profile (case-insensitive), so
+    // `Downloads\file` and localized names like `Descargas` classify.
+    let seg_end = rest
+        .iter()
+        .position(|&b| b == b'\\' || b == b'/')
+        .unwrap_or(rest.len());
+    let seg = &rest[..seg_end];
+    let seg_str = std::str::from_utf8(seg).unwrap_or("");
+    match known_folder_key_from_basename(seg_str) {
+        Some("Downloads") => Some("downloads"),
+        Some("Desktop") => Some("desktop"),
+        Some("Documents") => Some("documents"),
+        Some("Pictures") | Some("Videos") | Some("Music") => Some("media"),
+        _ => None,
     }
-    if rest.starts_with(b"desktop\\") || rest == b"desktop" {
-        return Some("desktop");
-    }
-    if rest.starts_with(b"documents\\") || rest == b"documents" {
-        return Some("documents");
-    }
-    if rest.starts_with(b"pictures\\")
-        || rest == b"pictures"
-        || rest.starts_with(b"videos\\")
-        || rest == b"videos"
-        || rest.starts_with(b"music\\")
-        || rest == b"music"
-    {
-        return Some("media");
-    }
-    None
 }
 
 fn storage_is_app_path(path_bytes: &[u8]) -> bool {
@@ -1014,7 +1010,7 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
                 ),
                 bytes_text: ss(format_size_short(e.bytes)),
                 severity: ss("info"),
-                path: ss(""),
+                path: ss(&e.path),
                 action: ss(""),
                 accent: TIP_ACCENT_INFO,
             }),
@@ -1027,7 +1023,7 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
                 ),
                 bytes_text: ss(format_size_short(e.bytes)),
                 severity: ss("info"),
-                path: ss(""),
+                path: ss(&e.path),
                 action: ss(""),
                 accent: TIP_ACCENT_INFO,
             }),
@@ -1040,7 +1036,7 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
                 ),
                 bytes_text: ss(format_size_short(e.bytes)),
                 severity: ss("info"),
-                path: ss(""),
+                path: ss(&e.path),
                 action: ss(""),
                 accent: TIP_ACCENT_INFO,
             }),
@@ -1057,7 +1053,16 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
         "DL",
         "Downloads",
         "Old downloads worth reviewing",
-        &["\\downloads\\", "/downloads/"],
+        &[
+            "\\downloads\\",
+            "/downloads/",
+            "\\downloads",
+            "/downloads",
+            "\\descargas\\",
+            "\\descargas",
+            "\\téléchargements\\",
+            "\\telechargements\\",
+        ],
         TIP_ACCENT_TIP,
         "",
     );
@@ -1069,22 +1074,16 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
         "Temporary files and browser caches you can usually clear safely",
         &[
             "\\appdata\\local\\temp\\",
+            "\\appdata\\local\\temp",
             "\\windows\\temp\\",
+            "\\windows\\temp",
             "\\inetcache\\",
+            "\\inetcache",
         ],
         TIP_ACCENT_TIP,
         "",
     );
-    add_location_tip(
-        &mut tips,
-        result,
-        "RB",
-        "Recycle Bin",
-        "Files waiting to be permanently deleted. Empty the bin to reclaim.",
-        &["\\$recycle.bin\\"],
-        TIP_ACCENT_WARN,
-        "",
-    );
+    // Recycle Bin contents are skipped by the storage walker; tip removed.
 
     add_age_based_tips(&mut tips, result);
 
@@ -1161,7 +1160,8 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
             bytes_text: ss(""),
             severity: ss("tip"),
             path: ss(""),
-            action: ss(""),
+            // Clicking drills into the matching bucket card.
+            action: ss(format!("bucket:{}", b.id)),
             accent: TIP_ACCENT_TIP,
         });
     }
@@ -1175,6 +1175,22 @@ fn build_storage_tips(result: &StorageScanResult) -> Vec<StorageTipUi> {
 /// then push a single tip summarising the group. The first matching
 /// path becomes the click target so the user can jump straight to it.
 #[allow(clippy::too_many_arguments)]
+fn storage_path_matches_markers(path: &str, markers: &[&str]) -> bool {
+    let lower = path.replace('/', "\\").to_ascii_lowercase();
+    let trimmed = lower.trim_end_matches('\\');
+    markers.iter().any(|m| {
+        let needle = m.replace('/', "\\").to_ascii_lowercase();
+        let needle_trim = needle.trim_end_matches('\\');
+        if needle_trim.is_empty() {
+            return false;
+        }
+        // Match both `...\Downloads\file` and a folder rollup ending in `\Downloads`.
+        lower.contains(&needle)
+            || trimmed == needle_trim
+            || trimmed.ends_with(&format!("\\{needle_trim}"))
+    })
+}
+
 fn add_location_tip(
     out: &mut Vec<StorageTipUi>,
     result: &StorageScanResult,
@@ -1190,8 +1206,7 @@ fn add_location_tip(
     let mut first_path: Option<String> = None;
     let mut largest: u64 = 0;
     for e in result.top_items.iter() {
-        let lower = e.path.to_ascii_lowercase();
-        if !markers.iter().any(|m| lower.contains(m)) {
+        if !storage_path_matches_markers(&e.path, markers) {
             continue;
         }
         total = total.saturating_add(e.bytes);
@@ -1250,8 +1265,7 @@ fn collect_storage_tip_entries(result: &StorageScanResult) -> Vec<StorageEntry> 
 }
 
 fn entry_path_has_marker(entry: &StorageEntry, markers: &[&str]) -> bool {
-    let lower = entry.path.to_ascii_lowercase();
-    markers.iter().any(|m| lower.contains(m))
+    storage_path_matches_markers(&entry.path, markers)
 }
 
 fn entry_is_system_reserved(entry: &StorageEntry) -> bool {
@@ -1267,16 +1281,25 @@ fn add_age_based_tips(out: &mut Vec<StorageTipUi>, result: &StorageScanResult) {
     let now = now_unix_secs() as i64;
     let entries = collect_storage_tip_entries(result);
 
-    let old_downloads: Vec<StorageEntry> = entries
+    let mut old_downloads: Vec<StorageEntry> = entries
         .iter()
         .filter(|e| {
             e.modified > 0
                 && now.saturating_sub(e.modified) > 90 * 86_400
-                && entry_path_has_marker(e, &["\\downloads\\", "/downloads/"])
+                && entry_path_has_marker(
+                    e,
+                    &[
+                        "\\downloads\\",
+                        "\\downloads",
+                        "\\descargas\\",
+                        "\\descargas",
+                    ],
+                )
         })
-        .take(40)
         .cloned()
         .collect();
+    // Threshold on the full match set; preview list stays capped inside.
+    old_downloads.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
     push_cleanup_tip(
         out,
         "90",
@@ -1287,17 +1310,17 @@ fn add_age_based_tips(out: &mut Vec<StorageTipUi>, result: &StorageScanResult) {
         TIP_ACCENT_TIP,
     );
 
-    let stale: Vec<StorageEntry> = entries
+    let mut stale: Vec<StorageEntry> = entries
         .iter()
         .filter(|e| {
             e.modified > 0
                 && now.saturating_sub(e.modified) > 365 * 86_400
                 && !entry_is_system_reserved(e)
-                && !entry_path_has_marker(e, &["\\windows\\", "/windows/"])
+                && !entry_path_has_marker(e, &["\\windows\\", "\\windows"])
         })
-        .take(40)
         .cloned()
         .collect();
+    stale.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
     push_cleanup_tip(
         out,
         "1Y",
@@ -1323,6 +1346,7 @@ fn push_cleanup_tip(
     if count == 0 || total < 100 * 1024 * 1024 {
         return;
     }
+    // Tip card uses the full match set for count/total; path jumps to the largest.
     let first_path = entries.first().map(|e| e.path.clone()).unwrap_or_default();
     out.push(StorageTipUi {
         icon: ss(icon),
@@ -4412,17 +4436,25 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        let target = if path_buf.is_dir() {
-            path_buf.to_string_lossy().to_string()
+        // Quote the path so spaces (and most special chars) survive Explorer's
+        // `/select,` parsing. Passing `/select,C:\Path With Spaces\f.txt` as a
+        // single argv used to open the wrong folder or fail silently.
+        let raw = path_buf.to_string_lossy();
+        if path_buf.is_dir() {
+            ProcessCommand::new("explorer")
+                .arg(raw.as_ref())
+                .no_window()
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         } else {
-            format!("/select,{}", path_buf.to_string_lossy())
-        };
-        ProcessCommand::new("explorer")
-            .arg(target)
-            .no_window()
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            ProcessCommand::new("explorer")
+                .arg(format!("/select,\"{raw}\""))
+                .no_window()
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -7309,13 +7341,17 @@ fn is_steam_common_container_path(path: &str) -> bool {
 /// Paths that should never appear in the global "Largest items" list.
 fn is_storage_largest_folder_skip(path: &str) -> bool {
     let lower = path.replace('/', "\\").to_ascii_lowercase();
+    let trimmed = lower.trim_end_matches('\\');
     if is_steam_common_container_path(path) {
         return true;
     }
     if is_storage_apps_drill_noise(path) {
         return true;
     }
-    if lower.contains("\\windows\\")
+    // Include `C:\Windows` itself (not only nested `\windows\…` paths) so the
+    // overview does not surface a giant opaque "Windows" row users cannot act on.
+    if trimmed.ends_with("\\windows")
+        || lower.contains("\\windows\\")
         || lower.contains("\\winsxs\\")
         || lower.ends_with("\\appdata\\local")
         || lower.ends_with("\\appdata\\roaming")
@@ -7327,6 +7363,9 @@ fn is_storage_largest_folder_skip(path: &str) -> bool {
 }
 
 fn is_storage_largest_file_skip(path: &str) -> bool {
+    // Individual large files (including pagefile.sys / files under Windows)
+    // stay listed so users can jump to them. Folder roll-ups under Windows
+    // are filtered separately via is_storage_largest_folder_skip.
     is_storage_apps_drill_noise(path)
 }
 
@@ -7417,16 +7456,19 @@ fn storage_path_summary(path: &str) -> String {
         "\\program files (x86)\\",
         "\\program files\\",
         "\\users\\",
+        "\\windows\\",
     ] {
         if let Some(idx) = lower.find(marker) {
-            let tail = norm[idx + 1..].trim_start_matches('\\');
+            // Slice on the original string at a char boundary (marker is ASCII).
+            let tail = norm.get(idx + 1..).unwrap_or("").trim_start_matches('\\');
             if !tail.is_empty() {
                 return format!("…\\{tail}");
             }
         }
     }
-    if norm.len() > 72 {
-        format!("…{}", &norm[norm.len().saturating_sub(68)..])
+    if norm.chars().count() > 72 {
+        let tail: String = norm.chars().rev().take(68).collect::<String>().chars().rev().collect();
+        format!("…{tail}")
     } else {
         norm
     }
@@ -7849,6 +7891,121 @@ mod storage_tests {
         let refined = refine_storage_largest_list(raw);
         assert_eq!(refined.len(), 1);
         assert_eq!(refined[0].name, "Crimson Desert");
+    }
+
+    #[test]
+    fn storage_largest_list_skips_windows_folder_keeps_pagefile() {
+        let raw = vec![
+            StorageEntry {
+                path: r"C:\Windows".to_string(),
+                name: "Windows".to_string(),
+                bytes: 40_000_000_000,
+                modified: 0,
+                is_dir: true,
+                bucket: "system".to_string(),
+            },
+            StorageEntry {
+                path: r"C:\pagefile.sys".to_string(),
+                name: "pagefile.sys".to_string(),
+                bytes: 16_000_000_000,
+                modified: 0,
+                is_dir: false,
+                bucket: "system".to_string(),
+            },
+            StorageEntry {
+                path: r"C:\Users\a\big.iso".to_string(),
+                name: "big.iso".to_string(),
+                bytes: 8_000_000_000,
+                modified: 0,
+                is_dir: false,
+                bucket: "documents".to_string(),
+            },
+        ];
+        let refined = refine_storage_largest_list(raw);
+        assert!(
+            refined.iter().all(|e| e.name != "Windows"),
+            "opaque Windows folder must not appear in Largest items"
+        );
+        assert!(
+            refined.iter().any(|e| e.path.eq_ignore_ascii_case(r"C:\pagefile.sys")),
+            "pagefile.sys should remain findable"
+        );
+        assert!(refined.iter().any(|e| e.name == "big.iso"));
+    }
+
+    #[test]
+    fn storage_entry_display_keeps_real_path_separate_from_summary() {
+        let entry = StorageEntry {
+            path: r"C:\Users\Someone\Downloads\huge-installer.exe".to_string(),
+            name: "huge-installer.exe".to_string(),
+            bytes: 5_000_000_000,
+            modified: 0,
+            is_dir: false,
+            bucket: "downloads".to_string(),
+        };
+        let (title, path_line) = storage_entry_display_labels(&entry);
+        assert_eq!(title, "huge-installer.exe");
+        assert!(
+            path_line.starts_with('…') || path_line.contains("Downloads"),
+            "display line should be shortened: {path_line}"
+        );
+        // The real path used for open/reveal must stay absolute and unsummarized.
+        assert!(entry.path.starts_with(r"C:\Users\"));
+        assert!(!entry.path.starts_with('…'));
+    }
+
+    #[test]
+    fn storage_path_summary_is_utf8_safe_and_marks_windows() {
+        let summary = storage_path_summary(r"C:\Windows\SoftwareDistribution\Download\payload.cab");
+        assert!(summary.starts_with('…'), "{summary}");
+        assert!(summary.contains("Windows") || summary.contains("payload.cab"), "{summary}");
+        // Multi-byte trailing chars must not panic on truncate.
+        let long = format!(r"C:\Users\a\{}", "ñ".repeat(80));
+        let _ = storage_path_summary(&long);
+    }
+
+    #[test]
+    fn profile_bucket_matches_case_and_localized_names() {
+        assert_eq!(
+            profile_bucket_for_rest(b"Downloads\\setup.exe"),
+            Some("downloads")
+        );
+        assert_eq!(
+            profile_bucket_for_rest(b"downloads\\setup.exe"),
+            Some("downloads")
+        );
+        assert_eq!(
+            profile_bucket_for_rest(b"Descargas\\setup.exe"),
+            Some("downloads")
+        );
+        assert_eq!(
+            profile_bucket_for_rest(b"Documentos\\notes.txt"),
+            Some("documents")
+        );
+        assert_eq!(
+            profile_bucket_for_rest(b"Escritorio\\shot.png"),
+            Some("desktop")
+        );
+        assert_eq!(
+            profile_bucket_for_rest(b"Pictures\\a.jpg"),
+            Some("media")
+        );
+    }
+
+    #[test]
+    fn storage_path_markers_match_folder_rollups() {
+        assert!(storage_path_matches_markers(
+            r"C:\Users\a\Downloads",
+            &["\\downloads\\", "\\downloads"]
+        ));
+        assert!(storage_path_matches_markers(
+            r"C:\Users\a\Downloads\file.zip",
+            &["\\downloads\\", "\\downloads"]
+        ));
+        assert!(!storage_path_matches_markers(
+            r"C:\Users\a\Documents",
+            &["\\downloads\\", "\\downloads"]
+        ));
     }
 
     #[test]
@@ -13497,6 +13654,27 @@ mod double_click_open_tests {
 }
 
 #[cfg(test)]
+mod path_compare_tests {
+    use super::*;
+
+    #[test]
+    fn same_path_trims_trailing_separators() {
+        #[cfg(target_os = "windows")]
+        {
+            assert!(same_path_string(r"C:\Users\a", r"C:\Users\a\"));
+            assert!(same_path_string(r"C:/Users/a/", r"C:\Users\a"));
+            assert!(same_path_string(r"C:\", r"C:"));
+            assert!(!same_path_string(r"C:\Users\a", r"C:\Users\b"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(same_path_string("/home/a", "/home/a/"));
+            assert!(!same_path_string("/home/a", "/home/b"));
+        }
+    }
+}
+
+#[cfg(test)]
 mod open_file_routing_tests {
     use super::*;
 
@@ -13707,15 +13885,37 @@ fn ss(value: impl Into<String>) -> SharedString {
     SharedString::from(value.into())
 }
 
-fn same_path_string(left: &str, right: &str) -> bool {
+fn normalize_path_compare_key(path: &str) -> String {
     #[cfg(target_os = "windows")]
     {
-        left.replace('/', "\\")
-            .eq_ignore_ascii_case(&right.replace('/', "\\"))
+        let mut s = path.replace('/', "\\");
+        // Trim trailing separators except drive roots (`C:\`).
+        while s.len() > 3 && s.ends_with('\\') {
+            s.pop();
+        }
+        if s.len() == 2 && s.as_bytes().get(1) == Some(&b':') {
+            s.push('\\');
+        }
+        s
     }
     #[cfg(not(target_os = "windows"))]
     {
-        left == right
+        let mut s = path.to_string();
+        while s.len() > 1 && s.ends_with('/') {
+            s.pop();
+        }
+        s
+    }
+}
+
+fn same_path_string(left: &str, right: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        normalize_path_compare_key(left).eq_ignore_ascii_case(&normalize_path_compare_key(right))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        normalize_path_compare_key(left) == normalize_path_compare_key(right)
     }
 }
 
@@ -27786,6 +27986,7 @@ impl NativeController {
                 StorageEntryUi {
                     name: ss(label),
                     path: ss(&d.path),
+                    path_display: ss(&d.path),
                     bytes_text: ss(bytes_text),
                     modified_text: ss(""),
                     bucket: ss(if d.kind == "local" {
@@ -27876,9 +28077,16 @@ impl NativeController {
                 .filter(|e| {
                     e.modified > 0
                         && now.saturating_sub(e.modified) > 90 * 86_400
-                        && entry_path_has_marker(e, &["\\downloads\\", "/downloads/"])
+                        && entry_path_has_marker(
+                            e,
+                            &[
+                                "\\downloads\\",
+                                "\\downloads",
+                                "\\descargas\\",
+                                "\\descargas",
+                            ],
+                        )
                 })
-                .take(40)
                 .collect(),
             "cleanup:stale" => collect_storage_tip_entries(result)
                 .into_iter()
@@ -27886,34 +28094,32 @@ impl NativeController {
                     e.modified > 0
                         && now.saturating_sub(e.modified) > 365 * 86_400
                         && !entry_is_system_reserved(e)
-                        && !entry_path_has_marker(e, &["\\windows\\", "/windows/"])
+                        && !entry_path_has_marker(e, &["\\windows\\", "\\windows"])
                 })
-                .take(40)
                 .collect(),
             _ => Vec::new(),
         };
         entries.sort_unstable_by_key(|e| std::cmp::Reverse(e.bytes));
+        entries.truncate(40);
         entries
     }
 
     fn prepare_storage_tip_action(&mut self, ui: &MainWindow, action: String, _path: String) {
-        if action == "duplicates" {
-            if let Some(result) = self.storage_result() {
-                ui.set_preview_visible(true);
-                ui.set_preview_title(ss("Duplicate Finder"));
-                ui.set_preview_body(ss(format!(
-                    "{} large duplicate file{} across {} group{}.\nEstimated reclaimable: {}\n\nOpen the drive root and run Find Duplicates when you are ready to choose which copies to keep.",
-                    result.duplicate_count,
-                    if result.duplicate_count == 1 { "" } else { "s" },
-                    result.duplicate_groups,
-                    if result.duplicate_groups == 1 { "" } else { "s" },
-                    format_size_short(result.duplicate_reclaimable_bytes)
-                )));
-                ui.set_preview_meta(ss(format!(
-                    "Minimum duplicate size: {}",
-                    format_size_short(STORAGE_DUPLICATE_MIN_SIZE)
-                )));
+        if let Some(bucket) = action.strip_prefix("bucket:") {
+            let bucket = bucket.trim();
+            if !bucket.is_empty() {
+                self.select_storage_bucket(ui, bucket.to_string());
             }
+            return;
+        }
+        if action == "duplicates" {
+            // Storage scans no longer run an implicit duplicate pass; point the
+            // user at Duplicate Finder instead of showing a stale zeroed tip.
+            self.show_toast_kind(
+                ui,
+                "Open Find Duplicates from the command palette to scan this drive.",
+                "info",
+            );
             return;
         }
 
@@ -28105,9 +28311,12 @@ impl NativeController {
             .take(limit)
             .map(|e| {
                 let (title, path_line) = storage_entry_display_labels(&e);
+                // `path` must stay the real absolute path — open / reveal /
+                // open-with all read this field. `path_display` is UI-only.
                 StorageEntryUi {
                     name: ss(&title),
-                    path: ss(&path_line),
+                    path: ss(&e.path),
+                    path_display: ss(&path_line),
                     bytes_text: ss(format_size_short(e.bytes)),
                     modified_text: ss(format_storage_entry_age(e.modified)),
                     bucket: ss(bucket_display_name(&e.bucket)),
@@ -31395,14 +31604,31 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
     ui.on_storage_open_path(move |path| {
         if let Some(ui) = weak.upgrade() {
             let p = path.to_string();
-            let target = if Path::new(&p).is_dir() {
-                p
+            // Reject display-summary leftovers (legacy cache / bad callers) so we
+            // never navigate to a path starting with the ellipsis character.
+            if p.is_empty() || p.starts_with('…') || p.starts_with("...") {
+                c.borrow_mut().show_toast_kind(
+                    &ui,
+                    "That storage entry has no usable path. Rescan Storage and try again.",
+                    "error",
+                );
+                return;
+            }
+            let pb = PathBuf::from(&p);
+            let target = if pb.is_dir() {
+                p.clone()
+            } else if let Some(parent) = pb.parent().filter(|d| !d.as_os_str().is_empty()) {
+                parent.to_string_lossy().into_owned()
             } else {
-                Path::new(&p)
-                    .parent()
-                    .map(|d| d.to_string_lossy().into_owned())
-                    .unwrap_or(p)
+                p.clone()
             };
+            // `is_dir()` is false for missing paths — still allow navigating to a
+            // parent that exists (e.g. locked system files still have a folder).
+            if !pb.exists() && !Path::new(&target).is_dir() {
+                c.borrow_mut()
+                    .show_toast_kind(&ui, format!("Path not found: {p}"), "error");
+                return;
+            }
             c.borrow_mut().navigate(&ui, target, true);
         }
     });
