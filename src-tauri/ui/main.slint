@@ -5862,6 +5862,7 @@ export component MainWindow inherits Window {
                     viewport-y <=> root.primary_list_scroll_y;
                     viewport-width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     viewport-height: Math.max(parent.height - AppMetrics.pad * 2 - 32px, root.list_content_h);
+                    horizontal-scrollbar-policy: always-off;
                     changed height => {
                         root.primary_list_viewport_h = self.height;
                         root.sync_grid_windows();
@@ -6069,11 +6070,15 @@ export component MainWindow inherits Window {
                 if root.view_mode != "list" && !root.is_storage_view: ScrollView {
                     x: AppMetrics.pad;
                     y: AppMetrics.pad;
-                    width: parent.width - AppMetrics.pad * 2;
+                    // Match list view: reserve scroll_gutter so the vertical bar
+                    // never steals width from the icon grid when it appears
+                    // (Documents → GitHub used to reflow the whole layout).
+                    width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     height: parent.height - AppMetrics.pad * 2;
                     viewport-y <=> root.primary_grid_scroll_y;
-                    viewport-width: parent.width - AppMetrics.pad * 2;
+                    viewport-width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     viewport-height: Math.max(parent.height - AppMetrics.pad * 2, root.grid_rows * (root.grid_item_h + root.grid_gap));
+                    horizontal-scrollbar-policy: always-off;
                     changed height => {
                         root.primary_grid_viewport_h = self.height;
                         root.sync_grid_windows();
@@ -6703,6 +6708,7 @@ export component MainWindow inherits Window {
                     viewport-y <=> root.secondary_list_scroll_y;
                     viewport-width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     viewport-height: Math.max(parent.height - 38px - root.secondary_filter_h - 32px - AppMetrics.pad, root.secondary_list_content_h);
+                    horizontal-scrollbar-policy: always-off;
                     changed height => {
                         root.secondary_list_viewport_h = self.height;
                         root.sync_grid_windows();
@@ -6746,11 +6752,14 @@ export component MainWindow inherits Window {
                 if root.view_mode != "list": ScrollView {
                     x: AppMetrics.pad;
                     y: 38px + root.secondary_filter_h + AppMetrics.pad;
-                    width: parent.width - AppMetrics.pad * 2;
+                    // Same gutter as primary grid — keep dual-pane icon columns
+                    // stable when the secondary scrollbar appears.
+                    width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     height: parent.height - 38px - root.secondary_filter_h - AppMetrics.pad * 2;
                     viewport-y <=> root.secondary_list_scroll_y;
-                    viewport-width: parent.width - AppMetrics.pad * 2;
+                    viewport-width: parent.width - AppMetrics.pad * 2 - AppMetrics.scroll_gutter;
                     viewport-height: Math.max(parent.height - 38px - root.secondary_filter_h - AppMetrics.pad * 2, root.secondary_grid_rows * (root.secondary_grid_item_h + root.secondary_grid_gap));
+                    horizontal-scrollbar-policy: always-off;
                     changed height => {
                         root.secondary_grid_viewport_h = self.height;
                         root.sync_grid_windows();
@@ -11349,21 +11358,42 @@ export component MainWindow inherits Window {
             }
         } }
         KeyBinding { keys: @keys(Space); activated => { if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.ui_mode_prompt_visible && !root.tool_overlay_visible && !root.command_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) { root.toggle_quick_look(); } } }
+        // Grid/gallery/compact: Up/Down move by a full row (grid_columns).
+        // List: step stays 1. Left/Right step by one in icon views so the
+        // grid can be walked in two dimensions without jumping the layout.
         KeyBinding { keys: @keys(UpArrow); activated => {
             if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) {
                 if (root.dual_pane && root.active_pane == "secondary") {
-                    root.secondary_file_selected(max(0, root.selected_index - 1), false, false);
+                    root.secondary_file_selected(max(0, max(0, root.selected_index) - (root.view_mode == "list" ? 1 : root.secondary_grid_columns)), false, false);
                 } else {
-                    root.file_selected(max(0, root.selected_index - 1), false, false);
+                    root.file_selected(max(0, max(0, root.selected_index) - (root.view_mode == "list" ? 1 : root.grid_columns)), false, false);
                 }
             }
         } }
         KeyBinding { keys: @keys(DownArrow); activated => {
             if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible) {
                 if (root.dual_pane && root.active_pane == "secondary") {
-                    root.secondary_file_selected(min(root.secondary_files.length - 1, root.selected_index + 1), false, false);
+                    root.secondary_file_selected(min(root.secondary_files.length - 1, max(0, root.selected_index) + (root.view_mode == "list" ? 1 : root.secondary_grid_columns)), false, false);
                 } else {
-                    root.file_selected(min(root.files.length - 1, root.selected_index + 1), false, false);
+                    root.file_selected(min(root.files.length - 1, max(0, root.selected_index) + (root.view_mode == "list" ? 1 : root.grid_columns)), false, false);
+                }
+            }
+        } }
+        KeyBinding { keys: @keys(LeftArrow); activated => {
+            if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible && root.view_mode != "list") {
+                if (root.dual_pane && root.active_pane == "secondary") {
+                    root.secondary_file_selected(max(0, max(0, root.selected_index) - 1), false, false);
+                } else {
+                    root.file_selected(max(0, max(0, root.selected_index) - 1), false, false);
+                }
+            }
+        } }
+        KeyBinding { keys: @keys(RightArrow); activated => {
+            if (!root.is_storage_view && !root.confirm_visible && !root.prompt_visible && !root.settings_visible && !root.welcome_visible && !root.command_visible && !root.tool_overlay_visible && !root.compare_overlay_visible && !root.image_tools_visible && !root.dupe_overlay_visible && root.view_mode != "list") {
+                if (root.dual_pane && root.active_pane == "secondary") {
+                    root.secondary_file_selected(min(root.secondary_files.length - 1, max(0, root.selected_index) + 1), false, false);
+                } else {
+                    root.file_selected(min(root.files.length - 1, max(0, root.selected_index) + 1), false, false);
                 }
             }
         } }

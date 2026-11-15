@@ -7328,10 +7328,7 @@ fn path_is_strict_parent(parent: &str, child: &str) -> bool {
 /// children (e.g. `common`, `Crimson Desert`, and `0015` all at once).
 fn is_storage_apps_drill_noise(path: &str) -> bool {
     let lower = path.replace('/', "\\").to_ascii_lowercase();
-    if lower.contains("\\appdata\\") && !lower.contains("\\appdata\\local\\programs\\") {
-        return true;
-    }
-    false
+    lower.contains("\\appdata\\") && !lower.contains("\\appdata\\local\\programs\\")
 }
 
 fn is_steam_common_container_path(path: &str) -> bool {
@@ -21154,7 +21151,8 @@ impl NativeController {
                 row_h,
             )
         } else {
-            let file_area_w = (ui.get_primary_pane_w() - pad * 2.0 - 12.0).max(1.0);
+            let scroll_gutter = ui.global::<AppMetrics>().get_scroll_gutter();
+            let file_area_w = (ui.get_primary_pane_w() - pad * 2.0 - scroll_gutter).max(1.0);
             let compact = view.as_str() == "compact";
             let cell_w_target = if compact { 200.0 } else { grid_w };
             let cols = (file_area_w / cell_w_target).floor().max(1.0) as usize;
@@ -21312,7 +21310,8 @@ impl NativeController {
                 row_h,
             )
         } else {
-            let file_area_w = (ui.get_primary_pane_w() - pad * 2.0 - 12.0).max(1.0);
+            let scroll_gutter = ui.global::<AppMetrics>().get_scroll_gutter();
+            let file_area_w = (ui.get_primary_pane_w() - pad * 2.0 - scroll_gutter).max(1.0);
             let compact = view.as_str() == "compact";
             let cell_w_target = if compact { 200.0 } else { grid_w };
             let cols = (file_area_w / cell_w_target).floor().max(1.0) as usize;
@@ -21358,8 +21357,10 @@ impl NativeController {
         }
     }
 
-    /// Scroll the primary list/grid so `index` stays inside the viewport with
-    /// a small margin — used for keyboard and click selection near edges.
+    /// Scroll the primary list/grid so `index` stays inside the viewport.
+    /// Only moves when the row/cell is actually clipped — a fully visible
+    /// item near the edge must not jump (mouse clicks on Documents folders
+    /// were shifting the whole grid by the old edge margin).
     fn ensure_primary_selection_visible(&mut self, ui: &MainWindow, index: i32) {
         if index < 0 {
             return;
@@ -21383,14 +21384,11 @@ impl NativeController {
             let content_h = ui.get_list_content_h().max(viewport_h);
             let min_scroll = -(content_h - viewport_h).max(0.0);
             let scroll = ui.get_primary_list_scroll_y().abs();
-            let visible_top = scroll;
-            let visible_bottom = scroll + viewport_h;
-            let mut new_scroll = scroll;
-            if item_top < visible_top + margin {
-                new_scroll = (item_top - margin).max(0.0);
-            } else if item_bottom > visible_bottom - margin {
-                new_scroll = (item_bottom - viewport_h + margin).max(0.0);
-            }
+            let Some(new_scroll) =
+                selection_scroll_target(item_top, item_bottom, scroll, viewport_h, margin)
+            else {
+                return;
+            };
             let next = (-new_scroll).clamp(min_scroll, 0.0);
             if (next + scroll).abs() > 0.5 {
                 ui.set_primary_list_scroll_y(next);
@@ -21409,14 +21407,11 @@ impl NativeController {
             let content_h = (rows * row_stride).max(viewport_h);
             let min_scroll = -(content_h - viewport_h).max(0.0);
             let scroll = ui.get_primary_grid_scroll_y().abs();
-            let visible_top = scroll;
-            let visible_bottom = scroll + viewport_h;
-            let mut new_scroll = scroll;
-            if item_top < visible_top + margin {
-                new_scroll = (item_top - margin).max(0.0);
-            } else if item_bottom > visible_bottom - margin {
-                new_scroll = (item_bottom - viewport_h + margin).max(0.0);
-            }
+            let Some(new_scroll) =
+                selection_scroll_target(item_top, item_bottom, scroll, viewport_h, margin)
+            else {
+                return;
+            };
             let next = (-new_scroll).clamp(min_scroll, 0.0);
             if (next + scroll).abs() > 0.5 {
                 ui.set_primary_grid_scroll_y(next);
@@ -33939,6 +33934,71 @@ fn marquee_selection_list(
         }
     }
     result
+}
+
+/// Absolute scroll offset needed so `[item_top, item_bottom]` fits in the
+/// viewport. Returns `None` when the item is already fully visible — callers
+/// must not apply an edge margin to visible rows (that caused click layout
+/// jumps in Documents / GitHub-folder grids).
+fn selection_scroll_target(
+    item_top: f32,
+    item_bottom: f32,
+    scroll: f32,
+    viewport_h: f32,
+    margin: f32,
+) -> Option<f32> {
+    let visible_top = scroll;
+    let visible_bottom = scroll + viewport_h;
+    if item_top < visible_top {
+        Some((item_top - margin).max(0.0))
+    } else if item_bottom > visible_bottom {
+        Some((item_bottom - viewport_h + margin).max(0.0))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod selection_scroll_tests {
+    use super::selection_scroll_target;
+
+    #[test]
+    fn fully_visible_near_bottom_edge_does_not_scroll() {
+        // Item sits inside the viewport but within the old 28px margin of the
+        // bottom — clicking it must leave scroll unchanged.
+        let scroll = 0.0_f32;
+        let viewport_h = 400.0_f32;
+        let item_top = 350.0_f32;
+        let item_bottom = 380.0_f32;
+        assert_eq!(
+            selection_scroll_target(item_top, item_bottom, scroll, viewport_h, 28.0),
+            None
+        );
+    }
+
+    #[test]
+    fn clipped_below_viewport_scrolls_with_margin() {
+        let scroll = 0.0_f32;
+        let viewport_h = 400.0_f32;
+        let item_top = 390.0_f32;
+        let item_bottom = 430.0_f32;
+        assert_eq!(
+            selection_scroll_target(item_top, item_bottom, scroll, viewport_h, 28.0),
+            Some(58.0_f32)
+        );
+    }
+
+    #[test]
+    fn clipped_above_viewport_scrolls_up_with_margin() {
+        let scroll = 200.0_f32;
+        let viewport_h = 400.0_f32;
+        let item_top = 150.0_f32;
+        let item_bottom = 180.0_f32;
+        assert_eq!(
+            selection_scroll_target(item_top, item_bottom, scroll, viewport_h, 28.0),
+            Some(122.0_f32)
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
