@@ -3750,9 +3750,13 @@ fn known_folder_key_from_basename(base: &str) -> Option<&'static str> {
     let lower = base.to_lowercase();
     match lower.as_str() {
         "documents" | "documentos" | "documenti" | "dokumente" => Some("Documents"),
-        "downloads" | "descargas" | "download" | "téléchargements" | "telechargements" => {
-            Some("Downloads")
-        }
+        "downloads"
+        | "descargas"
+        | "download"
+        | "scaricati"
+        | "scaricare"
+        | "téléchargements"
+        | "telechargements" => Some("Downloads"),
         "desktop" | "escritorio" | "scrivania" | "bureau" => Some("Desktop"),
         "pictures" | "imagenes" | "imágenes" | "immagini" | "bilder" | "images" => {
             Some("Pictures")
@@ -3760,6 +3764,24 @@ fn known_folder_key_from_basename(base: &str) -> Option<&'static str> {
         "music" | "musica" | "música" | "musik" | "musique" => Some("Music"),
         "videos" | "video" | "vídeos" | "vidéos" => Some("Videos"),
         _ => None,
+    }
+}
+
+/// Tab strip title for a session path. Known folders and virtual roots follow
+/// the active UI language so English never shows OS leaves like "Documentos".
+fn tab_title_for_path(path: &str) -> String {
+    match path {
+        "recycle://" => i18n::t("Recycle Bin"),
+        "storage://" => i18n::t("Storage"),
+        "home://" => i18n::t("Home"),
+        _ => {
+            let label = path_ui_label(Path::new(path));
+            if label.is_empty() {
+                path.to_string()
+            } else {
+                label
+            }
+        }
     }
 }
 
@@ -7617,6 +7639,10 @@ fn scan_storage_root(root: String, top_n: Option<usize>) -> Result<StorageScanRe
 #[cfg(test)]
 mod known_folder_label_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// `i18n::set_language` is process-global; serialize tests that mutate it.
+    static LANG_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn localized_basenames_map_to_english_keys() {
@@ -7633,6 +7659,10 @@ mod known_folder_label_tests {
             Some("Downloads")
         );
         assert_eq!(
+            known_folder_key_from_basename("Scaricati"),
+            Some("Downloads")
+        );
+        assert_eq!(
             known_folder_key_from_basename("Escritorio"),
             Some("Desktop")
         );
@@ -7645,6 +7675,7 @@ mod known_folder_label_tests {
 
     #[test]
     fn english_ui_translates_keys_to_english() {
+        let _guard = LANG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         i18n::set_language("en");
         assert_eq!(i18n::t("Documents"), "Documents");
         assert_eq!(i18n::t("Downloads"), "Downloads");
@@ -7653,6 +7684,76 @@ mod known_folder_label_tests {
         assert_eq!(i18n::t("Downloads"), "Descargas");
         i18n::set_language("it");
         assert_eq!(i18n::t("Documents"), "Documenti");
+        i18n::set_language("en");
+    }
+
+    #[test]
+    fn tab_titles_follow_ui_language_not_os_leaf() {
+        let _guard = LANG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Basename remapping covers junctions / redirected profile folders where
+        // the on-disk leaf is localized but the active UI language differs.
+        i18n::set_language("en");
+        assert_eq!(tab_title_for_path("home://"), "Home");
+        assert_eq!(tab_title_for_path("recycle://"), "Recycle Bin");
+        assert_eq!(tab_title_for_path("storage://"), "Storage");
+
+        // Simulate a Spanish on-disk Documents leaf under the user profile.
+        // known_folder_ui_name only remaps when parent is home/OneDrive; for
+        // unit tests without a real home, assert the basename key + t() path
+        // that tab_title_for_path uses via path_ui_label's fallback chain.
+        assert_eq!(
+            known_folder_key_from_basename("Documentos").map(i18n::t),
+            Some("Documents".to_string())
+        );
+        assert_eq!(
+            known_folder_key_from_basename("Descargas").map(i18n::t),
+            Some("Downloads".to_string())
+        );
+
+        i18n::set_language("es");
+        assert_eq!(tab_title_for_path("home://"), "Inicio");
+        assert_eq!(tab_title_for_path("recycle://"), "Papelera");
+        assert_eq!(
+            known_folder_key_from_basename("Documents").map(i18n::t),
+            Some("Documentos".to_string())
+        );
+        assert_eq!(
+            known_folder_key_from_basename("Documentos").map(i18n::t),
+            Some("Documentos".to_string())
+        );
+
+        i18n::set_language("it");
+        assert_eq!(tab_title_for_path("home://"), "Home");
+        assert_eq!(tab_title_for_path("storage://"), "Archiviazione");
+        assert_eq!(
+            known_folder_key_from_basename("Documentos").map(i18n::t),
+            Some("Documenti".to_string())
+        );
+        assert_eq!(
+            known_folder_key_from_basename("Documenti").map(i18n::t),
+            Some("Documenti".to_string())
+        );
+
+        i18n::set_language("en");
+        // Use the host separator so Path::file_name works on Linux CI too.
+        let projects = Path::new("Users").join("demo").join("Projects");
+        assert_eq!(
+            tab_title_for_path(&projects.to_string_lossy()),
+            "Projects"
+        );
+    }
+
+    #[test]
+    fn navigation_virtual_roots_follow_ui_language() {
+        let _guard = LANG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        i18n::set_language("en");
+        assert_eq!(navigation_display_path("home://", None), "Home");
+        assert_eq!(navigation_display_path("recycle://", None), "Recycle Bin");
+        i18n::set_language("es");
+        assert_eq!(navigation_display_path("home://", None), "Inicio");
+        assert_eq!(navigation_display_path("storage://", None), "Almacenamiento");
+        i18n::set_language("it");
+        assert_eq!(navigation_display_path("recycle://", None), "Cestino");
         i18n::set_language("en");
     }
 }
@@ -16436,9 +16537,9 @@ fn navigation_display_path(current_path: &str, archive: Option<&ArchiveView>) ->
         return archive_display_path(&archive.archive_path, &archive.prefix);
     }
     match current_path {
-        "home://" => "Home".to_string(),
-        "recycle://" => "Recycle Bin".to_string(),
-        "storage://" => "Storage".to_string(),
+        "home://" => i18n::t("Home"),
+        "recycle://" => i18n::t("Recycle Bin"),
+        "storage://" => i18n::t("Storage"),
         _ => current_path.to_string(),
     }
 }
@@ -19765,22 +19866,10 @@ impl NativeController {
         self.tabs
             .iter()
             .enumerate()
-            .map(|(index, tab)| {
-                let title = match tab.path.as_str() {
-                    "recycle://" => i18n::t("Recycle Bin"),
-                    "storage://" => i18n::t("Storage"),
-                    "home://" => i18n::t("Home"),
-                    _ => Path::new(&tab.path)
-                        .file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or_else(|| tab.path.clone()),
-                };
-                TabItem {
-                    title: ss(title),
-                    path: ss(&tab.path),
-                    active: index == self.active_tab,
-                }
+            .map(|(index, tab)| TabItem {
+                title: ss(tab_title_for_path(&tab.path)),
+                path: ss(&tab.path),
+                active: index == self.active_tab,
             })
             .collect()
     }

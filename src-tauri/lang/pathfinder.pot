@@ -985,3 +985,335 @@ msgstr ""
 msgid "Full access to every feature:\ndual pane, power tools,\narchive tools, and AI."
 msgstr ""
 
+
+msgid "1 GB or larger"
+msgstr ""
+
+msgid "1 MB to 100 MB"
+msgstr ""
+
+msgid "100 MB to 1 GB"
+msgstr ""
+
+msgid "A phrase in the filename"
+msgstr ""
+
+msgid "Any extension (.pdf, .sys, .txt)"
+msgstr ""
+
+msgid "Any filename"
+msgstr ""
+
+msgid "Any kind"
+msgstr ""
+
+msgid "Any size"
+msgstr ""
+
+msgid "App and model downloads"
+msgstr ""
+
+msgid "Apply preview"
+msgstr ""
+
+msgid "Archives"
+msgstr ""
+
+msgid "Audio"
+msgstr ""
+
+msgid "Cancel running"
+msgstr ""
+
+msgid "Changed in the last 7 days"
+msgstr ""
+
+msgid "Clear and close filters"
+msgstr ""
+
+msgid "Clear caches"
+msgstr ""
+
+msgid "Clear history"
+msgstr ""
+
+msgid "Click to search the entire drive"
+msgstr ""
+
+msgid "Click, then press a shortcut"
+msgstr ""
+
+msgid "Close search help"
+msgstr ""
+
+msgid ""
+"Combine rules: ext:pdf modified:week\n"
+"Use tag searches on their own.\n"
+"Content: text files up to 1 MB; PDF, DOCX and PPTX up to 8 MB. No image text recognition."
+msgstr ""
+
+msgid "Delete destination-only items: Off (default)"
+msgstr ""
+
+msgid "Delete destination-only items: On (previous versions kept)"
+msgstr ""
+
+msgid "Desktop"
+msgstr ""
+
+msgid "DISPLAY REFRESH"
+msgstr ""
+
+msgid "Documents"
+msgstr ""
+
+msgid "Downloads"
+msgstr ""
+
+msgid "Downloads stay off until you turn this on or confirm an install."
+msgstr ""
+
+msgid "Empty files (0 bytes)"
+msgstr ""
+
+msgid "Empty folder"
+msgstr ""
+
+msgid "Exclude"
+msgstr ""
+
+msgid "Files larger than 10 MB"
+msgstr ""
+
+msgid "Files only"
+msgstr ""
+
+msgid "Files with the yellow tag"
+msgstr ""
+
+msgid "Filter by name, file type, size, or date (Ctrl+Shift+G)"
+msgstr ""
+
+msgid "Filters"
+msgstr ""
+
+msgid "Filters narrow the current list by name, file type, size, and date. Search can also look inside files. Click an example to search:"
+msgstr ""
+
+msgid "Flat view"
+msgstr ""
+
+msgid "Flat view (all files under this folder)"
+msgstr ""
+
+msgid "Flat view works inside a real folder"
+msgstr ""
+
+msgid "Folders only"
+msgstr ""
+
+msgid "Hardware schedule"
+msgstr ""
+
+msgid "Hide preview pane"
+msgstr ""
+
+msgid "Hide same: Off"
+msgstr ""
+
+msgid "Home"
+msgstr ""
+
+msgid "Images"
+msgstr ""
+
+msgid "Index, thumbnails, and notes stay on this PC. Clear generated caches without touching your files."
+msgstr ""
+
+msgid "LIST COLUMNS"
+msgstr ""
+
+msgid "LOW POWER"
+msgstr ""
+
+msgid "Low power"
+msgstr ""
+
+msgid "Low power mode"
+msgstr ""
+
+msgid "Media file — press Play to open in your default app"
+msgstr ""
+
+msgid "Modified: any time"
+msgstr ""
+
+msgid "Modified: last 24 hours"
+msgstr ""
+
+msgid "Modified: last 30 days"
+msgstr ""
+
+msgid "Modified: last 7 days"
+msgstr ""
+
+msgid "Modified: over a year ago"
+msgstr ""
+
+msgid "More view and search options"
+msgstr ""
+
+msgid "Music"
+msgstr ""
+
+msgid "No extension"
+msgstr ""
+
+msgid "No files match the filter"
+msgstr ""
+
+msgid "No files match these filters"
+msgstr ""
+
+msgid "Open recovery folder"
+msgstr ""
+
+msgid "Optional. When on, Pathfinder pauses theme motion, skips fresh thumbnail encodes, holds background indexing, and defers git status badges — browsing and opens stay responsive."
+msgstr ""
+
+msgid "Pace theme atmospheres to your monitor. Auto matches the panel; pick 240 Hz on a 240 Hz display for the smoothest motion. UI chrome already vsyncs with the display."
+msgstr ""
+
+msgid "Patterns separated by commas, e.g. *.tmp, node_modules/**"
+msgstr ""
+
+msgid "PDF files"
+msgstr ""
+
+msgid "PDF · first-page text extract shown below. Open the file for the full document."
+msgstr ""
+
+msgid "Pictures"
+msgstr ""
+
+msgid "Pin"
+msgstr ""
+
+msgid "Press a key combination…"
+msgstr ""
+
+msgid "Preview changes"
+msgstr ""
+
+msgid "PRIVACY AND STORAGE"
+msgstr ""
+
+msgid "Privacy details"
+msgstr ""
+
+msgid "Programs"
+msgstr ""
+
+msgid "Recycle Bin"
+msgstr ""
+
+
+msgid "Remember for this session"
+msgstr ""
+
+msgid "Rescan"
+msgstr ""
+
+msgid "Reset all filters"
+msgstr ""
+
+msgid "Reset sort to name"
+msgstr ""
+
+msgid "Reset the filters or choose different options"
+msgstr ""
+
+msgid "Safe by design: HKCU only, no admin, and unknown Explorer verbs are forwarded to the system binary. Alternative: import extras/set-pathfinder-default-folder-handler.reg with your pathfinder.exe path."
+msgstr ""
+
+msgid "Search"
+msgstr ""
+
+msgid "Search beyond filenames"
+msgstr ""
+
+msgid "Search help and examples"
+msgstr ""
+
+msgid "Semantic ranking off - click to rank by name embeddings"
+msgstr ""
+
+msgid "Share"
+msgstr ""
+
+msgid "Show Modified column"
+msgstr ""
+
+msgid "Show preview pane"
+msgstr ""
+
+msgid "Show Size column"
+msgstr ""
+
+msgid "Show Type column"
+msgstr ""
+
+msgid "Single pane"
+msgstr ""
+
+msgid "Stop & close"
+msgstr ""
+
+msgid "Stop sync"
+msgstr ""
+
+msgid "Storage"
+msgstr ""
+
+msgid "STORED ON THIS PC"
+msgstr ""
+
+msgid "System files"
+msgstr ""
+
+msgid "Text inside supported files"
+msgstr ""
+
+msgid "Try a different query or search the whole drive"
+msgstr ""
+
+msgid "Turn off flat view"
+msgstr ""
+
+msgid "Turn off semantic ranking"
+msgstr ""
+
+msgid "Turn on semantic ranking"
+msgstr ""
+
+msgid "Under 1 MB"
+msgstr ""
+
+msgid "Updates and Local AI may download when you ask."
+msgstr ""
+
+msgid "v Advanced & Windows tools"
+msgstr ""
+
+msgid "Video"
+msgstr ""
+
+msgid "Videos"
+msgstr ""
+
+msgid "Windows menu…"
+msgstr ""
+
+msgid "Registers Pathfinder for your user account only (HKCU). Folder/drive opens and bare explorer.exe launches (Show in folder) open Pathfinder. Never replaces C:\\Windows\\explorer.exe — shell restart, Control Panel, and shell: namespaces still use real Explorer."
+msgstr ""
+
