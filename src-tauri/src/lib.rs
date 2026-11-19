@@ -1853,12 +1853,20 @@ fn destination_within_source(from: &Path, to: &Path) -> Result<bool, String> {
 fn path_is_within(outer: &Path, inner: &Path) -> bool {
     #[cfg(target_os = "windows")]
     {
-        let outer = outer.to_string_lossy().to_lowercase();
-        let inner = inner.to_string_lossy().to_lowercase();
-        let prefix = if outer.ends_with(std::path::MAIN_SEPARATOR) {
+        // Normalize `/` → `\` so mixed-separator inputs (and older tests) still
+        // match under MAIN_SEPARATOR prefix checks.
+        let outer = outer
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_lowercase();
+        let inner = inner
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_lowercase();
+        let prefix = if outer.ends_with('\\') {
             outer.clone()
         } else {
-            format!("{outer}{}", std::path::MAIN_SEPARATOR)
+            format!("{outer}\\")
         };
         inner == outer || inner.starts_with(&prefix)
     }
@@ -1937,9 +1945,12 @@ mod transfer_ancestry_tests {
 
     #[test]
     fn delete_watch_release_matches_folder_and_children() {
-        let outer = PathBuf::from("/Users/demo/Projects");
-        let child = PathBuf::from("/Users/demo/Projects/app");
-        let sibling = PathBuf::from("/Users/demo/Other");
+        // Build with join() so Windows CI gets native `\` separators. Hard-coded
+        // POSIX paths made path_is_within's MAIN_SEPARATOR prefix check fail
+        // (`...\Projects\` vs `.../Projects/app`).
+        let outer = PathBuf::from("Users").join("demo").join("Projects");
+        let child = outer.join("app");
+        let sibling = PathBuf::from("Users").join("demo").join("Other");
         assert!(path_is_within(&outer, &child));
         assert!(path_is_within(&outer, &outer));
         assert!(!path_is_within(&outer, &sibling));
