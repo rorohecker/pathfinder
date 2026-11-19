@@ -215,6 +215,12 @@ export global ThemePalette {
     in-out property <image> sunset_folder_image;
     // Text that sits on accent / danger fills (primary buttons, active chips).
     in-out property <color> on_accent: #ffffff;
+    // Shared hover washes — light themes use dark translucent, dark themes use
+    // white translucent. Keeps ToolButton / rows / headers readable on every
+    // built-in and custom theme (hard-coded white overlays failed on mica-light).
+    in-out property <color> hover: rgba(255, 255, 255, 0.06);
+    in-out property <color> hover_strong: rgba(255, 255, 255, 0.10);
+    in-out property <color> pressed: rgba(255, 255, 255, 0.12);
     // True while DoDragDrop is blocking the UI thread - selected items show glow
     in-out property <bool> is_dragging: false;
     in-out property <int> drag_count: 0;
@@ -380,9 +386,9 @@ component ToolButton inherits Rectangle {
     border-width: root.active ? 1px : 0px;
     border-color: root.active ? ThemePalette.accent : rgba(0, 0, 0, 0);
     background: root.danger && touch.has-hover ? ThemePalette.danger :
-        (touch.pressed ? rgba(255, 255, 255, 0.12) :
+        (touch.pressed ? ThemePalette.pressed :
         (root.active ? ThemePalette.accent_soft :
-        (touch.has-hover ? rgba(255, 255, 255, 0.06) : rgba(0, 0, 0, 0))));
+        (touch.has-hover ? ThemePalette.hover : rgba(0, 0, 0, 0))));
     animate background { duration: 90ms; easing: ease-out; }
 
     // Prefer explicit tooltip; fall back to the caption so icon-only buttons
@@ -403,14 +409,14 @@ component ToolButton inherits Rectangle {
             : (root.show_caption ? 4px : (parent.height - 16px) / 2);
         icon_size: 16px;
         data: root.icon_data;
-        tint: root.danger && touch.has-hover ? white : (root.active || touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted);
+        tint: root.danger && touch.has-hover ? ThemePalette.on_accent : (root.active || touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted);
     }
 
     // Icon-less button: centered glyph or letter.
     Text {
         visible: root.icon_data == "" && !root.show_caption;
         text: root.text_label;
-        color: root.danger && touch.has-hover ? white : (root.active || touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted);
+        color: root.danger && touch.has-hover ? ThemePalette.on_accent : (root.active || touch.has-hover ? ThemePalette.accent_strong : ThemePalette.text_muted);
         font-size: 16px;
         font-weight: 600;
         horizontal-alignment: center;
@@ -619,7 +625,7 @@ component SideRow inherits Rectangle {
             : (!root.item.is_header && root.item.active
                 ? ThemePalette.accent_soft
                 : (!root.item.is_header && touch.has-hover
-                    ? rgba(255, 255, 255, 0.06)
+                    ? ThemePalette.hover
                     : rgba(0, 0, 0, 0)));
         animate background { duration: 90ms; easing: ease-out; }
         animate border-color { duration: 90ms; easing: ease-out; }
@@ -1530,7 +1536,7 @@ component FileRow inherits Rectangle {
         width: parent.width;
         height: parent.height - root.group_header_h;
         border-radius: AppMetrics.radius;
-        background: rgba(255, 255, 255, 0.07);
+        background: ThemePalette.hover_strong;
     }
 
     // Drag glow - shown on selected items while DoDragDrop is active
@@ -1980,7 +1986,7 @@ component ListHeader inherits Rectangle {
         x: 44px;
         width: max(60px, parent.width - 44px - root.right_zone - 16px);
         height: parent.height;
-        background: nh.has-hover ? rgba(255,255,255,0.04) : transparent;
+        background: nh.has-hover ? ThemePalette.hover : transparent;
         animate background { duration: 90ms; easing: ease-out; }
         Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Name"); color: root.sort_by == "name" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
         if root.sort_by == "name": SvgIcon {
@@ -1995,7 +2001,7 @@ component ListHeader inherits Rectangle {
         x: parent.width - root.right_zone;
         width: root.col_size_w;
         height: parent.height;
-        background: sh.has-hover ? rgba(255,255,255,0.04) : transparent;
+        background: sh.has-hover ? ThemePalette.hover : transparent;
         animate background { duration: 90ms; easing: ease-out; }
         Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Size"); color: root.sort_by == "size" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; horizontal-alignment: right; vertical-alignment: center; }
         if root.sort_by == "size": SvgIcon {
@@ -2010,7 +2016,7 @@ component ListHeader inherits Rectangle {
         x: parent.width - root.right_zone + root.col_size_w + root.col_gap;
         width: root.col_modified_w;
         height: parent.height;
-        background: mh.has-hover ? rgba(255,255,255,0.04) : transparent;
+        background: mh.has-hover ? ThemePalette.hover : transparent;
         animate background { duration: 90ms; easing: ease-out; }
         Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Modified"); color: root.sort_by == "modified" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
         if root.sort_by == "modified": SvgIcon {
@@ -2025,7 +2031,7 @@ component ListHeader inherits Rectangle {
         x: parent.width - root.right_zone + root.col_size_w + root.col_gap + root.col_modified_w + root.col_gap;
         width: root.col_type_w;
         height: parent.height;
-        background: th.has-hover ? rgba(255,255,255,0.04) : transparent;
+        background: th.has-hover ? ThemePalette.hover : transparent;
         animate background { duration: 90ms; easing: ease-out; }
         Text { x: 0; width: parent.width - 18px; height: parent.height; text: @tr("Type"); color: root.sort_by == "type" ? ThemePalette.text_muted : ThemePalette.text_faint; font-size: 11px; font-weight: 700; vertical-alignment: center; }
         if root.sort_by == "type": SvgIcon {
@@ -2138,7 +2144,7 @@ component ChoiceMenuRow inherits Rectangle {
         y: (parent.height - 14px) / 2;
         icon_size: 14px;
         data: root.cmd_icon;
-        tint: touch.has-hover ? (root.danger ? white : ThemePalette.accent_strong) : ThemePalette.text_faint;
+        tint: touch.has-hover ? (root.danger ? ThemePalette.on_accent : ThemePalette.accent_strong) : ThemePalette.text_muted;
         visible: root.cmd_icon != "";
     }
     Text {
@@ -2146,7 +2152,7 @@ component ChoiceMenuRow inherits Rectangle {
         width: parent.width - (root.cmd_icon != "" ? 39px : 18px);
         height: parent.height;
         text: root.label;
-        color: touch.has-hover ? (root.danger ? white : ThemePalette.accent_strong) : ThemePalette.text_muted;
+        color: touch.has-hover ? (root.danger ? ThemePalette.on_accent : ThemePalette.accent_strong) : ThemePalette.text_muted;
         font-size: 12.5px;
         vertical-alignment: center;
         overflow: elide;
@@ -2218,6 +2224,8 @@ component DialogButton inherits Rectangle {
     width: self.preferred-width;
     height: 32px;
     border-radius: AppMetrics.radius_small;
+    border-width: root.primary ? 0px : 1px;
+    border-color: root.primary ? transparent : ThemePalette.border_strong;
     background: root.primary
         ? (root.danger
             ? (dlg_btn_touch.has-hover ? ThemePalette.danger : ThemePalette.danger)
@@ -5067,7 +5075,7 @@ export component MainWindow inherits Window {
                             width: parent.width - 4px;
                             x: 2px;
                             border-radius: AppMetrics.radius - 1px;
-                            background: sug_ta.has-hover ? rgba(255, 255, 255, 0.07) : transparent;
+                            background: sug_ta.has-hover ? ThemePalette.hover_strong : transparent;
                             Text {
                                 x: 8px;
                                 width: parent.width - 16px;
@@ -6464,19 +6472,19 @@ export component MainWindow inherits Window {
                     x: (parent.width - 2px) / 2;
                     y: parent.height / 2 - 12px;
                     width: 2px; height: 2px; border-radius: 1px;
-                    background: split_touch.has-hover || split_touch.pressed ? white : ThemePalette.text_faint;
+                    background: split_touch.has-hover || split_touch.pressed ? ThemePalette.on_accent : ThemePalette.text_faint;
                 }
                 Rectangle {
                     x: (parent.width - 2px) / 2;
                     y: parent.height / 2 - 1px;
                     width: 2px; height: 2px; border-radius: 1px;
-                    background: split_touch.has-hover || split_touch.pressed ? white : ThemePalette.text_faint;
+                    background: split_touch.has-hover || split_touch.pressed ? ThemePalette.on_accent : ThemePalette.text_faint;
                 }
                 Rectangle {
                     x: (parent.width - 2px) / 2;
                     y: parent.height / 2 + 10px;
                     width: 2px; height: 2px; border-radius: 1px;
-                    background: split_touch.has-hover || split_touch.pressed ? white : ThemePalette.text_faint;
+                    background: split_touch.has-hover || split_touch.pressed ? ThemePalette.on_accent : ThemePalette.text_faint;
                 }
 
                 // Larger invisible touch area extending past the visible splitter
@@ -7368,7 +7376,7 @@ export component MainWindow inherits Window {
                         width: parent.width;
                         height: parent.height;
                         text: root.queue_busy_text != "" ? root.queue_busy_text : @tr("Queue busy");
-                        color: white;
+                        color: ThemePalette.on_accent;
                         font-size: 10px;
                         font-weight: 600;
                         horizontal-alignment: center;
@@ -7437,7 +7445,7 @@ export component MainWindow inherits Window {
                             : (root.update_size_text != ""
                                 ? ("Update v" + root.update_version + " · " + root.update_size_text)
                                 : ("Update v" + root.update_version + " available"));
-                        color: white;
+                        color: ThemePalette.on_accent;
                         font-size: 10px;
                         font-weight: 600;
                         horizontal-alignment: center;
@@ -7468,7 +7476,7 @@ export component MainWindow inherits Window {
                         Text {
                             width: parent.width; height: parent.height;
                             text: @tr("Install");
-                            color: white;
+                            color: ThemePalette.on_accent;
                             font-size: 10px;
                             font-weight: 700;
                             horizontal-alignment: center;
@@ -7633,6 +7641,8 @@ export component MainWindow inherits Window {
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Copy"); command_name: "copy"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Cut"); command_name: "cut"; picked(c) => { root.context_visible = false; root.command(c); } }
             if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Paste"); command_name: "paste"; picked(c) => { root.context_visible = false; root.command(c); } }
+            if !root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
+            if !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Delete"); command_name: "delete"; danger: true; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.context_is_archive && !root.in_recycle_bin: Rectangle { height: 1px; background: ThemePalette.border; }
             if root.context_is_archive && !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Archive Browser"); command_name: "archive-browser"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.context_is_archive && !root.in_recycle_bin: ChoiceMenuRow { width: parent.width; label: @tr("Extract Here"); command_name: "extract-here"; picked(c) => { root.context_visible = false; root.command(c); } }
@@ -7748,8 +7758,6 @@ export component MainWindow inherits Window {
             if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: @tr("Take Ownership"); command_name: "take-ownership"; picked(c) => { root.context_visible = false; root.command(c); } }
             if root.context_advanced && !root.is_simple: ChoiceMenuRow { width: parent.width; label: @tr("Previous Versions"); command_name: "previous-versions"; picked(c) => { root.context_visible = false; root.command(c); } }
 
-            Rectangle { height: 1px; background: ThemePalette.border; }
-            ChoiceMenuRow { width: parent.width; label: @tr("Delete"); command_name: "delete"; danger: true; picked(c) => { root.context_visible = false; root.command(c); } }
         }
         }
     }
@@ -9939,6 +9947,8 @@ export component MainWindow inherits Window {
             border-color: ThemePalette.border_strong;
             border-radius: AppMetrics.radius;
             background: ThemePalette.panel_solid;
+            drop-shadow-blur: 18px;
+            drop-shadow-color: rgba(0, 0, 0, 0.40);
             clip: true;
             Text { x: 18px; y: 16px; width: parent.width - 36px; text: root.confirm_title != "" ? root.confirm_title : @tr("Confirm delete"); color: root.confirm_is_permanent ? ThemePalette.danger : ThemePalette.text; font-size: 18px; font-weight: 700; }
             confirm_body := CopyableMessageText {

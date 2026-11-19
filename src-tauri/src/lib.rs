@@ -1934,6 +1934,32 @@ mod transfer_ancestry_tests {
         assert!(reject_descendant_transfer(&a.to_string_lossy(), &dest).is_ok());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn delete_watch_release_matches_folder_and_children() {
+        let outer = PathBuf::from("/Users/demo/Projects");
+        let child = PathBuf::from("/Users/demo/Projects/app");
+        let sibling = PathBuf::from("/Users/demo/Other");
+        assert!(path_is_within(&outer, &child));
+        assert!(path_is_within(&outer, &outer));
+        assert!(!path_is_within(&outer, &sibling));
+    }
+
+    #[test]
+    fn paths_still_present_filters_missing() {
+        let dir = scratch("present");
+        let alive = dir.join("alive.txt");
+        let gone = dir.join("gone.txt");
+        fs::write(&alive, b"x").unwrap();
+        let paths = vec![
+            alive.to_string_lossy().to_string(),
+            gone.to_string_lossy().to_string(),
+        ];
+        let left = paths_still_present(&paths);
+        assert_eq!(left.len(), 1);
+        assert!(same_path_string(&left[0], &alive.to_string_lossy()));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 fn copy_dir_recursive(state: &AppState, from: &Path, to: &Path) -> Result<(), String> {
@@ -10367,6 +10393,34 @@ fn contrasting_on_color(c: Color) -> Color {
     }
 }
 
+fn apply_hover_tokens(global: &ThemePalette, light: bool) {
+    if light {
+        global.set_hover(rgba_u8(16, 24, 36, 0.05));
+        global.set_hover_strong(rgba_u8(16, 24, 36, 0.08));
+        global.set_pressed(rgba_u8(16, 24, 36, 0.12));
+    } else {
+        global.set_hover(rgba_u8(255, 255, 255, 0.06));
+        global.set_hover_strong(rgba_u8(255, 255, 255, 0.10));
+        global.set_pressed(rgba_u8(255, 255, 255, 0.12));
+    }
+}
+
+fn derive_panel_alt(panel: Color, light: bool) -> Color {
+    if light {
+        Color::from_rgb_u8(
+            panel.red().saturating_sub(14),
+            panel.green().saturating_sub(12),
+            panel.blue().saturating_sub(10),
+        )
+    } else {
+        Color::from_rgb_u8(
+            panel.red().saturating_add(14),
+            panel.green().saturating_add(12),
+            panel.blue().saturating_add(14),
+        )
+    }
+}
+
 /// Keep std-widgets (LineEdit, etc.) in sync with Pathfinder's light/dark themes.
 /// Without this, Fluent LineEdits keep the default dark palette and paint white
 /// text on light Settings / dialog panels.
@@ -14753,31 +14807,16 @@ fn native_delete_inner(
     }
     // Fast path (recycle UI): skip folder size walk + queue bookkeeping.
     if !measure_folder_bytes {
-        trash::delete(&path_buf).map_err(|e| e.to_string())?;
-        state.invalidate_path(&path_buf);
-        let ids = trash_ids_for_originals(&[path.to_string()]);
-        let trash_id = ids
-            .iter()
-            .find(|(k, _)| same_path_string(k, path))
-            .map(|(_, v)| v.as_str());
-        state.log_op_with_trash("delete", path, None, trash_id);
+        recycle_paths_resilient(state, &[path.to_string()])?;
         return Ok(());
     }
     let total = folder_size_quick(&path_buf, 25_000);
     let op_id = state.queue_start("delete", path, None, total);
     let started = Instant::now();
-    if let Err(error) = trash::delete(&path_buf) {
-        let message = error.to_string();
-        state.queue_finish(op_id, "failed", message.clone(), 0, started.elapsed());
-        return Err(message);
+    if let Err(error) = recycle_paths_resilient(state, &[path.to_string()]) {
+        state.queue_finish(op_id, "failed", error.clone(), 0, started.elapsed());
+        return Err(error);
     }
-    state.invalidate_path(&path_buf);
-    let ids = trash_ids_for_originals(&[path.to_string()]);
-    let trash_id = ids
-        .iter()
-        .find(|(k, _)| same_path_string(k, path))
-        .map(|(_, v)| v.as_str());
-    state.log_op_with_trash("delete", path, None, trash_id);
     state.queue_finish(
         op_id,
         "done",
@@ -14786,6 +14825,168 @@ fn native_delete_inner(
         started.elapsed(),
     );
     Ok(())
+}
+
+/// Drop directory watchers that would keep a handle open on paths about to be
+/// deleted. Explorer can remove those folders; Pathfinder previously could not
+/// because `notify` still held `ReadDirectoryChangesW` handles on recently
+/// visited directories (including dual-pane / back-stack targets).
+fn release_watchers_blocking_paths(state: &AppState, paths: &[String]) {
+    let Ok(mut watchers) = state.watchers.lock() else {
+        return;
+    };
+    if watchers.is_empty() || paths.is_empty() {
+        return;
+    }
+    let victims: Vec<String> = watchers
+        .keys()
+        .filter(|watched| {
+            let watched_path = Path::new(watched.as_str());
+            paths.iter().any(|target| {
+                let target_path = Path::new(target.as_str());
+                same_path_string(watched, target)
+                    || path_is_within(target_path, watched_path)
+            })
+        })
+        .cloned()
+        .collect();
+    for key in victims {
+        watchers.remove(&key);
+    }
+}
+
+/// Clear the Windows read-only attribute on a single path (best-effort).
+/// Explorer clears this before delete; `remove_dir_all` / some shell skips do not.
+fn clear_readonly_attr(path: &Path) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_READONLY, FILE_FLAGS_AND_ATTRIBUTES, GetFileAttributesW,
+            SetFileAttributesW,
+        };
+        use windows::core::PCWSTR;
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let pcwstr = PCWSTR(wide.as_ptr());
+        unsafe {
+            let attrs = GetFileAttributesW(pcwstr);
+            if attrs != u32::MAX && (attrs & FILE_ATTRIBUTE_READONLY.0) != 0 {
+                let _ = SetFileAttributesW(
+                    pcwstr,
+                    FILE_FLAGS_AND_ATTRIBUTES(attrs & !FILE_ATTRIBUTE_READONLY.0),
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+    }
+}
+
+/// Walk a folder (or single file) and clear read-only bits so delete can proceed
+/// the way File Explorer does for git objects, copied media, etc.
+fn clear_readonly_tree(path: &Path) {
+    clear_readonly_attr(path);
+    if !path.is_dir() {
+        return;
+    }
+    let walker = walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok());
+    for entry in walker {
+        clear_readonly_attr(entry.path());
+    }
+}
+
+fn paths_still_present(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|p| Path::new(p.as_str()).exists())
+        .cloned()
+        .collect()
+}
+
+fn record_recycle_success(state: &AppState, paths: &[String]) {
+    let ids = trash_ids_for_originals(paths);
+    let mut parents = HashSet::new();
+    for path in paths {
+        let pb = Path::new(path);
+        state.invalidate_path(pb);
+        if let Some(parent) = pb.parent() {
+            parents.insert(parent.to_path_buf());
+        }
+        let trash_id = ids
+            .iter()
+            .find(|(k, _)| same_path_string(k, path))
+            .map(|(_, v)| v.as_str());
+        state.log_op_with_trash("delete", path, None, trash_id);
+    }
+    for parent in parents {
+        state.invalidate_directory_path(&parent);
+    }
+}
+
+/// Recycle paths with Explorer-parity recovery:
+/// 1) release our own directory watchers on the targets
+/// 2) `trash::delete_all`
+/// 3) if the shell aborted or items remain, clear read-only and retry once
+fn recycle_paths_resilient(state: &AppState, paths: &[String]) -> Result<usize, String> {
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    release_watchers_blocking_paths(state, paths);
+
+    let first_error = match trash::delete_all(paths) {
+        Ok(()) => None,
+        Err(error) => Some(error.to_string()),
+    };
+
+    let mut remaining = paths_still_present(paths);
+    if remaining.is_empty() {
+        record_recycle_success(state, paths);
+        return Ok(paths.len());
+    }
+
+    // Shell often reports success while skipping locked/read-only trees when
+    // FOF_NO_UI is set. Clear attributes, drop watchers again, and retry.
+    for path in &remaining {
+        clear_readonly_tree(Path::new(path));
+    }
+    release_watchers_blocking_paths(state, &remaining);
+    let retry_error = match trash::delete_all(&remaining) {
+        Ok(()) => None,
+        Err(error) => Some(error.to_string()),
+    };
+    remaining = paths_still_present(&remaining);
+    if remaining.is_empty() {
+        record_recycle_success(state, paths);
+        return Ok(paths.len());
+    }
+
+    let detail = remaining
+        .iter()
+        .take(3)
+        .map(|p| {
+            Path::new(p)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.clone())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let reason = retry_error
+        .or(first_error)
+        .unwrap_or_else(|| "the shell skipped the item".to_string());
+    Err(format!(
+        "Could not delete {detail}{}: {reason}",
+        if remaining.len() > 3 { "…" } else { "" }
+    ))
 }
 
 /// Batch-move paths to the OS Recycle Bin in one shell operation.
@@ -14804,27 +15005,7 @@ fn native_delete_all_fast(state: &AppState, paths: &[String]) -> Result<usize, S
     }
     // Trust the shell op for missing paths — a serial exists() walk over large
     // selections was adding noticeable latency before IFileOperation even started.
-    let existing: Vec<String> = paths.to_vec();
-    let n = existing.len();
-    trash::delete_all(&existing).map_err(|e| e.to_string())?;
-    let ids = trash_ids_for_originals(&existing);
-    let mut parents = HashSet::new();
-    for path in &existing {
-        let pb = Path::new(path);
-        state.invalidate_path(pb);
-        if let Some(parent) = pb.parent() {
-            parents.insert(parent.to_path_buf());
-        }
-        let trash_id = ids
-            .iter()
-            .find(|(k, _)| same_path_string(k, path))
-            .map(|(_, v)| v.as_str());
-        state.log_op_with_trash("delete", path, None, trash_id);
-    }
-    for parent in parents {
-        state.invalidate_directory_path(&parent);
-    }
-    Ok(n)
+    recycle_paths_resilient(state, paths)
 }
 
 fn native_create_directory(state: &AppState, path: &str) -> Result<(), String> {
@@ -15410,11 +15591,11 @@ fn theme_palette(id: &str) -> PaletteSpec {
             panel_alt: color("#dfe8f4"),
             titlebar: rgba_u8(236, 244, 252, 0.94),
             sidebar: rgba_u8(226, 236, 248, 0.88),
-            border: rgba_u8(56, 90, 132, 0.14),
-            border_strong: rgba_u8(56, 90, 132, 0.26),
+            border: rgba_u8(56, 90, 132, 0.22),
+            border_strong: rgba_u8(56, 90, 132, 0.36),
             text: color("#16202f"),
             text_muted: color("#4d5f73"),
-            text_faint: color("#758497"),
+            text_faint: color("#5a6a7c"),
             accent: color("#4f9cff"),
             accent_soft: rgba_u8(79, 156, 255, 0.16),
             accent_strong: color("#72b3ff"),
@@ -15434,11 +15615,11 @@ fn theme_palette(id: &str) -> PaletteSpec {
             panel_alt: color("#d8c4a0"),
             titlebar: rgba_u8(230, 215, 192, 0.96),
             sidebar: rgba_u8(220, 205, 180, 0.94),
-            border: rgba_u8(110, 78, 36, 0.18),
-            border_strong: rgba_u8(110, 78, 36, 0.35),
+            border: rgba_u8(110, 78, 36, 0.24),
+            border_strong: rgba_u8(110, 78, 36, 0.40),
             text: color("#241c10"),
             text_muted: color("#5c4830"),
-            text_faint: color("#8a7260"),
+            text_faint: color("#6a5644"),
             accent: color("#c86010"),
             accent_soft: rgba_u8(200, 96, 16, 0.18),
             accent_strong: color("#a04c08"),
@@ -15461,7 +15642,7 @@ fn theme_palette(id: &str) -> PaletteSpec {
             border_strong: color("#b9c6d4"),
             text: color("#161a20"),
             text_muted: color("#526071"),
-            text_faint: color("#7d8795"),
+            text_faint: color("#5e6876"),
             accent: color("#4f6fdc"),
             accent_soft: rgba_u8(79, 111, 220, 0.15),
             accent_strong: color("#3d5ac8"),
@@ -15484,7 +15665,7 @@ fn theme_palette(id: &str) -> PaletteSpec {
             border_strong: rgba_u8(120, 255, 180, 0.52),
             text: color("#cbffe0"),
             text_muted: color("#6bdc97"),
-            text_faint: color("#3f8f5f"),
+            text_faint: color("#58a878"),
             accent: color("#7cff9d"),
             accent_soft: rgba_u8(124, 255, 157, 0.12),
             accent_strong: color("#c8ffd8"),
@@ -15503,11 +15684,11 @@ fn theme_palette(id: &str) -> PaletteSpec {
             panel_alt: color("#d4c29e"),
             titlebar: color("#dbc9a6"),
             sidebar: color("#d6c6a0"),
-            border: rgba_u8(88, 63, 34, 0.20),
-            border_strong: rgba_u8(88, 63, 34, 0.34),
+            border: rgba_u8(88, 63, 34, 0.28),
+            border_strong: rgba_u8(88, 63, 34, 0.42),
             text: color("#332617"),
             text_muted: color("#6b573d"),
-            text_faint: color("#957f5e"),
+            text_faint: color("#6f5a3c"),
             accent: color("#9f3f2c"),
             accent_soft: rgba_u8(159, 63, 44, 0.14),
             accent_strong: color("#7f2f21"),
@@ -15602,11 +15783,11 @@ fn theme_palette(id: &str) -> PaletteSpec {
             panel_alt: color("#451c4c"),
             titlebar: rgba_u8(10, 5, 12, 0.98),
             sidebar: rgba_u8(26, 10, 30, 0.96),
-            border: rgba_u8(255, 120, 70, 0.20),
-            border_strong: rgba_u8(255, 160, 100, 0.36),
+            border: rgba_u8(255, 120, 70, 0.28),
+            border_strong: rgba_u8(255, 160, 100, 0.44),
             text: color("#ffe8d8"),
             text_muted: color("#d4907a"),
-            text_faint: color("#8a5040"),
+            text_faint: color("#b06a58"),
             accent: color("#ff7043"),
             accent_soft: rgba_u8(255, 112, 67, 0.16),
             accent_strong: color("#ff9a7a"),
@@ -15630,11 +15811,11 @@ fn theme_palette(id: &str) -> PaletteSpec {
             panel_alt: color("#2b3440"),
             titlebar: rgba_u8(10, 12, 15, 0.94),
             sidebar: rgba_u8(26, 30, 37, 0.88),
-            border: rgba_u8(120, 150, 190, 0.14),
-            border_strong: rgba_u8(170, 195, 230, 0.24),
+            border: rgba_u8(120, 150, 190, 0.18),
+            border_strong: rgba_u8(170, 195, 230, 0.30),
             text: color("#f0f4fa"),
             text_muted: color("#aab6c9"),
-            text_faint: color("#758296"),
+            text_faint: color("#8896a8"),
             accent: color("#4f9cff"),
             accent_soft: rgba_u8(79, 156, 255, 0.16),
             accent_strong: color("#82bfff"),
@@ -15713,6 +15894,7 @@ fn apply_theme(ui: &MainWindow, settings: &NativeSettings) {
     global.set_danger(color("#e5484d"));
     global.set_success(color("#37b26c"));
     global.set_warning(color("#e3a524"));
+    apply_hover_tokens(&global, palette.light_controls);
 
     let (folder_1, folder_2) = if let Some(hex) = settings
         .folder_color
@@ -15835,7 +16017,7 @@ fn apply_custom_theme_to_ui(ui: &MainWindow, def: &ThemeDefinition) {
         panel_c.blue(),
     ));
     global.set_panel_solid(panel_c);
-    global.set_panel_alt(color(&def.panel));
+    global.set_panel_alt(derive_panel_alt(panel_c, is_light));
     global.set_titlebar(Color::from_argb_u8(235, bg.red(), bg.green(), bg.blue()));
     global.set_sidebar(Color::from_argb_u8(
         sidebar_alpha,
@@ -15843,14 +16025,21 @@ fn apply_custom_theme_to_ui(ui: &MainWindow, def: &ThemeDefinition) {
         panel_c.green(),
         panel_c.blue(),
     ));
+    // Keep opaque custom borders opaque; only wash translucent ones.
+    let border_alpha = if border_c.alpha() < 250 { 56 } else { 255 };
+    let border_strong_alpha = if border_strong_c.alpha() < 250 {
+        92
+    } else {
+        255
+    };
     global.set_border(Color::from_argb_u8(
-        41,
+        border_alpha,
         border_c.red(),
         border_c.green(),
         border_c.blue(),
     ));
     global.set_border_strong(Color::from_argb_u8(
-        66,
+        border_strong_alpha,
         border_strong_c.red(),
         border_strong_c.green(),
         border_strong_c.blue(),
@@ -15870,6 +16059,7 @@ fn apply_custom_theme_to_ui(ui: &MainWindow, def: &ThemeDefinition) {
     global.set_danger(danger_c);
     global.set_success(success_c);
     global.set_warning(color("#e3a524"));
+    apply_hover_tokens(&global, is_light);
 
     let folder_base = if def.icon_folder_hex.is_empty() {
         color("#e2a934")
@@ -24569,9 +24759,17 @@ impl NativeController {
         if n > 1 {
             ui.set_confirm_text(ss(format!("Send {n} items to the Recycle Bin?")));
         } else if let Some(entry) = self.selected_entry() {
-            ui.set_confirm_text(ss(format!("Send '{}' to the Recycle Bin?", entry.name)));
+            let kind = if entry.kind == FileKind::Directory {
+                "folder"
+            } else {
+                "item"
+            };
+            ui.set_confirm_text(ss(format!(
+                "Send {kind} '{}' to the Recycle Bin?",
+                entry.name
+            )));
         } else {
-            self.show_toast(ui, "Select a file first.");
+            self.show_toast(ui, "Select a file or folder first.");
             return;
         }
         self.pending_prompt = None;
@@ -24589,7 +24787,7 @@ impl NativeController {
         let paths = self.selected_paths();
         let n = paths.len();
         if n == 0 {
-            self.show_toast(ui, "Select a file first.");
+            self.show_toast(ui, "Select a file or folder first.");
             return;
         }
         self.pending_prompt = Some(PendingPrompt::PermanentDelete(paths));
@@ -25020,6 +25218,35 @@ impl NativeController {
         }
     }
 
+    /// If a pane or tab is viewing a folder being deleted (or a child of it),
+    /// navigate to the deleted folder's parent first so our own watchers and
+    /// open directory handles do not block the shell the way Explorer never would.
+    fn leave_paths_before_delete(&mut self, ui: &MainWindow, paths: &[String]) {
+        let escape_target = |open: &str| -> Option<String> {
+            for target in paths {
+                if same_path_string(open, target)
+                    || path_is_within(Path::new(target), Path::new(open))
+                {
+                    return parent_dir_path(target);
+                }
+            }
+            None
+        };
+
+        if let Some(parent) = escape_target(&self.current_path) {
+            self.navigate(ui, parent, true);
+        }
+        if let Some(parent) = escape_target(&self.secondary_path) {
+            self.secondary_navigate(ui, parent);
+        }
+        for tab in &mut self.tabs {
+            if let Some(parent) = escape_target(&tab.path) {
+                tab.path = parent;
+            }
+        }
+        release_watchers_blocking_paths(&self.app_state, paths);
+    }
+
     fn confirm_delete(&mut self, ui: &MainWindow) {
         let cleanup_paths = match self.pending_prompt.take() {
             Some(PendingPrompt::StorageCleanup(paths)) => Some(paths),
@@ -25052,6 +25279,7 @@ impl NativeController {
         if from_storage_cleanup {
             self.storage_caches.remove(&self.storage_current_root);
         }
+        self.leave_paths_before_delete(ui, &paths);
         self.selected_set.clear();
         self.secondary_selected_set.clear();
         self.selected_index = -1;
@@ -25120,6 +25348,7 @@ impl NativeController {
             return;
         }
         let n = paths.len();
+        self.leave_paths_before_delete(ui, &paths);
         self.selected_set.clear();
         self.secondary_selected_set.clear();
         self.selected_index = -1;
@@ -25140,6 +25369,7 @@ impl NativeController {
         let pending_result = self.pending_operation_result.clone();
         let paths_for_optimistic = paths.clone();
         std::thread::spawn(move || {
+            release_watchers_blocking_paths(&app_state, &paths);
             let mut deleted = 0usize;
             let mut first_error: Option<String> = None;
             for path in &paths {
@@ -29586,13 +29816,15 @@ impl NativeController {
                 native_copy_replay(&self.app_state, &from, dest)
             }
             // Recycle-bin delete only — permanent deletes are never logged.
-            "delete" => trash::delete(&from).map_err(|e| e.to_string()).map(|()| {
-                let ids = trash_ids_for_originals(std::slice::from_ref(&from));
-                op.trash_id = ids
-                    .into_iter()
-                    .find(|(path, _)| same_path_string(path, &from))
-                    .map(|(_, id)| id);
-            }),
+            "delete" => recycle_paths_resilient(&self.app_state, std::slice::from_ref(&from)).map(
+                |_| {
+                    let ids = trash_ids_for_originals(std::slice::from_ref(&from));
+                    op.trash_id = ids
+                        .into_iter()
+                        .find(|(path, _)| same_path_string(path, &from))
+                        .map(|(_, id)| id);
+                },
+            ),
             "batch_rename" => match &op.batch {
                 None => Err("Missing batch rename metadata".to_string()),
                 Some(ops) => {
@@ -30000,10 +30232,27 @@ fn undo_delete_from_trash(
 
 fn native_delete_path(path: &str) -> Result<(), String> {
     let p = Path::new(path);
+    clear_readonly_tree(p);
     if p.is_dir() {
-        fs::remove_dir_all(p).map_err(|e| e.to_string())
+        match fs::remove_dir_all(p) {
+            Ok(()) => Ok(()),
+            Err(first) => {
+                // Second pass after attribute clear — nested read-only files
+                // (common in .git objects) are the usual Explorer-vs-us gap.
+                clear_readonly_tree(p);
+                fs::remove_dir_all(p).map_err(|e| {
+                    format!("{} ({})", e, first)
+                })
+            }
+        }
     } else {
-        fs::remove_file(p).map_err(|e| e.to_string())
+        match fs::remove_file(p) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                clear_readonly_attr(p);
+                fs::remove_file(p).map_err(|e| e.to_string())
+            }
+        }
     }
 }
 
