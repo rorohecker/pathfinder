@@ -13726,6 +13726,101 @@ fn patch_window_file_selection(
     }
 }
 
+/// Apply thumbnail / git / system-icon fields onto an existing FileItem without
+/// touching date-group headers, size_ratio, or selection. Used so enrichment
+/// can land without rebuilding the whole listing (which recycled FileRows and
+/// broke Documents double-clicks on folders like GitHub).
+fn apply_enrichment_fields(
+    item: &mut FileItem,
+    thumbnails: &HashMap<String, slint::Image>,
+    git_status: &GitStatusMap,
+    git_dir_status: &HashMap<String, String>,
+    #[cfg(target_os = "windows")] system_icon_by_path: &HashMap<String, slint::Image>,
+    #[cfg(target_os = "windows")] system_icon_by_ext: &HashMap<String, slint::Image>,
+) -> bool {
+    let path = item.file_path.as_str();
+    let mut changed = false;
+
+    if let Some(img) = thumbnails.get(path) {
+        if !item.has_thumbnail {
+            item.has_thumbnail = true;
+            item.thumbnail = img.clone();
+            changed = true;
+        }
+    }
+
+    let git = git_status
+        .get(path)
+        .cloned()
+        .or_else(|| {
+            if item.is_dir {
+                git_dir_status.get(path).cloned()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    let badge = git_label(&git);
+    let color = git_color(&git);
+    if item.git_badge.as_str() != badge || item.git_color != color {
+        item.git_badge = ss(badge);
+        item.git_color = color;
+        changed = true;
+    }
+
+    #[cfg(target_os = "windows")]
+    if !item.is_dir {
+        let path_icon = system_icon_by_path.get(path);
+        let ext_icon = {
+            let ext = item.extension.as_str().to_ascii_lowercase();
+            system_icon_by_ext.get(&ext)
+        };
+        if let Some(img) = path_icon.or(ext_icon) {
+            if !item.has_system_icon {
+                item.has_system_icon = true;
+                item.system_icon = img.clone();
+                changed = true;
+            }
+        }
+    }
+
+    changed
+}
+
+fn patch_model_enrichment_fields(
+    model: &ModelRc<FileItem>,
+    thumbnails: &HashMap<String, slint::Image>,
+    git_status: &GitStatusMap,
+    git_dir_status: &HashMap<String, String>,
+    #[cfg(target_os = "windows")] system_icon_by_path: &HashMap<String, slint::Image>,
+    #[cfg(target_os = "windows")] system_icon_by_ext: &HashMap<String, slint::Image>,
+) -> usize {
+    use slint::Model;
+    let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() else {
+        return 0;
+    };
+    let mut n = 0;
+    for i in 0..m.row_count() {
+        let Some(mut item) = m.row_data(i) else {
+            continue;
+        };
+        if apply_enrichment_fields(
+            &mut item,
+            thumbnails,
+            git_status,
+            git_dir_status,
+            #[cfg(target_os = "windows")]
+            system_icon_by_path,
+            #[cfg(target_os = "windows")]
+            system_icon_by_ext,
+        ) {
+            m.set_row_data(i, item);
+            n += 1;
+        }
+    }
+    n
+}
+
 #[cfg(test)]
 mod navigation_open_tests {
     use super::*;
@@ -18778,7 +18873,91 @@ impl NativeController {
             return;
         }
         self.enrich_visible_pending = false;
-        self.update_file_models(ui);
+        // Probe icons / queue disk thumbs, then patch fields in place. A full
+        // update_file_models here rebuilt every FileRow (clearing then
+        // restamping date groups) and broke Documents double-clicks on folders
+        // like GitHub when enrichment landed between click 1 and click 2.
+        #[cfg(target_os = "windows")]
+        self.populate_system_icons(32);
+        self.queue_visible_thumbnail_loads(12);
+        self.patch_enrichment_into_models(ui);
+    }
+
+    fn queue_visible_thumbnail_loads(&self, limit: usize) {
+        let mut async_loads: Vec<(String, PathBuf)> = Vec::new();
+        for entry in self.visible_files.iter().take(limit) {
+            let ext = entry.extension.as_deref().unwrap_or("").to_lowercase();
+            if !is_thumbnail_image_ext(&ext) || self.thumbnail_memory.contains_key(&entry.path) {
+                continue;
+            }
+            let disk_key = thumbnail_cache_key(Path::new(&entry.path), entry.modified, 160);
+            let thumb_path = thumbnail_cache_dir().join(format!("{disk_key}.jpg"));
+            if thumb_path.exists() {
+                async_loads.push((entry.path.clone(), thumb_path));
+            }
+        }
+        if async_loads.is_empty() {
+            return;
+        }
+        let pending = self.pending_thumb_rgba.clone();
+        let ready_flag = self.thumbnail_ready.clone();
+        THUMBNAIL_POOL.spawn(move || {
+            let mut decoded = Vec::new();
+            for (path, thumb_path) in async_loads.into_iter().take(12) {
+                if let Ok(img) = image::open(&thumb_path).map(|i| i.into_rgba8()) {
+                    let (w, h) = img.dimensions();
+                    decoded.push((path, img.into_raw(), w, h));
+                }
+            }
+            if !decoded.is_empty() {
+                if let Ok(mut lock) = pending.lock() {
+                    lock.extend(decoded);
+                }
+                ready_flag.store(true, Ordering::Release);
+            }
+        });
+    }
+
+    /// Patch thumbnails / git badges / shell icons onto the live models without
+    /// replacing them or clearing Explorer date-group headers.
+    fn patch_enrichment_into_models(&mut self, ui: &MainWindow) {
+        let thumbs = &self.thumbnail_memory;
+        let git = self.git_status.as_ref();
+        let git_dirs = &self.git_dir_status;
+        #[cfg(target_os = "windows")]
+        let by_path = &self.system_icon_by_path;
+        #[cfg(target_os = "windows")]
+        let by_ext = &self.system_icon_by_ext;
+        let patch = |model: &ModelRc<FileItem>| {
+            patch_model_enrichment_fields(
+                model,
+                thumbs,
+                git,
+                git_dirs,
+                #[cfg(target_os = "windows")]
+                by_path,
+                #[cfg(target_os = "windows")]
+                by_ext,
+            );
+        };
+        if let Some(model) = &self.files_model {
+            patch(model);
+        }
+        if let Some(model) = &self.secondary_files_model {
+            patch(model);
+        }
+        patch(&ui.get_list_window_files());
+        patch(&ui.get_grid_window_files());
+        if ui.get_dual_pane() {
+            patch(&ui.get_secondary_list_window_files());
+            patch(&ui.get_secondary_grid_window_files());
+        }
+    }
+
+    fn pointer_click_recent(&self) -> bool {
+        self.last_file_click.as_ref().is_some_and(|(_, _, at)| {
+            Instant::now().saturating_duration_since(*at) <= double_click_interval()
+        })
     }
 
     /// Build a viewport-sized FileItem window for grid/gallery so Slint only
@@ -21687,19 +21866,32 @@ impl NativeController {
             let viewport_h = ui.get_primary_list_viewport_h().max(80.0);
             let row_h = ui.global::<AppMetrics>().get_row_h().max(26.0);
             let header_h = 26.0_f32;
-            // Prefer file-body bounds (exclude date-group header). Scrolling
-            // when only the "Today" strip is 1px clipped was shifting the whole
-            // Documents list on click even though the file row was fully visible.
-            let raw_top = if i < self.list_layout_offsets.len().saturating_sub(1) {
-                self.list_layout_offsets[i]
-            } else {
-                i as f32 * row_h
-            };
-            let raw_bottom = if i + 1 < self.list_layout_offsets.len() {
-                self.list_layout_offsets[i + 1]
-            } else {
-                raw_top + row_h
-            };
+            // If the row is already inside the virtualized window (with slack),
+            // do not scroll. Mouse clicks on fully visible Documents folders
+            // (e.g. GitHub) must not nudge the list — that recycled FileRows
+            // between click 1 and click 2 of a double-click.
+            {
+                use slint::Model;
+                let start = ui.get_list_window_start().max(0) as usize;
+                let window_len = ui.get_list_window_files().row_count();
+                if window_len > 0
+                    && i >= start.saturating_add(2)
+                    && i + 2 < start.saturating_add(window_len)
+                {
+                    return;
+                }
+            }
+            // Trust only real header-aware offsets. Guessing `i * row_h` while
+            // date groups are present falsely clips rows and scrolls the list.
+            let total = self.files_model.as_ref().map(|m| {
+                use slint::Model;
+                m.row_count()
+            }).unwrap_or(0);
+            if self.list_layout_offsets.len() != total.saturating_add(1) || i + 1 >= self.list_layout_offsets.len() {
+                return;
+            }
+            let raw_top = self.list_layout_offsets[i];
+            let raw_bottom = self.list_layout_offsets[i + 1];
             let has_header = self
                 .files_model
                 .as_ref()
@@ -21715,6 +21907,7 @@ impl NativeController {
                 raw_top
             };
             let item_bottom = raw_bottom;
+            let _ = row_h;
             let content_h = ui.get_list_content_h().max(viewport_h);
             let min_scroll = -(content_h - viewport_h).max(0.0);
             let scroll = ui.get_primary_list_scroll_y().abs();
@@ -32586,6 +32779,15 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                                             false,
                                             true,
                                         );
+                                    } else if ctrl.pointer_click_recent() {
+                                        // Defer soft refresh while a double-click
+                                        // may still be in flight — swapping the
+                                        // model mid-click recycled FileRows and
+                                        // broke opening Documents folders (GitHub).
+                                        if let Ok(mut lock) = pending_dir.lock() {
+                                            *lock = Some(result);
+                                        }
+                                        dir_ready.store(true, Ordering::Release);
                                     } else {
                                         // Soft refresh / progressive load: swap rows
                                         // without clearing the pane or re-running
@@ -32784,18 +32986,12 @@ fn wire_native_callbacks(ui: &MainWindow, controller: Rc<RefCell<NativeControlle
                     if thumb_fired || git_fired {
                         if let Ok(mut ctrl) = c.try_borrow_mut() {
                             let drained = ctrl.drain_pending_thumbnails();
-                            let scrolling_recently = ctrl
-                                .last_scroll_sync_at
-                                .elapsed()
-                                < Duration::from_millis(180);
-                            if git_fired || !scrolling_recently {
-                                ctrl.update_file_models(&ui);
-                                if ui.get_view_mode().as_str() != "list" {
-                                    ctrl.on_sync_grid_windows(&ui);
-                                }
-                            } else if drained > 0 || thumb_fired {
-                                // Keep scroll fluid: refresh only the visible window.
-                                ctrl.on_sync_grid_windows(&ui);
+                            // Never replace the full file model for icon/git
+                            // enrichment — that recycled list rows mid
+                            // double-click (Documents → GitHub). Git status was
+                            // already applied above; just patch live rows.
+                            if drained > 0 || git_fired || thumb_fired {
+                                ctrl.patch_enrichment_into_models(&ui);
                             }
                         }
                     }

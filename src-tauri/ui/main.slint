@@ -1895,7 +1895,9 @@ component FileRow inherits Rectangle {
     drag_arm_timer := Timer {
         // Longer than a normal click; short enough that intentional drags
         // still feel immediate. Prevents click jitter from moving icons.
-        interval: 300ms;
+        // Selected folders wait past the OS double-click window so Documents
+        // → GitHub open isn't stolen by DoDragDrop between click 1 and 2.
+        interval: (root.item.is_dir && root.item.is_selected) ? 550ms : 300ms;
         running: touch.pressed;
         triggered => {
             if (touch.pressed && !root.suppress_drag_arm) {
