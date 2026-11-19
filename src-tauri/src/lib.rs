@@ -15283,6 +15283,57 @@ fn date_group_label(secs: u64) -> &'static str {
     }
 }
 
+/// Explorer-style section label for a list row when sorted by Date modified
+/// (or Home recent buckets). Returns `(show_header, label)` for the row at
+/// `index` given the previous row's group key (empty string for the first row).
+fn explorer_date_group_for_entry(
+    entry: &FileEntry,
+    last_group: &str,
+    home_groups: bool,
+    date_groups: bool,
+) -> (bool, String, String) {
+    if home_groups {
+        let group = if entry.modified > 1_000_000 {
+            format!("Recent · {}", date_group_label(entry.modified))
+        } else {
+            home_section_label(entry.modified).to_string()
+        };
+        if group.is_empty() {
+            return (false, String::new(), last_group.to_string());
+        }
+        let show = group != last_group;
+        return (show, group.clone(), group);
+    }
+    if date_groups {
+        let group = date_group_label(entry.modified).to_string();
+        let show = group != last_group;
+        return (show, group.clone(), group);
+    }
+    (false, String::new(), String::new())
+}
+
+/// Stamp Explorer date/home group headers onto a freshly built `FileItem` list.
+fn apply_explorer_date_groups(
+    items: &mut [FileItem],
+    entries: &[FileEntry],
+    home_groups: bool,
+    date_groups: bool,
+) {
+    if !home_groups && !date_groups {
+        return;
+    }
+    let mut last_group = String::new();
+    for (item, entry) in items.iter_mut().zip(entries.iter()) {
+        let (show, label, next) =
+            explorer_date_group_for_entry(entry, &last_group, home_groups, date_groups);
+        item.show_date_group_header = show;
+        item.date_group_text = SharedString::from(label);
+        if home_groups || date_groups {
+            last_group = next;
+        }
+    }
+}
+
 fn dupe_group_ui_item(id_title: &str, paths: &[String], detail: &str) -> DupeGroupItem {
     let title = id_title
         .split_once("::")
@@ -18649,34 +18700,18 @@ impl NativeController {
             .map(|e| e.size)
             .max()
             .unwrap_or(0);
-        let mut last_group = String::new();
-        let items: Vec<FileItem> = self
+        let mut items: Vec<FileItem> = self
             .visible_files
             .iter()
             .enumerate()
-            .map(|(i, entry)| {
-                let mut item = self.file_item(entry, self.selected_set.contains(&i), max_file_size);
-                if show_home_groups {
-                    let group = if entry.modified > 1_000_000 {
-                        // Recent visits carry unix timestamps — Explorer-style day buckets.
-                        format!("Recent · {}", date_group_label(entry.modified))
-                    } else {
-                        home_section_label(entry.modified).to_string()
-                    };
-                    if !group.is_empty() {
-                        item.show_date_group_header = group != last_group;
-                        item.date_group_text = SharedString::from(group.clone());
-                        last_group = group;
-                    }
-                } else if show_date_groups {
-                    let group = date_group_label(entry.modified);
-                    item.show_date_group_header = group != last_group;
-                    item.date_group_text = SharedString::from(group);
-                    last_group = group.to_string();
-                }
-                item
-            })
+            .map(|(i, entry)| self.file_item(entry, self.selected_set.contains(&i), max_file_size))
             .collect();
+        apply_explorer_date_groups(
+            &mut items,
+            &self.visible_files,
+            show_home_groups,
+            show_date_groups,
+        );
         let model = model_from_vec(items);
         ui.set_files(model.clone());
         self.files_model = Some(model);
@@ -19109,29 +19144,19 @@ impl NativeController {
             self.update_status(ui);
             return;
         }
+        // Only flip is_selected. Rebuilding via file_item clears Explorer
+        // date/home group headers (and size_ratio), shrinking rows by ~26px and
+        // jumping the Documents list when clicking inside a date bucket.
         if let Some(model) = &self.files_model {
             use slint::Model;
-            for &i in changed {
-                if let Some(entry) = self.visible_files.get(i) {
-                    // Preserve date/home group headers and size_ratio. Rebuilding
-                    // via file_item alone clears headers (list jump) and would
-                    // otherwise re-scan all files for max size.
-                    let (keep_header, keep_label, keep_ratio) = model
-                        .row_data(i)
-                        .map(|prev| {
-                            (
-                                prev.show_date_group_header,
-                                prev.date_group_text.clone(),
-                                prev.size_ratio,
-                            )
-                        })
-                        .unwrap_or((false, SharedString::new(), 0.0));
-                    let mut item = self.file_item(entry, self.selected_set.contains(&i), 0);
-                    item.show_date_group_header = keep_header;
-                    item.date_group_text = keep_label;
-                    item.size_ratio = keep_ratio;
-                    if let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() {
-                        m.set_row_data(i, item);
+            if let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() {
+                for &i in changed {
+                    if let Some(mut item) = m.row_data(i) {
+                        let want = self.selected_set.contains(&i);
+                        if item.is_selected != want {
+                            item.is_selected = want;
+                            m.set_row_data(i, item);
+                        }
                     }
                 }
             }
@@ -21650,16 +21675,35 @@ impl NativeController {
         if ui.get_view_mode().as_str() == "list" {
             let viewport_h = ui.get_primary_list_viewport_h().max(80.0);
             let row_h = ui.global::<AppMetrics>().get_row_h().max(26.0);
-            let item_top = if i < self.list_layout_offsets.len().saturating_sub(1) {
+            let header_h = 26.0_f32;
+            // Prefer file-body bounds (exclude date-group header). Scrolling
+            // when only the "Today" strip is 1px clipped was shifting the whole
+            // Documents list on click even though the file row was fully visible.
+            let raw_top = if i < self.list_layout_offsets.len().saturating_sub(1) {
                 self.list_layout_offsets[i]
             } else {
                 i as f32 * row_h
             };
-            let item_bottom = if i + 1 < self.list_layout_offsets.len() {
+            let raw_bottom = if i + 1 < self.list_layout_offsets.len() {
                 self.list_layout_offsets[i + 1]
             } else {
-                item_top + row_h
+                raw_top + row_h
             };
+            let has_header = self
+                .files_model
+                .as_ref()
+                .and_then(|m| {
+                    use slint::Model;
+                    m.row_data(i)
+                })
+                .map(|it| it.show_date_group_header)
+                .unwrap_or(false);
+            let item_top = if has_header {
+                raw_top + header_h
+            } else {
+                raw_top
+            };
+            let item_bottom = raw_bottom;
             let content_h = ui.get_list_content_h().max(viewport_h);
             let min_scroll = -(content_h - viewport_h).max(0.0);
             let scroll = ui.get_primary_list_scroll_y().abs();
@@ -23035,7 +23079,8 @@ impl NativeController {
         self.secondary_selected_index = -1;
         self.secondary_selected_set.clear();
         self.secondary_select_anchor = -1;
-        if self.clipboard.as_ref().is_some_and(|c| c.cut) {
+        let cleared_cut = self.clipboard.as_ref().is_some_and(|c| c.cut);
+        if cleared_cut {
             self.clipboard = None;
             #[cfg(target_os = "windows")]
             let _ = file_drag::clear_shell_files_clipboard();
@@ -23047,7 +23092,12 @@ impl NativeController {
         // to zero. Push the new count so the X clear button and any other
         // path that ends up here drop the bar immediately.
         self.sync_selection_count_to_ui(ui);
-        self.refresh_clipboard_visuals(ui);
+        // Only rebuild listings when cut-ghosting must clear. A full
+        // update_models here made date-group headers flicker/vanish when a
+        // click on a "Today"/"Yesterday" label fell through to clear_selection.
+        if cleared_cut {
+            self.refresh_clipboard_visuals(ui);
+        }
         self.update_status(ui);
     }
 
@@ -23059,7 +23109,9 @@ impl NativeController {
             .map(|e| e.size)
             .max()
             .unwrap_or(0);
-        let items: Vec<FileItem> = self
+        let show_home_groups = self.secondary_path == "home://";
+        let show_date_groups = self.secondary_sort_by == "modified" && !show_home_groups;
+        let mut items: Vec<FileItem> = self
             .secondary_visible_files
             .iter()
             .enumerate()
@@ -23071,6 +23123,12 @@ impl NativeController {
                 )
             })
             .collect();
+        apply_explorer_date_groups(
+            &mut items,
+            &self.secondary_visible_files,
+            show_home_groups,
+            show_date_groups,
+        );
         let model = model_from_vec(items);
         ui.set_secondary_files(model.clone());
         ui.set_secondary_path(ss(&self.secondary_path));
@@ -23082,27 +23140,17 @@ impl NativeController {
     }
 
     fn update_secondary_selection_in_model(&mut self, ui: &MainWindow, changed: &[usize]) {
+        // Same as primary: never rebuild via file_item on select (keeps date groups).
         if let Some(model) = &self.secondary_files_model {
             use slint::Model;
-            for &i in changed {
-                if let Some(entry) = self.secondary_visible_files.get(i) {
-                    let (keep_header, keep_label, keep_ratio) = model
-                        .row_data(i)
-                        .map(|prev| {
-                            (
-                                prev.show_date_group_header,
-                                prev.date_group_text.clone(),
-                                prev.size_ratio,
-                            )
-                        })
-                        .unwrap_or((false, SharedString::new(), 0.0));
-                    let mut item =
-                        self.file_item(entry, self.secondary_selected_set.contains(&i), 0);
-                    item.show_date_group_header = keep_header;
-                    item.date_group_text = keep_label;
-                    item.size_ratio = keep_ratio;
-                    if let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() {
-                        m.set_row_data(i, item);
+            if let Some(m) = model.as_any().downcast_ref::<VecModel<FileItem>>() {
+                for &i in changed {
+                    if let Some(mut item) = m.row_data(i) {
+                        let want = self.secondary_selected_set.contains(&i);
+                        if item.is_selected != want {
+                            item.is_selected = want;
+                            m.set_row_data(i, item);
+                        }
                     }
                 }
             }
@@ -34336,6 +34384,64 @@ mod selection_scroll_tests {
             selection_scroll_target(item_top, item_bottom, scroll, viewport_h, 28.0),
             Some(122.0_f32)
         );
+    }
+
+    #[test]
+    fn file_body_visible_while_header_clipped_does_not_scroll() {
+        // Row starts with a 26px date header that is 4px above the viewport;
+        // the file body (26..64) is fully visible — click must not scroll.
+        let scroll = 100.0_f32;
+        let viewport_h = 400.0_f32;
+        let header_h = 26.0_f32;
+        let raw_top = 96.0_f32;
+        let raw_bottom = 96.0 + header_h + 38.0;
+        let item_top = raw_top + header_h;
+        let item_bottom = raw_bottom;
+        assert_eq!(
+            selection_scroll_target(item_top, item_bottom, scroll, viewport_h, 28.0),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
+mod explorer_date_group_tests {
+    use super::{explorer_date_group_for_entry, FileEntry, FileKind};
+
+    fn entry_with_mtime(secs: u64) -> FileEntry {
+        FileEntry {
+            name: "doc.txt".into(),
+            name_lower: "doc.txt".into(),
+            path: "/tmp/doc.txt".into(),
+            kind: FileKind::File,
+            size: 1,
+            modified: secs,
+            extension: Some("txt".into()),
+        }
+    }
+
+    #[test]
+    fn date_groups_mark_first_row_of_each_bucket() {
+        let today = entry_with_mtime(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+        let (show, label, next) =
+            explorer_date_group_for_entry(&today, "", false, true);
+        assert!(show);
+        assert_eq!(label, "Today");
+        let (show2, _, _) = explorer_date_group_for_entry(&today, &next, false, true);
+        assert!(!show2);
+    }
+
+    #[test]
+    fn date_groups_disabled_leave_headers_off() {
+        let e = entry_with_mtime(1_700_000_000);
+        let (show, label, _) = explorer_date_group_for_entry(&e, "", false, false);
+        assert!(!show);
+        assert!(label.is_empty());
     }
 }
 

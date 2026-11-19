@@ -1508,6 +1508,14 @@ component FileRow inherits Rectangle {
             background: ThemePalette.text_faint;
             opacity: 0.35;
         }
+        // Absorb clicks on Today/Yesterday labels. Without this, the press
+        // falls through to the pane's empty-space handler, clears selection,
+        // and the list rebuild/shift makes date groups look like they vanished.
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            mouse-cursor: default;
+        }
     }
     // The root has no background or border. Selection and hover paint into
     // inner rectangles that start BELOW the date-group header strip, so the
